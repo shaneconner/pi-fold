@@ -1,5 +1,6 @@
 import js from "@eslint/js";
 import stylistic from "@stylistic/eslint-plugin";
+import tseslint from "@typescript-eslint/eslint-plugin";
 import tsParser from "@typescript-eslint/parser";
 import globals from "globals";
 
@@ -32,12 +33,16 @@ export default [
   },
   {
     files: ["**/*.ts"],
+    plugins: {
+      "@typescript-eslint": tseslint,
+    },
     languageOptions: {
       parser: tsParser,
     },
     rules: {
       "no-undef": "off",
       "no-unused-vars": "off",
+      "@typescript-eslint/no-unused-vars": "error",
     },
   },
 ];

@@ -30,7 +30,8 @@ export function advisoryState(state: ActiveContextState): NonNullable<ActiveCont
 export function clearArmedAdvisory(state: ActiveContextState): ActiveContextState {
   const current = advisoryState(state);
   if (!current.armed) return state;
-  const { armed: _armed, ...advisory } = current;
+  const advisory = { ...current };
+  delete advisory.armed;
   return { ...state, advisory };
 }
 

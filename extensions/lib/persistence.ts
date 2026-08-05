@@ -288,7 +288,8 @@ export function parseActiveContextState(
 }
 
 export function clearPrepared(state: ActiveContextState): ActiveContextState {
-  const { prepared: _prepared, ...next } = state;
+  const next = { ...state };
+  delete next.prepared;
   return next;
 }
 
