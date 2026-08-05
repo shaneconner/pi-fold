@@ -329,14 +329,14 @@ export function semanticStateSha256(state: ActiveContextState): string {
   return sha256Value(state);
 }
 
-export function prePhaseBSemanticStateSha256(state: ActiveContextState): string {
+export function legacyCadenceOmittedStateSha256(state: ActiveContextState): string {
   const legacy = clone(state) as Partial<ActiveContextState>;
   if (legacy.tokensSinceToolFold === 0) delete legacy.tokensSinceToolFold;
   if (legacy.leases && Object.keys(legacy.leases).length === 0) delete legacy.leases;
   return sha256Value(legacy);
 }
 
-export function phaseAReplayOrderStateSha256(state: ActiveContextState): string {
+export function legacyReplayOrderStateSha256(state: ActiveContextState): string {
   return sha256Value({
     version: state.version,
     sessionId: state.sessionId,
@@ -643,8 +643,8 @@ export function materializeStatePersistence(
     // order. These shims keep already-written v2 events readable and can be removed
     // at the next wire-version bump.
     if (calculated !== wire.stateSha256 &&
-        prePhaseBSemanticStateSha256(state) !== wire.stateSha256 &&
-        phaseAReplayOrderStateSha256(state) !== wire.stateSha256) {
+        legacyCadenceOmittedStateSha256(state) !== wire.stateSha256 &&
+        legacyReplayOrderStateSha256(state) !== wire.stateSha256) {
       throw new Error("Active-context v2 state digest drift");
     }
     wireVersion = 2;
