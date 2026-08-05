@@ -1,26 +1,6 @@
 import { registerActiveContext } from "./active-context.ts";
 import { registerEvidenceIngestion } from "./evidence.js";
 
-function withNeutralCommands(pi, commandPrefix) {
-  return new Proxy(pi, {
-    get(target, property) {
-      if (property !== "registerCommand") {
-        const value = Reflect.get(target, property, target);
-        return typeof value === "function" ? value.bind(target) : value;
-      }
-      return (name, command) => {
-        const commandStem = commandPrefix ? `${commandPrefix.replace(/-+$/, "")}-` : "";
-        const foldCommand = `${commandStem}fold-context`;
-        if (name === foldCommand) return target.registerCommand(foldCommand, command);
-        if (typeof name === "string" && name.startsWith(commandStem) && name.endsWith("-context")) {
-          return target.registerCommand(`${commandStem}context`, command);
-        }
-        throw new Error(`Unexpected active-context command registration: ${String(name)}`);
-      };
-    },
-  });
-}
-
 export function registerPiFold(pi, {
   toolName = "active_context",
   entryTypePrefix = "pi-fold-active-context",
@@ -32,11 +12,12 @@ export function registerPiFold(pi, {
   readOnlyTools,
   isMcpTool = () => false,
 } = {}) {
+  const stem = commandPrefix ? `${commandPrefix.replace(/-+$/, "")}-` : "";
   registerEvidenceIngestion(pi, { isMcpTool });
-  return registerActiveContext(withNeutralCommands(pi, commandPrefix), {
+  return registerActiveContext(pi, {
     toolName,
     entryTypePrefix,
-    commandPrefix,
+    commandNames: { status: `${stem}context`, fold: `${stem}fold-context` },
     summarizeContextSpan,
     setProjectionProvider,
     toolActions,

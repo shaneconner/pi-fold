@@ -125,6 +125,7 @@ function makeRuntime(built, {
   toolName,
   entryTypePrefix,
   commandPrefix,
+  commandNames,
   summarizeContextSpan,
   initialEntries,
   readOnlyTools,
@@ -201,6 +202,7 @@ function makeRuntime(built, {
     ...(toolName ? { toolName } : {}),
     ...(entryTypePrefix ? { entryTypePrefix } : {}),
     ...(commandPrefix ? { commandPrefix } : {}),
+    ...(commandNames ? { commandNames } : {}),
     ...(summarizeContextSpan ? { summarizeContextSpan } : {}),
     ...(readOnlyTools ? { readOnlyTools } : {}),
     ...(blockingTools ? { blockingTools } : {}),
@@ -308,10 +310,19 @@ async function gateRegistration() {
   assert(types.includes("custom-context-fold-record"));
   assert(types.includes("custom-context-state"));
   assert(types.every((type) => type.startsWith("custom-context-")));
+
+  const named = makeRuntime(makeFixture({ turns: 4, resultChars: 3_000 }), {
+    commandNames: { status: "context", fold: "fold-context" },
+  });
+  assert.deepEqual([...named.commands.keys()].sort(), ["context", "fold-context"]);
+  assert.throws(() => makeRuntime(makeFixture({ turns: 4, resultChars: 3_000 }), {
+    commandNames: { status: "same", fold: "same" },
+  }).tools, /distinct kebab-case/i);
   return {
     defaultTool: "quorum_context",
     defaultCommands: [...defaults.commands.keys()].sort(),
     commands: [...custom.commands.keys()].sort(),
+    namedCommands: [...named.commands.keys()].sort(),
     customTypes: types,
   };
 }

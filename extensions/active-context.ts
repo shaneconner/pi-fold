@@ -3489,6 +3489,7 @@ export function registerActiveContext(pi: any, options: {
   toolName?: string;
   entryTypePrefix?: string;
   commandPrefix?: string;
+  commandNames?: { status?: string; fold?: string };
   readOnlyTools?: ReadonlySet<string>;
   blockingTools?: readonly string[];
 }): { projectionCandidates: (ctx: any) => Array<Record<string, unknown>> } {
@@ -3502,6 +3503,17 @@ export function registerActiveContext(pi: any, options: {
     throw new Error("Active-context names and read-only tools must be nonempty strings");
   }
   const commandStem = commandPrefix ? `${commandPrefix.replace(/-+$/, "")}-` : "";
+  // Full-name override for hosts that need non-default command names (e.g. the
+  // pi-fold package's neutral "context"); commandPrefix remains the derived form.
+  const commandNames = {
+    status: options.commandNames?.status ?? `${commandStem}quorum-context`,
+    fold: options.commandNames?.fold ?? `${commandStem}fold-context`,
+  };
+  if (![commandNames.status, commandNames.fold].every((name) =>
+      typeof name === "string" && /^[a-z0-9][a-z0-9-]*$/.test(name)) ||
+      commandNames.status === commandNames.fold) {
+    throw new Error("Active-context command names must be distinct kebab-case strings");
+  }
   const configuredBlockingTools = denseOwnArrayValues(options.blockingTools ?? ["Agent"]);
   if (!configuredBlockingTools || configuredBlockingTools.some((name) => typeof name !== "string" || !name) ||
       new Set(configuredBlockingTools).size !== configuredBlockingTools.length) {
@@ -5207,7 +5219,7 @@ export function registerActiveContext(pi: any, options: {
     },
   });
 
-  pi.registerCommand(`${commandStem}quorum-context`, {
+  pi.registerCommand(commandNames.status, {
     description: "Show active-context fold roots and paging state",
     handler: async (_args: string, ctx: any) => {
       if (!state) state = emptyActiveContextState(ctx.sessionManager.getSessionId());
@@ -5226,7 +5238,7 @@ export function registerActiveContext(pi: any, options: {
     },
   });
 
-  pi.registerCommand(`${commandStem}fold-context`, {
+  pi.registerCommand(commandNames.fold, {
     description: "Losslessly fold a stale context span; works without a main-model request",
     handler: async (args: string, ctx: any) => {
       const operation = actionQueue.then(async () => {

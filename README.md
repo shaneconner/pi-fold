@@ -12,7 +12,7 @@ It provides:
 
 ## Status
 
-This package is pre-release. Its API may move until 0.1.0. The license decision is pending; the package is currently marked `UNLICENSED`.
+This package is pre-release. Its API may move until 0.1.0. Licensed under [MIT](./LICENSE).
 
 ## Install
 

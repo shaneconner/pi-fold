@@ -6,7 +6,7 @@
   "private": false,
   "repository": "https://github.com/shaneconner/pi-fold",
   "author": "Shane Conner",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "engines": {
     "node": ">=22"
   },
