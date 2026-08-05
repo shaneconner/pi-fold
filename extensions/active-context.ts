@@ -110,6 +110,7 @@ import {
 import { buildActiveContextCommands, buildActiveContextTool } from "./lib/tool-surface.ts";
 import { mapActiveContext } from "./lib/transcript.ts";
 
+// Test seam only; the package API is registerPiFold because package.json exports block deep imports.
 export * from "./lib/advisory.ts";
 export * from "./lib/canonical.ts";
 export * from "./lib/folding.ts";
@@ -118,7 +119,6 @@ export * from "./lib/persistence.ts";
 export * from "./lib/policy.ts";
 export * from "./lib/selection.ts";
 export * from "./lib/transcript.ts";
-
 
 export function registerActiveContext(pi: any, options: {
   summarizeContextSpan?: (request: Record<string, unknown>, ctx: unknown) => Promise<Record<string, unknown>>;
@@ -260,12 +260,6 @@ export function registerActiveContext(pi: any, options: {
   // preparation → commit → projection transaction so a follower cannot
   // observe a published measurement before the leader's durable receipt or
   // return raw final-rung context while the leader is preparing a brief.
-  // A same-session start/tree reload is a projection-generation mutation.
-  // Queue it behind every context authority → preparation → commit →
-  // projection transaction, then serialize the actual load with the action
-  // queue. Appending to actionQueue only after the context queue drains is
-  // deliberate: a running context may itself need actionQueue to commit its
-  // final-rung chapter, so capturing both queues up front would deadlock.
   const lifecycle = {
     generation: 0,
     shuttingDown: false,
@@ -1291,6 +1285,12 @@ export function registerActiveContext(pi: any, options: {
   };
   options.setProjectionProvider?.(projectionCandidates);
 
+  // A same-session start/tree reload is a projection-generation mutation.
+  // Queue it behind every context authority → preparation → commit →
+  // projection transaction, then serialize the actual load with the action
+  // queue. Appending to actionQueue only after the context queue drains is
+  // deliberate: a running context may itself need actionQueue to commit its
+  // final-rung chapter, so capturing both queues up front would deadlock.
   const enqueueLifecycleLoad = async (ctx: any): Promise<void> => {
     const operation = lifecycle.contextQueue.then(() => {
       const loadOperation = ladder.actionQueue.then(async () => {

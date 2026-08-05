@@ -1,11 +1,10 @@
+import { sha256Value } from "../json.ts";
+import { clone } from "./canonical.ts";
 import {
-  ADVISORY_BUDGETS,
   boundReceiptText,
-  clone,
   hardFenceRatio,
-  sha256Value,
-  validAdvisoryState,
 } from "./measurement.ts";
+import { ADVISORY_BUDGETS, validAdvisoryState } from "./persistence.ts";
 import type {
   ActiveContextSnapshot,
   ActiveContextState,

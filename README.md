@@ -35,12 +35,39 @@ The package entry calls `registerPiFold(pi)` with the defaults below. Hosts that
 | `commandPrefix` | `""` | Prefix for `/context` and `/fold-context`; trailing hyphens are removed. |
 | `commandNames` | `undefined` | Optional full-name overrides for the effective defaults `{ status: "context", fold: "fold-context" }`. Both names must be distinct kebab-case strings; supplied values take precedence over `commandPrefix`. |
 | `summarizeContextSpan` | `undefined` | Optional async brief generator. Results must include a useful bounded brief, provider/model/effort attribution, and `toolCalls: 0`; failure uses the deterministic brief. |
-| `setProjectionProvider` | `undefined` | Optional host callback that receives the projection-candidate provider. Normal Pi context events do not require it. |
+| `setProjectionProvider` | `undefined` | Optional host callback that receives the [projection-candidate provider](#projection-candidate-records). Normal Pi context events do not require it. |
 | `toolActions` | all six actions | Replacement allowlist drawn from `status`, `fold`, `expand`, `refold`, `protect`, and `unprotect`. |
 | `blockingTools` | `["Agent"]` | Replacement list of tool names that trigger one opportunistic stale-tool fold before the call. Use `[]` to disable it. |
 | `readOnlyTools` | `new Set(["read", "grep", "find", "ls"])` | Replacement set of tool names whose completed batches may fold automatically. Defaults to Pi's built-in read-only tools. Pass a `ReadonlySet<string>`. |
 | `isMcpTool` | `() => false` | Synchronous predicate enabling evidence ingestion for oversized structured MCP results. Names shaped as `mcp__<server>__<tool>` project the actual server; other names use the neutral namespace derived from `entryTypePrefix`. |
 | `evidenceIngestion` | `true` | Set to `false` to register no evidence-ingestion hook and write no evidence artifacts. |
+
+### Projection candidate records
+
+The provider emits one record per visible collapsed fold. The fields and current values are:
+
+| Field | Emitted value |
+| --- | --- |
+| `version` | `1` |
+| `key` | `"projection:<fold-id>"` |
+| `kind` | `"projection"` |
+| `domain` | `"system"` |
+| `horizon` | `"working"` |
+| `source_id` | Fold ID. |
+| `source_version` | Exact source SHA-256. |
+| `route` | `{ tool: <toolName>, arguments: { action: "expand", id: <fold-id> } }` |
+| `token_cost` | Estimated replacement tokens, rounded up with a minimum of 1. |
+| `expansion_cost` | Estimated exact-source tokens, rounded up with a minimum of 1. |
+| `rank` | Zero-based position among emitted candidates. |
+| `score` | Saved-byte fraction, capped at 1. |
+| `raw_score` | Exact bytes saved by the fold. |
+| `confidence` | `"exact"` |
+| `freshness` | `"current"` |
+| `locked_owner` | `false` |
+| `collapse_key` | `"projection:<fold-id>"` |
+| `generator` | `"projection-model"`, `"projection-deterministic"`, or `"projection-supplied"` from brief provenance. |
+| `generator_version` | `"memory-slate-generators-v2"` |
+| `recency` | `null` |
 
 ## Development
 

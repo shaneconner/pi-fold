@@ -24,6 +24,7 @@ export default [
       "no-unused-vars": ["error", { args: "none" }],
       "no-useless-assignment": "off",
       "@stylistic/eol-last": ["error", "always"],
+      "@stylistic/no-multiple-empty-lines": ["error", { max: 1, maxBOF: 0, maxEOF: 0 }],
       "@stylistic/no-trailing-spaces": "error",
       "@stylistic/quotes": ["error", "double", { avoidEscape: true }],
       "@stylistic/semi": ["error", "always"],
