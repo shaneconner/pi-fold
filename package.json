@@ -1,7 +1,15 @@
 {
   "name": "pi-fold",
-  "version": "0.1.0-dev.0",
-  "description": "Lossless, agent-governed context folding for the Pi coding agent — only the oldest context changes; the fresh window stays untouched.",
+  "version": "0.1.0",
+  "description": "Lossless, agent-governed context folding for the Pi coding agent \u2014 only the oldest context changes; the fresh window stays untouched.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "context",
+    "context-management",
+    "folding",
+    "coding-agent"
+  ],
   "type": "module",
   "exports": {
     ".": "./extensions/index.js",
