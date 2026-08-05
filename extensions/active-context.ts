@@ -93,6 +93,7 @@ import {
   DEFAULT_SURFACING_ENABLED,
   entryTypeNamespace,
   EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS,
+  EPOCH_COMMIT_TARGET_WINDOW_SHARE,
   EPOCH_READ_ONLY_CONTEXT_ACTIONS,
   FOLD_SCHEDULING_MODES,
   READ_ONLY_CONTEXT_ACTIONS_DEFAULT,
@@ -115,12 +116,15 @@ import type {
 } from "./lib/policy.ts";
 import {
   addPendingMark,
+  claimedRefKeys,
   commitPendingMarks,
   ephemeralPeekMarks,
   epochCommitDue,
+  estimatedTokens,
   foldMarkFor,
   ladderSelectionMark,
   markAccounting,
+  markedFoldIds,
   markOrdinal,
   pendingMarks,
   schedulingStatus,
@@ -1252,14 +1256,16 @@ export function registerActiveContext(pi: any, options: {
   ): Promise<Record<string, unknown> | null> => {
     const ordinal = markOrdinal(snapshot);
     let state = persistence.state!;
+    let peekAdded = 0;
+    let topUpAdded = 0;
     for (const mark of ephemeralPeekMarks({ snapshot, state, ordinal })) {
       const addition = addPendingMark(state, mark);
-      if (addition.added) state = addition.state;
+      if (addition.added) { state = addition.state; peekAdded += 1; }
     }
     if (topUp) {
       for (const mark of topUpMarks({ snapshot, state, ordinal })) {
         const addition = addPendingMark(state, mark);
-        if (addition.added) state = addition.state;
+        if (addition.added) { state = addition.state; topUpAdded += 1; }
       }
     }
     const accounting = markAccounting(snapshot, state);
@@ -1272,14 +1278,28 @@ export function registerActiveContext(pi: any, options: {
     });
     persistence.state = result.state;
     const bytesAfter = bytes(projectActiveContext(snapshot, result.state));
+    const freedBytes = Math.max(0, bytesBefore - bytesAfter);
+    // A bound-out top-up and a silently dropped agent mark are both invisible in an
+    // applied/refused list alone, so the epoch reports its own composition.
     return {
       trigger,
       applied: result.applied,
       refused: result.refused,
+      pendingMarks: accounting.pending,
       agentMarks: accounting.agentMarks,
       ladderMarks: accounting.ladderMarks,
+      peekMarks: peekAdded,
+      topUpMarks: topUpAdded,
+      appliedMarks: result.applied.length,
+      refusedMarks: result.refused.length,
       estimatedRewriteTokens: accounting.rewriteTokens,
-      sourceBytesSaved: Math.max(0, bytesBefore - bytesAfter),
+      estimatedFreedTokens: accounting.freedTokens,
+      freedWindowShare: accounting.freedWindowShare,
+      sourceBytesSaved: freedBytes,
+      actualFreedWindowShare: snapshot.contextWindow > 0
+        ? estimatedTokens(freedBytes) / snapshot.contextWindow
+        : 0,
+      targetWindowShare: EPOCH_COMMIT_TARGET_WINDOW_SHARE,
     };
   };
 
@@ -1299,7 +1319,14 @@ export function registerActiveContext(pi: any, options: {
     if (epochScheduling) {
       if (!epochCommitDue(snapshot, ratio)) {
         // Below the commit threshold the ladder decides but does not move bytes.
-        const decision = selectAutomaticRung(snapshot, persistence.state, ratio, rungSelectionOptions);
+        // Marks already pending are decisions already made: excluding the evidence
+        // they cover makes every eligible turn choose NEW stale content, so marks
+        // accumulate with stale growth instead of re-proposing one stale batch.
+        const decision = selectAutomaticRung(snapshot, persistence.state, ratio, {
+          ...rungSelectionOptions,
+          claimed: claimedRefKeys(persistence.state),
+          claimedFoldIds: markedFoldIds(persistence.state),
+        });
         const mark = decision
           ? ladderSelectionMark({
             snapshot, state: persistence.state, selection: decision, ordinal: markOrdinal(snapshot),
@@ -1326,11 +1353,13 @@ export function registerActiveContext(pi: any, options: {
       epoch = await runCommitEpoch(snapshot, "window-pressure", true);
     }
     const selection = selectAutomaticRung(snapshot, persistence.state, ratio, rungSelectionOptions);
-    // In epoch mode the accumulated marks ARE the ladder's action; the one rung that
-    // still applies inline is the prepared chapter, which only fires at the hard
-    // provider fence, above the commit threshold and inside this same epoch.
-    const applicable = !epochScheduling || selection?.kind === "prepared-chapter" ? selection : null;
-    if (!applicable) {
+    // Above the commit threshold we are already inside the epoch's rewrite turn, so
+    // every rung applies inline: the extra rung costs at most one more invalidation
+    // in a turn that has already paid one. Restricting this to prepared chapters made
+    // the refold and consolidation rungs unreachable in epoch mode, which drove a
+    // session whose reducible bytes sit in expanded folds into the hard fence.
+    const applicable = selection;
+    if (!applicable || applicable.kind === "chapter-prepare") {
       if (!epoch || !persistence.state) return null;
       persistence.state = clearArmedAdvisory(persistence.state);
       advisory.armedMilestone = null;
@@ -2115,9 +2144,10 @@ export function registerActiveContext(pi: any, options: {
       }
       const ordinal = markOrdinal(snapshot);
       let staged = persistence.state;
+      let peekMarks = 0;
       for (const mark of ephemeralPeekMarks({ snapshot, state: staged, ordinal })) {
         const addition = addPendingMark(staged, mark);
-        if (addition.added) staged = addition.state;
+        if (addition.added) { staged = addition.state; peekMarks += 1; }
       }
       const pending = pendingMarks(staged).length;
       const accounting = markAccounting(snapshot, staged);
@@ -2142,7 +2172,14 @@ export function registerActiveContext(pi: any, options: {
         refused: result.refused,
         agentMarks: accounting.agentMarks,
         ladderMarks: accounting.ladderMarks,
+        peekMarks,
+        // An explicit commit never tops up: the agent asked for exactly its marks.
+        topUpMarks: 0,
+        appliedMarks: result.applied.length,
+        refusedMarks: result.refused.length,
         estimatedRewriteTokens: accounting.rewriteTokens,
+        estimatedFreedTokens: accounting.freedTokens,
+        freedWindowShare: accounting.freedWindowShare,
         durableRevision: persistence.state.revision,
         activation: pending
           ? "one batched projection rewrite; durable immediately and projected on the next model call"

@@ -2755,6 +2755,23 @@ async function gateEpochQuotaTopUp() {
   assert(epoch.applied.some((item) => item.id === agentMarkId && item.origin === "agent"));
   assert(epoch.applied.some((item) => item.origin === "ladder"));
   assert.deepEqual(epoch.refused, []);
+
+  // Adjudication visibility: a bound-out top-up or a dropped agent mark must be
+  // readable from the epoch record alone, without re-deriving it from applied[].
+  for (const key of ["pendingMarks", "agentMarks", "ladderMarks", "peekMarks", "topUpMarks",
+    "appliedMarks", "refusedMarks", "freedWindowShare", "estimatedFreedTokens",
+    "actualFreedWindowShare", "sourceBytesSaved", "targetWindowShare"]) {
+    assert.equal(typeof epoch[key], "number", `epoch accounting is missing ${key}`);
+  }
+  assert.equal(epoch.appliedMarks, epoch.applied.length);
+  assert.equal(epoch.refusedMarks, 0);
+  assert.equal(epoch.pendingMarks, epoch.agentMarks + epoch.ladderMarks);
+  assert(epoch.topUpMarks >= 1 && epoch.topUpMarks < context.EPOCH_MAX_TOPUP_MARKS);
+  // This fixture runs the candidate pool dry before the floor, which is the other
+  // legitimate exit; what must never happen silently is the mark CAP binding.
+  assert(epoch.freedWindowShare > 0);
+  assert(epoch.sourceBytesSaved > 0);
+  assert.equal(epoch.targetWindowShare, context.EPOCH_COMMIT_TARGET_WINDOW_SHARE);
   const committed = materialized(runtime);
   assert.equal(committed.pendingMarks, undefined);
   assert.equal(committed.folds.length, epoch.applied.length);
@@ -2772,6 +2789,8 @@ async function gateEpochQuotaTopUp() {
   assert.equal(new Set(hungry.map((mark) => mark.id)).size, hungry.length);
   return {
     agentMarks: epoch.agentMarks,
+    topUpMarks: epoch.topUpMarks,
+    freedWindowShare: epoch.freedWindowShare,
     ladderTopUps: epoch.ladderMarks,
     appliedInOneEpoch: epoch.applied.length,
     metQuotaAddsNothing: true,
@@ -2994,6 +3013,105 @@ async function gateSchedulingWireRoundTrip() {
   };
 }
 
+/**
+ * Below the commit threshold every eligible turn must mark NEW stale content. If the
+ * selector cannot see the pending marks it re-proposes the batch already marked,
+ * `addPendingMark` rejects the duplicate, and the epoch arrives with one mark and a
+ * top-up doing all the work. That collapse is what this gate measures.
+ */
+async function gateMarkAccumulation() {
+  const runtime = await epochToolRuntime({ turns: 40 });
+  const growth = [];
+  for (const tokens of [76_000, 78_000, 80_000, 82_000, 84_000]) {
+    await measure(runtime, tokens, 100_000);
+    growth.push(materialized(runtime).pendingMarks?.length ?? 0);
+  }
+  const marks = materialized(runtime).pendingMarks;
+  assert(marks.length > 3, `Pending marks stalled at ${marks.length}; the selector re-proposed a marked batch`);
+  assert.equal(new Set(marks.map((mark) => mark.id)).size, marks.length, "A mark was recorded twice");
+  assert.deepEqual([...growth].sort((left, right) => left - right), growth, "Marks did not grow monotonically");
+  assert.equal(growth.at(-1) - growth[0], growth.length - 1, "Marks did not grow one per eligible turn");
+  // Marking is still byte-free: nothing folded on the way here.
+  assert.equal(materialized(runtime).folds.length, 0);
+  const claimed = context.claimedRefKeys(materialized(runtime));
+  assert.equal(
+    context.selectAutomaticToolBatch(epochSnapshot(runtime.built), materialized(runtime), 1, claimed)
+      .some((candidate) => candidate.sourceRefs.some((ref) => claimed.has(json.objectRefKey(ref)))),
+    false,
+    "The selector still returns evidence a pending mark covers",
+  );
+
+  // At the commit the accumulated marks, not the top-up floor, do most of the freeing.
+  await measure(runtime, 86_000, 100_000);
+  const status = await toolStatus(runtime);
+  const epoch = status.details.automatic.lastAutomaticAction.epoch;
+  assert.equal(epoch.refusedMarks, 0);
+  assert.equal(epoch.appliedMarks, epoch.pendingMarks);
+  assert(epoch.pendingMarks > epoch.topUpMarks, "The top-up out-marked the accumulated epoch");
+  assert(epoch.freedWindowShare >= context.EPOCH_COMMIT_TARGET_WINDOW_SHARE,
+    "A full epoch freed less than the top-up floor alone");
+  assert(epoch.appliedMarks >= marks.length + 1,
+    "The accumulated marks did not all reach the commit");
+  assert.equal(materialized(runtime).pendingMarks, undefined);
+  return {
+    growth,
+    accumulatedMarks: marks.length,
+    appliedMarks: epoch.appliedMarks,
+    topUpMarks: epoch.topUpMarks,
+    freedWindowShare: epoch.freedWindowShare,
+    actualFreedWindowShare: epoch.actualFreedWindowShare,
+  };
+}
+
+/**
+ * Above the commit threshold we are already inside the epoch's rewrite turn, so every
+ * inline rung stays reachable. Restricting the inline selection to prepared chapters
+ * stranded the refold rung: a session whose reducible bytes sat in expanded folds
+ * re-committed forever without ever re-collapsing one.
+ */
+async function gateEpochInlineRungs() {
+  const wide = await epochToolRuntime({ turns: 40 });
+  await measure(wide, 86_000, 100_000);
+  const first = (await toolStatus(wide)).details.automatic.lastAutomaticAction;
+  assert.equal(first.kind, "tool-fold", "The inline rung did not run inside the epoch's rewrite turn");
+  assert.equal(typeof first.epoch, "object", "The inline rung replaced the epoch commit instead of riding it");
+
+  const runtime = await epochToolRuntime({ turns: 12 });
+  await measure(runtime, 86_000, 100_000);
+  const target = materialized(runtime).folds[0].id;
+  await toolCall(runtime, { action: "expand", id: target });
+  assert(materialized(runtime).expanded.includes(target));
+  let kinds = [];
+  for (let step = 0; step < 12; step += 1) {
+    await measure(runtime, 86_000 + step * 100, 100_000);
+    const action = (await toolStatus(runtime)).details.automatic.lastAutomaticAction;
+    kinds.push(action.kind);
+    if (action.kind === "refold") break;
+  }
+  assert.equal(kinds.at(-1), "refold", `The refold rung never fired in epoch mode: ${kinds.join(",")}`);
+  assert.equal(materialized(runtime).expanded.includes(target), false);
+
+  // The mark-side branch for a refold selection maps to a refold mark, not a fold one.
+  const snapshot = epochSnapshot(runtime.built);
+  const refoldMark = context.ladderSelectionMark({
+    snapshot,
+    state: materialized(runtime),
+    selection: { kind: "refold", foldId: target },
+    ordinal: 7,
+  });
+  assert.deepEqual(refoldMark, { mark: "refold", id: target, origin: "ladder", ordinal: 7 });
+  const claimedFolds = context.markedFoldIds(context.withPendingMarks(
+    materialized(runtime), [refoldMark],
+  ));
+  assert.equal(claimedFolds.has(target), true);
+  return {
+    inlineRungInsideEpoch: first.kind,
+    stepsToRefold: kinds.length,
+    refoldRungReached: true,
+    refoldMarkMapped: true,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -3033,6 +3151,8 @@ const gates = [
   [36, "Ephemeral peek auto-mark", gateEphemeralPeekMark],
   [37, "Commit on threshold", gateCommitOnThreshold],
   [38, "Scheduling wire round-trip", gateSchedulingWireRoundTrip],
+  [39, "Epoch mark accumulation", gateMarkAccumulation],
+  [40, "Epoch inline rung reachability", gateEpochInlineRungs],
 ];
 
 let failures = 0;

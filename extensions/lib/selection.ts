@@ -253,14 +253,18 @@ export function selectAutomaticConsolidation(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
   ratio: number,
+  claimed: ReadonlySet<string> = new Set<string>(),
 ): FoldCandidate | null {
   const visibleRoots = visibleCollapsedRoots(state, snapshot);
   const widthEligible = visibleRoots.length > CONSOLIDATION_WIDTH_THRESHOLD;
   const pressureEligible = Number.isFinite(ratio) && ratio >= snapshot.policy.consolidationRatio;
   if (!widthEligible && !pressureEligible) return null;
-  const roots = visibleRoots.filter(({ fold }) =>
-    (fold.kind === "chapter" || fold.kind === "consolidation") &&
-    !refsProtected(flattenFoldRefs(fold, state), state, snapshot));
+  const roots = visibleRoots.filter(({ fold }) => {
+    if (fold.kind !== "chapter" && fold.kind !== "consolidation") return false;
+    const refs = flattenFoldRefs(fold, state);
+    if (claimed.size && refs.some((ref) => claimed.has(objectRefKey(ref)))) return false;
+    return !refsProtected(refs, state, snapshot);
+  });
   const candidateFor = (selected: typeof roots): FoldCandidate | null => {
     const parts: FoldPart[] = selected.map(({ fold }) => ({ kind: "fold", foldId: fold.id }));
     const sourceRefs = candidateSourceRefs(parts, state);
@@ -349,9 +353,11 @@ export function selectAutomaticRefold(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
   ratio: number,
+  claimedFoldIds: ReadonlySet<string> = new Set<string>(),
 ): string | null {
   if (!Number.isFinite(ratio) || ratio < snapshot.policy.refoldRatio) return null;
   const candidates = state.expanded.flatMap((id) => {
+    if (claimedFoldIds.has(id)) return [];
     const fold = state.folds.find((item) => item.id === id);
     const interval = fold ? foldInterval(fold, state, snapshot) : null;
     const protectedSource = fold && (fold.kind === "tool-result"
@@ -367,11 +373,12 @@ export function selectAutomaticToolForRung(
   state: ActiveContextState,
   ratio: number,
   cadenceWaived = false,
+  claimed: ReadonlySet<string> = new Set<string>(),
 ): FoldCandidate | null {
   const cadenceSatisfied = state.tokensSinceToolFold >= toolFoldCadence(snapshot.contextWindow);
   if (!cadenceWaived && (!Number.isFinite(ratio) ||
       (ratio < snapshot.policy.toolFoldRatio && !cadenceSatisfied))) return null;
-  return selectAutomaticToolBatch(snapshot, state, 1)[0] ?? null;
+  return selectAutomaticToolBatch(snapshot, state, 1, claimed)[0] ?? null;
 }
 
 export function resolveFoldInputIds(

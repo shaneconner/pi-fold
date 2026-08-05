@@ -91,12 +91,17 @@ export const DEFAULT_FOLD_SCHEDULING: FoldSchedulingMode = "immediate";
 // Epoch knobs stay INTERNAL constants for the same reason the surfacing knobs do:
 // they are what the round-2 cost measurement exists to settle, and an option surface
 // fixed before that data would freeze a guess.
-/** An automatic commit tops up with stale tool batches until it would free this share of the window. */
-export const EPOCH_COMMIT_TARGET_WINDOW_SHARE = 0.20;
+/**
+ * An automatic commit tops up with stale tool batches until it would free this share
+ * of the window. It is a FLOOR under an epoch's accumulated marks, not the driver of
+ * one, so it is set where a commit is unambiguously worth its single rewrite.
+ */
+export const EPOCH_COMMIT_TARGET_WINDOW_SHARE = 0.40;
 /** A fold whose span ends within this many mapped messages of the tail invalidates almost nothing. */
 export const EPOCH_TAIL_ADJACENT_MESSAGES = 16;
 export const MAX_PENDING_MARKS = 256;
-export const EPOCH_MAX_TOPUP_MARKS = 32;
+/** Enough batches to actually reach the floor on a wide window before the loop exits. */
+export const EPOCH_MAX_TOPUP_MARKS = 64;
 /** Estimate only; provider token accounting always comes from a measured response. */
 export const ESTIMATED_BYTES_PER_TOKEN = 4;
 /** Rendered navigation/topology overhead assumed around a brief when estimating a placeholder. */

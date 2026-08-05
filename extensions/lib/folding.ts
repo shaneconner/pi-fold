@@ -76,6 +76,7 @@ export function selectAutomaticChapter(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
   maximumSourceRefs: number = snapshot.policy.maxFoldSourceRefs,
+  claimed: ReadonlySet<string> = new Set<string>(),
 ): FoldCandidate | null {
   const units = chapterUnits(snapshot);
   const allowedChildren = new Set<FoldKind>(["tool-result"]);
@@ -94,6 +95,7 @@ export function selectAutomaticChapter(
       if (!parts || parts.some((part) => part.kind === "fold" && state.expanded.includes(part.foldId))) continue;
       const refs = candidateSourceRefs(parts, state);
       if (refs.length > maximumSourceRefs) break;
+      if (claimed.size && refs.some((ref) => claimed.has(objectRefKey(ref)))) continue;
       if (refsProtected(refs, state, snapshot)) continue;
       const size = bytes(encodedFoldSource(snapshot, state, parts, "chapter"));
       if (size > snapshot.policy.maxChapterChars) break;
@@ -117,6 +119,14 @@ export interface AutomaticRungSelectionOptions {
   toolOnly?: boolean;
   summarizerAvailable?: boolean;
   failedPreparationIds?: ReadonlySet<string>;
+  /**
+   * Evidence and folds already spoken for by something that is not yet a fold, i.e.
+   * a pending epoch mark. Excluding them makes each eligible turn select NEW stale
+   * content instead of re-selecting the batch a mark already covers, which is the
+   * only way marks accumulate below the commit threshold.
+   */
+  claimed?: ReadonlySet<string>;
+  claimedFoldIds?: ReadonlySet<string>;
 }
 
 export function automaticPreparationId(candidate: FoldCandidate, state: ActiveContextState): string {
@@ -134,19 +144,21 @@ export function selectAutomaticRung(
   ratio: number,
   options: AutomaticRungSelectionOptions = {},
 ): AutomaticRungSelection | null {
+  const claimed = options.claimed ?? new Set<string>();
+  const claimedFoldIds = options.claimedFoldIds ?? new Set<string>();
   if (!options.toolOnly && state.prepared) {
     if (!Number.isFinite(ratio) || ratio < hardFenceRatio(snapshot)) return null;
-    const candidate = selectAutomaticChapter(snapshot, state);
+    const candidate = selectAutomaticChapter(snapshot, state, snapshot.policy.maxFoldSourceRefs, claimed);
     return candidate ? { kind: "prepared-chapter", candidate } : null;
   }
-  const tool = selectAutomaticToolForRung(snapshot, state, ratio, options.waiveToolCadence);
+  const tool = selectAutomaticToolForRung(snapshot, state, ratio, options.waiveToolCadence, claimed);
   if (tool) return { kind: "tool", candidate: tool };
   if (options.toolOnly || !Number.isFinite(ratio)) return null;
-  const refold = selectAutomaticRefold(snapshot, state, ratio);
+  const refold = selectAutomaticRefold(snapshot, state, ratio, claimedFoldIds);
   if (refold) return { kind: "refold", foldId: refold };
-  const consolidation = selectAutomaticConsolidation(snapshot, state, ratio);
+  const consolidation = selectAutomaticConsolidation(snapshot, state, ratio, claimed);
   if (consolidation) return { kind: "consolidation", candidate: consolidation };
-  const chapter = selectAutomaticChapter(snapshot, state);
+  const chapter = selectAutomaticChapter(snapshot, state, snapshot.policy.maxFoldSourceRefs, claimed);
   if (!chapter) return null;
   const preparationFailed = options.failedPreparationIds?.has(
     automaticPreparationId(chapter, state),

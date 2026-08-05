@@ -381,6 +381,13 @@ export function claimedRefKeys(state: ActiveContextState): Set<string> {
   return keys;
 }
 
+/** Every fold id already spoken for by a pending refold mark. */
+export function markedFoldIds(state: ActiveContextState): Set<string> {
+  const ids = new Set<string>();
+  for (const mark of pendingMarks(state)) if (mark.mark === "refold") ids.add(mark.id);
+  return ids;
+}
+
 /**
  * Agent judgment leads; automation guarantees the floor. If the marks the agent
  * made would free less than the target share of the window, the ladder adds the
