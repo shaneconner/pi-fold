@@ -123,8 +123,11 @@ export function markOrdinal(snapshot: Pick<ActiveContextSnapshot, "mapped">): nu
 }
 
 /**
- * A fold whose span ends this close to the tail invalidates almost nothing, so it
- * applies immediately even in epoch mode. Deterministic in mapped positions.
+ * A fold whose span BEGINS this close to the tail invalidates almost nothing, so it
+ * applies immediately even in epoch mode. The measurement is the FIRST mapped source
+ * index, not the last: a positional prefix cache is invalidated from the earliest
+ * byte the rewrite touches, so a span reaching back from the tail is as expensive as
+ * its oldest ref. Deterministic in mapped positions.
  */
 export function tailAdjacent(
   snapshot: ActiveContextSnapshot,
@@ -134,13 +137,13 @@ export function tailAdjacent(
   const refs = candidate.sourceRefs.length ? candidate.sourceRefs : candidateSourceRefs(candidate.parts, state);
   const indexByKey = new Map(snapshot.mapped.flatMap((item) =>
     item.ref ? [[objectRefKey(item.ref), item.index] as const] : []));
-  let last = -1;
+  let first = -1;
   for (const ref of refs) {
     const index = indexByKey.get(objectRefKey(ref));
     if (index === undefined) return false;
-    if (index > last) last = index;
+    if (first < 0 || index < first) first = index;
   }
-  return last >= 0 && snapshot.mapped.length - 1 - last <= EPOCH_TAIL_ADJACENT_MESSAGES;
+  return first >= 0 && snapshot.mapped.length - 1 - first <= EPOCH_TAIL_ADJACENT_MESSAGES;
 }
 
 /**

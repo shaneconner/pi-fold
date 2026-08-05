@@ -97,7 +97,7 @@ export const DEFAULT_FOLD_SCHEDULING: FoldSchedulingMode = "immediate";
  * one, so it is set where a commit is unambiguously worth its single rewrite.
  */
 export const EPOCH_COMMIT_TARGET_WINDOW_SHARE = 0.40;
-/** A fold whose span ends within this many mapped messages of the tail invalidates almost nothing. */
+/** A fold whose span begins within this many mapped messages of the tail invalidates almost nothing. */
 export const EPOCH_TAIL_ADJACENT_MESSAGES = 16;
 export const MAX_PENDING_MARKS = 256;
 /** Enough batches to actually reach the floor on a wide window before the loop exits. */

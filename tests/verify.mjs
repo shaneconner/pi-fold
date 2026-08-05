@@ -2813,6 +2813,25 @@ async function gateTailAdjacentExemption() {
   assert.equal(context.tailAdjacent(snapshot, distant, empty), false);
   assert.equal(context.tailAdjacent(snapshot, near, empty), true);
 
+  // Geometry: the exemption is measured from the FIRST mapped source index, because a
+  // positional cache is invalidated from the earliest byte a rewrite touches. A span
+  // that ENDS at the tail but reaches back past the window is expensive, not cheap.
+  const spanning = {
+    kind: "chapter",
+    parts: [...distant.parts, ...near.parts],
+    sourceRefs: [...distant.sourceRefs, ...near.sourceRefs],
+  };
+  assert.equal(context.tailAdjacent(snapshot, spanning, empty), false,
+    "A span reaching back from the tail was classified by its last index");
+  const firstIndex = snapshot.mapped.findIndex((item) =>
+    item.ref && json.objectRefKey(item.ref) === json.objectRefKey(spanning.sourceRefs[0]));
+  const lastIndex = snapshot.mapped.findIndex((item) =>
+    item.ref && json.objectRefKey(item.ref) === json.objectRefKey(spanning.sourceRefs.at(-1)));
+  assert(snapshot.mapped.length - 1 - lastIndex <= context.EPOCH_TAIL_ADJACENT_MESSAGES,
+    "The spanning fixture does not end inside the exemption window");
+  assert(snapshot.mapped.length - 1 - firstIndex > context.EPOCH_TAIL_ADJACENT_MESSAGES,
+    "The spanning fixture does not begin outside the exemption window");
+
   const marked = await toolCall(runtime, {
     action: "fold",
     ids: [built.turnEntries[0][2]],
@@ -2832,6 +2851,7 @@ async function gateTailAdjacentExemption() {
   assert.notEqual(state.folds[0].id, state.pendingMarks[0].id);
   return {
     tailAdjacentMessages: context.EPOCH_TAIL_ADJACENT_MESSAGES,
+    spanningToTailRefused: true,
     distantMarked: 1,
     tailAdjacentApplied: 1,
     immediateFolds: state.folds.length,
