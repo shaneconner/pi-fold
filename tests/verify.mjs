@@ -15,6 +15,7 @@ const jiti = createJiti(import.meta.url);
 const context = await jiti.import(join(projectRoot, "extensions", "active-context.ts"));
 const json = await jiti.import(join(projectRoot, "extensions", "json.ts"));
 const piFold = await jiti.import(join(projectRoot, "extensions", "index.js"));
+const summarizerFactory = await jiti.import(join(projectRoot, "extensions", "summarizer.js"));
 
 const LEGACY_REPRODUCTION_FIXTURE = Object.freeze({
   originName: "Quorum",
@@ -186,6 +187,8 @@ function makeRuntime(built, {
   blockingTools,
   isMcpTool,
   evidenceIngestion,
+  summarizer,
+  loadHostModule,
   packageRegistration = false,
   sessionFile = join(tmpdir(), "pi-fold-test-session.jsonl"),
 } = {}) {
@@ -269,8 +272,9 @@ function makeRuntime(built, {
     ...(blockingTools ? { blockingTools } : {}),
     ...(isMcpTool ? { isMcpTool } : {}),
     ...(evidenceIngestion === undefined ? {} : { evidenceIngestion }),
+    ...(summarizer === undefined ? {} : { summarizer }),
   };
-  if (packageRegistration) piFold.registerPiFold(pi, registrationOptions);
+  if (packageRegistration) piFold.registerPiFold(pi, registrationOptions, loadHostModule);
   else context.registerActiveContext(pi, registrationOptions);
   return runtime;
 }
@@ -1693,6 +1697,233 @@ async function gateEvidenceIngestionSwitch() {
   }
 }
 
+async function gateSummarizerOption() {
+  const measureForModel = async (runtime, tokens, model) => {
+    runtime.usage = { tokens, contextWindow: 100_000 };
+    const message = runtime.appendMessage({
+      ...measuredAssistant(tokens, 100_000, `summarizer-measurement-${tokens}`),
+      provider: model.provider,
+      model: model.id,
+    }, "summarizer-measurement");
+    await runtime.handlers.get("message_end")({ message }, runtime.ctx);
+    await settle();
+  };
+  const sessionModel = { provider: "fake-session", id: "brief-model", reasoning: true };
+  let loaderCalls = 0;
+  let createCalls = 0;
+  let completionCalls = 0;
+  let completionRequest;
+  const loadHostModule = async () => {
+    loaderCalls += 1;
+    return {
+      ModelRuntime: {
+        async create() {
+          createCalls += 1;
+          return {
+            getModel() { return undefined; },
+            async completeSimple(model, request, options) {
+              completionCalls += 1;
+              completionRequest = structuredClone({ model, request, options: {
+                maxTokens: options.maxTokens,
+                signalIdentical: options.signal instanceof AbortSignal,
+                reasoning: options.reasoning,
+              } });
+              return {
+                role: "assistant",
+                content: [
+                  { type: "thinking", thinking: "not part of the brief" },
+                  { type: "text", text: "The fake session model records " },
+                  { type: "text", text: "the exact bounded chapter." },
+                ],
+              };
+            },
+          };
+        },
+      },
+    };
+  };
+  const built = makeFixture({
+    turns: 8,
+    tools: false,
+    chapterChars: 3_500,
+    contextWindow: 100_000,
+  });
+  const session = makeRuntime(built, { packageRegistration: true, loadHostModule });
+  session.ctx.model = sessionModel;
+  assert.equal(loaderCalls, 0);
+  await startRuntime(session);
+  assert.equal(loaderCalls, 0, "Default registration imported the host before a model brief was requested");
+  const fenceTokens = Math.round(context.hardFenceRatio({ contextWindow: 100_000 }) * 100_000);
+  await measureForModel(session, fenceTokens, sessionModel);
+  await settle(8);
+  const modelFold = materialized(session).folds.find((fold) => fold.kind === "chapter");
+  assert(modelFold, json.stableStringify({
+    loaderCalls,
+    createCalls,
+    completionCalls,
+    automatic: (await toolStatus(session)).details.automatic,
+    notifications: session.notifications,
+    state: materialized(session),
+  }));
+  assert.equal(modelFold.brief, "The fake session model records the exact bounded chapter.");
+  assert.deepEqual(modelFold.provenance, {
+    kind: "model",
+    provider: sessionModel.provider,
+    model: sessionModel.id,
+    effort: "max",
+  });
+  assert.equal(loaderCalls, 1);
+  assert.equal(createCalls, 1);
+  assert.equal(completionCalls, 1);
+  assert.equal(completionRequest.model.provider, sessionModel.provider);
+  assert.equal(completionRequest.model.id, sessionModel.id);
+  assert.equal(completionRequest.request.messages.length, 1);
+  assert.equal(completionRequest.request.messages[0].role, "user");
+  assert(completionRequest.request.messages[0].content.startsWith(
+    "Write a factual brief of at most 1200 characters. Use no preamble and no Markdown headers.\n\n",
+  ));
+  assert.equal(completionRequest.options.maxTokens, 512);
+  assert.equal(completionRequest.options.signalIdentical, true);
+  assert.equal(completionRequest.options.reasoning, "max");
+
+  let deterministicLoaderCalls = 0;
+  const deterministic = makeRuntime(built, {
+    packageRegistration: true,
+    summarizer: "deterministic",
+    loadHostModule: async () => {
+      deterministicLoaderCalls += 1;
+      throw new Error("deterministic mode loaded the host");
+    },
+  });
+  await startRuntime(deterministic);
+  await measure(deterministic, fenceTokens, 100_000);
+  assert.equal(deterministicLoaderCalls, 0);
+  assert.equal(
+    materialized(deterministic).folds.find((fold) => fold.kind === "chapter")?.provenance.kind,
+    "deterministic",
+  );
+
+  let failureCompletionCalls = 0;
+  const failure = makeRuntime(built, {
+    packageRegistration: true,
+    loadHostModule: async () => ({
+      ModelRuntime: {
+        async create() {
+          return {
+            async completeSimple() {
+              failureCompletionCalls += 1;
+              throw new Error("fake completion failed");
+            },
+          };
+        },
+      },
+    }),
+  });
+  failure.ctx.model = sessionModel;
+  await startRuntime(failure);
+  await measureForModel(failure, fenceTokens, sessionModel);
+  assert.equal(failureCompletionCalls, 1);
+  assert.equal(
+    materialized(failure).folds.find((fold) => fold.kind === "chapter")?.provenance.kind,
+    "deterministic",
+  );
+
+  assert.throws(() => makeRuntime(built, {
+    packageRegistration: true,
+    summarizer: "session",
+    summarizeContextSpan: MODEL_BRIEF,
+  }), /summarizer and summarizeContextSpan cannot be configured together/);
+  assert.throws(() => makeRuntime(built, {
+    packageRegistration: true,
+    summarizer: { provider: "fake-session" },
+  }), /nonempty provider and model strings/);
+  assert.throws(() => makeRuntime(built, {
+    packageRegistration: true,
+    summarizer: { model: "brief-model" },
+  }), /nonempty provider and model strings/);
+
+  let escapeLoaderCalls = 0;
+  const escape = makeRuntime(built, {
+    packageRegistration: true,
+    summarizeContextSpan: MODEL_BRIEF,
+    loadHostModule: async () => {
+      escapeLoaderCalls += 1;
+      throw new Error("custom callback loaded the built-in summarizer host");
+    },
+  });
+  await startRuntime(escape);
+  await measure(escape, fenceTokens, 100_000);
+  assert.equal(escapeLoaderCalls, 0);
+  assert.equal(
+    materialized(escape).folds.find((fold) => fold.kind === "chapter")?.provenance.kind,
+    "model",
+  );
+
+  let registryLoaderCalls = 0;
+  let registryCreateCalls = 0;
+  const registryCompletionOptions = [];
+  const registryModel = { provider: "fake-registry", id: "explicit-model", reasoning: true };
+  const explicit = summarizerFactory.createSummarizeContextSpan({
+    provider: registryModel.provider,
+    model: registryModel.id,
+    effort: "low",
+  }, async () => {
+    registryLoaderCalls += 1;
+    return {
+      ModelRuntime: {
+        async create() {
+          registryCreateCalls += 1;
+          return {
+            getModel(provider, model) {
+              return provider === registryModel.provider && model === registryModel.id
+                ? registryModel
+                : undefined;
+            },
+            async completeSimple(_model, _request, options) {
+              registryCompletionOptions.push(options);
+              return { content: [{ type: "text", text: "Explicit registry brief." }] };
+            },
+          };
+        },
+      },
+    };
+  });
+  const request = {
+    sourceText: "Exact source span.",
+    maxBriefChars: 1_200,
+    signal: new AbortController().signal,
+  };
+  const explicitFirst = await explicit(request, { thinkingLevel: "max" });
+  const explicitSecond = await explicit(request, { thinkingLevel: "max" });
+  assert.deepEqual(explicitFirst, {
+    brief: "Explicit registry brief.",
+    provider: registryModel.provider,
+    model: registryModel.id,
+    effort: "low",
+    toolCalls: 0,
+  });
+  assert.deepEqual(explicitSecond, explicitFirst);
+  assert.equal(registryLoaderCalls, 1);
+  assert.equal(registryCreateCalls, 1);
+  assert.equal(registryCompletionOptions.length, 2);
+  assert(registryCompletionOptions.every((options) => options.signal === request.signal));
+  assert(registryCompletionOptions.every((options) => options.maxTokens === 512));
+  assert(registryCompletionOptions.every((options) => options.reasoning === "low"));
+
+  return {
+    default: modelFold.provenance,
+    toolCalls: 0,
+    hostLoads: loaderCalls,
+    runtimeCreates: createCalls,
+    deterministic: "no-host-load",
+    failureFallback: "deterministic",
+    exclusiveOptions: "enforced",
+    malformedObjects: "rejected",
+    customCallback: "unchanged",
+    explicitRegistryRuntimeCreates: registryCreateCalls,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -1716,6 +1947,7 @@ const gates = [
   [20, "Neutral default branding", gateNeutralDefaultBranding],
   [21, "Legacy branding reproduction", gateLegacyBrandingReproduction],
   [22, "Evidence ingestion switch", gateEvidenceIngestionSwitch],
+  [23, "Summarizer option", gateSummarizerOption],
 ];
 
 let failures = 0;
