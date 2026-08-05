@@ -52,6 +52,25 @@ export const MAX_EXPAND_LEASES = 64;
 export const CONSOLIDATION_WIDTH_THRESHOLD = 10;
 export const MAX_ADVISORY_DELIVERIES_PER_MILESTONE = 16;
 
+// Ephemeral surfacing structure. These stay INTERNAL constants rather than public
+// options: they are the knobs the surfacing experiment is meant to settle, and an
+// option surface fixed before the accept/reject data exists would freeze a guess.
+export const DEFAULT_SURFACING_ENABLED = true;
+export const SURFACING_TOP_K = 3;
+export const SURFACING_MIN_SCORE = 0.30;
+export const SURFACING_CHAR_BUDGET = 1_000;
+export const SURFACING_COOLDOWN_ORDINALS = 8;
+export const SURFACING_OUTCOME_WINDOW_ORDINALS = 12;
+export const SURFACING_RECENT_TASK_SPANS = 6;
+export const SURFACING_MAX_TASK_CHARS = 12_000;
+export const SURFACING_MAX_LOG_RECORDS = 128;
+export const SURFACING_LEXICAL_WEIGHT = 0.80;
+export const SURFACING_RECENCY_WEIGHT = 0.14;
+export const SURFACING_DEPTH_WEIGHT = 0.06;
+export const SURFACING_MAX_DEPTH = 4;
+export const SURFACING_MAX_TEXT_CHARS = 220;
+export const SURFACING_SOURCE_ID = "fold-brief";
+
 // Conservative LOWER bound on UTF-8 bytes per provider token, used only to cap
 // the protected byte tail as a share of a small window; never to estimate usage.
 export const BYTES_PER_TOKEN_FLOOR = 2;
@@ -123,6 +142,44 @@ export interface PreparedFold {
   fold: ActiveFold;
 }
 
+export type SurfacingOutcome = "shown" | "accept" | "reject";
+
+/** One durable surfacing observation: what was shown, how it scored, and what the agent did. */
+export interface SurfacingRecord {
+  source: string;
+  id: string;
+  score: number;
+  ordinal: number;
+  outcome: SurfacingOutcome;
+}
+
+/** One item a suggestion source offers for the shared carrier. */
+export interface SurfacingCandidate {
+  source: string;
+  id: string;
+  text: string;
+  route: string;
+  alternateRoute?: string;
+  /** Transcript position used for recency; higher is more recent. Never a wall clock. */
+  position?: number;
+  depth?: number;
+}
+
+export interface SurfacingSuggestion extends SurfacingCandidate {
+  score: number;
+}
+
+export interface SuggestionSourceInput {
+  state: ActiveContextState;
+  snapshot: ActiveContextSnapshot;
+  toolName: string;
+}
+
+export interface SuggestionSource {
+  id: string;
+  candidates: (input: SuggestionSourceInput) => SurfacingCandidate[];
+}
+
 export interface ActiveContextState {
   version: 1;
   sessionId: string;
@@ -132,6 +189,7 @@ export interface ActiveContextState {
   protected: EvidenceRef[];
   tokensSinceToolFold: number;
   leases: Record<string, number>;
+  surfacing?: SurfacingRecord[];
   prepared?: PreparedFold;
   advisory?: {
     highWater: number;
@@ -164,6 +222,7 @@ export interface ActiveContextCheckpointV2 {
   prepared: PreparedFold | null;
   tokensSinceToolFold?: number;
   leases?: Record<string, number>;
+  surfacing?: SurfacingRecord[];
   advisory?: NonNullable<ActiveContextState["advisory"]>;
   stateSha256: string;
 }
@@ -182,6 +241,7 @@ export interface ActiveContextDeltaV2 {
   prepared: PreparedFold | null;
   tokensSinceToolFold?: number;
   leases?: Record<string, number>;
+  surfacing?: SurfacingRecord[];
   advisory?: NonNullable<ActiveContextState["advisory"]>;
   stateSha256: string;
 }

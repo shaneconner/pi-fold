@@ -22,6 +22,7 @@ import {
   EXPAND_LEASE_GENERATIONS,
   MAX_ADVISORY_DELIVERIES_PER_MILESTONE,
   MAX_EXPAND_LEASES,
+  SURFACING_MAX_LOG_RECORDS,
 } from "./policy.ts";
 import type {
   ActiveContextCheckpointV2,
@@ -36,6 +37,7 @@ import type {
   FoldRecordEntry,
   FoldRecordRef,
   PreparedFold,
+  SurfacingRecord,
 } from "./policy.ts";
 
 export const ACTIVE_FOLD_KEYS = [
@@ -49,6 +51,8 @@ export const PREPARED_FOLD_KEYS = [
 export const ACTIVE_STATE_KEYS = ["version", "sessionId", "revision", "folds", "expanded", "protected"] as const;
 export const FOLD_RECORD_REF_KEYS = ["id", "sha256"] as const;
 export const FOLD_RECORD_ENTRY_KEYS = ["version", "sessionId", "foldId", "recordSha256", "fold"] as const;
+export const SURFACING_RECORD_KEYS = ["source", "id", "score", "ordinal", "outcome"] as const;
+export const SURFACING_OUTCOMES = Object.freeze(["shown", "accept", "reject"] as const);
 export const STATE_CHECKPOINT_V2_KEYS = [
   "version", "kind", "sessionId", "revision", "foldRefs", "expanded", "protected", "prepared", "stateSha256",
 ] as const;
@@ -65,6 +69,24 @@ export const MAX_ACTIVE_PROTECTED = 1_024;
 
 export function validTokensSinceToolFold(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+
+export function validSurfacingRecord(value: unknown): value is SurfacingRecord {
+  if (!exactRecord(value, SURFACING_RECORD_KEYS)) return false;
+  const score = ownValue(value, "score");
+  return typeof ownValue(value, "source") === "string" && Boolean(ownValue(value, "source")) &&
+    typeof ownValue(value, "id") === "string" && Boolean(ownValue(value, "id")) &&
+    typeof score === "number" && Number.isFinite(score) && Number(score) >= 0 && Number(score) <= 1 &&
+    Number.isSafeInteger(ownValue(value, "ordinal")) && Number(ownValue(value, "ordinal")) >= 0 &&
+    SURFACING_OUTCOMES.includes(ownValue(value, "outcome") as SurfacingRecord["outcome"]);
+}
+
+export function parseSurfacingLog(value: unknown): SurfacingRecord[] {
+  const records = denseOwnArrayValues(value);
+  if (!records || records.length > SURFACING_MAX_LOG_RECORDS || !records.every(validSurfacingRecord)) {
+    throw new Error("Invalid active-context surfacing log");
+  }
+  return clone(records) as SurfacingRecord[];
 }
 
 export function parseLeases(value: unknown, foldIds?: ReadonlySet<string>): Record<string, number> {
@@ -235,11 +257,13 @@ export function parseActiveContextState(
   const hasTokensSinceToolFold = recordLike &&
     Object.prototype.hasOwnProperty.call(value, "tokensSinceToolFold");
   const hasLeases = recordLike && Object.prototype.hasOwnProperty.call(value, "leases");
+  const hasSurfacing = recordLike && Object.prototype.hasOwnProperty.call(value, "surfacing");
   const extraKeys = [
     ...(hasPrepared ? ["prepared"] : []),
     ...(hasAdvisory ? ["advisory"] : []),
     ...(hasTokensSinceToolFold ? ["tokensSinceToolFold"] : []),
     ...(hasLeases ? ["leases"] : []),
+    ...(hasSurfacing ? ["surfacing"] : []),
   ];
   if (!exactRecord(value, [...ACTIVE_STATE_KEYS, ...extraKeys])) throw new Error("Invalid active-context state keys");
   const folds = denseOwnArrayValues(ownValue(value, "folds"));
@@ -265,6 +289,7 @@ export function parseActiveContextState(
     throw new Error("Invalid active-context tool-fold cadence");
   }
   const leases = hasLeases ? parseLeases(ownValue(value, "leases"), ids) : {};
+  const surfacing = hasSurfacing ? parseSurfacingLog(ownValue(value, "surfacing")) : [];
   const source = clone(value) as unknown as ActiveContextState;
   // Provenance normalization is presentation-only; never mutate a durable
   // content-addressed fold record: changing its bytes causes the next re-persist
@@ -280,6 +305,9 @@ export function parseActiveContextState(
       ? Number(ownValue(value, "tokensSinceToolFold"))
       : 0,
     leases,
+    // Omitted when empty so every state written before surfacing existed keeps its
+    // exact digest; the replay digest is order- and presence-sensitive by design.
+    ...(surfacing.length ? { surfacing } : {}),
     ...(hasAdvisory
       ? { advisory: clone(source.advisory!) }
       : defaultAdvisory ? { advisory: { highWater: 0, delivered: {} } } : {}),
@@ -355,6 +383,7 @@ export function sameStateProjection(left: ActiveContextState, right: ActiveConte
     const normalizedState = { ...clone(value), revision: 0 } as Partial<ActiveContextState>;
     if (normalizedState.tokensSinceToolFold === 0) delete normalizedState.tokensSinceToolFold;
     if (normalizedState.leases && Object.keys(normalizedState.leases).length === 0) delete normalizedState.leases;
+    if (normalizedState.surfacing && normalizedState.surfacing.length === 0) delete normalizedState.surfacing;
     return normalizedState;
   };
   return stableStringify(normalized(left)) === stableStringify(normalized(right));
@@ -395,6 +424,7 @@ export function validateV2ProjectionFields(
   advisoryValue: unknown,
   tokensSinceToolFoldValue: unknown,
   leasesValue: unknown,
+  surfacingValue?: unknown,
 ): {
   expanded: string[];
   protected: EvidenceRef[];
@@ -402,6 +432,7 @@ export function validateV2ProjectionFields(
   advisory?: NonNullable<ActiveContextState["advisory"]>;
   tokensSinceToolFold: number;
   leases: Record<string, number>;
+  surfacing: SurfacingRecord[];
 } {
   const expanded = denseOwnArrayValues(expandedValue);
   const protectedRefs = denseOwnArrayValues(protectedValue);
@@ -419,6 +450,7 @@ export function validateV2ProjectionFields(
     throw new Error("Invalid active-context v2 tool-fold cadence");
   }
   const leases = leasesValue === undefined ? {} : parseLeases(leasesValue);
+  const surfacing = surfacingValue === undefined ? [] : parseSurfacingLog(surfacingValue);
   return {
     expanded: clone(expanded) as string[],
     protected: clone(protectedRefs) as EvidenceRef[],
@@ -428,6 +460,7 @@ export function validateV2ProjectionFields(
     }),
     tokensSinceToolFold: tokensSinceToolFoldValue === undefined ? 0 : Number(tokensSinceToolFoldValue),
     leases,
+    surfacing,
   };
 }
 
@@ -439,10 +472,13 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     Object.prototype.hasOwnProperty.call(value, "tokensSinceToolFold"));
   const hasLeases = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "leases"));
+  const hasSurfacing = Boolean(value && typeof value === "object" &&
+    Object.prototype.hasOwnProperty.call(value, "surfacing"));
   const optionalKeys = [
     ...(hasAdvisory ? ["advisory"] : []),
     ...(hasTokensSinceToolFold ? ["tokensSinceToolFold"] : []),
     ...(hasLeases ? ["leases"] : []),
+    ...(hasSurfacing ? ["surfacing"] : []),
   ];
   const checkpoint = kind === "checkpoint" &&
     exactRecord(value, [...STATE_CHECKPOINT_V2_KEYS, ...optionalKeys]);
@@ -457,6 +493,7 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
   validateV2ProjectionFields(
     ownValue(value, "expanded"), ownValue(value, "protected"), ownValue(value, "prepared"),
     ownValue(value, "advisory"), ownValue(value, "tokensSinceToolFold"), ownValue(value, "leases"),
+    ownValue(value, "surfacing"),
   );
   if (checkpoint) {
     const refs = denseOwnArrayValues(ownValue(value, "foldRefs"));
@@ -521,7 +558,7 @@ export function stateFromFoldRefs(
   wire: Pick<
     ActiveContextCheckpointV2,
     "sessionId" | "revision" | "expanded" | "protected" | "prepared" | "advisory" |
-      "tokensSinceToolFold" | "leases"
+      "tokensSinceToolFold" | "leases" | "surfacing"
   >,
   refs: FoldRecordRef[],
   records: Map<string, FoldRecordEntry>,
@@ -541,6 +578,7 @@ export function stateFromFoldRefs(
     protected: clone(wire.protected),
     tokensSinceToolFold: wire.tokensSinceToolFold ?? 0,
     leases: clone(wire.leases ?? {}),
+    ...(wire.surfacing?.length ? { surfacing: clone(wire.surfacing) } : {}),
     ...(wire.advisory === undefined ? {} : { advisory: clone(wire.advisory) }),
     ...(wire.prepared === null || wire.prepared === undefined ? {} : { prepared: clone(wire.prepared) }),
   };
@@ -690,6 +728,7 @@ export function makeStateCheckpoint(state: ActiveContextState): ActiveContextChe
     prepared: state.prepared ? clone(state.prepared) : null,
     tokensSinceToolFold: state.tokensSinceToolFold,
     leases: clone(state.leases),
+    ...(state.surfacing?.length ? { surfacing: clone(state.surfacing) } : {}),
     ...(state.advisory ? { advisory: clone(state.advisory) } : {}),
     stateSha256: semanticStateSha256(state),
   }, state.sessionId) as ActiveContextCheckpointV2;
@@ -724,6 +763,7 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
     prepared: next.prepared ? clone(next.prepared) : null,
     tokensSinceToolFold: next.tokensSinceToolFold,
     leases: clone(next.leases),
+    ...(next.surfacing?.length ? { surfacing: clone(next.surfacing) } : {}),
     ...(next.advisory ? { advisory: clone(next.advisory) } : {}),
     stateSha256: semanticStateSha256(next),
   }, next.sessionId) as ActiveContextDeltaV2;

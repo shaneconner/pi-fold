@@ -10,6 +10,7 @@ import type {
   ActiveContextState,
   AdvisoryMilestone,
   GuidanceProfile,
+  SurfacingSuggestion,
 } from "./policy.ts";
 import {
   contextBrand,
@@ -181,6 +182,34 @@ export function milestoneText(
   }
   return `${prefix} The hard context fence is near. The next automatic action is a committed chapter fold ` +
     "or the provider request is aborted before transmission.";
+}
+
+/**
+ * The surfacing carrier. It rides the same ephemeral tail channel as the live
+ * advisory: appended after the stable prefix, never durable, never a mutation of
+ * the projection, and cleared whenever the next context event is built.
+ */
+export function surfacingText(input: {
+  suggestions: readonly SurfacingSuggestion[];
+  brandNoun?: string;
+}): string | null {
+  if (!input.suggestions.length) return null;
+  const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
+  const lines = input.suggestions.map((suggestion, index) => [
+    `${index + 1}. ${suggestion.id}${suggestion.depth ? ` (depth ${suggestion.depth})` : ""}: ${suggestion.text}`,
+    ...(suggestion.alternateRoute ? [`   peek (ephemeral read): ${suggestion.alternateRoute}`] : []),
+    `   expand (durable restore): ${suggestion.route}`,
+  ].join("\n"));
+  return boundReceiptText(
+    [
+      `[${brand} suggestions] ${input.suggestions.length} collapsed span(s) look relevant to the current ` +
+        "task. Peek reads one back ephemerally at any depth; expand restores it in place, outermost first. " +
+        "Ignoring them is a valid answer.",
+      ...lines,
+    ].join("\n"),
+    2_048,
+    `[${brand} suggestions] Relevant collapsed spans are unavailable this pass.`,
+  );
 }
 
 export function liveAdvisoryText(input: {

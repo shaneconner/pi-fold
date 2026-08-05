@@ -40,6 +40,40 @@ Milestone wording comes in three guidance profiles over the same rungs, threshol
 
 By default, evidence ingestion writes read-only artifact files under the session directory's `pi-fold-evidence/`, sets them to mode `0444`, and enforces a 512 MB session cap. These immutable files provide exact-recovery anchors for oversized tool results. Set `evidenceIngestion: false` to disable the hook and all evidence writes.
 
+## Surfacing relevant folds
+
+Paging the fold index is something the agent can do at any moment. Surfacing is that same act performed on its behalf when it did not think to look. As a session grows, the material most worth reopening tends to sit in the oldest and deepest folds, which are exactly the ones the agent stops seeing. pi-fold scores every collapsed fold against what the session is working on right now and hands the best two or three back with the fold id and both affordances, so the agent can peek one ephemerally, expand it in place, or dismiss the whole slate and carry on. The judgment stays with the agent; the mechanism only puts the option where it can be acted on.
+
+The selector is deterministic and model free: no extra provider call, no embeddings, no randomness, no wall clock. A fold scores on the lexical overlap between its brief and the most recent user and assistant text, plus a small recency component read from transcript position and a small bonus for depth (a deeply nested fold is otherwise invisible). Those structural components alone can never clear the threshold, so a suggestion always rests on evidence that the span matches the task in hand, and when nothing clears the threshold, nothing is shown at all. A fold that was suggested and left alone is suppressed for a cooldown; a fold that is currently expanded or protected is never suggested.
+
+Suggestions ride the same ephemeral channel as the advisory milestones: appended at the tail of the window, after the stable prefix, so no cached prefix is invalidated and nothing durable is written to the transcript. They never share an advisory with urgent fence text, where the only useful next action is the fold that keeps the request transmissible.
+
+Every suggestion shown is recorded in durable session state with its source, item id, score and transcript ordinal. The record resolves to `accept` when the agent peeks or expands that item within a short window of turns, and to `reject` otherwise. `active_context {"action":"status"}` returns the live slate and the whole log under `automatic.surfacing`. Set `surfacing: false` to register no sources and emit nothing. Slate size, threshold, cooldown and character budget are internal constants rather than options: they are the knobs the accept and reject record exists to settle.
+
+### Suggestion sources
+
+pi-fold owns the carrier, not the content. Any extension can put its own items into the same slate, with the same ranking, the same budget, and the same accept and reject log. The built-in fold-brief source is registered through that identical interface.
+
+```js
+registerPiFold(pi, {
+  setSuggestionSourceRegistrar: (register) => {
+    const memory = register({
+      id: "my-memory",
+      candidates: ({ state, snapshot, toolName }) => [
+        {
+          id: "note-42",
+          text: "Durable note the current task may want back.",
+          route: "recall {\"address\":\"note-42\"}",
+        },
+      ],
+    });
+    // memory.accepted("note-42") when the agent acts on it; memory.unregister() to withdraw.
+  },
+});
+```
+
+A candidate needs an id, the text that is scored and shown, and a route string naming the action that retrieves it. Optional `position` (a transcript ordinal, where higher is more recent) and `depth` feed the recency and depth components. A source that throws, or an item that is malformed, costs its own items and nothing else: the carrier, the projection, and the ladder are never at risk.
+
 ## Relation to prior work
 
 pi-fold combines two recent lines of work in one mechanism. Lossless hierarchical compaction, exemplified by LCM ([arXiv:2605.04050](https://arxiv.org/abs/2605.04050)) with an interactive walkthrough at [losslesscontext.ai](https://www.losslesscontext.ai/), builds a summary DAG over older messages with lossless pointers to every original, but the system alone decides when to compact. Self-GC ([arXiv:2607.00692](https://arxiv.org/abs/2607.00692)) treats context as indexed, recoverable objects with fold, mask, and prune actions, proposed by a side-channel planner under harness enforcement. In pi-fold the session agent itself holds the verbs, in-band: it can fold, expand, refold, protect, and consolidate on its own judgment, and the autonomous ladder is the fallback; a session that never touches the tool degrades gracefully into lossless hierarchical compaction.
@@ -64,6 +98,8 @@ The package entry calls `registerPiFold(pi)` with the defaults below. Hosts that
 | `summarizeContextSpan` | `undefined` | Optional async brief generator. Results must include a useful bounded brief, provider/model/effort attribution, and `toolCalls: 0`; failure uses the deterministic brief. |
 | `guidance` | `"pressure"` | Advisory wording profile: `"pressure"`, `"curation"` for task-relevance self-curation plus an early orientation advisory, or `"minimal"` for the urgent advisory alone. Rungs, thresholds, and budgets are the same in every profile. |
 | `setProjectionProvider` | `undefined` | Optional host callback that receives the [projection-candidate provider](#projection-candidate-records). Normal Pi context events do not require it. |
+| `surfacing` | `true` | Score collapsed folds against the recent task context and offer the best few back through the ephemeral tail channel. Set `false` to register no suggestion sources and emit nothing. |
+| `setSuggestionSourceRegistrar` | `undefined` | Optional host callback that receives the [suggestion source](#suggestion-sources) registration function. |
 | `toolActions` | all seven actions | Replacement allowlist drawn from `status`, `peek`, `fold`, `expand`, `refold`, `protect`, and `unprotect`. |
 | `blockingTools` | `["Agent"]` | Replacement list of tool names that trigger one opportunistic stale-tool fold before the call. Use `[]` to disable it. |
 | `readOnlyTools` | `new Set(["read", "grep", "find", "ls"])` | Replacement set of tool names whose completed batches may fold automatically. Defaults to Pi's built-in read-only tools. Pass a `ReadonlySet<string>`. |

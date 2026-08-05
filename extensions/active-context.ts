@@ -11,6 +11,7 @@ import {
   liveAdvisoryText,
   milestoneText,
   normalizeGuidanceProfile,
+  surfacingText,
   updateAdvisoryMilestone,
 } from "./lib/advisory.ts";
 import {
@@ -88,6 +89,7 @@ import {
   DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_SURFACING_ENABLED,
   entryTypeNamespace,
   READ_ONLY_TOOLS_DEFAULT,
   USER_RESCUE_MAX_SOURCE_CHARS,
@@ -102,6 +104,8 @@ import type {
   FoldRecordEntry,
   GuidanceProfile,
   PreparedFold,
+  SuggestionSource,
+  SurfacingSuggestion,
 } from "./lib/policy.ts";
 import {
   automaticToolBrief,
@@ -111,6 +115,12 @@ import {
   selectAutomaticToolBatch,
   selectAutomaticToolForRung,
 } from "./lib/selection.ts";
+import {
+  acceptSurfacingSuggestion,
+  FOLD_BRIEF_SUGGESTION_SOURCE,
+  surfacingOrdinal,
+  updateSurfacing,
+} from "./lib/surfacing.ts";
 import { buildActiveContextCommands, buildActiveContextTool } from "./lib/tool-surface.ts";
 import { mapActiveContext } from "./lib/transcript.ts";
 
@@ -122,11 +132,22 @@ export * from "./lib/measurement.ts";
 export * from "./lib/persistence.ts";
 export * from "./lib/policy.ts";
 export * from "./lib/selection.ts";
+export * from "./lib/surfacing.ts";
 export * from "./lib/transcript.ts";
+
+/** Handle a suggestion source keeps: withdraw itself, and report that its item was acted on. */
+export interface SuggestionSourceHandle {
+  unregister: () => void;
+  accepted: (id: string) => void;
+}
+
+export type SuggestionSourceRegistrar = (source: SuggestionSource) => SuggestionSourceHandle;
 
 export function registerActiveContext(pi: any, options: {
   summarizeContextSpan?: (request: Record<string, unknown>, ctx: unknown) => Promise<Record<string, unknown>>;
   setProjectionProvider?: (provider: (ctx: any) => Array<Record<string, unknown>>) => void;
+  setSuggestionSourceRegistrar?: (register: SuggestionSourceRegistrar) => void;
+  surfacing?: boolean;
   toolActions?: readonly ActiveContextToolAction[];
   toolName?: string;
   toolLabel?: string;
@@ -137,7 +158,10 @@ export function registerActiveContext(pi: any, options: {
   readOnlyTools?: ReadonlySet<string>;
   blockingTools?: readonly string[];
   guidance?: GuidanceProfile;
-}): { projectionCandidates: (ctx: any) => Array<Record<string, unknown>> } {
+}): {
+  projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
+  registerSuggestionSource: SuggestionSourceRegistrar;
+} {
   const toolName = options.toolName ?? DEFAULT_ACTIVE_CONTEXT_TOOL_NAME;
   const toolLabel = options.toolLabel ?? DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL;
   const brandNoun = options.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN;
@@ -145,6 +169,10 @@ export function registerActiveContext(pi: any, options: {
   const commandPrefix = options.commandPrefix ?? "";
   const readOnlyTools = options.readOnlyTools ?? READ_ONLY_TOOLS_DEFAULT;
   const guidance = normalizeGuidanceProfile(options.guidance);
+  if (options.surfacing !== undefined && typeof options.surfacing !== "boolean") {
+    throw new Error("surfacing must be a boolean");
+  }
+  const surfacingEnabled = options.surfacing ?? DEFAULT_SURFACING_ENABLED;
   if (!toolName || !toolLabel || !brandNoun || !entryTypePrefix || typeof commandPrefix !== "string" ||
       (commandPrefix && !/^[a-z0-9-]+$/.test(commandPrefix)) ||
       [...readOnlyTools].some((name) => typeof name !== "string" || !name)) {
@@ -172,6 +200,7 @@ export function registerActiveContext(pi: any, options: {
   const foldRecordEntryType = `${entryTypePrefix}-fold-record`;
   const milestoneProjectionType = `${entryTypePrefix}-milestone`;
   const advisoryProjectionType = `${entryTypePrefix}-advisory`;
+  const surfacingProjectionType = `${entryTypePrefix}-surfacing`;
   const entryNamespace = entryTypeNamespace(entryTypePrefix);
   const providerMeasurementEntryType = `${entryNamespace}-provider-context-measurement`;
   const nativeReceiptEntryType = `${entryNamespace}-native-compaction-receipt`;
@@ -251,6 +280,14 @@ export function registerActiveContext(pi: any, options: {
     hardFenceNoticeKey: null as string | null,
     hardFenceReleaseSessionId: null as string | null,
     hardFenceReleasedProjectionKeys: new Set<string>(),
+  };
+
+  // Owns the suggestion sources feeding the ephemeral surfacing carrier plus the slate
+  // rendered on the current context event. Nothing here is durable: the carrier is
+  // rebuilt from state on every projection, and only the log lives in session state.
+  const surfacing = {
+    sources: [] as SuggestionSource[],
+    suggestions: [] as SurfacingSuggestion[],
   };
 
   // Owns native-compaction decisions and completion retry state; nativeReceiptQueue serializes it.
@@ -1024,14 +1061,40 @@ export function registerActiveContext(pi: any, options: {
       if (ownsSlot && sessionIdentityStillValid(ctx, snapshot.sessionId, capturedGeneration)) updateStatus(ctx);
     });
   };
+  // Appended at the very TAIL, after the stable prefix, so a suggestion never
+  // invalidates a cached prefix and never becomes durable transcript.
+  const appendSurfacing = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
+    const content = surfacingText({ suggestions: surfacing.suggestions, brandNoun });
+    if (!content) return projected;
+    projected.push({
+      role: "custom",
+      customType: surfacingProjectionType,
+      content,
+      display: false,
+      details: {
+        source: activeContextSource(entryTypePrefix),
+        ephemeral: true,
+        suggestions: surfacing.suggestions.map((suggestion) => ({
+          source: suggestion.source,
+          id: suggestion.id,
+          score: suggestion.score,
+        })),
+      },
+      timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
+        ? ownValue(snapshot.messages.at(-1), "timestamp")
+        : 0,
+    });
+    return projected;
+  };
   const projectWithAdvisory = (snapshot: ActiveContextSnapshot): unknown[] => {
     const projected = projectActiveContext(snapshot, persistence.state!).filter((message) => {
       const customType = ownValue(message, "customType");
-      return customType !== milestoneProjectionType && customType !== advisoryProjectionType;
+      return customType !== milestoneProjectionType && customType !== advisoryProjectionType &&
+        customType !== surfacingProjectionType;
     });
     const armed = advisoryState(persistence.state!).armed;
     if (!armed || armed.milestone !== advisory.armedMilestone || measurements.latestRatio === null ||
-        measurements.latestRatio < 0.85 * armed.threshold) return projected;
+        measurements.latestRatio < 0.85 * armed.threshold) return appendSurfacing(projected, snapshot);
     const status = activeContextStatus(snapshot, persistence.state!, 0, 1, snapshot.policy.maxFoldSourceRefs);
     const eligible = ownValue(status, "eligibleChapter");
     const startId = ownValue(eligible, "startId");
@@ -1070,7 +1133,9 @@ export function registerActiveContext(pi: any, options: {
         ? ownValue(snapshot.messages.at(-1), "timestamp")
         : 0,
     });
-    return projected;
+    // A suggestion never shares an advisory with urgent fence text: at the fence the
+    // only useful next action is the fold that keeps the request transmissible.
+    return armed.milestone === "urgent" ? projected : appendSurfacing(projected, snapshot);
   };
   const commitDeterministicCandidate = async (
     snapshot: ActiveContextSnapshot,
@@ -1293,6 +1358,67 @@ export function registerActiveContext(pi: any, options: {
   };
   options.setProjectionProvider?.(projectionCandidates);
 
+  /**
+   * The suggestion-source hook. The built-in fold-brief source registers through this
+   * same call, so an external memory system's items reach the identical carrier,
+   * budget, ranking, and accept/reject log; pi-fold owns the channel, not the content.
+   */
+  const registerSuggestionSource: SuggestionSourceRegistrar = (source: SuggestionSource) => {
+    if (!source || typeof source !== "object" || typeof source.id !== "string" || !source.id ||
+        typeof source.candidates !== "function") {
+      throw new Error("A suggestion source needs a nonempty id and a candidates function");
+    }
+    if (surfacing.sources.some((registered) => registered.id === source.id)) {
+      throw new Error(`Suggestion source '${source.id}' is already registered`);
+    }
+    surfacing.sources.push(source);
+    return {
+      unregister: () => {
+        surfacing.sources = surfacing.sources.filter((registered) => registered !== source);
+      },
+      accepted: (id: string) => {
+        if (!persistence.state || typeof id !== "string" || !id) return;
+        // In-memory only: the next persisted state carries it. Reporting an outcome
+        // must never write a durable entry of its own.
+        persistence.state = acceptSurfacingSuggestion(
+          persistence.state,
+          id,
+          lifecycle.latestSnapshot ? surfacingOrdinal(lifecycle.latestSnapshot) : 0,
+        );
+      },
+    };
+  };
+  if (surfacingEnabled) registerSuggestionSource(FOLD_BRIEF_SUGGESTION_SOURCE);
+  options.setSuggestionSourceRegistrar?.(registerSuggestionSource);
+
+  /**
+   * Selects this context event's slate and logs what will be shown. Selection is
+   * deterministic and model-free, and a selector fault costs the session nothing but
+   * its suggestions: the projection itself is never at risk.
+   *
+   * Returns whether the log now differs from the DURABLE one rather than merely from
+   * the pre-selection value: an outcome marked by an ephemeral peek carries no
+   * persistence of its own and would otherwise never reach the session file.
+   */
+  const refreshSurfacing = (snapshot: ActiveContextSnapshot): boolean => {
+    surfacing.suggestions = [];
+    if (!surfacingEnabled || !surfacing.sources.length || !persistence.state) return false;
+    try {
+      const update = updateSurfacing({
+        state: persistence.state,
+        snapshot,
+        sources: surfacing.sources,
+        toolName,
+      });
+      surfacing.suggestions = update.suggestions;
+      persistence.state = update.state;
+    } catch {
+      surfacing.suggestions = [];
+    }
+    return stableStringify(persistence.state.surfacing ?? null) !==
+      stableStringify(persistence.persisted?.surfacing ?? null);
+  };
+
   // A same-session start/tree reload is a projection-generation mutation.
   // Queue it behind every context authority → preparation → commit →
   // projection transaction, then serialize the actual load with the action
@@ -1492,8 +1618,9 @@ export function registerActiveContext(pi: any, options: {
       } else {
         measurements.latestRatio = contextUsageRatio(measurements.lastProviderMeasurement);
       }
-      if ((advisoryChanged || measurementStateChanged) && persistence.state && persistence.persisted &&
-          !sameStateProjection(persistence.state, persistence.persisted)) {
+      const surfacingChanged = refreshSurfacing(snapshot);
+      if ((advisoryChanged || measurementStateChanged || surfacingChanged) && persistence.state &&
+          persistence.persisted && !sameStateProjection(persistence.state, persistence.persisted)) {
         mutationAttempted = true;
         await persistThroughActionQueue(ctx);
         persistedSucceeded = true;
@@ -1758,6 +1885,16 @@ export function registerActiveContext(pi: any, options: {
           ])),
           armedMilestone: advisory.armedMilestone,
           advisory: advisoryState(persistence.state),
+          surfacing: {
+            enabled: surfacingEnabled,
+            sources: surfacing.sources.map((source) => source.id),
+            shown: surfacing.suggestions.map((suggestion) => ({
+              source: suggestion.source,
+              id: suggestion.id,
+              score: suggestion.score,
+            })),
+            log: clone(persistence.state.surfacing ?? []),
+          },
           historicalGuidanceEntries: advisory.historicalGuidanceEntries,
           warningRatio: snapshot.policy.warningRatio,
           toolFoldRatio: snapshot.policy.toolFoldRatio,
@@ -1812,21 +1949,30 @@ export function registerActiveContext(pi: any, options: {
         ...(detail === "tree" ? { tree: foldTreeDetail(snapshot, persistence.state) } : {}),
       });
     }
+    // Peeking or expanding a suggested fold is the accept signal. Peek stays
+    // ephemeral: the mark rides the next persisted state, never an entry of its own.
+    const noteSurfacingAccept = (id: string): void => {
+      if (!surfacingEnabled || !persistence.state) return;
+      persistence.state = acceptSurfacingSuggestion(persistence.state, id, surfacingOrdinal(snapshot));
+    };
     if (action === "peek") {
       const id = String(params.id ?? "").trim();
       if (!id) throw new Error("peek requires id");
-      return toolPayload(peekFoldSource({
+      const payload = toolPayload(peekFoldSource({
         foldId: id,
         state: persistence.state,
         entries: ctx.sessionManager.getEntries?.() ?? ctx.sessionManager.getBranch(),
         sessionId: ctx.sessionManager.getSessionId(),
         maximumBytes: snapshot.policy.maxChapterChars,
       }));
+      noteSurfacingAccept(id);
+      return payload;
     }
     if (action === "expand" || action === "refold") {
       const id = String(params.id ?? "").trim();
       if (!id) throw new Error(`${action} requires id`);
       requireActiveFold(snapshot, persistence.state, id);
+      if (action === "expand") noteSurfacingAccept(id);
       let next = setFoldProjectionState(persistence.state, id, action === "expand" ? "expanded" : "folded");
       if (action === "expand") next = withExpandLease(next, id);
       else {
@@ -2003,8 +2149,9 @@ export function registerActiveContext(pi: any, options: {
     persistence.persisted = null;
     lifecycle.latestSnapshot = null;
     advisory.armedMilestone = null;
+    surfacing.suggestions = [];
     try { ctx.ui?.setStatus?.(entryTypePrefix, undefined); } catch { /* Shutdown cannot be blocked by UI. */ }
   });
 
-  return { projectionCandidates };
+  return { projectionCandidates, registerSuggestionSource };
 }

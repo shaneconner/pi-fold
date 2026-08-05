@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -189,6 +189,8 @@ function makeRuntime(built, {
   evidenceIngestion,
   summarizer,
   guidance,
+  surfacing,
+  setSuggestionSourceRegistrar,
   loadHostModule,
   packageRegistration = false,
   sessionFile = join(tmpdir(), "pi-fold-test-session.jsonl"),
@@ -275,9 +277,12 @@ function makeRuntime(built, {
     ...(evidenceIngestion === undefined ? {} : { evidenceIngestion }),
     ...(summarizer === undefined ? {} : { summarizer }),
     ...(guidance === undefined ? {} : { guidance }),
+    ...(surfacing === undefined ? {} : { surfacing }),
+    ...(setSuggestionSourceRegistrar ? { setSuggestionSourceRegistrar } : {}),
   };
-  if (packageRegistration) piFold.registerPiFold(pi, registrationOptions, loadHostModule);
-  else context.registerActiveContext(pi, registrationOptions);
+  runtime.registration = packageRegistration
+    ? piFold.registerPiFold(pi, registrationOptions, loadHostModule)
+    : context.registerActiveContext(pi, registrationOptions);
   return runtime;
 }
 
@@ -2146,6 +2151,417 @@ async function gatePeekAndFoldIndex() {
   };
 }
 
+const SURFACING_TASK_TEXT =
+  "Which chapter remains independently pageable and recoverable in the complete index?";
+const SURFACING_SOURCE = "fold-brief";
+
+function taskSnapshotFor(snapshot, text = SURFACING_TASK_TEXT) {
+  return {
+    ...snapshot,
+    messages: [...snapshot.messages, { role: "user", content: [{ type: "text", text }] }],
+  };
+}
+
+function surfacingCarrier(projection, entryTypePrefix = "pi-fold-active-context") {
+  return projection.messages.filter((message) => message?.customType === `${entryTypePrefix}-surfacing`);
+}
+
+async function surfacingFixture({ consolidate = false, taskText = SURFACING_TASK_TEXT, ...options } = {}) {
+  const forest = await chapterForest(2);
+  let state = forest.state;
+  if (consolidate) {
+    const chapterIds = context.orderedRoots(state, forest.snapshot).map((root) => root.fold.id);
+    state = (await commitCandidate(
+      state,
+      forest.snapshot,
+      context.manualFoldCandidate(forest.snapshot, state, chapterIds),
+      { brief: "Grouped two complete chapters that remain independently pageable and recoverable.", now: 9 },
+    )).state;
+  }
+  const runtime = makeRuntime(forest, {
+    ...options,
+    initialEntries: [
+      ...forest.entries,
+      stateEntry(forest.sessionId, state, "surfacing-state", forest.entries.at(-1).id),
+    ],
+  });
+  if (taskText) {
+    runtime.appendMessage(
+      { role: "user", content: [{ type: "text", text: taskText }], timestamp: 9_000 },
+      "surfacing-task",
+    );
+  }
+  return { forest, state, runtime };
+}
+
+async function gateSurfacingSelector() {
+  const source = await readFile(join(projectRoot, "extensions", "lib", "surfacing.ts"), "utf8");
+  assert.equal(/Date\.now|Math\.random|new Date/.test(source), false,
+    "The selector must be seedless: no wall clock and no randomness");
+
+  const forest = await chapterForest(2);
+  const taskTokens = context.taskTokenSet(taskSnapshotFor({ messages: [] }));
+  const candidates = context.foldBriefCandidates({
+    state: forest.state,
+    snapshot: forest.snapshot,
+    toolName: "active_context",
+  });
+  assert.equal(candidates.length, 2);
+  assert.deepEqual(candidates.map((candidate) => candidate.source), [SURFACING_SOURCE, SURFACING_SOURCE]);
+  assert(candidates.every((candidate) => candidate.route.includes('"action":"expand"') &&
+    candidate.alternateRoute.includes('"action":"peek"')));
+  const positionCeiling = forest.snapshot.mapped.length - 1;
+  const ranked = context.rankSurfacingCandidates({ candidates, taskTokens, positionCeiling });
+  const repeated = context.rankSurfacingCandidates({ candidates, taskTokens, positionCeiling });
+  const reversed = context.rankSurfacingCandidates({
+    candidates: [...candidates].reverse(), taskTokens, positionCeiling,
+  });
+  assert.equal(json.stableStringify(ranked), json.stableStringify(repeated));
+  assert.equal(json.stableStringify(ranked), json.stableStringify(reversed));
+  assert.equal(ranked.length, 2);
+  assert(ranked[0].score > ranked[1].score);
+  // Equal lexical overlap: the later span wins on the recency component alone.
+  assert.equal(ranked[0].id, candidates[1].id);
+
+  const depthRanked = context.rankSurfacingCandidates({
+    candidates: [
+      { source: "probe", id: "shallow", text: "chapter remains independently pageable", route: "r", position: 4, depth: 0 },
+      { source: "probe", id: "deep", text: "chapter remains independently pageable", route: "r", position: 4, depth: 4 },
+    ],
+    taskTokens,
+    positionCeiling: 8,
+  });
+  assert.deepEqual(depthRanked.map((suggestion) => suggestion.id), ["deep", "shallow"]);
+  assert(depthRanked[0].score - depthRanked[1].score > 0);
+
+  const consolidated = await surfacingFixture({ consolidate: true, taskText: null });
+  const nested = context.foldBriefCandidates({
+    state: consolidated.state,
+    snapshot: consolidated.forest.snapshot,
+    toolName: "active_context",
+  });
+  assert.deepEqual(nested.map((candidate) => candidate.depth), [0, 1, 1]);
+  return {
+    seedless: true,
+    candidates: candidates.length,
+    deterministic: true,
+    arrivalOrderIndependent: true,
+    recencyOrder: [ranked[0].score, ranked[1].score],
+    depthOrder: depthRanked.map((suggestion) => suggestion.id),
+    nestedDepths: nested.map((candidate) => candidate.depth),
+  };
+}
+
+async function gateSurfacingThresholdAndBudget() {
+  // Structural components alone can never clear the bar: a suggestion always needs
+  // lexical evidence that the span matches the task in hand.
+  assert(context.SURFACING_RECENCY_WEIGHT + context.SURFACING_DEPTH_WEIGHT < context.SURFACING_MIN_SCORE);
+
+  const forest = await chapterForest(2);
+  const candidates = context.foldBriefCandidates({
+    state: forest.state,
+    snapshot: forest.snapshot,
+    toolName: "active_context",
+  });
+  const unrelated = context.rankSurfacingCandidates({
+    candidates,
+    taskTokens: context.taskTokenSet(forest.snapshot),
+    positionCeiling: forest.snapshot.mapped.length - 1,
+  });
+  assert.deepEqual(unrelated, []);
+
+  const taskTokens = context.taskTokenSet(taskSnapshotFor({ messages: [] }));
+  const many = Array.from({ length: 6 }, (_value, index) => ({
+    source: "probe",
+    id: `candidate-${index}`,
+    text: "chapter remains independently pageable and recoverable",
+    route: `route-${index}`,
+    position: index,
+    depth: 0,
+  }));
+  const topK = context.rankSurfacingCandidates({ candidates: many, taskTokens, positionCeiling: 5 });
+  assert.equal(topK.length, context.SURFACING_TOP_K);
+  assert(context.SURFACING_TOP_K >= 2 && context.SURFACING_TOP_K <= 3);
+  const budgeted = context.rankSurfacingCandidates({
+    candidates: many, taskTokens, positionCeiling: 5, charBudget: 140,
+  });
+  assert.equal(budgeted.length, 1);
+  const raised = context.rankSurfacingCandidates({
+    candidates: many, taskTokens, positionCeiling: 5, minimumScore: 0.99,
+  });
+  assert.deepEqual(raised, []);
+  const carrier = context.surfacingText({ suggestions: topK, brandNoun: "pi-fold" });
+  const silent = context.surfacingText({ suggestions: [], brandNoun: "pi-fold" });
+  assert.equal(silent, null);
+  assert(carrier.includes(topK[0].id) && carrier.includes("expand"));
+  return {
+    structuralWeightsBelowThreshold: true,
+    unrelatedSuggestions: 0,
+    topK: topK.length,
+    budgetedSuggestions: budgeted.length,
+    raisedThresholdSuggestions: 0,
+    silentBelowThreshold: silent === null,
+  };
+}
+
+async function gateSurfacingHysteresis() {
+  const forest = await chapterForest(2);
+  const snapshot = taskSnapshotFor(forest.snapshot);
+  const sources = [context.FOLD_BRIEF_SUGGESTION_SOURCE];
+  const first = context.updateSurfacing({ state: forest.state, snapshot, sources, toolName: "active_context" });
+  assert.equal(first.suggestions.length, 2);
+  assert.equal(first.state.surfacing.length, 2);
+  assert(first.state.surfacing.every((record) => record.outcome === "shown" &&
+    record.source === SURFACING_SOURCE && Number.isSafeInteger(record.ordinal)));
+
+  // Re-projecting the same ordinal is one showing: same slate, no duplicate record.
+  const second = context.updateSurfacing({ state: first.state, snapshot, sources, toolName: "active_context" });
+  assert.equal(json.stableStringify(second.suggestions), json.stableStringify(first.suggestions));
+  assert.equal(second.state, first.state);
+  assert.equal(second.state.surfacing.length, 2);
+
+  const ordinal = first.state.surfacing[0].ordinal;
+  const suppressed = context.cooledDownIds(first.state.surfacing, ordinal + 1);
+  assert.equal(suppressed.size, 2);
+  const expired = context.cooledDownIds(
+    first.state.surfacing,
+    ordinal + context.SURFACING_COOLDOWN_ORDINALS,
+  );
+  assert.equal(expired.size, 0);
+  const accepted = context.acceptSurfacingSuggestion(first.state, first.suggestions[0].id, ordinal);
+  assert.equal(accepted.surfacing.filter((record) => record.outcome === "accept").length, 1);
+  assert.equal(context.cooledDownIds(accepted.surfacing, ordinal + 1).size, 1);
+
+  const expandedState = context.setFoldProjectionState(forest.state, first.suggestions[0].id, "expanded");
+  const withoutExpanded = context.foldBriefCandidates({
+    state: expandedState, snapshot: forest.snapshot, toolName: "active_context",
+  });
+  assert.equal(withoutExpanded.some((candidate) => candidate.id === first.suggestions[0].id), false);
+
+  const protectedState = context.protectEvidence(
+    forest.snapshot,
+    forest.state,
+    [first.suggestions[0].id],
+    true,
+  );
+  const withoutProtected = context.foldBriefCandidates({
+    state: protectedState, snapshot: forest.snapshot, toolName: "active_context",
+  });
+  assert.equal(withoutProtected.some((candidate) => candidate.id === first.suggestions[0].id), false);
+  return {
+    shown: first.suggestions.length,
+    sameOrdinalIdempotent: true,
+    cooldownSuppressed: suppressed.size,
+    cooldownExpired: expired.size,
+    acceptedExemptFromCooldown: true,
+    expandedNeverSuggested: true,
+    protectedNeverSuggested: true,
+  };
+}
+
+async function gateSurfacingCarrier() {
+  const { forest, state, runtime } = await surfacingFixture();
+  const projection = await startRuntime(runtime);
+  const carrier = surfacingCarrier(projection);
+  assert.equal(carrier.length, 1);
+  assert.equal(projection.messages.at(-1), carrier[0], "The carrier rides the tail, never the stable prefix");
+  assert.equal(carrier[0].role, "custom");
+  assert.equal(carrier[0].display, false);
+  assert.equal(carrier[0].details.ephemeral, true);
+  assert(carrier[0].content.includes('"action":"peek"'));
+  assert(carrier[0].content.includes('"action":"expand"'));
+  const shownIds = carrier[0].details.suggestions.map((suggestion) => suggestion.id);
+  assert(shownIds.length >= 1);
+  assert(shownIds.every((id) => carrier[0].content.includes(id)));
+
+  // The carrier is never durable and never touches the fold lattice.
+  assert.equal(runtime.branch.some((entry) => entry.customType?.endsWith("-surfacing")), false);
+  assert.equal(runtime.appended.some((entry) => entry.customType?.endsWith("-surfacing")), false);
+  const after = materialized(runtime);
+  assert.deepEqual(after.folds.map((fold) => fold.id), state.folds.map((fold) => fold.id));
+  assert.deepEqual(after.expanded, state.expanded);
+  const prefix = projection.messages.slice(0, -1);
+  assert.equal(prefix.some((message) => typeof message?.customType === "string" &&
+    ["-milestone", "-advisory", "-surfacing"].some((suffix) => message.customType.endsWith(suffix))), false);
+
+  // Re-projecting the same ordinal neither duplicates the carrier nor rewrites state.
+  const appendedBefore = runtime.appended.length;
+  const again = await project(runtime);
+  assert.equal(surfacingCarrier(again).length, 1);
+  assert.equal(json.stableStringify(surfacingCarrier(again)), json.stableStringify(carrier));
+  assert.equal(runtime.appended.length, appendedBefore);
+
+  // Urgent fence text never shares an advisory with suggestions.
+  const fenced = await surfacingFixture({ consolidate: true });
+  await startRuntime(fenced.runtime);
+  await measure(fenced.runtime, 88_000, 100_000);
+  const fencedProjection = await project(fenced.runtime);
+  const milestone = fencedProjection.messages.filter((message) =>
+    message?.customType === "pi-fold-active-context-milestone");
+  assert.equal(milestone.length, 1);
+  assert.equal(milestone[0].details.milestone, "urgent");
+  assert.equal(surfacingCarrier(fencedProjection).length, 0);
+
+  const disabled = await surfacingFixture({ surfacing: false });
+  const disabledProjection = await startRuntime(disabled.runtime);
+  assert.equal(surfacingCarrier(disabledProjection).length, 0);
+  assert.equal(materialized(disabled.runtime).surfacing, undefined);
+  const disabledStatus = await toolStatus(disabled.runtime);
+  assert.deepEqual(disabledStatus.details.automatic.surfacing, {
+    enabled: false, sources: [], shown: [], log: [],
+  });
+  return {
+    carrierMessages: carrier.length,
+    tailOnly: true,
+    ephemeral: carrier[0].details.ephemeral,
+    durableCarrierEntries: 0,
+    foldStateUnchanged: true,
+    reprojectionStable: true,
+    urgentExcludesSuggestions: true,
+    disabledCarrierMessages: 0,
+    sessionId: forest.sessionId === runtime.built.sessionId,
+  };
+}
+
+async function gateSuggestionSourceHook() {
+  const registered = [];
+  const { runtime } = await surfacingFixture({
+    setSuggestionSourceRegistrar: (register) => registered.push(register),
+  });
+  assert.equal(registered.length, 1, "The registrar reaches the host exactly once");
+  const register = registered[0];
+  assert.equal(typeof runtime.registration.registerSuggestionSource, "function");
+
+  const seen = [];
+  const handle = register({
+    id: "external-memory",
+    candidates: (input) => {
+      seen.push(Object.keys(input).sort().join(","));
+      return [
+        {
+          id: "art_pageable_index",
+          text: "Durable note: the chapter index remains independently pageable and recoverable.",
+          route: 'recall {"address":"art_pageable_index"}',
+        },
+        { id: "", text: "malformed", route: "route" },
+        { text: "no id", route: "route" },
+        "not-an-object",
+      ];
+    },
+  });
+  assert.throws(() => register({ id: "external-memory", candidates: () => [] }),
+    /already registered/);
+  assert.throws(() => register({ id: "", candidates: () => [] }), /nonempty id/);
+  register({ id: "faulty", candidates: () => { throw new Error("source is broken"); } });
+
+  const projection = await startRuntime(runtime);
+  const carrier = surfacingCarrier(projection);
+  assert.equal(carrier.length, 1);
+  assert.deepEqual(seen, ["snapshot,state,toolName"]);
+  const shown = carrier[0].details.suggestions;
+  assert(shown.some((suggestion) => suggestion.source === "external-memory" &&
+    suggestion.id === "art_pageable_index"));
+  assert(shown.some((suggestion) => suggestion.source === SURFACING_SOURCE));
+  assert(carrier[0].content.includes('recall {"address":"art_pageable_index"}'));
+  // A malformed candidate and a throwing source cost their own items, nothing else.
+  assert.equal(shown.filter((suggestion) => suggestion.source === "external-memory").length, 1);
+
+  const log = materialized(runtime).surfacing;
+  assert(log.some((record) => record.source === "external-memory" && record.outcome === "shown"));
+  handle.accepted("art_pageable_index");
+  await project(runtime);
+  assert.equal(materialized(runtime).surfacing
+    .find((record) => record.id === "art_pageable_index").outcome, "accept");
+
+  handle.unregister();
+  const withdrawn = await project(runtime);
+  assert.equal(surfacingCarrier(withdrawn)[0].details.suggestions
+    .some((suggestion) => suggestion.source === "external-memory"), false);
+  return {
+    registrarDelivered: registered.length,
+    sourceInput: seen[0],
+    externalSuggestions: 1,
+    malformedCandidatesDropped: 3,
+    faultySourceIsolated: true,
+    externalAccepted: true,
+    unregistered: true,
+  };
+}
+
+async function gateSurfacingLogging() {
+  const { runtime } = await surfacingFixture();
+  await startRuntime(runtime);
+  const shownLog = materialized(runtime).surfacing;
+  assert(shownLog.length >= 1);
+  assert(shownLog.every((record) => record.outcome === "shown" &&
+    typeof record.source === "string" && typeof record.id === "string" &&
+    record.score >= 0 && record.score <= 1 && Number.isSafeInteger(record.ordinal)));
+  const target = shownLog[0].id;
+
+  // Peek is the accept signal and stays ephemeral: no durable entry of its own.
+  const branchBefore = runtime.branch.length;
+  await runtime.tools.get("active_context").execute(
+    "peek-suggested", { action: "peek", id: target }, new AbortController().signal, undefined, runtime.ctx,
+  );
+  assert.equal(runtime.branch.length, branchBefore);
+  const peeked = (await toolStatus(runtime)).details.automatic.surfacing.log;
+  assert.equal(peeked.find((record) => record.id === target).outcome, "accept");
+  await project(runtime);
+  assert.equal(materialized(runtime).surfacing.find((record) => record.id === target).outcome, "accept");
+
+  // Expanding a suggested fold is the other accept signal, and it persists at once.
+  const expandTarget = shownLog.find((record) => record.id !== target)?.id ?? target;
+  await runtime.tools.get("active_context").execute(
+    "expand-suggested", { action: "expand", id: expandTarget }, new AbortController().signal,
+    undefined, runtime.ctx,
+  );
+  assert.equal(materialized(runtime).surfacing.find((record) => record.id === expandTarget).outcome, "accept");
+
+  // A shown suggestion nobody acts on inside the window is a reject.
+  const stale = context.resolvedSurfacingLog(
+    [{ source: SURFACING_SOURCE, id: "fold_ignored", score: 0.5, ordinal: 4, outcome: "shown" }],
+    4 + context.SURFACING_OUTCOME_WINDOW_ORDINALS + 1,
+  );
+  assert.deepEqual(stale.map((record) => record.outcome), ["reject"]);
+  const kept = context.resolvedSurfacingLog(
+    [{ source: SURFACING_SOURCE, id: "fold_ignored", score: 0.5, ordinal: 4, outcome: "shown" }],
+    4 + context.SURFACING_OUTCOME_WINDOW_ORDINALS,
+  );
+  assert.deepEqual(kept.map((record) => record.outcome), ["shown"]);
+
+  // The log survives the durable wire and is refused when malformed.
+  const roundTrip = materialized(runtime);
+  assert.deepEqual(
+    context.parseActiveContextState(roundTrip, runtime.built.sessionId).surfacing,
+    roundTrip.surfacing,
+  );
+  assert.throws(() => context.parseSurfacingLog([
+    { source: SURFACING_SOURCE, id: "fold_x", score: 2, ordinal: 1, outcome: "shown" },
+  ]), /Invalid active-context surfacing log/);
+  assert.throws(() => context.parseSurfacingLog([
+    { source: SURFACING_SOURCE, id: "fold_x", score: 0.5, ordinal: 1, outcome: "maybe" },
+  ]), /Invalid active-context surfacing log/);
+  const bounded = context.withSurfacingLog(
+    context.emptyActiveContextState("bounded-session"),
+    Array.from({ length: context.SURFACING_MAX_LOG_RECORDS + 5 }, (_value, index) => ({
+      source: SURFACING_SOURCE, id: `fold_${index}`, score: 0.5, ordinal: index, outcome: "shown",
+    })),
+  );
+  assert.equal(bounded.surfacing.length, context.SURFACING_MAX_LOG_RECORDS);
+  assert.equal(bounded.surfacing[0].id, "fold_5");
+  assert.equal(context.withSurfacingLog(bounded, []).surfacing, undefined);
+  return {
+    shownRecords: shownLog.length,
+    peekAccepted: true,
+    peekDurableEntries: 0,
+    expandAccepted: true,
+    rejectedAfterWindow: true,
+    wireRoundTrip: true,
+    malformedRefused: 2,
+    boundedLog: bounded.surfacing.length,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -2172,6 +2588,12 @@ const gates = [
   [23, "Summarizer option", gateSummarizerOption],
   [24, "Guidance profiles", gateGuidanceProfiles],
   [25, "Peek and fold index", gatePeekAndFoldIndex],
+  [26, "Surfacing selector", gateSurfacingSelector],
+  [27, "Surfacing threshold & budget", gateSurfacingThresholdAndBudget],
+  [28, "Surfacing hysteresis", gateSurfacingHysteresis],
+  [29, "Surfacing carrier ephemerality", gateSurfacingCarrier],
+  [30, "Suggestion-source hook", gateSuggestionSourceHook],
+  [31, "Surfacing accept/reject logging", gateSurfacingLogging],
 ];
 
 let failures = 0;
