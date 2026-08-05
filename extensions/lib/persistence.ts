@@ -83,6 +83,7 @@ export function validProvenance(value: unknown): value is BriefProvenance {
       (ownValue(value, "kind") === "supplied" || ownValue(value, "kind") === "deterministic")) return true;
   const hasDigest = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "launchContractDigest"));
+  // legacy provenance kind written by pre-release sessions; normalized to the model kind at presentation
   if (!exactRecord(value, ["kind", "provider", "model", "effort", ...(hasDigest ? ["launchContractDigest"] : [])]) ||
       (ownValue(value, "kind") !== "model" && ownValue(value, "kind") !== "luna") ||
       typeof ownValue(value, "provider") !== "string" || !ownValue(value, "provider") ||

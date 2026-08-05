@@ -86,7 +86,7 @@ export type BriefProvenance =
   | { kind: "supplied" }
   | { kind: "deterministic" }
   | {
-      kind: "model";
+      kind: "model" | "luna";
       provider: string;
       model: string;
       effort: string;
