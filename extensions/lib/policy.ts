@@ -63,8 +63,6 @@ export const ACTIVE_CONTEXT_POLICY = Object.freeze({
   prepareRatio: 0.90,
   warmRatio: 0.55,
   responseReserve: 16_384,
-  // Used only when neither provider measurements nor the host report a context window.
-  fallbackChapterFoldRatio: 255_616 / 272_000,
   consolidationRatio: 0.85,
   consolidationChildren: 5,
   maxConsolidationChildren: 8,

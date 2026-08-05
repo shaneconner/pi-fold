@@ -1570,11 +1570,14 @@ async function gateWireForwardBackwardNote() {
 }
 
 async function gateFollowupFencesAndAnchors() {
+  const fallbackHardFenceRatio = (
+    context.DEFAULT_CONTEXT_WINDOW - context.ACTIVE_CONTEXT_POLICY.responseReserve
+  ) / context.DEFAULT_CONTEXT_WINDOW;
   near(context.hardFenceRatio({ contextWindow: 16_000 }), 0.90, 1e-12, "16k fence");
   near(context.hardFenceRatio({ contextWindow: 17_000 }), 0.90, 1e-12, "17k fence");
   near(
     context.hardFenceRatio({ contextWindow: 0 }),
-    context.ACTIVE_CONTEXT_POLICY.fallbackChapterFoldRatio,
+    fallbackHardFenceRatio,
     1e-12,
     "fallback fence",
   );
@@ -1595,7 +1598,7 @@ async function gateFollowupFencesAndAnchors() {
   assert.equal(fallbackAutomatic.windowSource, "fallback");
   near(
     fallbackAutomatic.hardFenceRatio,
-    context.ACTIVE_CONTEXT_POLICY.fallbackChapterFoldRatio,
+    fallbackHardFenceRatio,
     1e-12,
     "fallback status fence",
   );

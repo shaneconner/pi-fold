@@ -97,10 +97,6 @@ export function hardFenceRatio(value?: unknown, ctx?: any): number {
     : typeof reported === "number" && Number.isFinite(reported) && reported > 0
       ? reported
       : DEFAULT_CONTEXT_WINDOW;
-  if ((!Number.isFinite(direct) || Number(direct) <= 0) &&
-      (!Number.isFinite(reported) || Number(reported) <= 0)) {
-    return ACTIVE_CONTEXT_POLICY.fallbackChapterFoldRatio;
-  }
   const reserve = Math.min(
     ACTIVE_CONTEXT_POLICY.responseReserve,
     Math.floor(contextWindow * 0.1),
