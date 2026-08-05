@@ -229,11 +229,7 @@ export interface FoldCandidate {
 }
 
 export const READ_ONLY_TOOLS_DEFAULT = new Set([
-  "read", "grep", "find", "ls", "inspect_repo",
-  "web_search", "source_check", "fetch_content", "get_search_content",
-  "wiki_read", "wiki_search", "journal_read", "recall", "memory_context",
-  "memory_status", "memory_outline", "wiki_lint", "surface_folds", "expand",
-  "memory_search_turns", "memory_ticker_dossier", "memory_theme_dossier",
+  "read", "grep", "find", "ls",
 ]);
 
 export type AdvisoryMilestone = "notice" | "tools" | "chapters" | "urgent";

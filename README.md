@@ -36,7 +36,7 @@ The package entry calls `registerPiFold(pi)` with the defaults below. Hosts that
 | `setProjectionProvider` | `undefined` | Optional host callback that receives the projection-candidate provider. Normal Pi context events do not require it. |
 | `toolActions` | all six actions | Replacement allowlist drawn from `status`, `fold`, `expand`, `refold`, `protect`, and `unprotect`. |
 | `blockingTools` | `["Agent"]` | Replacement list of tool names that trigger one opportunistic stale-tool fold before the call. Use `[]` to disable it. |
-| `readOnlyTools` | built-in `ReadonlySet` | Replacement set of tool names whose completed batches may fold automatically. Pass a `ReadonlySet<string>`. |
+| `readOnlyTools` | `new Set(["read", "grep", "find", "ls"])` | Replacement set of tool names whose completed batches may fold automatically. Defaults to Pi's built-in read-only tools. Pass a `ReadonlySet<string>`. |
 | `isMcpTool` | `() => false` | Synchronous predicate enabling evidence ingestion for oversized structured MCP results. Names shaped as `mcp__<server>__<tool>` project the actual server; other names use the neutral namespace derived from `entryTypePrefix`. |
 
 ## Development

@@ -470,6 +470,7 @@ async function collectRegistrationSurface(registration, mcpToolName) {
 
 async function gateRegistration() {
   const defaults = makeRuntime(makeFixture({ turns: 4, resultChars: 3_000 }));
+  assert.deepEqual([...context.READ_ONLY_TOOLS_DEFAULT], ["read", "grep", "find", "ls"]);
   assert.deepEqual([...defaults.tools.keys()], ["active_context"]);
   assert.deepEqual([...defaults.commands.keys()].sort(), ["context", "fold-context"]);
   await startRuntime(defaults);
@@ -498,6 +499,7 @@ async function gateRegistration() {
   }).tools, /distinct kebab-case/i);
   return {
     defaultTool: "active_context",
+    defaultReadOnlyTools: [...context.READ_ONLY_TOOLS_DEFAULT],
     defaultCommands: [...defaults.commands.keys()].sort(),
     commands: [...custom.commands.keys()].sort(),
     namedCommands: [...named.commands.keys()].sort(),
