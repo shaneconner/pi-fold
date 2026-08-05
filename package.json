@@ -1,0 +1,27 @@
+{
+  "name": "pi-fold",
+  "version": "0.1.0-dev.0",
+  "description": "Lossless, agent-governed context folding for the Pi coding agent — only the oldest context changes; the fresh window stays untouched.",
+  "type": "module",
+  "private": false,
+  "repository": "https://github.com/shaneconner/pi-fold",
+  "author": "Shane Conner",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node tests/verify.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.83.0 <1"
+  },
+  "devDependencies": {
+    "jiti": "^2.7.0"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  }
+}
