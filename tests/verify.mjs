@@ -3137,6 +3137,44 @@ async function gateEpochInlineRungs() {
   };
 }
 
+/**
+ * `withSurfacingLog` must rebuild the record in canonical key order. Assigning
+ * `.surfacing` onto a spread of a state that had no surfacing key lands it after
+ * pendingMarks/advisory/prepared, and the stable-stringify digest then drifts from
+ * the parsed replay of the same state.
+ */
+async function gateSurfacingKeyOrder() {
+  const built = makeFixture({ turns: 10, resultChars: 10_000, contextWindow: 100_000 });
+  const snapshot = epochSnapshot(built);
+  const empty = context.emptyActiveContextState(built.sessionId);
+  const marks = context.topUpMarks({ snapshot, state: empty, ordinal: 3, targetShare: 1 }).slice(0, 2);
+  const withMarks = context.withPendingMarks(empty, marks);
+  assert.equal(Object.hasOwn(withMarks, "surfacing"), false, "The fixture already carries a surfacing key");
+  const record = { source: "ladder", id: marks[0].id, score: 0.9, ordinal: 3, outcome: "shown" };
+  const logged = context.withSurfacingLog(withMarks, [record]);
+  assert.deepEqual(Object.keys(logged).filter((key) => key === "surfacing" || key === "pendingMarks"),
+    ["surfacing", "pendingMarks"], "withSurfacingLog appended surfacing after pendingMarks");
+  assert.deepEqual(
+    Object.keys(logged),
+    Object.keys(context.parseActiveContextState(logged, built.sessionId)),
+    "withSurfacingLog produced a non-canonical key order",
+  );
+  assert.equal(
+    context.semanticStateSha256(logged),
+    context.semanticStateSha256(context.parseActiveContextState(logged, built.sessionId)),
+    "A surfacing write drifted the replay digest",
+  );
+  assert.deepEqual(logged.pendingMarks, withMarks.pendingMarks);
+  const cleared = context.withSurfacingLog(logged, []);
+  assert.equal(cleared.surfacing, undefined);
+  assert.equal(context.semanticStateSha256(cleared), context.semanticStateSha256(withMarks));
+  return {
+    canonicalKeyOrder: Object.keys(logged).join(","),
+    digestStable: true,
+    clearedRoundTrip: true,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -3178,6 +3216,7 @@ const gates = [
   [38, "Scheduling wire round-trip", gateSchedulingWireRoundTrip],
   [39, "Epoch mark accumulation", gateMarkAccumulation],
   [40, "Epoch inline rung reachability", gateEpochInlineRungs],
+  [41, "Surfacing key-order digest stability", gateSurfacingKeyOrder],
 ];
 
 let failures = 0;

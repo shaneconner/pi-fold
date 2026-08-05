@@ -191,15 +191,29 @@ export function surfacingLog(state: Pick<ActiveContextState, "surfacing">): Surf
   return state.surfacing ? clone(state.surfacing) : [];
 }
 
+/**
+ * Property ORDER is load-bearing: the state digest is a stable stringify, so a
+ * `surfacing` key assigned onto a state that did not already carry one would land
+ * after `pendingMarks`/`advisory`/`prepared` and replay as digest drift. Rebuild the
+ * tail of the record in the same order `parseActiveContextState` produces.
+ */
 export function withSurfacingLog(
   state: ActiveContextState,
   log: readonly SurfacingRecord[],
 ): ActiveContextState {
   const bounded = log.slice(Math.max(0, log.length - SURFACING_MAX_LOG_RECORDS));
-  const next = { ...state };
-  if (bounded.length) next.surfacing = clone(bounded) as SurfacingRecord[];
-  else delete next.surfacing;
-  return next;
+  const head = { ...state };
+  delete head.surfacing;
+  delete head.pendingMarks;
+  delete head.advisory;
+  delete head.prepared;
+  return {
+    ...head,
+    ...(bounded.length ? { surfacing: clone(bounded) as SurfacingRecord[] } : {}),
+    ...(state.pendingMarks?.length ? { pendingMarks: clone(state.pendingMarks) } : {}),
+    ...(state.advisory ? { advisory: clone(state.advisory) } : {}),
+    ...(state.prepared ? { prepared: clone(state.prepared) } : {}),
+  };
 }
 
 /** A shown suggestion the agent never peeked or expanded inside the outcome window is a reject. */
