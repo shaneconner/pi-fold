@@ -107,6 +107,7 @@ import {
   selectAutomaticToolBatch,
   selectAutomaticToolForRung,
 } from "./lib/selection.ts";
+import { buildActiveContextCommands, buildActiveContextTool } from "./lib/tool-surface.ts";
 import { mapActiveContext } from "./lib/transcript.ts";
 
 export * from "./lib/advisory.ts";
@@ -1858,122 +1859,113 @@ export function registerActiveContext(pi: any, options: {
     }
     throw new Error(`Unknown ${toolName} action '${action}'`);
   };
-  const fullToolSurface = allowedToolActions.length === ACTIVE_CONTEXT_TOOL_ACTIONS.length;
-  pi.registerTool({
+  const toolHandler = async (
+    _toolCallId: string,
+    params: Record<string, unknown>,
+    signal: AbortSignal,
+    _onUpdate: unknown,
+    ctx: any,
+  ): Promise<unknown> => {
+    const operation = ladder.actionQueue.then(() => executeAction(params, signal, ctx));
+    ladder.actionQueue = operation.catch(() => undefined);
+    return operation;
+  };
+  const statusCommandHandler = async (_args: string, ctx: any): Promise<void> => {
+    if (!persistence.state) persistence.state = emptyActiveContextState(ctx.sessionManager.getSessionId());
+    try {
+      const snapshot = authoritativeSnapshotFor(ctx);
+      const status = activeContextStatus(snapshot, persistence.state, 0, 40);
+      safeNotify(
+        ctx,
+        `Active context: ${status.totalFolds} fold(s), roots ${(status.roots as string[]).join(", ") || "none"}. ` +
+          `Use ${toolName} status for exact recursive actions.`,
+        "info",
+      );
+    } catch (error) {
+      safeNotify(ctx, `Active-context status unavailable; native Pi context is unchanged: ${String(error)}`, "warning");
+    }
+  };
+  const foldCommandHandler = async (args: string, ctx: any): Promise<void> => {
+    const operation = ladder.actionQueue.then(async () => {
+      if (!persistence.state) persistence.state = emptyActiveContextState(ctx.sessionManager.getSessionId());
+      const snapshot = lifecycle.latestSnapshot
+        ? authoritativeSnapshotFor(ctx)
+        : snapshotForEvent(ctx, ctx.sessionManager.buildSessionContext().messages);
+      if (!lifecycle.latestSnapshot) lifecycle.latestSnapshot = snapshot;
+      const divider = args.indexOf(" -- ");
+      const selector = (divider >= 0 ? args.slice(0, divider) : args).trim();
+      const supplied = (divider >= 0 ? args.slice(divider + 4) : "").trim() || undefined;
+      const ids = selector ? selector.replace(/\.\./g, " ").split(/[\s,]+/).filter(Boolean) : [];
+      const candidate = ids.length
+        ? manualFoldCandidate(snapshot, persistence.state!, ids)
+        : selectAutomaticChapter(snapshot, persistence.state!) ?? selectAutomaticToolBatch(snapshot, persistence.state!, 1)[0] ?? null;
+      if (!candidate) throw new Error("No exact stale rescue span is currently eligible");
+      const stateBefore = persistence.state!;
+      const persistedBefore = persistence.persisted ? clone(persistence.persisted) : null;
+      const generationBefore = lifecycle.generation;
+      const { preparedFold, nextState } = await prepareAndCommitExplicit({
+        snapshot,
+        candidate,
+        brief: supplied,
+        ctx,
+        maximumSourceChars: USER_RESCUE_MAX_SOURCE_CHARS,
+      });
+      if (!sessionIdentityStillValid(ctx, stateBefore.sessionId, generationBefore)) {
+        throw new Error("Active-context session changed before rescue persistence");
+      }
+      persistence.state = clearArmedAdvisory(nextState);
+      advisory.armedMilestone = null;
+      try { await persist(ctx); }
+      catch (error) {
+        if (sessionIdentityStillValid(ctx, stateBefore.sessionId, generationBefore)) {
+          persistence.state = stateBefore;
+          persistence.persisted = persistedBefore;
+        }
+        throw error;
+      }
+      ladder.pendingManual = false;
+      ladder.automaticFailure = null;
+      advisory.armedMilestone = null;
+      ladder.pendingContextNote =
+        `User rescue folded stale context under ${preparedFold.id}; exact source remains expandable.`;
+      ladder.lastAutomaticAction = {
+        kind: "user-rescue-fold",
+        foldIds: [preparedFold.id],
+        sourceIds: preparedFold.sourceRefs.map((ref) => ref.entryId),
+      };
+      updateStatus(ctx);
+      safeNotify(
+        ctx,
+        `Folded ${preparedFold.fold.sourceChars} bytes into ${preparedFold.id}. Exact source remains expandable.`,
+        "info",
+      );
+    });
+    ladder.actionQueue = operation.catch(() => undefined);
+    try { await operation; }
+    catch (error) {
+      safeNotify(ctx, `Context rescue failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+    }
+  };
+
+  pi.registerTool(buildActiveContextTool({
     name: toolName,
     label: toolLabel,
-    description: fullToolSurface
-      ? "Page, fold, expand, refold, or protect exact Pi active-context evidence. Mutations persist immediately and affect the next model call inside the same continuing turn; no turn boundary is required. Supplied fold briefs have a hard 1200-character maximum."
-      : `Use only the configured active-context actions: ${allowedToolActions.join(", ")}. Call fold only by copying the exact eligibleChapter.action returned by status; if status has no eligibleChapter, continue the task without folding. Supplied fold briefs have a hard 1200-character maximum.`,
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      required: ["action"],
-      properties: {
-        action: { type: "string", enum: allowedToolActions },
-        ids: { type: "array", minItems: 1, maxItems: 64, items: { type: "string", minLength: 1 } },
-        id: { type: "string", minLength: 1 },
-        brief: {
-          type: "string",
-          minLength: 1,
-          maxLength: ACTIVE_CONTEXT_POLICY.maxBriefChars,
-          description: "Factual fold brief; keep it at most 1000 characters to stay below the hard 1200-character limit.",
-        },
-        offset: { type: "integer", minimum: 0 },
-        limit: { type: "integer", minimum: 1, maximum: 100 },
-        detail: { type: "string", enum: ["fold_candidates"] },
-      },
-    },
-    async execute(_toolCallId: string, params: Record<string, unknown>, signal: AbortSignal, _onUpdate: unknown, ctx: any) {
-      const operation = ladder.actionQueue.then(() => executeAction(params, signal, ctx));
-      ladder.actionQueue = operation.catch(() => undefined);
-      return operation;
-    },
-  });
-
-  pi.registerCommand(commandNames.status, {
-    description: "Show active-context fold roots and paging state",
-    handler: async (_args: string, ctx: any) => {
-      if (!persistence.state) persistence.state = emptyActiveContextState(ctx.sessionManager.getSessionId());
-      try {
-        const snapshot = authoritativeSnapshotFor(ctx);
-        const status = activeContextStatus(snapshot, persistence.state, 0, 40);
-        safeNotify(
-          ctx,
-          `Active context: ${status.totalFolds} fold(s), roots ${(status.roots as string[]).join(", ") || "none"}. ` +
-            `Use ${toolName} status for exact recursive actions.`,
-          "info",
-        );
-      } catch (error) {
-        safeNotify(ctx, `Active-context status unavailable; native Pi context is unchanged: ${String(error)}`, "warning");
-      }
-    },
-  });
-
-  pi.registerCommand(commandNames.fold, {
-    description: "Losslessly fold a stale context span; works without a main-model request",
-    handler: async (args: string, ctx: any) => {
-      const operation = ladder.actionQueue.then(async () => {
-        if (!persistence.state) persistence.state = emptyActiveContextState(ctx.sessionManager.getSessionId());
-        const snapshot = lifecycle.latestSnapshot
-          ? authoritativeSnapshotFor(ctx)
-          : snapshotForEvent(ctx, ctx.sessionManager.buildSessionContext().messages);
-        if (!lifecycle.latestSnapshot) lifecycle.latestSnapshot = snapshot;
-        const divider = args.indexOf(" -- ");
-        const selector = (divider >= 0 ? args.slice(0, divider) : args).trim();
-        const supplied = (divider >= 0 ? args.slice(divider + 4) : "").trim() || undefined;
-        const ids = selector ? selector.replace(/\.\./g, " ").split(/[\s,]+/).filter(Boolean) : [];
-        const candidate = ids.length
-          ? manualFoldCandidate(snapshot, persistence.state!, ids)
-          : selectAutomaticChapter(snapshot, persistence.state!) ?? selectAutomaticToolBatch(snapshot, persistence.state!, 1)[0] ?? null;
-        if (!candidate) throw new Error("No exact stale rescue span is currently eligible");
-        const stateBefore = persistence.state!;
-        const persistedBefore = persistence.persisted ? clone(persistence.persisted) : null;
-        const generationBefore = lifecycle.generation;
-        const { preparedFold, nextState } = await prepareAndCommitExplicit({
-          snapshot,
-          candidate,
-          brief: supplied,
-          ctx,
-          maximumSourceChars: USER_RESCUE_MAX_SOURCE_CHARS,
-        });
-        if (!sessionIdentityStillValid(ctx, stateBefore.sessionId, generationBefore)) {
-          throw new Error("Active-context session changed before rescue persistence");
-        }
-        persistence.state = clearArmedAdvisory(nextState);
-        advisory.armedMilestone = null;
-        try { await persist(ctx); }
-        catch (error) {
-          if (sessionIdentityStillValid(ctx, stateBefore.sessionId, generationBefore)) {
-            persistence.state = stateBefore;
-            persistence.persisted = persistedBefore;
-          }
-          throw error;
-        }
-        ladder.pendingManual = false;
-        ladder.automaticFailure = null;
-        advisory.armedMilestone = null;
-        ladder.pendingContextNote =
-          `User rescue folded stale context under ${preparedFold.id}; exact source remains expandable.`;
-        ladder.lastAutomaticAction = {
-          kind: "user-rescue-fold",
-          foldIds: [preparedFold.id],
-          sourceIds: preparedFold.sourceRefs.map((ref) => ref.entryId),
-        };
-        updateStatus(ctx);
-        safeNotify(
-          ctx,
-          `Folded ${preparedFold.fold.sourceChars} bytes into ${preparedFold.id}. Exact source remains expandable.`,
-          "info",
-        );
-      });
-      ladder.actionQueue = operation.catch(() => undefined);
-      try { await operation; }
-      catch (error) {
-        safeNotify(ctx, `Context rescue failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-      }
-    },
-  });
+    allowedActions: allowedToolActions,
+    fullSurface: allowedToolActions.length === ACTIVE_CONTEXT_TOOL_ACTIONS.length,
+    maxBriefChars: ACTIVE_CONTEXT_POLICY.maxBriefChars,
+    handler: toolHandler,
+  }));
+  for (const command of buildActiveContextCommands({
+    statusName: commandNames.status,
+    foldName: commandNames.fold,
+    statusHandler: statusCommandHandler,
+    foldHandler: foldCommandHandler,
+  })) {
+    pi.registerCommand(command.name, {
+      description: command.description,
+      handler: command.handler,
+    });
+  }
   pi.on("session_shutdown", (_event: unknown, ctx: any) => {
     lifecycle.generation += 1;
     lifecycle.shuttingDown = true;
