@@ -16,7 +16,6 @@ const defineProperty = Object.defineProperty;
 const freeze = Object.freeze;
 const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const getPrototypeOf = Object.getPrototypeOf;
-const isFrozen = Object.isFrozen;
 const jsonStringify = JSON.stringify;
 const number = Number;
 const numberIsFinite = Number.isFinite;
@@ -168,7 +167,6 @@ export function denseOwnArrayValues(value: unknown): unknown[] | null {
         !objectIs(copied.value, source.value) || !copied.enumerable || copied.configurable || copied.writable) return null;
   }
   freeze(values);
-  if (!isFrozen(values)) throw new Error("Trusted dense array copy did not freeze");
   return values;
 }
 
