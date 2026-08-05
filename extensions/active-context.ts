@@ -13,210 +13,48 @@ import {
   stableStringify,
 } from "./json.ts";
 
-export const ACTIVE_CONTEXT_STATE_ENTRY = "quorum-active-context-state";
-export const ACTIVE_CONTEXT_FOLD_RECORD_ENTRY = "quorum-active-context-fold-record";
-export const NATIVE_COMPACTION_RECEIPT_ENTRY = "quorum-native-compaction-receipt";
-export const NATIVE_COMPACTION_DECISION_ENTRY = "quorum-native-compaction-decision";
-export const PROVIDER_CONTEXT_MEASUREMENT_ENTRY = "quorum-provider-context-measurement";
-export const ACTIVE_CONTEXT_STATUS_KEY = "quorum-active-context";
-export const ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
-  "status", "fold", "expand", "refold", "protect", "unprotect",
-] as const);
-export type ActiveContextToolAction = typeof ACTIVE_CONTEXT_TOOL_ACTIONS[number];
-const USER_RESCUE_MAX_SOURCE_CHARS = 512_000;
-const DEFAULT_CONTEXT_WINDOW = 272_000;
-const TOOL_FOLD_CADENCE_MIN_TOKENS = 12_000;
-const TOOL_FOLD_CADENCE_WINDOW_FRACTION = 0.06;
-const EXPAND_LEASE_GENERATIONS = 8;
-const MAX_EXPAND_LEASES = 64;
-const CONSOLIDATION_WIDTH_THRESHOLD = 10;
-const MAX_ADVISORY_DELIVERIES_PER_MILESTONE = 16;
+import {
+  ACTIVE_CONTEXT_FOLD_RECORD_ENTRY,
+  ACTIVE_CONTEXT_POLICY,
+  ACTIVE_CONTEXT_STATE_ENTRY,
+  ACTIVE_CONTEXT_STATUS_KEY,
+  ACTIVE_CONTEXT_TOOL_ACTIONS,
+  BYTES_PER_TOKEN_FLOOR,
+  CONSOLIDATION_WIDTH_THRESHOLD,
+  DEFAULT_CONTEXT_WINDOW,
+  EXPAND_LEASE_GENERATIONS,
+  MAX_ADVISORY_DELIVERIES_PER_MILESTONE,
+  MAX_EXPAND_LEASES,
+  NATIVE_COMPACTION_DECISION_ENTRY,
+  NATIVE_COMPACTION_RECEIPT_ENTRY,
+  PROVIDER_CONTEXT_MEASUREMENT_ENTRY,
+  READ_ONLY_TOOLS_DEFAULT,
+  TOOL_FOLD_CADENCE_MIN_TOKENS,
+  TOOL_FOLD_CADENCE_WINDOW_FRACTION,
+  USER_RESCUE_MAX_SOURCE_CHARS,
+} from "./lib/policy.ts";
+import type {
+  ActiveContextCheckpointV2,
+  ActiveContextDeltaV2,
+  ActiveContextSnapshot,
+  ActiveContextState,
+  ActiveContextStateWireV2,
+  ActiveContextToolAction,
+  ActiveFold,
+  AdvisoryMilestone,
+  BranchObject,
+  BriefProvenance,
+  CompleteTurn,
+  FoldCandidate,
+  FoldKind,
+  FoldPart,
+  FoldRecordEntry,
+  FoldRecordRef,
+  MappedMessage,
+  PreparedFold,
+} from "./lib/policy.ts";
 
-// Conservative LOWER bound on UTF-8 bytes per provider token, used only to cap
-// the protected byte tail as a share of a small window — never to estimate usage.
-const BYTES_PER_TOKEN_FLOOR = 2;
-
-export const ACTIVE_CONTEXT_POLICY = Object.freeze({
-  freshTurns: 3,
-  freshBytes: 24_000,
-  freshWindowShare: 0.25,
-  warningRatio: 0.65,
-  toolFoldRatio: 0.75,
-  refoldRatio: 0.85,
-  prepareRatio: 0.90,
-  warmRatio: 0.55,
-  responseReserve: 16_384,
-  // Used only when neither provider measurements nor the host report a context window.
-  fallbackChapterFoldRatio: 255_616 / 272_000,
-  consolidationRatio: 0.85,
-  consolidationChildren: 5,
-  maxConsolidationChildren: 8,
-  minToolChars: 2_000,
-  minChapterChars: 4_000,
-  maxChapterChars: 128_000,
-  maxChapterTurns: 4,
-  maxSourceChars: 200_000,
-  maxFoldSourceRefs: 256,
-  maxBriefChars: 1_200,
-  briefTimeoutMs: 120_000,
-  orientationMessages: 2,
-  maxOrientationChars: 12_000,
-});
-
-export type FoldKind = "tool-result" | "chapter" | "consolidation";
-export type FoldPart = { kind: "raw"; ref: EvidenceRef } | { kind: "fold"; foldId: string };
-export type BriefProvenance =
-  | { kind: "supplied" }
-  | { kind: "deterministic" }
-  | {
-      kind: "model";
-      provider: string;
-      model: string;
-      effort: string;
-      launchContractDigest?: string;
-    };
-
-export interface ActiveFold {
-  id: string;
-  kind: FoldKind;
-  parentId: string | null;
-  parts: FoldPart[];
-  brief: string;
-  provenance: BriefProvenance;
-  sourceSha256: string;
-  sourceChars: number;
-  placeholderChars: number;
-  createdAt: number;
-}
-
-export interface PreparedFold {
-  id: string;
-  sessionId: string;
-  generation: number;
-  branchSha256: string;
-  topologySha256: string;
-  protectionSha256: string;
-  sourceRefs: EvidenceRef[];
-  sourceSha256: string;
-  beforeRefs: EvidenceRef[];
-  beforeSha256: string;
-  afterRefs: EvidenceRef[];
-  afterSha256: string;
-  fold: ActiveFold;
-}
-
-export interface ActiveContextState {
-  version: 1;
-  sessionId: string;
-  revision: number;
-  folds: ActiveFold[];
-  expanded: string[];
-  protected: EvidenceRef[];
-  tokensSinceToolFold: number;
-  leases: Record<string, number>;
-  prepared?: PreparedFold;
-  advisory?: {
-    highWater: number;
-    delivered: Record<string, number>;
-    armed?: { milestone: AdvisoryMilestone; threshold: number; scheduleKey: string };
-  };
-}
-
-interface FoldRecordRef {
-  id: string;
-  sha256: string;
-}
-
-interface FoldRecordEntry {
-  version: 1;
-  sessionId: string;
-  foldId: string;
-  recordSha256: string;
-  fold: ActiveFold;
-}
-
-interface ActiveContextCheckpointV2 {
-  version: 2;
-  kind: "checkpoint";
-  sessionId: string;
-  revision: number;
-  foldRefs: FoldRecordRef[];
-  expanded: string[];
-  protected: EvidenceRef[];
-  prepared: PreparedFold | null;
-  tokensSinceToolFold?: number;
-  leases?: Record<string, number>;
-  advisory?: NonNullable<ActiveContextState["advisory"]>;
-  stateSha256: string;
-}
-
-interface ActiveContextDeltaV2 {
-  version: 2;
-  kind: "delta";
-  sessionId: string;
-  revision: number;
-  baseRevision: number;
-  baseStateSha256: string;
-  addFoldRefs: FoldRecordRef[];
-  removeFoldIds: string[];
-  expanded: string[];
-  protected: EvidenceRef[];
-  prepared: PreparedFold | null;
-  tokensSinceToolFold?: number;
-  leases?: Record<string, number>;
-  advisory?: NonNullable<ActiveContextState["advisory"]>;
-  stateSha256: string;
-}
-
-type ActiveContextStateWireV2 = ActiveContextCheckpointV2 | ActiveContextDeltaV2;
-
-interface MappedMessage {
-  index: number;
-  message: unknown;
-  ref: EvidenceRef | null;
-}
-
-interface BranchObject {
-  branchIndex: number;
-  message: unknown;
-  ref: EvidenceRef;
-}
-
-export interface CompleteTurn {
-  start: number;
-  end: number;
-}
-
-export interface ActiveContextSnapshot {
-  sessionId: string;
-  messages: unknown[];
-  mapped: MappedMessage[];
-  branchObjects: BranchObject[];
-  completeTurns: CompleteTurn[];
-  freshBoundary: number;
-  protectedIndices: Set<number>;
-  toolProtectedIndices: Set<number>;
-  policy: typeof ACTIVE_CONTEXT_POLICY;
-  toolName: string;
-  entryTypePrefix: string;
-  readOnlyTools: ReadonlySet<string>;
-  contextWindow: number;
-  windowSource: "reported" | "fallback";
-}
-
-export interface FoldCandidate {
-  kind: FoldKind;
-  parts: FoldPart[];
-  sourceRefs: EvidenceRef[];
-}
-
-const READ_ONLY_TOOLS_DEFAULT = new Set([
-  "read", "grep", "find", "ls", "inspect_repo",
-  "web_search", "source_check", "fetch_content", "get_search_content",
-  "wiki_read", "wiki_search", "journal_read", "recall", "memory_context",
-  "memory_status", "memory_outline", "wiki_lint", "surface_folds", "expand",
-  "memory_search_turns", "memory_ticker_dossier", "memory_theme_dossier",
-]);
+export * from "./lib/policy.ts";
 
 function clone<T>(value: T): T {
   return structuredClone(value);
@@ -3312,8 +3150,6 @@ export function parseNativeCompactionCompletion(value: unknown, expectedSessionI
   }
   return { ...(clone(value) as unknown as NativeCompactionCompletionReceipt), decision };
 }
-
-export type AdvisoryMilestone = "notice" | "tools" | "chapters" | "urgent";
 
 export const ADVISORY_BUDGETS: Readonly<Record<AdvisoryMilestone, number>> = Object.freeze({
   notice: 2,
