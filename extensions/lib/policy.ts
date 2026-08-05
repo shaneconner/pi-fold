@@ -109,7 +109,13 @@ export const ESTIMATED_PLACEHOLDER_OVERHEAD_BYTES = 240;
 
 /** Active-context tool actions that read without mutating, so their results may fold. */
 export const READ_ONLY_CONTEXT_ACTIONS_DEFAULT: ReadonlySet<string> = new Set(["status"]);
-export const EPOCH_READ_ONLY_CONTEXT_ACTIONS: ReadonlySet<string> = new Set(["status", "peek"]);
+/**
+ * The classification that also lets a `peek` result be reclaimed by the tool-fold rung.
+ * A peek copies a fold's own stored source back into the window, so leaving it raw is a
+ * pure duplicate of evidence the runtime already holds; epoch scheduling adopts this set
+ * unconditionally, and immediate scheduling reaches it through `foldPeekResults`.
+ */
+export const PEEK_READ_ONLY_CONTEXT_ACTIONS: ReadonlySet<string> = new Set(["status", "peek"]);
 
 export type MarkOrigin = "agent" | "ladder";
 

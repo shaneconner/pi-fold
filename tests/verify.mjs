@@ -197,6 +197,7 @@ function makeRuntime(built, {
   guidance,
   surfacing,
   foldScheduling,
+  foldPeekResults,
   setSuggestionSourceRegistrar,
   loadHostModule,
   packageRegistration = false,
@@ -286,6 +287,7 @@ function makeRuntime(built, {
     ...(guidance === undefined ? {} : { guidance }),
     ...(surfacing === undefined ? {} : { surfacing }),
     ...(foldScheduling === undefined ? {} : { foldScheduling }),
+    ...(foldPeekResults === undefined ? {} : { foldPeekResults }),
     ...(setSuggestionSourceRegistrar ? { setSuggestionSourceRegistrar } : {}),
   };
   runtime.registration = packageRegistration
@@ -2583,7 +2585,7 @@ function epochSnapshot(built) {
     eventMessages: built.messages,
     contextEntries: built.entries,
     contextWindow: built.contextWindow,
-    readOnlyContextActions: context.EPOCH_READ_ONLY_CONTEXT_ACTIONS,
+    readOnlyContextActions: context.PEEK_READ_ONLY_CONTEXT_ACTIONS,
   });
 }
 
@@ -2606,10 +2608,10 @@ async function epochToolRuntime(fixture = {}) {
  * The identical scripted session both modes must produce, so the immediate-mode
  * digest can be pinned against the pre-scheduling release.
  */
-async function scriptedSession(foldScheduling) {
+async function scriptedSession(foldScheduling, extra = {}) {
   const runtime = makeRuntime(
     makeFixture({ turns: 8, resultChars: 10_000, contextWindow: 100_000 }),
-    foldScheduling ? { foldScheduling } : {},
+    { ...(foldScheduling ? { foldScheduling } : {}), ...extra },
   );
   await startRuntime(runtime);
   await measure(runtime, 50_000, 100_000);
@@ -2858,6 +2860,136 @@ async function gateTailAdjacentExemption() {
   };
 }
 
+/**
+ * A transcript whose only bulk is peek output. Immediate mode classifies no peek batch
+ * as a foldable read, so the ladder is STARVED: it measures the pressure and has nothing
+ * to take. The override hands it exactly that supply back.
+ */
+function peekOnlyFixture() {
+  return makeFixture({
+    turns: 8,
+    resultChars: 10_000,
+    contextWindow: 100_000,
+    peekTurns: [0, 1, 2, 3, 4, 5, 6, 7],
+    peekTargetId: "fold_probe",
+  });
+}
+
+async function climb(runtime) {
+  await measure(runtime, 10_000, 100_000);
+  await measure(runtime, 20_000, 100_000);
+  await measure(runtime, 40_000, 100_000);
+  await measure(runtime, 60_000, 100_000);
+  await measure(runtime, 80_000, 100_000);
+  return materialized(runtime);
+}
+
+async function gatePeekFoldOverride() {
+  // Stock immediate mode: every rung sees the same pressure and cannot act.
+  const starved = makeRuntime(peekOnlyFixture());
+  await startRuntime(starved);
+  const starvedState = await climb(starved);
+  assert.equal(starvedState.folds.length, 0,
+    "Stock immediate mode folded a peek batch it does not classify as a read");
+  const starvedStatus = await toolStatus(starved);
+  assert.equal(starvedStatus.details.automatic.foldPeekResults, false);
+  assert(starvedStatus.details.automatic.pressureRatio >= 0.75,
+    "The starved fixture never reached the tool-fold rung");
+
+  // Same transcript, same measurements, override on: the rung now has supply.
+  const built = peekOnlyFixture();
+  const runtime = makeRuntime(built, { foldPeekResults: true });
+  await startRuntime(runtime);
+  const state = await climb(runtime);
+  assert(state.folds.length >= 1, "The override left the ladder starved");
+  assert(state.folds.every((fold) => fold.kind === "tool-result"));
+  const peekResultIds = new Set(built.turnEntries.map((ids) => ids[2]));
+  const sources = state.folds.flatMap((fold) => fold.parts.map((part) => part.ref.entryId));
+  assert(sources.length >= 1 && sources.every((id) => peekResultIds.has(id)),
+    "A fold reclaimed something other than a peek result");
+  const status = await toolStatus(runtime);
+  assert.equal(status.details.automatic.foldPeekResults, true);
+
+  // Onset, not just eventual behavior: the first measurement that authorizes a tool
+  // fold under the override still authorizes nothing without it.
+  const early = makeRuntime(peekOnlyFixture(), { foldPeekResults: true });
+  await startRuntime(early);
+  await measure(early, 10_000, 100_000);
+  await measure(early, 40_000, 100_000);
+  const earlyState = materialized(early);
+  assert.equal(earlyState.folds.length, 1, "The override did not act at the cadence rung");
+
+  const earlyStarved = makeRuntime(peekOnlyFixture());
+  await startRuntime(earlyStarved);
+  await measure(earlyStarved, 10_000, 100_000);
+  await measure(earlyStarved, 40_000, 100_000);
+  assert.equal(materialized(earlyStarved).folds.length, 0);
+
+  // Only booleans configure it; a truthy string is a misconfiguration, not an opt-in.
+  assert.throws(
+    () => makeRuntime(peekOnlyFixture(), { foldPeekResults: "true" }),
+    /foldPeekResults must be a boolean/,
+  );
+
+  const reclaimed = state.folds.reduce((total, fold) => total + fold.sourceChars, 0);
+  const spent = state.folds.reduce((total, fold) => total + fold.placeholderChars, 0);
+  return {
+    starvedFolds: starvedState.folds.length,
+    overrideFolds: state.folds.length,
+    onsetFoldsWithOverride: earlyState.folds.length,
+    onsetFoldsWithout: 0,
+    reclaimedChars: reclaimed,
+    placeholderChars: spent,
+    nonBooleanRefused: true,
+  };
+}
+
+async function gatePeekFoldOverrideAbsence() {
+  // Absent and explicitly false are the same deployment, byte for byte, and both are
+  // the digest gate 33 pins to the pre-scheduling release.
+  const absent = await scriptedSession();
+  const disabled = await scriptedSession(undefined, { foldPeekResults: false });
+  const digest = normalizedStateDigest(materialized(absent));
+  assert.equal(normalizedStateDigest(materialized(disabled)), digest,
+    "An explicit foldPeekResults:false diverged from the stock deployment");
+  assert.equal(digest, IMMEDIATE_SCRIPTED_STATE_DIGEST,
+    "The peek-fold option moved the immediate-mode durable state");
+  assert.equal(
+    json.stableStringify((await project(absent)).messages),
+    json.stableStringify((await project(disabled)).messages),
+    "An explicit foldPeekResults:false changed the projection",
+  );
+  assert.deepEqual(
+    [...[...disabled.tools.values()][0].parameters.properties.action.enum],
+    [...context.ACTIVE_CONTEXT_TOOL_ACTIONS],
+    "The peek-fold option changed the tool surface",
+  );
+
+  // A transcript that the override WOULD change is unchanged without it: absence is
+  // proved on the sensitive fixture, not only on one that has no peeks in it.
+  const sensitive = makeRuntime(peekOnlyFixture(), { foldPeekResults: false });
+  await startRuntime(sensitive);
+  assert.equal((await climb(sensitive)).folds.length, 0);
+
+  // Epoch scheduling still carries peek foldability with it; the option is the way
+  // immediate mode reaches the same classification, not a second switch on top of it.
+  const epoch = makeRuntime(peekOnlyFixture(), { foldScheduling: "epoch" });
+  await startRuntime(epoch);
+  assert.equal((await toolStatus(epoch)).details.automatic.foldPeekResults, true);
+  const epochOff = makeRuntime(peekOnlyFixture(), {
+    foldScheduling: "epoch", foldPeekResults: false,
+  });
+  await startRuntime(epochOff);
+  assert.equal((await toolStatus(epochOff)).details.automatic.foldPeekResults, false);
+  return {
+    digest,
+    absentEqualsDisabled: true,
+    sensitiveFixtureFolds: 0,
+    epochDefault: true,
+    epochOverridable: true,
+  };
+}
+
 async function gateEphemeralPeekMark() {
   const built = makeFixture({
     turns: 10, resultChars: 10_000, contextWindow: 100_000, peekTurns: [0], peekTargetId: "fold_probe",
@@ -2895,14 +3027,14 @@ async function gateEphemeralPeekMark() {
   assert.equal(
     context.isReadOnlyContextTool(
       "active_context", { action: "peek", id: "fold_probe" }, "active_context",
-      context.READ_ONLY_TOOLS_DEFAULT, context.EPOCH_READ_ONLY_CONTEXT_ACTIONS,
+      context.READ_ONLY_TOOLS_DEFAULT, context.PEEK_READ_ONLY_CONTEXT_ACTIONS,
     ),
     true,
   );
   assert.equal(
     context.isReadOnlyContextTool(
       "active_context", { action: "peek", id: "x", brief: "no" }, "active_context",
-      context.READ_ONLY_TOOLS_DEFAULT, context.EPOCH_READ_ONLY_CONTEXT_ACTIONS,
+      context.READ_ONLY_TOOLS_DEFAULT, context.PEEK_READ_ONLY_CONTEXT_ACTIONS,
     ),
     false,
   );
@@ -3025,7 +3157,7 @@ async function gateSchedulingWireRoundTrip() {
     eventMessages: [],
     contextEntries: [],
     contextWindow: built.contextWindow,
-    readOnlyContextActions: context.EPOCH_READ_ONLY_CONTEXT_ACTIONS,
+    readOnlyContextActions: context.PEEK_READ_ONLY_CONTEXT_ACTIONS,
   }));
   assert.equal(projected.pendingMarks, undefined);
   return {
@@ -3217,6 +3349,8 @@ const gates = [
   [39, "Epoch mark accumulation", gateMarkAccumulation],
   [40, "Epoch inline rung reachability", gateEpochInlineRungs],
   [41, "Surfacing key-order digest stability", gateSurfacingKeyOrder],
+  [42, "Peek-fold override reaches a starved ladder", gatePeekFoldOverride],
+  [43, "Peek-fold override absence is byte-identical", gatePeekFoldOverrideAbsence],
 ];
 
 let failures = 0;

@@ -94,7 +94,7 @@ import {
   entryTypeNamespace,
   EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS,
   EPOCH_COMMIT_TARGET_WINDOW_SHARE,
-  EPOCH_READ_ONLY_CONTEXT_ACTIONS,
+  PEEK_READ_ONLY_CONTEXT_ACTIONS,
   FOLD_SCHEDULING_MODES,
   READ_ONLY_CONTEXT_ACTIONS_DEFAULT,
   READ_ONLY_TOOLS_DEFAULT,
@@ -184,6 +184,7 @@ export function registerActiveContext(pi: any, options: {
   blockingTools?: readonly string[];
   guidance?: GuidanceProfile;
   foldScheduling?: FoldSchedulingMode;
+  foldPeekResults?: boolean;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
   registerSuggestionSource: SuggestionSourceRegistrar;
@@ -204,10 +205,16 @@ export function registerActiveContext(pi: any, options: {
     throw new Error(`foldScheduling must be one of ${FOLD_SCHEDULING_MODES.join(", ")}`);
   }
   const epochScheduling = foldScheduling === "epoch";
-  // Peek mutates nothing, so in epoch mode its own tool result is a foldable read
-  // batch. Immediate mode keeps the pre-0.1.2 classification exactly.
-  const readOnlyContextActions = epochScheduling
-    ? EPOCH_READ_ONLY_CONTEXT_ACTIONS
+  if (options.foldPeekResults !== undefined && typeof options.foldPeekResults !== "boolean") {
+    throw new Error("foldPeekResults must be a boolean");
+  }
+  // Peek mutates nothing, so its own tool result is a foldable read batch. Epoch mode
+  // adopts that classification with its scheduling; immediate mode keeps the pre-0.1.2
+  // classification unless the deployment opts in, because a peek copies a fold's stored
+  // source back into the window and a window that cannot reclaim it grows without bound.
+  const foldPeekResults = options.foldPeekResults ?? epochScheduling;
+  const readOnlyContextActions = foldPeekResults
+    ? PEEK_READ_ONLY_CONTEXT_ACTIONS
     : READ_ONLY_CONTEXT_ACTIONS_DEFAULT;
   if (!toolName || !toolLabel || !brandNoun || !entryTypePrefix || typeof commandPrefix !== "string" ||
       (commandPrefix && !/^[a-z0-9-]+$/.test(commandPrefix)) ||
@@ -2093,6 +2100,7 @@ export function registerActiveContext(pi: any, options: {
             ratio: measurements.latestRatio,
           }),
           nativeSummaries: "disabled",
+          foldPeekResults,
           freeHarvest: blockingTools.size === 0 ? "disabled" : "enabled",
           pressureSource: "last-successful-provider-response-only",
           postOverflowCallback: "blocked-while-stock-native-compaction-is-disabled",
