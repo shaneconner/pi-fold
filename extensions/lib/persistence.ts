@@ -738,6 +738,7 @@ export function protectionSha256(state: Pick<ActiveContextState, "protected">): 
 }
 
 export const ADVISORY_BUDGETS: Readonly<Record<AdvisoryMilestone, number>> = Object.freeze({
+  orientation: 1,
   notice: 2,
   tools: 2,
   chapters: 2,

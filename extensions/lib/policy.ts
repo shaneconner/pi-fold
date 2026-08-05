@@ -8,6 +8,9 @@ export const DEFAULT_ACTIVE_CONTEXT_COMMAND_NAMES = Object.freeze({
   status: "context",
   fold: "fold-context",
 });
+export const GUIDANCE_PROFILES = Object.freeze(["pressure", "curation", "minimal"] as const);
+export type GuidanceProfile = typeof GUIDANCE_PROFILES[number];
+export const DEFAULT_GUIDANCE_PROFILE: GuidanceProfile = "pressure";
 
 export function entryTypeNamespace(entryTypePrefix: string): string {
   const suffix = "-active-context";
@@ -230,4 +233,4 @@ export const READ_ONLY_TOOLS_DEFAULT = new Set([
   "read", "grep", "find", "ls",
 ]);
 
-export type AdvisoryMilestone = "notice" | "tools" | "chapters" | "urgent";
+export type AdvisoryMilestone = "orientation" | "notice" | "tools" | "chapters" | "urgent";

@@ -188,6 +188,7 @@ function makeRuntime(built, {
   isMcpTool,
   evidenceIngestion,
   summarizer,
+  guidance,
   loadHostModule,
   packageRegistration = false,
   sessionFile = join(tmpdir(), "pi-fold-test-session.jsonl"),
@@ -273,6 +274,7 @@ function makeRuntime(built, {
     ...(isMcpTool ? { isMcpTool } : {}),
     ...(evidenceIngestion === undefined ? {} : { evidenceIngestion }),
     ...(summarizer === undefined ? {} : { summarizer }),
+    ...(guidance === undefined ? {} : { guidance }),
   };
   if (packageRegistration) piFold.registerPiFold(pi, registrationOptions, loadHostModule);
   else context.registerActiveContext(pi, registrationOptions);
@@ -802,11 +804,16 @@ async function gateAutonomousLadder() {
   };
 }
 
-function scheduleMap(contextWindow) {
-  return Object.fromEntries(context.advisorySchedule({
+function guidanceSchedule(contextWindow, guidance) {
+  return context.advisorySchedule({
     policy: context.ACTIVE_CONTEXT_POLICY,
     contextWindow,
-  }).rungs.map((rung) => [rung.milestone, rung]));
+  }, guidance);
+}
+
+function scheduleMap(contextWindow, guidance) {
+  return Object.fromEntries(guidanceSchedule(contextWindow, guidance).rungs
+    .map((rung) => [rung.milestone, rung]));
 }
 
 async function gateAdvisoryMilestones() {
@@ -1924,6 +1931,106 @@ async function gateSummarizerOption() {
   };
 }
 
+async function gateGuidanceProfiles() {
+  const expectedPressureTexts = [
+    "[active-context milestone notice; session active-context-t] Context pressure has crossed 50%. " +
+      'Automatic folding is available. Inspect candidates exactly with active_context {"action":"status"}.',
+    "[active-context milestone tools; session active-context-t] The read-only tool-fold rung begins at 71%. " +
+      "Eligible completed tool batches can be folded now; current endpoint ids are in the live advisory.",
+    "[active-context milestone chapters; session active-context-t] The chapter preparation rung begins at 85%. " +
+      'Use eligibleChapter endpoints with active_context {"action":"fold","ids":["<start>","<end>"],' +
+      '"brief":"<factual brief>"}.',
+    "[active-context milestone urgent; session active-context-t] The hard context fence is near. The next " +
+      "automatic action is a committed chapter fold or the provider request is aborted before transmission.",
+  ];
+  const textFor = (rung, guidance) => context.milestoneText(
+    rung.milestone, "active-context-test", rung.threshold, "active_context", undefined, guidance);
+  const advisoryRun = async (guidance, steps) => {
+    const runtime = makeRuntime(makeFixture({ turns: 3, tools: false, contextWindow: 272_000 }), { guidance });
+    await startRuntime(runtime);
+    const texts = [];
+    for (const tokens of steps) {
+      await measure(runtime, tokens, 272_000);
+      const projection = await project(runtime);
+      for (const message of projection.messages) {
+        if (message?.customType === "pi-fold-active-context-milestone") texts.push(message.content);
+      }
+    }
+    return { texts, delivered: (await toolStatus(runtime)).details.automatic.advisory.delivered };
+  };
+
+  const pressure = guidanceSchedule(272_000);
+  const pressureMap = scheduleMap(272_000);
+  assert.deepEqual(guidanceSchedule(272_000, "pressure"), pressure);
+  assert.equal(pressure.key, "e42777638607eb2e822996a1da9aa88217082e1d1a2e010e2f54c4e7f2bf93e8");
+  assert.deepEqual(pressure.rungs.map((rung) => rung.milestone), ["notice", "tools", "chapters", "urgent"]);
+  assert.deepEqual(pressure.rungs.map((rung) => textFor(rung, undefined)), expectedPressureTexts);
+  assert.deepEqual(pressure.rungs.map((rung) => textFor(rung, "pressure")), expectedPressureTexts);
+  const defaultRun = await advisoryRun(undefined, [233_920]);
+  const pressureRun = await advisoryRun("pressure", [233_920]);
+  assert.deepEqual(defaultRun.texts, [expectedPressureTexts[2]]);
+  assert.deepEqual(pressureRun.texts, defaultRun.texts);
+  assert.deepEqual(pressureRun.delivered, { chapters: 1 });
+
+  const curation = guidanceSchedule(272_000, "curation");
+  const curationMap = scheduleMap(272_000, "curation");
+  assert.deepEqual(curation.rungs.map((rung) => rung.milestone),
+    ["orientation", "notice", "tools", "chapters", "urgent"]);
+  near(curationMap.orientation.threshold, 0.25);
+  assert.equal(curationMap.orientation.budget, 1);
+  assert.equal(context.ADVISORY_BUDGETS.orientation, 1);
+  for (const milestone of ["notice", "tools", "chapters", "urgent"]) {
+    near(curationMap[milestone].threshold, pressureMap[milestone].threshold, 1e-9, milestone);
+    assert.equal(curationMap[milestone].budget, pressureMap[milestone].budget);
+  }
+  const curationTexts = Object.fromEntries(curation.rungs.map((rung) => [rung.milestone, textFor(rung, "curation")]));
+  assert.equal(curationTexts.urgent, expectedPressureTexts[3]);
+  assert(curationTexts.orientation.includes("browsable index of the work behind you"));
+  assert(curationTexts.orientation.includes("briefs sit in the cached prefix of the window"));
+  assert(curationTexts.orientation.includes('Page it with active_context {"action":"status"}'));
+  assert(curationTexts.orientation.includes(
+    'expand what the current task needs with active_context {"action":"expand","id":"<fold-id>"}'));
+  assert(curationTexts.notice.includes("curate it against the task you are on now"));
+  assert(curationTexts.notice.includes(
+    'Fold the spans that task no longer needs with active_context {"action":"fold"'));
+  assert(curationTexts.notice.includes(
+    'keep what must stay raw out of every fold with active_context {"action":"protect","ids":["<entry-id>"]}'));
+  assert(curationTexts.tools.includes("Fold the batches whose detail this task is finished with"));
+  assert(curationTexts.chapters.includes("Fold up: hand two or more adjacent folds of finished work"));
+  assert(curationTexts.chapters.includes(
+    '{"action":"fold","ids":["<fold-id>","<fold-id>"],"brief":"<factual brief>"}'));
+  assert(curationTexts.chapters.includes("leaving the oldest material deepest and still exactly recoverable"));
+  assert(Object.values(curationTexts).every((text) => !text.includes("\u2014")));
+  const curationRun = await advisoryRun("curation", [81_600, 27_200, 81_600]);
+  assert.deepEqual(curationRun.texts, [curationTexts.orientation]);
+  assert.deepEqual(curationRun.delivered, { orientation: 1 });
+
+  const minimal = guidanceSchedule(272_000, "minimal");
+  assert.deepEqual(minimal.rungs.map((rung) => rung.milestone), ["urgent"]);
+  near(minimal.rungs[0].threshold, pressureMap.urgent.threshold);
+  const minimalRun = await advisoryRun("minimal", [108_800, 196_520, 233_920, 250_240]);
+  assert.deepEqual(minimalRun.texts, [expectedPressureTexts[3]]);
+  assert.deepEqual(minimalRun.delivered, { urgent: 1 });
+
+  assert.throws(() => makeRuntime(makeFixture({ turns: 3, tools: false }), { guidance: "aggressive" }),
+    /guidance must be "pressure", "curation", or "minimal"/);
+  assert.throws(() => makeRuntime(makeFixture({ turns: 3, tools: false }),
+    { packageRegistration: true, guidance: 3 }), /guidance must be/);
+
+  return {
+    pressureScheduleKey: pressure.key,
+    pressureRungs: pressure.rungs.map((rung) => rung.milestone),
+    defaultMatchesPressure: true,
+    curationRungs: curation.rungs.map((rung) => rung.milestone),
+    orientation: { threshold: curationMap.orientation.threshold, budget: curationMap.orientation.budget },
+    curationDelivered: curationRun.delivered,
+    curationUrgentText: "unchanged",
+    minimalRungs: minimal.rungs.map((rung) => rung.milestone),
+    minimalDelivered: minimalRun.delivered,
+    invalidGuidance: "rejected",
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -1948,6 +2055,7 @@ const gates = [
   [21, "Legacy branding reproduction", gateLegacyBrandingReproduction],
   [22, "Evidence ingestion switch", gateEvidenceIngestionSwitch],
   [23, "Summarizer option", gateSummarizerOption],
+  [24, "Guidance profiles", gateGuidanceProfiles],
 ];
 
 let failures = 0;

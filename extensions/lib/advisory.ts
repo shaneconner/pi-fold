@@ -9,8 +9,14 @@ import type {
   ActiveContextSnapshot,
   ActiveContextState,
   AdvisoryMilestone,
+  GuidanceProfile,
 } from "./policy.ts";
-import { contextBrand, DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN } from "./policy.ts";
+import {
+  contextBrand,
+  DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
+  DEFAULT_GUIDANCE_PROFILE,
+  GUIDANCE_PROFILES,
+} from "./policy.ts";
 
 export { ADVISORY_BUDGETS };
 
@@ -35,18 +41,41 @@ export function clearArmedAdvisory(state: ActiveContextState): ActiveContextStat
   return { ...state, advisory };
 }
 
-export function advisorySchedule(
+export function normalizeGuidanceProfile(guidance: unknown = DEFAULT_GUIDANCE_PROFILE): GuidanceProfile {
+  if (!GUIDANCE_PROFILES.includes(guidance as GuidanceProfile)) {
+    throw new Error('guidance must be "pressure", "curation", or "minimal"');
+  }
+  return guidance as GuidanceProfile;
+}
+
+function guidanceRungs(
   snapshot: Pick<ActiveContextSnapshot, "policy" | "contextWindow">,
-): AdvisorySchedule {
-  const rungs = [
+  guidance: GuidanceProfile,
+): AdvisorySchedule["rungs"] {
+  const urgent = {
+    milestone: "urgent" as const,
+    threshold: hardFenceRatio(snapshot) - 0.03,
+    budget: ADVISORY_BUDGETS.urgent,
+  };
+  if (guidance === "minimal") return [urgent];
+  return [
+    ...(guidance === "curation"
+      ? [{ milestone: "orientation" as const, threshold: 0.25, budget: ADVISORY_BUDGETS.orientation }]
+      : []),
     { milestone: "notice" as const, threshold: 0.50, budget: ADVISORY_BUDGETS.notice },
     { milestone: "tools" as const, threshold: snapshot.policy.toolFoldRatio - 0.04,
       budget: ADVISORY_BUDGETS.tools },
     { milestone: "chapters" as const, threshold: snapshot.policy.prepareRatio - 0.05,
       budget: ADVISORY_BUDGETS.chapters },
-    { milestone: "urgent" as const, threshold: hardFenceRatio(snapshot) - 0.03,
-      budget: ADVISORY_BUDGETS.urgent },
+    urgent,
   ];
+}
+
+export function advisorySchedule(
+  snapshot: Pick<ActiveContextSnapshot, "policy" | "contextWindow">,
+  guidance: GuidanceProfile = DEFAULT_GUIDANCE_PROFILE,
+): AdvisorySchedule {
+  const rungs = guidanceRungs(snapshot, guidance);
   for (let index = rungs.length - 2; index >= 0; index -= 1) {
     rungs[index].threshold = Math.min(rungs[index].threshold, rungs[index + 1].threshold - 0.02);
   }
@@ -100,15 +129,43 @@ export function updateAdvisoryMilestone(
   };
 }
 
+function curationText(milestone: AdvisoryMilestone, percent: number, toolName: string): string {
+  if (milestone === "orientation") {
+    return "Collapsed folds are a browsable index of the work behind you, and their briefs sit in the cached " +
+      `prefix of the window, so paging that index costs almost nothing. Page it with ${toolName} ` +
+      `{"action":"status"} and expand what the current task needs with ${toolName} ` +
+      '{"action":"expand","id":"<fold-id>"}.';
+  }
+  if (milestone === "notice") {
+    return `Context is ${percent}% full; curate it against the task you are on now. Fold the spans that task ` +
+      `no longer needs with ${toolName} ` +
+      '{"action":"fold","ids":["<start>","<end>"],"brief":"<factual brief>"}, and keep what must stay raw out ' +
+      `of every fold with ${toolName} {"action":"protect","ids":["<entry-id>"]}.`;
+  }
+  if (milestone === "tools") {
+    return "Completed read-only tool batches are the cheapest thing to fold, and their endpoint ids are in the " +
+      "live advisory. Fold the batches whose detail this task is finished with; each one expands back to the " +
+      `exact entries later with ${toolName} {"action":"expand","id":"<fold-id>"}.`;
+  }
+  return "Fold up: hand two or more adjacent folds of finished work to " +
+    `${toolName} {"action":"fold","ids":["<fold-id>","<fold-id>"],"brief":"<factual brief>"} so they nest in ` +
+    "one deeper fold, leaving the oldest material deepest and still exactly recoverable. A closed chapter " +
+    `folds first, from the eligibleChapter endpoints in ${toolName} {"action":"status"}.`;
+}
+
 export function milestoneText(
   milestone: AdvisoryMilestone,
   sessionId: string,
   threshold: number,
   toolName: string,
   brandNoun = DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
+  guidance: GuidanceProfile = DEFAULT_GUIDANCE_PROFILE,
 ): string {
   const percent = Math.round(threshold * 100);
   const prefix = `[${contextBrand(brandNoun)} milestone ${milestone}; session ${sessionId.slice(0, 16)}]`;
+  if (guidance === "curation" && milestone !== "urgent") {
+    return `${prefix} ${curationText(milestone, percent, toolName)}`;
+  }
   if (milestone === "notice") {
     return `${prefix} Context pressure has crossed ${percent}%. Automatic folding is available. ` +
       `Inspect candidates exactly with ${toolName} {"action":"status"}.`;

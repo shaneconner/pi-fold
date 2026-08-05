@@ -10,6 +10,7 @@ import {
   clearArmedAdvisory,
   liveAdvisoryText,
   milestoneText,
+  normalizeGuidanceProfile,
   updateAdvisoryMilestone,
 } from "./lib/advisory.ts";
 import {
@@ -97,6 +98,7 @@ import type {
   FoldCandidate,
   FoldKind,
   FoldRecordEntry,
+  GuidanceProfile,
   PreparedFold,
 } from "./lib/policy.ts";
 import {
@@ -132,6 +134,7 @@ export function registerActiveContext(pi: any, options: {
   commandNames?: { status?: string; fold?: string };
   readOnlyTools?: ReadonlySet<string>;
   blockingTools?: readonly string[];
+  guidance?: GuidanceProfile;
 }): { projectionCandidates: (ctx: any) => Array<Record<string, unknown>> } {
   const toolName = options.toolName ?? DEFAULT_ACTIVE_CONTEXT_TOOL_NAME;
   const toolLabel = options.toolLabel ?? DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL;
@@ -139,6 +142,7 @@ export function registerActiveContext(pi: any, options: {
   const entryTypePrefix = options.entryTypePrefix ?? DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX;
   const commandPrefix = options.commandPrefix ?? "";
   const readOnlyTools = options.readOnlyTools ?? READ_ONLY_TOOLS_DEFAULT;
+  const guidance = normalizeGuidanceProfile(options.guidance);
   if (!toolName || !toolLabel || !brandNoun || !entryTypePrefix || typeof commandPrefix !== "string" ||
       (commandPrefix && !/^[a-z0-9-]+$/.test(commandPrefix)) ||
       [...readOnlyTools].some((name) => typeof name !== "string" || !name)) {
@@ -1040,7 +1044,9 @@ export function registerActiveContext(pi: any, options: {
     projected.push({
       role: "custom",
       customType: milestoneProjectionType,
-      content: milestoneText(armed.milestone, persistence.state!.sessionId, armed.threshold, toolName, brandNoun),
+      content: milestoneText(
+        armed.milestone, persistence.state!.sessionId, armed.threshold, toolName, brandNoun, guidance,
+      ),
       display: false,
       details: { source: activeContextSource(entryTypePrefix), ephemeral: true, milestone: armed.milestone },
       timestamp: 0,
@@ -1381,7 +1387,7 @@ export function registerActiveContext(pi: any, options: {
     if (!persistence.state) return false;
     const ratio = contextUsageRatio(measurement);
     if (ratio === null) return false;
-    const schedule = advisorySchedule(snapshot);
+    const schedule = advisorySchedule(snapshot, guidance);
     const scheduleKey = sha256Value({
       schedule: schedule.key,
       provider: measurement.provider,
@@ -1732,7 +1738,7 @@ export function registerActiveContext(pi: any, options: {
       if (detail !== undefined && detail !== "fold_candidates") {
         throw new Error("status detail must be 'fold_candidates'");
       }
-      const schedule = advisorySchedule(snapshot);
+      const schedule = advisorySchedule(snapshot, guidance);
       return toolPayload({
         ...activeContextStatus(
           snapshot,
