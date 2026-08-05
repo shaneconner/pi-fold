@@ -2867,7 +2867,8 @@ async function gateEphemeralPeekMark() {
   const marks = context.ephemeralPeekMarks({ snapshot, state, ordinal: 1 });
   assert.equal(marks.length, 1, "The completed peek read was not marked for the next epoch");
   assert.equal(marks[0].kind, "tool-result");
-  assert.equal(marks[0].origin, "ladder");
+  // A peek is agent-initiated, so its disposal is an agent mark, not a ladder one.
+  assert.equal(marks[0].origin, "agent");
   assert.equal(marks[0].parts.length, 1);
   assert.equal(marks[0].parts[0].ref.entryId, built.turnEntries[0][2]);
 
@@ -2911,12 +2912,16 @@ async function gateEphemeralPeekMark() {
   await startRuntime(runtime);
   const committed = await toolCall(runtime, { action: "commit" });
   assert.equal(committed.details.applied.length, 1);
-  assert.equal(committed.details.applied[0].origin, "ladder");
+  assert.equal(committed.details.applied[0].origin, "agent");
+  assert.equal(committed.details.agentMarks, 1);
+  assert.equal(committed.details.ladderMarks, 0);
+  assert.equal(committed.details.peekMarks, 1);
   const folded = materialized(runtime);
   assert.equal(folded.folds.length, 1);
   assert.equal(folded.folds[0].kind, "tool-result");
   return {
     peekMarks: marks.length,
+    peekMarkOrigin: marks[0].origin,
     expandedPeekExempt: true,
     immediateModePeekMarks: 0,
     autoFoldedOnCommit: committed.details.applied.length,

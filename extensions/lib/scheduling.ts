@@ -351,7 +351,9 @@ export function ephemeralPeekMarks(input: {
       candidate,
       brief: automaticToolBrief(snapshot, candidate),
       briefProvenance: { kind: "deterministic" },
-      origin: "ladder",
+      // A peek is an agent-initiated read; attributing its disposal to the ladder
+      // would deflate the agent-vs-ladder mark ratio the adjudication reads.
+      origin: "agent",
       ordinal: input.ordinal,
     }));
   }
