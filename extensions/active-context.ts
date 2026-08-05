@@ -1,163 +1,24 @@
-import type { EvidenceRef } from "./json.ts";
 import {
   denseOwnArrayValues,
-  evidenceRef,
-  evidenceSha256,
-  evidenceValue,
-  isObjectRef,
-  isPlainRecord,
   objectRefKey,
-  sameObjectIdentity,
-  sha256Text,
   sha256Value,
   stableStringify,
 } from "./json.ts";
-
 import {
-  ACTIVE_CONTEXT_FOLD_RECORD_ENTRY,
-  ACTIVE_CONTEXT_POLICY,
-  ACTIVE_CONTEXT_STATE_ENTRY,
-  ACTIVE_CONTEXT_STATUS_KEY,
-  ACTIVE_CONTEXT_TOOL_ACTIONS,
-  BYTES_PER_TOKEN_FLOOR,
-  CONSOLIDATION_WIDTH_THRESHOLD,
-  DEFAULT_CONTEXT_WINDOW,
-  EXPAND_LEASE_GENERATIONS,
-  MAX_ADVISORY_DELIVERIES_PER_MILESTONE,
-  MAX_EXPAND_LEASES,
-  NATIVE_COMPACTION_DECISION_ENTRY,
-  NATIVE_COMPACTION_RECEIPT_ENTRY,
-  PROVIDER_CONTEXT_MEASUREMENT_ENTRY,
-  READ_ONLY_TOOLS_DEFAULT,
-  TOOL_FOLD_CADENCE_MIN_TOKENS,
-  TOOL_FOLD_CADENCE_WINDOW_FRACTION,
-  USER_RESCUE_MAX_SOURCE_CHARS,
-} from "./lib/policy.ts";
-import type {
-  ActiveContextCheckpointV2,
-  ActiveContextDeltaV2,
-  ActiveContextSnapshot,
-  ActiveContextState,
-  ActiveContextStateWireV2,
-  ActiveContextToolAction,
-  ActiveFold,
-  AdvisoryMilestone,
-  BranchObject,
-  BriefProvenance,
-  CompleteTurn,
-  FoldCandidate,
-  FoldKind,
-  FoldPart,
-  FoldRecordEntry,
-  FoldRecordRef,
-  MappedMessage,
-  PreparedFold,
-} from "./lib/policy.ts";
-
-export * from "./lib/policy.ts";
+  advisorySchedule,
+  advisoryState,
+  clearArmedAdvisory,
+  liveAdvisoryText,
+  milestoneText,
+  updateAdvisoryMilestone,
+} from "./lib/advisory.ts";
 import {
   bytes,
   clone,
-  contentText,
   emptyActiveContextState,
-  exactRecord,
-  messageRole,
   ownValue,
-  sessionEntryMessages,
-  structurallyValidBrief,
   uniqueMessageDigestAnchor,
-  usefulBrief,
 } from "./lib/canonical.ts";
-
-export * from "./lib/canonical.ts";
-import {
-  ADVISORY_BUDGETS,
-  ADVISORY_MILESTONES,
-  childFoldIds,
-  clearPrepared,
-  deriveFoldParents,
-  flattenFoldRefs,
-  foldIdFor,
-  foldMap,
-  makeFoldRecordEntry,
-  makeStateCheckpoint,
-  makeStateDelta,
-  MAX_ACTIVE_FOLD_RECORDS,
-  materializeStatePersistence,
-  normalizeFoldsForPersistedRecords,
-  normalizeLegacyProvenance,
-  normalizedPart,
-  parseActiveContextState,
-  protectionSha256,
-  sameStateProjection,
-  semanticStateSha256,
-  topologySha256,
-  validAdvisoryState,
-  validateFoldForest,
-} from "./lib/persistence.ts";
-import type { MaterializedStatePersistence } from "./lib/persistence.ts";
-
-export * from "./lib/persistence.ts";
-import {
-  chapterSegments,
-  mapActiveContext,
-  scanTurnToolBatches,
-  structurallyClosedChapterUnits,
-  terminalAssistant,
-} from "./lib/transcript.ts";
-import type { ChapterUnit } from "./lib/transcript.ts";
-
-export * from "./lib/transcript.ts";
-import {
-  automatic_PLACEHOLDER,
-  boundReceiptText,
-  branchSha256,
-  contextUsageRatio,
-  contextWindowFor,
-  exactMapped,
-  explicitProtectedKeys,
-  foldInterval,
-  hardFenceRatio,
-  latestProviderContextMeasurement,
-  orderedRoots,
-  parseNativeCompactionCompletion,
-  parseNativeCompactionDecision,
-  parseProviderContextMeasurementReceipt,
-  persistenceProjection,
-  providerContextMeasurement,
-  refsInOrder,
-  refsProtected,
-  stringIds,
-  toolFoldCadence,
-  toolPayload,
-  toolRefsProtected,
-  visibleCollapsedRoots,
-  boundedInteger,
-} from "./lib/measurement.ts";
-import type {
-  NativeCompactionCompletionReceipt,
-  NativeCompactionDecisionReceipt,
-  ProviderContextMeasurement,
-  ProviderMeasurementAnchor,
-} from "./lib/measurement.ts";
-
-export * from "./lib/measurement.ts";
-import {
-  automaticToolBrief,
-  candidateSourceRefs,
-  chapterUnits,
-  deterministicChapterCandidateBrief,
-  deterministicConsolidationBrief,
-  manualFoldCandidate,
-  partsForRange,
-  resultCall,
-  selectAutomaticConsolidation,
-  selectAutomaticRefold,
-  selectAutomaticToolBatch,
-  selectAutomaticToolForRung,
-} from "./lib/selection.ts";
-
-export * from "./lib/selection.ts";
 import {
   activeContextStatus,
   automaticPreparationId,
@@ -175,141 +36,83 @@ import {
   setFoldProjectionState,
   withExpandLease,
 } from "./lib/folding.ts";
+import {
+  boundReceiptText,
+  boundedInteger,
+  contextUsageRatio,
+  contextWindowFor,
+  hardFenceRatio,
+  latestProviderContextMeasurement,
+  orderedRoots,
+  parseNativeCompactionCompletion,
+  parseNativeCompactionDecision,
+  parseProviderContextMeasurementReceipt,
+  persistenceProjection,
+  providerContextMeasurement,
+  stringIds,
+  toolPayload,
+} from "./lib/measurement.ts";
+import type {
+  NativeCompactionCompletionReceipt,
+  NativeCompactionDecisionReceipt,
+  ProviderContextMeasurement,
+  ProviderMeasurementAnchor,
+} from "./lib/measurement.ts";
+import {
+  clearPrepared,
+  makeFoldRecordEntry,
+  makeStateCheckpoint,
+  makeStateDelta,
+  MAX_ACTIVE_FOLD_RECORDS,
+  materializeStatePersistence,
+  normalizeFoldsForPersistedRecords,
+  normalizeLegacyProvenance,
+  protectionSha256,
+  sameStateProjection,
+  semanticStateSha256,
+  topologySha256,
+} from "./lib/persistence.ts";
+import type { MaterializedStatePersistence } from "./lib/persistence.ts";
+import {
+  ACTIVE_CONTEXT_POLICY,
+  ACTIVE_CONTEXT_STATUS_KEY,
+  ACTIVE_CONTEXT_TOOL_ACTIONS,
+  DEFAULT_CONTEXT_WINDOW,
+  NATIVE_COMPACTION_DECISION_ENTRY,
+  NATIVE_COMPACTION_RECEIPT_ENTRY,
+  PROVIDER_CONTEXT_MEASUREMENT_ENTRY,
+  READ_ONLY_TOOLS_DEFAULT,
+  USER_RESCUE_MAX_SOURCE_CHARS,
+} from "./lib/policy.ts";
+import type {
+  ActiveContextSnapshot,
+  ActiveContextState,
+  ActiveContextToolAction,
+  AdvisoryMilestone,
+  FoldCandidate,
+  FoldKind,
+  FoldRecordEntry,
+  PreparedFold,
+} from "./lib/policy.ts";
+import {
+  automaticToolBrief,
+  deterministicChapterCandidateBrief,
+  deterministicConsolidationBrief,
+  manualFoldCandidate,
+  selectAutomaticToolBatch,
+  selectAutomaticToolForRung,
+} from "./lib/selection.ts";
+import { mapActiveContext } from "./lib/transcript.ts";
 
+export * from "./lib/advisory.ts";
+export * from "./lib/canonical.ts";
 export * from "./lib/folding.ts";
+export * from "./lib/measurement.ts";
+export * from "./lib/persistence.ts";
+export * from "./lib/policy.ts";
+export * from "./lib/selection.ts";
+export * from "./lib/transcript.ts";
 
-
-interface AdvisorySchedule {
-  key: string;
-  rungs: Array<{ milestone: AdvisoryMilestone; threshold: number; budget: number }>;
-}
-
-function advisoryState(state: ActiveContextState): NonNullable<ActiveContextState["advisory"]> {
-  if (state.advisory === undefined) return { highWater: 0, delivered: {} };
-  if (!validAdvisoryState(state.advisory)) {
-    throw new Error("Corrupt in-memory advisory state (no silent fallback)");
-  }
-  return clone(state.advisory);
-}
-
-function clearArmedAdvisory(state: ActiveContextState): ActiveContextState {
-  const current = advisoryState(state);
-  if (!current.armed) return state;
-  const { armed: _armed, ...advisory } = current;
-  return { ...state, advisory };
-}
-
-export function advisorySchedule(
-  snapshot: Pick<ActiveContextSnapshot, "policy" | "contextWindow">,
-): AdvisorySchedule {
-  const raw = [
-    { milestone: "notice" as const, threshold: 0.50, budget: ADVISORY_BUDGETS.notice },
-    { milestone: "tools" as const, threshold: snapshot.policy.toolFoldRatio - 0.04,
-      budget: ADVISORY_BUDGETS.tools },
-    { milestone: "chapters" as const, threshold: snapshot.policy.prepareRatio - 0.05,
-      budget: ADVISORY_BUDGETS.chapters },
-    { milestone: "urgent" as const, threshold: hardFenceRatio(snapshot) - 0.03,
-      budget: ADVISORY_BUDGETS.urgent },
-  ];
-  for (let index = raw.length - 2; index >= 0; index -= 1) {
-    raw[index].threshold = Math.min(raw[index].threshold, raw[index + 1].threshold - 0.02);
-  }
-  for (const rung of raw) rung.threshold = Math.max(0, Math.min(1, rung.threshold));
-  return {
-    key: sha256Value(raw.map(({ milestone, threshold }) => ({ milestone, threshold }))),
-    rungs: raw,
-  };
-}
-
-function updateAdvisoryMilestone(
-  currentState: ActiveContextState,
-  ratio: number,
-  schedule: AdvisorySchedule,
-  scheduleChanged: boolean,
-  scheduleKey: string,
-): { state: ActiveContextState; milestone: AdvisoryMilestone | null } {
-  const current = advisoryState(currentState);
-  if (scheduleChanged) {
-    return {
-      state: { ...currentState, advisory: { ...current, highWater: Math.min(1, ratio) } },
-      milestone: null,
-    };
-  }
-  let highWater = current.highWater;
-  for (let index = schedule.rungs.length - 1; index >= 0; index -= 1) {
-    const rung = schedule.rungs[index];
-    if ((current.delivered[rung.milestone] ?? 0) > 0 && ratio < 0.85 * rung.threshold) {
-      highWater = Math.min(highWater, index > 0 ? schedule.rungs[index - 1].threshold : 0);
-    }
-  }
-  const crossed = schedule.rungs.filter((rung) =>
-    highWater < rung.threshold && ratio >= rung.threshold &&
-    (current.delivered[rung.milestone] ?? 0) < rung.budget);
-  const selected = crossed.at(-1) ?? null;
-  const delivered = { ...current.delivered };
-  if (selected) delivered[selected.milestone] = (delivered[selected.milestone] ?? 0) + 1;
-  const armed = selected
-    ? { milestone: selected.milestone, threshold: selected.threshold, scheduleKey }
-    : current.armed;
-  return {
-    state: {
-      ...currentState,
-      advisory: {
-        highWater: Math.min(1, Math.max(highWater, ratio)),
-        delivered,
-        ...(armed ? { armed } : {}),
-      },
-    },
-    milestone: selected?.milestone ?? null,
-  };
-}
-
-function milestoneText(
-  milestone: AdvisoryMilestone,
-  sessionId: string,
-  threshold: number,
-  toolName: string,
-): string {
-  const percent = Math.round(threshold * 100);
-  const prefix = `[Quorum context milestone ${milestone}; session ${sessionId.slice(0, 16)}]`;
-  if (milestone === "notice") {
-    return `${prefix} Context pressure has crossed ${percent}%. Automatic folding is available. ` +
-      `Inspect candidates exactly with ${toolName} {"action":"status"}.`;
-  }
-  if (milestone === "tools") {
-    return `${prefix} The read-only tool-fold rung begins at ${percent}%. ` +
-      "Eligible completed tool batches can be folded now; current endpoint ids are in the live advisory.";
-  }
-  if (milestone === "chapters") {
-    return `${prefix} The chapter preparation rung begins at ${percent}%. ` +
-      `Use eligibleChapter endpoints with ${toolName} ` +
-      '{"action":"fold","ids":["<start>","<end>"],"brief":"<factual brief>"}.';
-  }
-  return `${prefix} The hard context fence is near. The next automatic action is a committed chapter fold ` +
-    "or the provider request is aborted before transmission.";
-}
-
-function liveAdvisoryText(input: {
-  milestone: AdvisoryMilestone;
-  ratio: number;
-  toolEndpoints: string[];
-  chapterEndpoints: string[];
-  remediationCount: number;
-}): string {
-  const tools = input.toolEndpoints.length
-    ? input.toolEndpoints.slice(0, 3).join(", ")
-    : "none";
-  const chapter = input.chapterEndpoints.length
-    ? `${input.chapterEndpoints[0]}..${input.chapterEndpoints.at(-1)}`
-    : "none";
-  return boundReceiptText(
-    `[Quorum context advisory] pressure ${Math.round(input.ratio * 100)}%; milestone ${input.milestone}; ` +
-      `eligible read-only batch endpoints: ${tools}; eligibleChapter endpoints: ${chapter}; ` +
-      `session milestone count: ${input.remediationCount}.`,
-    2_048,
-    "[Quorum context advisory] Live pressure details are unavailable.",
-  );
-}
 
 export function registerActiveContext(pi: any, options: {
   summarizeContextSpan?: (request: Record<string, unknown>, ctx: unknown) => Promise<Record<string, unknown>>;

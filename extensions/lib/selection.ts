@@ -2,12 +2,9 @@ import type { EvidenceRef } from "../json.ts";
 import {
   denseOwnArrayValues,
   objectRefKey,
-  sha256Value,
-  stableStringify,
 } from "../json.ts";
 import {
   bytes,
-  clone,
   contentText,
   messageRole,
   ownValue,
@@ -24,7 +21,6 @@ import {
   visibleCollapsedRoots,
 } from "./measurement.ts";
 import {
-  candidate_PLACEHOLDER,
   flattenFoldRefs,
   foldMap,
 } from "./persistence.ts";

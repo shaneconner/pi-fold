@@ -33,6 +33,9 @@ import type {
 } from "./policy.ts";
 
 export { protectionSha256, topologySha256 } from "./persistence.ts";
+export { clone } from "./canonical.ts";
+export { sha256Value } from "../json.ts";
+export { ADVISORY_BUDGETS, validAdvisoryState } from "./persistence.ts";
 
 export const MAPPED_BY_KEY = new WeakMap<ActiveContextSnapshot, Map<string, MappedMessage>>();
 

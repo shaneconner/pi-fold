@@ -65,7 +65,6 @@ import {
   resultCall,
   selectAutomaticConsolidation,
   selectAutomaticRefold,
-  selectAutomaticToolBatch,
   selectAutomaticToolForRung,
 } from "./selection.ts";
 
