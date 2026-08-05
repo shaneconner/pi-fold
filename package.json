@@ -3,6 +3,10 @@
   "version": "0.1.0-dev.0",
   "description": "Lossless, agent-governed context folding for the Pi coding agent — only the oldest context changes; the fresh window stays untouched.",
   "type": "module",
+  "exports": {
+    ".": "./extensions/index.js",
+    "./package.json": "./package.json"
+  },
   "private": false,
   "repository": "https://github.com/shaneconner/pi-fold",
   "bugs": "https://github.com/shaneconner/pi-fold/issues",
