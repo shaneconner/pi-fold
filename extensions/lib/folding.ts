@@ -734,22 +734,7 @@ export function renderFold(
       timestamp: typeof first?.timestamp === "number" ? first.timestamp : 0,
     }];
   }
-  const byId = foldMap(state);
-  const output: unknown[] = [];
-  for (const part of fold.parts) {
-    if (part.kind === "raw") {
-      const item = exactMapped(snapshot, part.ref);
-      if (!item) return null;
-      output.push(clone(item.message));
-    } else {
-      const child = byId.get(part.foldId);
-      if (!child) return null;
-      const rendered = renderFold(child, state, snapshot);
-      if (!rendered) return null;
-      output.push(...rendered);
-    }
-  }
-  return output;
+  return renderFoldParts(fold.parts, state, snapshot);
 }
 
 export interface ToolLinkageCount {
