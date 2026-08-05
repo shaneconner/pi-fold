@@ -9,6 +9,7 @@ import {
   stableStringify,
 } from "../json.ts";
 import {
+  boundedUtf8,
   bytes,
   clone,
   messageRole,
@@ -41,6 +42,7 @@ import {
   validateFoldForest,
 } from "./persistence.ts";
 import {
+  ACTIVE_CONTEXT_POLICY,
   activeContextBrand,
   activeContextSource,
   CONSOLIDATION_WIDTH_THRESHOLD,
@@ -849,14 +851,8 @@ export function foldStatusRow(fold: ActiveFold, state: ActiveContextState, snaps
   };
 }
 
-export function activeContextStatus(
-  snapshot: ActiveContextSnapshot,
-  state: ActiveContextState,
-  offset = 0,
-  limit = 40,
-  maximumChapterSourceRefs = Number.MAX_SAFE_INTEGER,
-): Record<string, unknown> {
-  const roots = orderedRoots(state, snapshot).map((item) => item.fold.id);
+/** Every fold, nested ones included, in transcript order with each parent before its children. */
+export function orderedFoldTree(state: ActiveContextState, snapshot: ActiveContextSnapshot): ActiveFold[] {
   const byId = foldMap(state);
   const ordered: ActiveFold[] = [];
   const seen = new Set<string>();
@@ -867,7 +863,42 @@ export function activeContextStatus(
     ordered.push(fold);
     for (const child of childFoldIds(fold)) visit(child);
   };
-  for (const root of roots) visit(root);
+  for (const root of orderedRoots(state, snapshot)) visit(root.fold.id);
+  return ordered;
+}
+
+export function foldDepth(state: ActiveContextState, fold: ActiveFold): number {
+  const byId = foldMap(state);
+  let depth = 0;
+  for (let parentId = fold.parentId; parentId; parentId = byId.get(parentId)?.parentId ?? null) depth += 1;
+  return depth;
+}
+
+export function foldTreeDetail(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+): Array<Record<string, unknown>> {
+  return orderedFoldTree(state, snapshot).map((fold) => ({
+    id: fold.id,
+    kind: fold.kind,
+    depth: foldDepth(state, fold),
+    parentId: fold.parentId,
+    brief: fold.brief,
+    sourceCount: flattenFoldRefs(fold, state).length,
+    state: state.expanded.includes(fold.id) ? "expanded" : "folded",
+    peekable: true,
+  }));
+}
+
+export function activeContextStatus(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+  offset = 0,
+  limit = 40,
+  maximumChapterSourceRefs = Number.MAX_SAFE_INTEGER,
+): Record<string, unknown> {
+  const roots = orderedRoots(state, snapshot).map((item) => item.fold.id);
+  const ordered = orderedFoldTree(state, snapshot);
   const selected = ordered.slice(offset, offset + limit);
   const protectedKeys = explicitProtectedKeys(state);
   const objects = snapshot.mapped.flatMap((item) => item.ref ? [{
@@ -1009,4 +1040,52 @@ export function recoverFoldMessages(input: {
     }
     return clone(message);
   });
+}
+
+/**
+ * Ephemeral point read of one fold's exact source at any depth. It recovers the same
+ * SHA-256-verified messages expansion restores, bounded for the reply, and changes no
+ * projection: the fold stays collapsed and the durable state is untouched.
+ */
+export function peekFoldSource(input: {
+  foldId: string;
+  state: ActiveContextState;
+  entries: Array<Record<string, unknown>>;
+  sessionId: string;
+  maximumBytes?: number;
+  projectEntry?: (entry: Record<string, unknown>) => unknown[];
+}): Record<string, unknown> {
+  const fold = input.state.folds.find((item) => item.id === input.foldId);
+  if (!fold) throw new Error(`Unknown active-context fold ${input.foldId}`);
+  const messages = recoverFoldMessages({
+    foldId: input.foldId,
+    state: input.state,
+    entries: input.entries,
+    sessionId: input.sessionId,
+    projectEntry: input.projectEntry,
+  });
+  const source = stableStringify(messages);
+  const sourceBytes = bytes(source);
+  const returned = boundedUtf8(source, input.maximumBytes ?? ACTIVE_CONTEXT_POLICY.maxChapterChars);
+  const returnedBytes = bytes(returned);
+  const truncated = returnedBytes < sourceBytes;
+  return {
+    version: 1,
+    action: "peek",
+    id: fold.id,
+    kind: fold.kind,
+    parentId: fold.parentId,
+    depth: foldDepth(input.state, fold),
+    brief: fold.brief,
+    sourceCount: messages.length,
+    sourceSha256: fold.sourceSha256,
+    sourceBytes,
+    returnedBytes,
+    truncated,
+    note: truncated
+      ? `Truncated: this reply carries the first ${returnedBytes} of ${sourceBytes} exact source bytes; ` +
+        `expand ${fold.id} to restore the complete source in place.`
+      : "Complete exact source; the fold stayed collapsed and no projection changed.",
+    source: returned,
+  };
 }

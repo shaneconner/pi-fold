@@ -15,6 +15,14 @@ export function bytes(value: unknown): number {
   return Buffer.byteLength(typeof value === "string" ? value : stableStringify(value), "utf8");
 }
 
+export function boundedUtf8(text: string, maximumBytes: number): string {
+  const buffer = Buffer.from(text, "utf8");
+  if (buffer.length <= maximumBytes) return text;
+  // A multi-byte sequence cut by the bound decodes to one trailing replacement
+  // character; dropping it keeps the slice an exact prefix of the source.
+  return buffer.subarray(0, maximumBytes).toString("utf8").replace(/\uFFFD$/, "");
+}
+
 export function ownValue(value: unknown, key: string): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const descriptor = Object.getOwnPropertyDescriptor(value, key);

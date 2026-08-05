@@ -2031,6 +2031,121 @@ async function gateGuidanceProfiles() {
   };
 }
 
+async function gatePeekAndFoldIndex() {
+  const forest = await chapterForest(2);
+  const chapterIds = forest.state.folds.filter((fold) => fold.parentId === null).map((fold) => fold.id);
+  const consolidated = await commitCandidate(
+    forest.state,
+    forest.snapshot,
+    context.manualFoldCandidate(forest.snapshot, forest.state, chapterIds),
+    { brief: "Grouped two complete chapters whose exact sources stay recoverable at depth.", now: 9 },
+  );
+  const consolidationId = consolidated.prepared.id;
+  const childId = chapterIds[0];
+  const runtime = makeRuntime(forest, { initialEntries: [
+    ...forest.entries,
+    stateEntry(forest.sessionId, consolidated.state, "peek-state", forest.entries.at(-1).id),
+  ] });
+  await startRuntime(runtime);
+  const seeded = materialized(runtime);
+  const projectionBefore = json.stableStringify(context.projectActiveContext(forest.snapshot, seeded));
+  const branchBefore = json.stableStringify(runtime.branch);
+  const appendedBefore = runtime.appended.length;
+  assert(projectionBefore.includes(consolidationId));
+  assert.equal(projectionBefore.includes(childId), false);
+
+  const peek = await runtime.tools.get("active_context").execute(
+    "peek-nested",
+    { action: "peek", id: childId },
+    new AbortController().signal,
+    undefined,
+    runtime.ctx,
+  );
+  const afterPeek = materialized(runtime);
+  assert.equal(afterPeek.revision, seeded.revision);
+  assert.deepEqual(afterPeek.expanded, seeded.expanded);
+  assert.equal(json.stableStringify(context.projectActiveContext(forest.snapshot, afterPeek)), projectionBefore);
+  assert.equal(json.stableStringify(runtime.branch), branchBefore);
+  assert.equal(runtime.appended.length, appendedBefore);
+
+  const childFold = seeded.folds.find((fold) => fold.id === childId);
+  const restored = context.renderFold(
+    childFold,
+    { ...seeded, expanded: [consolidationId, childId] },
+    forest.snapshot,
+  );
+  assert.equal(peek.details.source, json.stableStringify(restored));
+  assert.equal(peek.details.sourceCount, restored.length);
+  assert.equal(peek.details.truncated, false);
+  assert.equal(peek.details.depth, 1);
+  assert.equal(peek.details.parentId, consolidationId);
+  assert.equal(peek.details.sourceSha256, childFold.sourceSha256);
+
+  const big = makeFixture({
+    turns: 3,
+    resultChars: 150_000,
+    policy: { freshTurns: 1, freshBytes: 0, minToolChars: 100 },
+    contextWindow: 1_000_000,
+  });
+  const emptyBig = context.emptyActiveContextState(big.sessionId);
+  const [batch] = context.selectAutomaticToolBatch(big.snapshot, emptyBig, 0.80);
+  const oversized = await commitCandidate(emptyBig, big.snapshot, batch, {
+    brief: context.automaticToolBrief(big.snapshot, batch),
+  });
+  const peekArguments = {
+    foldId: oversized.prepared.id,
+    state: oversized.state,
+    entries: big.entries,
+    sessionId: big.sessionId,
+  };
+  const bounded = context.peekFoldSource(peekArguments);
+  const complete = json.stableStringify(context.recoverFoldMessages(peekArguments));
+  assert.equal(bounded.truncated, true);
+  assert.equal(bounded.sourceBytes, Buffer.byteLength(complete, "utf8"));
+  assert(bounded.sourceBytes > context.ACTIVE_CONTEXT_POLICY.maxChapterChars);
+  assert.equal(bounded.returnedBytes, context.ACTIVE_CONTEXT_POLICY.maxChapterChars);
+  assert.equal(bounded.source, complete.slice(0, bounded.source.length));
+  assert(bounded.note.startsWith("Truncated:"));
+  assert(bounded.note.includes(String(bounded.sourceBytes)));
+
+  const tree = (await toolStatus(runtime, "active_context", "tree")).details.tree;
+  assert.deepEqual(tree.map((row) => [row.id, row.depth, row.parentId, row.state, row.peekable]), [
+    [consolidationId, 0, null, "folded", true],
+    [chapterIds[0], 1, consolidationId, "folded", true],
+    [chapterIds[1], 1, consolidationId, "folded", true],
+  ]);
+  assert(tree.every((row) => row.brief && row.sourceCount > 0 && row.kind));
+  assert.deepEqual(
+    context.visibleCollapsedFolds(seeded, forest.snapshot).map((fold) => fold.id),
+    [consolidationId],
+  );
+  const plain = await toolStatus(runtime, "active_context");
+  assert.equal(plain.details.tree, undefined);
+  assert.equal(plain.details.totalFolds, 3);
+  const candidates = await toolStatus(runtime, "active_context", "fold_candidates");
+  assert.equal(candidates.details.tree, undefined);
+  assert(candidates.details.candidates);
+
+  await assert.rejects(() => runtime.tools.get("active_context").execute(
+    "peek-unknown",
+    { action: "peek", id: "no-such-fold" },
+    new AbortController().signal,
+    undefined,
+    runtime.ctx,
+  ), /Unknown active-context fold/);
+  return {
+    peekedDepth: peek.details.depth,
+    peekedParent: peek.details.parentId === consolidationId,
+    exactSourceMatchesExpansion: true,
+    revisionUnchanged: afterPeek.revision === seeded.revision,
+    boundedReturnedBytes: bounded.returnedBytes,
+    boundedTotalBytes: bounded.sourceBytes,
+    treeDepths: tree.map((row) => row.depth),
+    visibleRoots: 1,
+    unknownIdRejected: true,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -2056,6 +2171,7 @@ const gates = [
   [22, "Evidence ingestion switch", gateEvidenceIngestionSwitch],
   [23, "Summarizer option", gateSummarizerOption],
   [24, "Guidance profiles", gateGuidanceProfiles],
+  [25, "Peek and fold index", gatePeekAndFoldIndex],
 ];
 
 let failures = 0;

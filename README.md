@@ -1,6 +1,6 @@
 # pi-fold
 
-pi-fold lets a Pi agent govern its own context window. The registered `active_context` tool gives the session's agent six actions over its transcript: `status`, `fold`, `expand`, `refold`, `protect`, and `unprotect`. Folding is lossless: a fold replaces a stale span with a short brief while keeping SHA-256-verified references to every original entry, so any fold can be expanded back to its exact source. Advisory milestones tell the agent what is eligible as measured context pressure rises; the agent decides what stays hot, what folds, and what is pinned.
+pi-fold lets a Pi agent govern its own context window. The registered `active_context` tool gives the session's agent seven actions over its transcript: `status`, `peek`, `fold`, `expand`, `refold`, `protect`, and `unprotect`. Folding is lossless: a fold replaces a stale span with a short brief while keeping SHA-256-verified references to every original entry, so any fold can be expanded back to its exact source. Advisory milestones tell the agent what is eligible as measured context pressure rises; the agent decides what stays hot, what folds, and what is pinned.
 
 When the agent does not act, an autonomous ladder manages the window the same lossless way: it folds completed read-only tool batches, folds structurally closed chapters, and consolidates existing folds into a hierarchy only past explicit thresholds. Only the oldest eligible context changes; the fresh window is never touched.
 
@@ -25,6 +25,8 @@ pi install npm:pi-fold
 pi-fold maps canonical session entries into a fold lattice. A fold replaces an eligible stale span with a short placeholder while retaining ordered references to the exact source entries. Expansion checks the stored SHA-256 identities before restoring that source.
 
 Collapsed folds double as a browsable index of earlier work. The briefs sit in the stable prefix of the window, which providers typically serve from cache, so the agent can page through them at little cost, note which spans matter to its current task, expand those, and leave the rest folded.
+
+The briefs are the index, and reading a fold is not the same as committing to it. `peek` is the ephemeral read: it returns one fold's exact SHA-256-verified source as a tool result, at any depth and with the ancestors still collapsed, without touching the projection; the content lands in the fresh window like any other read and can later fold away as a completed read batch. `expand` is the commitment, restoring that source in place until the fold is refolded, and `status` with `detail: "tree"` lists every fold, nested ones included, in transcript order with its depth and parent. Expansion is outside-in, level by level: expanding a parent reveals its children's briefs, each expandable in turn, and collapsing a parent re-collapses its descendants.
 
 The agent's own actions come first. Through the context tool it folds any structurally closed span it judges stale, folds completed tool batches, consolidates two or more adjacent folds into a deeper one at any time, expands any fold whose detail is needed again, and protects entries that must stay raw. None of the ladder's pressure or width thresholds apply to these actions.
 
@@ -62,7 +64,7 @@ The package entry calls `registerPiFold(pi)` with the defaults below. Hosts that
 | `summarizeContextSpan` | `undefined` | Optional async brief generator. Results must include a useful bounded brief, provider/model/effort attribution, and `toolCalls: 0`; failure uses the deterministic brief. |
 | `guidance` | `"pressure"` | Advisory wording profile: `"pressure"`, `"curation"` for task-relevance self-curation plus an early orientation advisory, or `"minimal"` for the urgent advisory alone. Rungs, thresholds, and budgets are the same in every profile. |
 | `setProjectionProvider` | `undefined` | Optional host callback that receives the [projection-candidate provider](#projection-candidate-records). Normal Pi context events do not require it. |
-| `toolActions` | all six actions | Replacement allowlist drawn from `status`, `fold`, `expand`, `refold`, `protect`, and `unprotect`. |
+| `toolActions` | all seven actions | Replacement allowlist drawn from `status`, `peek`, `fold`, `expand`, `refold`, `protect`, and `unprotect`. |
 | `blockingTools` | `["Agent"]` | Replacement list of tool names that trigger one opportunistic stale-tool fold before the call. Use `[]` to disable it. |
 | `readOnlyTools` | `new Set(["read", "grep", "find", "ls"])` | Replacement set of tool names whose completed batches may fold automatically. Defaults to Pi's built-in read-only tools. Pass a `ReadonlySet<string>`. |
 | `isMcpTool` | `() => false` | Synchronous predicate enabling evidence ingestion for oversized structured MCP results. Names shaped as `mcp__<server>__<tool>` project the actual server; other names use the neutral namespace derived from `entryTypePrefix`. |

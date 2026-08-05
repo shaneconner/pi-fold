@@ -40,7 +40,7 @@ export const NATIVE_COMPACTION_DECISION_ENTRY = `${DEFAULT_ENTRY_NAMESPACE}-nati
 export const PROVIDER_CONTEXT_MEASUREMENT_ENTRY = `${DEFAULT_ENTRY_NAMESPACE}-provider-context-measurement`;
 export const ACTIVE_CONTEXT_STATUS_KEY = DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX;
 export const ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
-  "status", "fold", "expand", "refold", "protect", "unprotect",
+  "status", "peek", "fold", "expand", "refold", "protect", "unprotect",
 ] as const);
 export type ActiveContextToolAction = typeof ACTIVE_CONTEXT_TOOL_ACTIONS[number];
 export const USER_RESCUE_MAX_SOURCE_CHARS = 512_000;
@@ -53,7 +53,7 @@ export const CONSOLIDATION_WIDTH_THRESHOLD = 10;
 export const MAX_ADVISORY_DELIVERIES_PER_MILESTONE = 16;
 
 // Conservative LOWER bound on UTF-8 bytes per provider token, used only to cap
-// the protected byte tail as a share of a small window — never to estimate usage.
+// the protected byte tail as a share of a small window; never to estimate usage.
 export const BYTES_PER_TOKEN_FLOOR = 2;
 
 export const ACTIVE_CONTEXT_POLICY = Object.freeze({

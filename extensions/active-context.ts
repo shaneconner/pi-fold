@@ -26,6 +26,8 @@ import {
   commitPreparedFold,
   encodedFoldSource,
   foldCandidatesDetail,
+  foldTreeDetail,
+  peekFoldSource,
   prepareFold,
   preparedFoldError,
   projectActiveContext,
@@ -1735,8 +1737,8 @@ export function registerActiveContext(pi: any, options: {
     const snapshot = authoritativeSnapshotFor(ctx);
     if (action === "status") {
       const detail = ownValue(params, "detail");
-      if (detail !== undefined && detail !== "fold_candidates") {
-        throw new Error("status detail must be 'fold_candidates'");
+      if (detail !== undefined && detail !== "fold_candidates" && detail !== "tree") {
+        throw new Error("status detail must be 'fold_candidates' or 'tree'");
       }
       const schedule = advisorySchedule(snapshot, guidance);
       return toolPayload({
@@ -1807,7 +1809,19 @@ export function registerActiveContext(pi: any, options: {
             failedPreparationIds: ladder.failedPreparations,
           }),
         } : {}),
+        ...(detail === "tree" ? { tree: foldTreeDetail(snapshot, persistence.state) } : {}),
       });
+    }
+    if (action === "peek") {
+      const id = String(params.id ?? "").trim();
+      if (!id) throw new Error("peek requires id");
+      return toolPayload(peekFoldSource({
+        foldId: id,
+        state: persistence.state,
+        entries: ctx.sessionManager.getEntries?.() ?? ctx.sessionManager.getBranch(),
+        sessionId: ctx.sessionManager.getSessionId(),
+        maximumBytes: snapshot.policy.maxChapterChars,
+      }));
     }
     if (action === "expand" || action === "refold") {
       const id = String(params.id ?? "").trim();

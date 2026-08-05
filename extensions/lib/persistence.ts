@@ -266,7 +266,7 @@ export function parseActiveContextState(
   }
   const leases = hasLeases ? parseLeases(ownValue(value, "leases"), ids) : {};
   const source = clone(value) as unknown as ActiveContextState;
-  // Provenance normalization is presentation-only — never mutate a durable
+  // Provenance normalization is presentation-only; never mutate a durable
   // content-addressed fold record: changing its bytes causes the next re-persist
   // to report a conflicting durable fold and suspend automatic management.
   return {
