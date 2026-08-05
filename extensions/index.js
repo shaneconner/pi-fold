@@ -2,11 +2,13 @@ import { registerActiveContext } from "./active-context.ts";
 import { registerEvidenceIngestion } from "./evidence.js";
 
 export function registerPiFold(pi, options = {}) {
-  const { isMcpTool, ...activeContextOptions } = options;
-  registerEvidenceIngestion(pi, {
-    isMcpTool,
-    entryTypePrefix: activeContextOptions.entryTypePrefix,
-  });
+  const { evidenceIngestion = true, isMcpTool, ...activeContextOptions } = options;
+  if (evidenceIngestion) {
+    registerEvidenceIngestion(pi, {
+      isMcpTool,
+      entryTypePrefix: activeContextOptions.entryTypePrefix,
+    });
+  }
   return registerActiveContext(pi, activeContextOptions);
 }
 

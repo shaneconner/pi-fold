@@ -20,6 +20,8 @@ pi-fold maps canonical session entries into a fold lattice. A fold replaces an e
 
 An autonomous ladder first folds completed read-only tool batches, then refolds or consolidates existing folds, and finally folds structurally closed chapters. Cadence and fresh-tail rules prevent repeated or premature folding. Chapter briefs are deterministic unless a configured summarizer returns a valid attributed result; summarizer failure falls back to the deterministic brief. Advisory milestones describe eligible actions as measured context pressure rises, and the provider-window fence blocks an unsafe request if no lossless fold can make room.
 
+By default, evidence ingestion writes read-only artifact files under the session directory's `pi-fold-evidence/`, sets them to mode `0444`, and enforces a 512 MB session cap. These immutable files provide exact-recovery anchors for oversized tool results. Set `evidenceIngestion: false` to disable the hook and all evidence writes.
+
 ## Configuration
 
 The package entry calls `registerPiFold(pi)` with the defaults below. Hosts that call the named `registerPiFold` export directly may pass an options object. Replacement lists and sets replace the defaults; they are not additive.
@@ -38,6 +40,7 @@ The package entry calls `registerPiFold(pi)` with the defaults below. Hosts that
 | `blockingTools` | `["Agent"]` | Replacement list of tool names that trigger one opportunistic stale-tool fold before the call. Use `[]` to disable it. |
 | `readOnlyTools` | `new Set(["read", "grep", "find", "ls"])` | Replacement set of tool names whose completed batches may fold automatically. Defaults to Pi's built-in read-only tools. Pass a `ReadonlySet<string>`. |
 | `isMcpTool` | `() => false` | Synchronous predicate enabling evidence ingestion for oversized structured MCP results. Names shaped as `mcp__<server>__<tool>` project the actual server; other names use the neutral namespace derived from `entryTypePrefix`. |
+| `evidenceIngestion` | `true` | Set to `false` to register no evidence-ingestion hook and write no evidence artifacts. |
 
 ## Development
 

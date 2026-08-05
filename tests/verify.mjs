@@ -185,6 +185,7 @@ function makeRuntime(built, {
   readOnlyTools,
   blockingTools,
   isMcpTool,
+  evidenceIngestion,
   packageRegistration = false,
   sessionFile = join(tmpdir(), "pi-fold-test-session.jsonl"),
 } = {}) {
@@ -267,6 +268,7 @@ function makeRuntime(built, {
     ...(readOnlyTools ? { readOnlyTools } : {}),
     ...(blockingTools ? { blockingTools } : {}),
     ...(isMcpTool ? { isMcpTool } : {}),
+    ...(evidenceIngestion === undefined ? {} : { evidenceIngestion }),
   };
   if (packageRegistration) piFold.registerPiFold(pi, registrationOptions);
   else context.registerActiveContext(pi, registrationOptions);
@@ -1664,6 +1666,30 @@ async function gateFreshTailShareCap() {
   };
 }
 
+async function gateEvidenceIngestionSwitch() {
+  const scratch = await mkdtemp(join(tmpdir(), "pi-fold-no-evidence-"));
+  try {
+    const sessionFile = join(scratch, "session.jsonl");
+    const runtime = makeRuntime(makeFixture({ turns: 4, resultChars: 20_000 }), {
+      packageRegistration: true,
+      sessionFile,
+      evidenceIngestion: false,
+      isMcpTool: () => true,
+    });
+    assert.equal(runtime.handlers.has("tool_result"), false);
+    await startRuntime(runtime);
+    assert.equal(existsSync(sessionFile), false);
+    assert.equal(existsSync(join(scratch, "pi-fold-evidence")), false);
+    return {
+      toolResultEvidenceHook: "absent",
+      sessionArtifact: "absent",
+      evidenceDirectory: "absent",
+    };
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -1686,6 +1712,7 @@ const gates = [
   [19, "Fresh-tail share cap", gateFreshTailShareCap],
   [20, "Neutral default branding", gateNeutralDefaultBranding],
   [21, "Legacy branding reproduction", gateLegacyBrandingReproduction],
+  [22, "Evidence ingestion switch", gateEvidenceIngestionSwitch],
 ];
 
 let failures = 0;
