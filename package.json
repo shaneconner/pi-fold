@@ -5,18 +5,31 @@
   "type": "module",
   "private": false,
   "repository": "https://github.com/shaneconner/pi-fold",
+  "bugs": "https://github.com/shaneconner/pi-fold/issues",
+  "homepage": "https://github.com/shaneconner/pi-fold#readme",
   "author": "Shane Conner",
   "license": "MIT",
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
+    "lint": "eslint . --max-warnings 0",
     "test": "node tests/verify.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.83.0 <1"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@stylistic/eslint-plugin": "^5.10.0",
+    "@typescript-eslint/parser": "^8.66.0",
+    "eslint": "^10.8.0",
+    "globals": "^17.9.0",
     "jiti": "^2.7.0"
   },
   "pi": {
