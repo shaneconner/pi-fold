@@ -655,8 +655,16 @@ export function materializeStatePersistence(
   return { state, wireVersion, records, stateSha256, projectionFingerprints };
 }
 
-export function materializeActiveContextState(entries: any[], sessionId: string): ActiveContextState {
-  return parseActiveContextState(materializeStatePersistence(entries, sessionId).state, sessionId);
+export function materializeActiveContextState(
+  entries: any[],
+  sessionId: string,
+  stateEntryType = ACTIVE_CONTEXT_STATE_ENTRY,
+  foldRecordEntryType = ACTIVE_CONTEXT_FOLD_RECORD_ENTRY,
+): ActiveContextState {
+  return parseActiveContextState(
+    materializeStatePersistence(entries, sessionId, stateEntryType, foldRecordEntryType).state,
+    sessionId,
+  );
 }
 
 export function makeFoldRecordEntry(fold: ActiveFold, sessionId: string): FoldRecordEntry {
