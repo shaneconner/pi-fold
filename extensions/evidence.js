@@ -603,7 +603,6 @@ export function registerEvidenceIngestion(pi, { isMcpTool = () => false } = {}) 
   });
 }
 
-// Register default Agent projector
 registerEvidenceProjector("Agent", async ({ event, ctx, sessionFile, sessionId, details, toolCallId }) => {
   const envelope = eventEnvelope(event);
   const serialized = `${stableStringify(envelope)}\n`;
