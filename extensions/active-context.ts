@@ -198,53 +198,88 @@ export function registerActiveContext(pi: any, options: {
     persistenceDisposition: "none" | "record-only" | "state-committed";
   };
 
-  let generation = 0;
-  let shuttingDown = false;
-  let state: ActiveContextState | null = null;
-  let persisted: ActiveContextState | null = null;
-  let latestSnapshot: ActiveContextSnapshot | null = null;
-  let latestSnapshotError: string | null = null;
-  let latestRatio: number | null = null;
-  let lastProviderMeasurement: ProviderContextMeasurement | null = null;
-  let pendingManual = false;
-  let preparing: { id: string; controller: AbortController; promise: Promise<void> } | null = null;
-  let lastThresholdDecision: Record<string, unknown> | null = null;
-  let pendingNativeReceipt: NativeCompactionCompletionReceipt | null = null;
-  let lastPreparationError: string | null = null;
-  let boundaryFailure: string | null = null;
-  let lastPreparationCandidateId: string | null = null;
-  let lastSelectionKind: FoldKind | "refold" | null = null;
-  let lastSelectionSourceIds: string[] = [];
-  let pendingContextNote: string | null = null;
-  let historicalGuidanceEntries = 0;
-  let armedMilestone: AdvisoryMilestone | null = null;
-  let advisoryScheduleKey: string | null = null;
-  let lastAutomaticAction: Record<string, unknown> | null = null;
-  let automaticFailure: AutomaticFailureState | null = null;
-  let hardFenceNoticeKey: string | null = null;
-  let hardFenceReleaseSessionId: string | null = null;
-  let blockingToolHarvestedThisTurn = false;
-  let blockingToolHarvestQueuedThisTurn = false;
-  const hardFenceReleasedProjectionKeys = new Set<string>();
-  const failedPreparations = new Set<string>();
-  let actionQueue = Promise.resolve<unknown>(undefined);
-  let persistenceQueue = Promise.resolve<void>(undefined);
-  let providerMeasurementQueue = Promise.resolve<void>(undefined);
-  const providerMeasurementReceipts = new Set<string>();
-  const providerMeasurementRevisionByMessageSha = new Map<string, number>();
-  const providerMeasurementByMessageSha = new Map<string, ProviderContextMeasurementReceipt>();
-  const providerMeasurementAnchorByMessageSha = new Map<string, ProviderMeasurementAnchor>();
-  let persistedWireVersion: 0 | 1 | 2 = 0;
-  let persistedStateSha256 = "";
-  let persistedFoldRecords = new Map<string, FoldRecordEntry>();
-  let nativeReceiptQueue = Promise.resolve<void>(undefined);
-  let contextQueue = Promise.resolve<void>(undefined);
+  // Owns in-memory/durable state and wire/record bookkeeping; persistenceQueue serializes it.
+  // Once the state event succeeds, replay owns this exact state; RAM may not roll behind it.
+  const persistence = {
+    state: null as ActiveContextState | null,
+    persisted: null as ActiveContextState | null,
+    persistedWireVersion: 0 as 0 | 1 | 2,
+    persistedStateSha256: "",
+    persistedFoldRecords: new Map<string, FoldRecordEntry>(),
+    persistenceQueue: Promise.resolve<void>(undefined),
+  };
+
+  // Owns preparation/ladder rollback, selection, and suspension; actionQueue serializes it.
+  const ladder = {
+    pendingManual: false,
+    preparing: null as { id: string; controller: AbortController; promise: Promise<void> } | null,
+    lastPreparationError: null as string | null,
+    boundaryFailure: null as string | null,
+    lastPreparationCandidateId: null as string | null,
+    lastSelectionKind: null as FoldKind | "refold" | null,
+    lastSelectionSourceIds: [] as string[],
+    pendingContextNote: null as string | null,
+    lastAutomaticAction: null as Record<string, unknown> | null,
+    automaticFailure: null as AutomaticFailureState | null,
+    failedPreparations: new Set<string>(),
+    actionQueue: Promise.resolve<unknown>(undefined),
+  };
+
+  // Owns provider receipts, anchors, and usage; providerMeasurementQueue serializes receipt writes.
+  const measurements = {
+    latestRatio: null as number | null,
+    lastProviderMeasurement: null as ProviderContextMeasurement | null,
+    providerMeasurementQueue: Promise.resolve<void>(undefined),
+    providerMeasurementReceipts: new Set<string>(),
+    providerMeasurementRevisionByMessageSha: new Map<string, number>(),
+    providerMeasurementByMessageSha: new Map<string, ProviderContextMeasurementReceipt>(),
+    providerMeasurementAnchorByMessageSha: new Map<string, ProviderMeasurementAnchor>(),
+  };
+
+  // Owns advisory arming and hard-fence delivery; durable effects use persistenceQueue.
+  const advisory = {
+    historicalGuidanceEntries: 0,
+    armedMilestone: null as AdvisoryMilestone | null,
+    advisoryScheduleKey: null as string | null,
+    hardFenceNoticeKey: null as string | null,
+    hardFenceReleaseSessionId: null as string | null,
+    hardFenceReleasedProjectionKeys: new Set<string>(),
+  };
+
+  // Owns native-compaction decisions and completion retry state; nativeReceiptQueue serializes it.
+  const nativeCompaction = {
+    lastThresholdDecision: null as Record<string, unknown> | null,
+    pendingNativeReceipt: null as NativeCompactionCompletionReceipt | null,
+    nativeReceiptQueue: Promise.resolve<void>(undefined),
+  };
+
+  // Owns session generation, snapshots/reloads, and per-turn blocking-tool harvest state.
+  // Pi normally requests context serially, but retries, reloads, and host
+  // integrations can overlap callbacks. Serialize the entire authority →
+  // preparation → commit → projection transaction so a follower cannot
+  // observe a published measurement before the leader's durable receipt or
+  // return raw final-rung context while the leader is preparing a brief.
+  // A same-session start/tree reload is a projection-generation mutation.
+  // Queue it behind every context authority → preparation → commit →
+  // projection transaction, then serialize the actual load with the action
+  // queue. Appending to actionQueue only after the context queue drains is
+  // deliberate: a running context may itself need actionQueue to commit its
+  // final-rung chapter, so capturing both queues up front would deadlock.
+  const lifecycle = {
+    generation: 0,
+    shuttingDown: false,
+    latestSnapshot: null as ActiveContextSnapshot | null,
+    latestSnapshotError: null as string | null,
+    blockingToolHarvestedThisTurn: false,
+    blockingToolHarvestQueuedThisTurn: false,
+    contextQueue: Promise.resolve<void>(undefined),
+  };
 
   const durableProviderMeasurementReceiptMatches = (
     measurement: ProviderContextMeasurement,
     projectionRevision: number,
   ): boolean => {
-    const receipt = providerMeasurementByMessageSha.get(measurement.messageSha256);
+    const receipt = measurements.providerMeasurementByMessageSha.get(measurement.messageSha256);
     return Boolean(receipt && receipt.projectionRevision === projectionRevision &&
       receipt.provider === measurement.provider && receipt.model === measurement.model &&
       receipt.tokens === measurement.tokens && receipt.contextWindow === measurement.contextWindow);
@@ -253,13 +288,13 @@ export function registerActiveContext(pi: any, options: {
   const durableProviderMeasurementMatches = (
     measurement: ProviderContextMeasurement,
   ): boolean => {
-    if (!state) return false;
-    const receipt = providerMeasurementByMessageSha.get(measurement.messageSha256);
-    const anchor = providerMeasurementAnchorByMessageSha.get(measurement.messageSha256);
-    return Boolean(receipt && anchor && anchor.sessionId === state.sessionId &&
-      anchor.generation === generation &&
-      anchor.topologySha256 === topologySha256(state) &&
-      anchor.protectionSha256 === protectionSha256(state) &&
+    if (!persistence.state) return false;
+    const receipt = measurements.providerMeasurementByMessageSha.get(measurement.messageSha256);
+    const anchor = measurements.providerMeasurementAnchorByMessageSha.get(measurement.messageSha256);
+    return Boolean(receipt && anchor && anchor.sessionId === persistence.state.sessionId &&
+      anchor.generation === lifecycle.generation &&
+      anchor.topologySha256 === topologySha256(persistence.state) &&
+      anchor.protectionSha256 === protectionSha256(persistence.state) &&
       receipt.provider === measurement.provider && receipt.model === measurement.model &&
       receipt.tokens === measurement.tokens && receipt.contextWindow === measurement.contextWindow);
   };
@@ -274,17 +309,17 @@ export function registerActiveContext(pi: any, options: {
   };
 
   const sessionIdentityStillValid = (ctx: any, sessionId: string, expectedGeneration: number): boolean =>
-    generation === expectedGeneration && state?.sessionId === sessionId &&
+    lifecycle.generation === expectedGeneration && persistence.state?.sessionId === sessionId &&
     (!ctx || contextSessionMatches(ctx, sessionId));
 
   const updateStatus = (ctx: any): void => {
     try {
-      const roots = state && latestSnapshot ? orderedRoots(state, latestSnapshot).length : 0;
-      const prepared = state?.prepared ? " · brief ready" : preparing ? " · briefing" : "";
-      const usage = lastProviderMeasurement
-        ? ` · provider ${lastProviderMeasurement.tokens}/${lastProviderMeasurement.contextWindow}`
+      const roots = persistence.state && lifecycle.latestSnapshot ? orderedRoots(persistence.state, lifecycle.latestSnapshot).length : 0;
+      const prepared = persistence.state?.prepared ? " · brief ready" : ladder.preparing ? " · briefing" : "";
+      const usage = measurements.lastProviderMeasurement
+        ? ` · provider ${measurements.lastProviderMeasurement.tokens}/${measurements.lastProviderMeasurement.contextWindow}`
         : " · provider usage unmeasured";
-      const suspended = automaticFailure ? " · automatic suspended" : "";
+      const suspended = ladder.automaticFailure ? " · automatic suspended" : "";
       ctx.ui?.setStatus?.(entryTypePrefix, `${toolName} folds: ${roots}${prepared}${usage}${suspended}`);
     } catch { /* Status presentation is request-ephemeral and never a lifecycle boundary. */ }
   };
@@ -302,14 +337,14 @@ export function registerActiveContext(pi: any, options: {
 
   const authoritativeSnapshotFor = (ctx: any): ActiveContextSnapshot => {
     const sessionId = ctx.sessionManager.getSessionId();
-    if (!latestSnapshot || latestSnapshot.sessionId !== sessionId) {
+    if (!lifecycle.latestSnapshot || lifecycle.latestSnapshot.sessionId !== sessionId) {
       throw new Error("A current same-session Pi context event is required");
     }
     return mapActiveContext({
       sessionId,
-      eventMessages: latestSnapshot.messages,
+      eventMessages: lifecycle.latestSnapshot.messages,
       contextEntries: ctx.sessionManager.buildContextEntries(),
-      policy: latestSnapshot.policy,
+      policy: lifecycle.latestSnapshot.policy,
       toolName,
       brandNoun,
       entryTypePrefix,
@@ -338,8 +373,8 @@ export function registerActiveContext(pi: any, options: {
   };
 
   const cancelPreparation = (): void => {
-    preparing?.controller.abort();
-    preparing = null;
+    ladder.preparing?.controller.abort();
+    ladder.preparing = null;
   };
 
   const providerMeasurementReceiptKey = (
@@ -355,38 +390,38 @@ export function registerActiveContext(pi: any, options: {
   });
 
   const load = (ctx: any, preserveThresholdDecision = false): void => {
-    generation += 1;
-    shuttingDown = false;
+    lifecycle.generation += 1;
+    lifecycle.shuttingDown = false;
     cancelPreparation();
-    latestSnapshot = null;
-    latestSnapshotError = null;
-    latestRatio = null;
-    lastProviderMeasurement = null;
-    pendingManual = false;
-    blockingToolHarvestedThisTurn = false;
-    blockingToolHarvestQueuedThisTurn = false;
-    if (!preserveThresholdDecision) lastThresholdDecision = null;
-    lastPreparationError = null;
-    boundaryFailure = null;
-    lastPreparationCandidateId = null;
-    lastSelectionKind = null;
-    lastSelectionSourceIds = [];
-    pendingContextNote = null;
-    historicalGuidanceEntries = 0;
-    armedMilestone = null;
-    advisoryScheduleKey = null;
-    lastAutomaticAction = null;
-    automaticFailure = null;
-    hardFenceNoticeKey = null;
-    failedPreparations.clear();
-    providerMeasurementReceipts.clear();
-    providerMeasurementRevisionByMessageSha.clear();
-    providerMeasurementByMessageSha.clear();
-    providerMeasurementAnchorByMessageSha.clear();
+    lifecycle.latestSnapshot = null;
+    lifecycle.latestSnapshotError = null;
+    measurements.latestRatio = null;
+    measurements.lastProviderMeasurement = null;
+    ladder.pendingManual = false;
+    lifecycle.blockingToolHarvestedThisTurn = false;
+    lifecycle.blockingToolHarvestQueuedThisTurn = false;
+    if (!preserveThresholdDecision) nativeCompaction.lastThresholdDecision = null;
+    ladder.lastPreparationError = null;
+    ladder.boundaryFailure = null;
+    ladder.lastPreparationCandidateId = null;
+    ladder.lastSelectionKind = null;
+    ladder.lastSelectionSourceIds = [];
+    ladder.pendingContextNote = null;
+    advisory.historicalGuidanceEntries = 0;
+    advisory.armedMilestone = null;
+    advisory.advisoryScheduleKey = null;
+    ladder.lastAutomaticAction = null;
+    ladder.automaticFailure = null;
+    advisory.hardFenceNoticeKey = null;
+    ladder.failedPreparations.clear();
+    measurements.providerMeasurementReceipts.clear();
+    measurements.providerMeasurementRevisionByMessageSha.clear();
+    measurements.providerMeasurementByMessageSha.clear();
+    measurements.providerMeasurementAnchorByMessageSha.clear();
     const sessionId = ctx.sessionManager.getSessionId();
-    if (hardFenceReleaseSessionId !== sessionId) {
-      hardFenceReleaseSessionId = sessionId;
-      hardFenceReleasedProjectionKeys.clear();
+    if (advisory.hardFenceReleaseSessionId !== sessionId) {
+      advisory.hardFenceReleaseSessionId = sessionId;
+      advisory.hardFenceReleasedProjectionKeys.clear();
     }
     let restored: ActiveContextState | null = null;
     let restoreError: unknown = null;
@@ -410,31 +445,31 @@ export function registerActiveContext(pi: any, options: {
         `${entryTypePrefix}-guidance-`,
         `${ACTIVE_CONTEXT_STATUS_KEY}-guidance-`,
       ].some((prefix) => entry.customType.startsWith(prefix))) {
-        historicalGuidanceEntries += 1;
+        advisory.historicalGuidanceEntries += 1;
         continue;
       }
       if (entry.customType !== providerMeasurementEntryType) continue;
       try {
         const receipt = parseProviderContextMeasurementReceipt(entry.data, sessionId);
-        const boundRevision = providerMeasurementRevisionByMessageSha.get(receipt.messageSha256);
+        const boundRevision = measurements.providerMeasurementRevisionByMessageSha.get(receipt.messageSha256);
         if (boundRevision !== undefined && boundRevision !== receipt.projectionRevision) {
           throw new Error("One provider response is bound to multiple projection revisions");
         }
-        providerMeasurementRevisionByMessageSha.set(receipt.messageSha256, receipt.projectionRevision);
-        const priorMeasurement = providerMeasurementByMessageSha.get(receipt.messageSha256);
+        measurements.providerMeasurementRevisionByMessageSha.set(receipt.messageSha256, receipt.projectionRevision);
+        const priorMeasurement = measurements.providerMeasurementByMessageSha.get(receipt.messageSha256);
         if (priorMeasurement && stableStringify(priorMeasurement) !== stableStringify(receipt)) {
           throw new Error("One provider response has conflicting durable measurement receipts");
         }
-        providerMeasurementByMessageSha.set(receipt.messageSha256, receipt);
+        measurements.providerMeasurementByMessageSha.set(receipt.messageSha256, receipt);
         const fingerprint = restoredPersistence?.projectionFingerprints.get(receipt.projectionRevision);
         if (fingerprint) {
-          providerMeasurementAnchorByMessageSha.set(receipt.messageSha256, {
+          measurements.providerMeasurementAnchorByMessageSha.set(receipt.messageSha256, {
             sessionId,
-            generation,
+            generation: lifecycle.generation,
             ...fingerprint,
           });
         }
-        providerMeasurementReceipts.add(providerMeasurementReceiptKey(
+        measurements.providerMeasurementReceipts.add(providerMeasurementReceiptKey(
           sessionId,
           receipt.projectionRevision,
           receipt,
@@ -444,19 +479,19 @@ export function registerActiveContext(pi: any, options: {
       }
     }
     const durableRestored = restored ?? emptyActiveContextState(sessionId);
-    state = durableRestored.prepared ? clearPrepared(durableRestored) : clone(durableRestored);
-    armedMilestone = advisoryState(state).armed?.milestone ?? null;
-    persistedWireVersion = restoredPersistence?.wireVersion ?? 0;
-    persistedFoldRecords = restoredPersistence?.records ?? new Map<string, FoldRecordEntry>();
-    persistedStateSha256 = restoredPersistence?.stateSha256 ?? semanticStateSha256(durableRestored);
+    persistence.state = durableRestored.prepared ? clearPrepared(durableRestored) : clone(durableRestored);
+    advisory.armedMilestone = advisoryState(persistence.state).armed?.milestone ?? null;
+    persistence.persistedWireVersion = restoredPersistence?.wireVersion ?? 0;
+    persistence.persistedFoldRecords = restoredPersistence?.records ?? new Map<string, FoldRecordEntry>();
+    persistence.persistedStateSha256 = restoredPersistence?.stateSha256 ?? semanticStateSha256(durableRestored);
     const restoredMessages = ctx.sessionManager.buildSessionContext?.()?.messages;
-    lastProviderMeasurement = latestProviderContextMeasurement(
+    measurements.lastProviderMeasurement = latestProviderContextMeasurement(
       Array.isArray(restoredMessages) ? restoredMessages : [],
       contextWindowFor(ctx),
       ctx.model,
     );
-    latestRatio = contextUsageRatio(lastProviderMeasurement);
-    persisted = clone(durableRestored);
+    measurements.latestRatio = contextUsageRatio(measurements.lastProviderMeasurement);
+    persistence.persisted = clone(durableRestored);
     if (restoreError) safeNotify(
       ctx,
       `Active-context state was ignored; Pi native context remains authoritative: ${String(restoreError)}`,
@@ -470,19 +505,19 @@ export function registerActiveContext(pi: any, options: {
     updateStatus(ctx);
   };
   const persist = (ctx?: any): Promise<void> => {
-    const operation = persistenceQueue.then(async () => {
-      if (!state || !persisted) return;
-      let next = clone(state);
-      if (ctx && latestSnapshot?.sessionId === next.sessionId) {
+    const operation = persistence.persistenceQueue.then(async () => {
+      if (!persistence.state || !persistence.persisted) return;
+      let next = clone(persistence.state);
+      if (ctx && lifecycle.latestSnapshot?.sessionId === next.sessionId) {
         next = persistenceProjection(next, authoritativeSnapshotFor(ctx));
       }
-      next.folds = normalizeFoldsForPersistedRecords(next.folds, persistedFoldRecords);
-      if (sameStateProjection(next, persisted)) {
-        state = clone(persisted);
+      next.folds = normalizeFoldsForPersistedRecords(next.folds, persistence.persistedFoldRecords);
+      if (sameStateProjection(next, persistence.persisted)) {
+        persistence.state = clone(persistence.persisted);
         return;
       }
-      if (next.revision <= persisted.revision) next.revision = persisted.revision + 1;
-      const generationAtStart = generation;
+      if (next.revision <= persistence.persisted.revision) next.revision = persistence.persisted.revision + 1;
+      const generationAtStart = lifecycle.generation;
       const sessionId = next.sessionId;
       if (!sessionIdentityStillValid(ctx, sessionId, generationAtStart)) {
         throw new Error("Active-context session changed before persistence");
@@ -492,7 +527,7 @@ export function registerActiveContext(pi: any, options: {
       }
       for (const fold of next.folds) {
         const record = makeFoldRecordEntry(fold, sessionId);
-        const existing = persistedFoldRecords.get(record.foldId);
+        const existing = persistence.persistedFoldRecords.get(record.foldId);
         if (existing) {
           if (existing.recordSha256 !== record.recordSha256) {
             throw new Error(`Conflicting durable active-context fold ${record.foldId}`);
@@ -500,34 +535,33 @@ export function registerActiveContext(pi: any, options: {
           continue;
         }
         await pi.appendEntry(foldRecordEntryType, record);
-        persistedFoldRecords.set(record.foldId, record);
+        persistence.persistedFoldRecords.set(record.foldId, record);
         if (!sessionIdentityStillValid(ctx, sessionId, generationAtStart)) {
           if (ctx && !contextSessionMatches(ctx, sessionId)) load(ctx);
           throw new Error("Active-context session changed after fold-record persistence");
         }
       }
-      const wire = persistedWireVersion === 2 ? makeStateDelta(persisted, next) : makeStateCheckpoint(next);
-      if (persistedWireVersion === 2 && persistedStateSha256 !== semanticStateSha256(persisted)) {
+      const wire = persistence.persistedWireVersion === 2 ? makeStateDelta(persistence.persisted, next) : makeStateCheckpoint(next);
+      if (persistence.persistedWireVersion === 2 && persistence.persistedStateSha256 !== semanticStateSha256(persistence.persisted)) {
         throw new Error("Active-context durable base digest drift");
       }
       await pi.appendEntry(stateEntryType, wire);
-      // Once the state event succeeds, replay owns this exact state; RAM may not roll behind it.
-      persisted = clone(next);
-      persistedWireVersion = 2;
-      persistedStateSha256 = semanticStateSha256(next);
-      state = shuttingDown ? null : clone(next);
+      persistence.persisted = clone(next);
+      persistence.persistedWireVersion = 2;
+      persistence.persistedStateSha256 = semanticStateSha256(next);
+      persistence.state = lifecycle.shuttingDown ? null : clone(next);
       if (!sessionIdentityStillValid(ctx, sessionId, generationAtStart)) {
         if (ctx && !contextSessionMatches(ctx, sessionId)) load(ctx);
         throw new Error("Active-context session changed after durable persistence");
       }
     });
-    persistenceQueue = operation.catch(() => undefined);
+    persistence.persistenceQueue = operation.catch(() => undefined);
     return operation;
   };
 
   const persistThroughActionQueue = (ctx?: any): Promise<void> => {
-    const operation = actionQueue.then(() => persist(ctx));
-    actionQueue = operation.catch(() => undefined);
+    const operation = ladder.actionQueue.then(() => persist(ctx));
+    ladder.actionQueue = operation.catch(() => undefined);
     return operation;
   };
 
@@ -536,32 +570,32 @@ export function registerActiveContext(pi: any, options: {
     measurement: ProviderContextMeasurement,
     projectionRevision: number,
   ): Promise<boolean> => {
-    if (!state || !Number.isSafeInteger(projectionRevision) || projectionRevision < 0) {
+    if (!persistence.state || !Number.isSafeInteger(projectionRevision) || projectionRevision < 0) {
       return Promise.resolve(false);
     }
-    const generationAtStart = generation;
-    const sessionId = state.sessionId;
+    const generationAtStart = lifecycle.generation;
+    const sessionId = persistence.state.sessionId;
     const queuedMeasurement = clone(measurement);
     const revision = projectionRevision;
     const anchor: ProviderMeasurementAnchor = {
       sessionId,
       generation: generationAtStart,
-      topologySha256: topologySha256(state),
-      protectionSha256: protectionSha256(state),
+      topologySha256: topologySha256(persistence.state),
+      protectionSha256: protectionSha256(persistence.state),
     };
-    const operation = providerMeasurementQueue.then(async () => {
-      if (shuttingDown || !sessionIdentityStillValid(ctx, sessionId, generationAtStart)) {
+    const operation = measurements.providerMeasurementQueue.then(async () => {
+      if (lifecycle.shuttingDown || !sessionIdentityStillValid(ctx, sessionId, generationAtStart)) {
         throw new Error("Active-context session changed before measurement persistence");
       }
       const measurement = queuedMeasurement;
-      const boundRevision = providerMeasurementRevisionByMessageSha.get(measurement.messageSha256);
+      const boundRevision = measurements.providerMeasurementRevisionByMessageSha.get(measurement.messageSha256);
       if (boundRevision !== undefined) {
         return boundRevision === revision &&
           durableProviderMeasurementReceiptMatches(measurement, revision);
       }
       const receiptKey = providerMeasurementReceiptKey(sessionId, revision, measurement);
-      if (providerMeasurementReceipts.has(receiptKey)) {
-        providerMeasurementRevisionByMessageSha.set(measurement.messageSha256, revision);
+      if (measurements.providerMeasurementReceipts.has(receiptKey)) {
+        measurements.providerMeasurementRevisionByMessageSha.set(measurement.messageSha256, revision);
         return durableProviderMeasurementReceiptMatches(measurement, revision);
       }
       const receipt = parseProviderContextMeasurementReceipt({
@@ -577,16 +611,16 @@ export function registerActiveContext(pi: any, options: {
       }, sessionId);
       await pi.appendEntry(providerMeasurementEntryType, receipt);
       // The append is authoritative even if lifecycle attribution changes immediately after it.
-      providerMeasurementReceipts.add(receiptKey);
-      providerMeasurementRevisionByMessageSha.set(measurement.messageSha256, revision);
-      providerMeasurementByMessageSha.set(measurement.messageSha256, receipt);
-      providerMeasurementAnchorByMessageSha.set(measurement.messageSha256, anchor);
+      measurements.providerMeasurementReceipts.add(receiptKey);
+      measurements.providerMeasurementRevisionByMessageSha.set(measurement.messageSha256, revision);
+      measurements.providerMeasurementByMessageSha.set(measurement.messageSha256, receipt);
+      measurements.providerMeasurementAnchorByMessageSha.set(measurement.messageSha256, anchor);
       if (!sessionIdentityStillValid(ctx, sessionId, generationAtStart)) {
         throw new Error("Active-context session changed during measurement persistence");
       }
       return true;
     });
-    providerMeasurementQueue = operation.then(() => undefined, () => undefined);
+    measurements.providerMeasurementQueue = operation.then(() => undefined, () => undefined);
     return operation;
   };
 
@@ -612,19 +646,19 @@ export function registerActiveContext(pi: any, options: {
       willRetry,
       failureCode: boundedFailureCode,
       message: boundReceiptText(message, 1_200, "Pi native compaction safety net allowed"),
-      preparationError: lastPreparationError
-        ? boundReceiptText(lastPreparationError, 1_200, "context preparation failed")
+      preparationError: ladder.lastPreparationError
+        ? boundReceiptText(ladder.lastPreparationError, 1_200, "context preparation failed")
         : null,
-      boundaryFailure: boundaryFailure
-        ? boundReceiptText(boundaryFailure, 1_200, "context boundary failed")
+      boundaryFailure: ladder.boundaryFailure
+        ? boundReceiptText(ladder.boundaryFailure, 1_200, "context boundary failed")
         : null,
-      selectionKind: lastSelectionKind ? boundReceiptText(lastSelectionKind, 64, "unknown") : null,
-      selectionSourceIds: lastSelectionSourceIds.slice(0, 64)
+      selectionKind: ladder.lastSelectionKind ? boundReceiptText(ladder.lastSelectionKind, 64, "unknown") : null,
+      selectionSourceIds: ladder.lastSelectionSourceIds.slice(0, 64)
         .map((id) => boundReceiptText(id, 512, "unknown-source")),
-      automaticActionKind: typeof ownValue(lastAutomaticAction, "kind") === "string"
-        ? boundReceiptText(ownValue(lastAutomaticAction, "kind"), 128, "unknown")
+      automaticActionKind: typeof ownValue(ladder.lastAutomaticAction, "kind") === "string"
+        ? boundReceiptText(ownValue(ladder.lastAutomaticAction, "kind"), 128, "unknown")
         : null,
-      providerMessageSha256: lastProviderMeasurement?.messageSha256 ?? null,
+      providerMessageSha256: measurements.lastProviderMeasurement?.messageSha256 ?? null,
       occurredAt: Date.now(),
     };
     return parseNativeCompactionDecision(decision, sessionId);
@@ -659,7 +693,7 @@ export function registerActiveContext(pi: any, options: {
   };
 
   const persistNativeCompletion = (receipt: NativeCompactionCompletionReceipt, ctx: any): Promise<void> => {
-    const operation = nativeReceiptQueue.then(async () => {
+    const operation = nativeCompaction.nativeReceiptQueue.then(async () => {
       const entries = ctx.sessionManager.getEntries?.() ?? ctx.sessionManager.getBranch();
       const existing = entries
         .filter((entry: any) => entry?.type === "custom" && entry.customType === nativeReceiptEntryType &&
@@ -673,14 +707,14 @@ export function registerActiveContext(pi: any, options: {
       } else {
         await pi.appendEntry(nativeReceiptEntryType, receipt);
       }
-      pendingNativeReceipt = null;
+      nativeCompaction.pendingNativeReceipt = null;
     });
-    nativeReceiptQueue = operation.catch(() => undefined);
+    nativeCompaction.nativeReceiptQueue = operation.catch(() => undefined);
     return operation;
   };
 
   const recoverNativeReceipts = async (ctx: any): Promise<void> => {
-    if (pendingNativeReceipt) await persistNativeCompletion(pendingNativeReceipt, ctx);
+    if (nativeCompaction.pendingNativeReceipt) await persistNativeCompletion(nativeCompaction.pendingNativeReceipt, ctx);
     const sessionId = ctx.sessionManager.getSessionId();
     const entries = [...(ctx.sessionManager.getEntries?.() ?? ctx.sessionManager.getBranch())];
     const completions = new Map<string, NativeCompactionCompletionReceipt>();
@@ -720,7 +754,7 @@ export function registerActiveContext(pi: any, options: {
     }
     const latest = [...completions.values()].sort((left, right) => left.occurredAt - right.occurredAt).at(-1);
     if (latest) {
-      lastThresholdDecision = {
+      nativeCompaction.lastThresholdDecision = {
         handled: true,
         retry: false,
         reason: `native compaction completed; ${brandNoun} folding state rebuilt`,
@@ -737,10 +771,10 @@ export function registerActiveContext(pi: any, options: {
     action: Exclude<ActiveContextToolAction, "status">,
   ): void => {
     cancelPreparation();
-    state = clearPrepared(next);
-    pendingManual = true;
-    if (action === "fold") armedMilestone = null;
-    boundaryFailure = null;
+    persistence.state = clearPrepared(next);
+    ladder.pendingManual = true;
+    if (action === "fold") advisory.armedMilestone = null;
+    ladder.boundaryFailure = null;
   };
 
   const persistManual = async (
@@ -748,56 +782,56 @@ export function registerActiveContext(pi: any, options: {
     action: Exclude<ActiveContextToolAction, "status">,
     ctx: any,
   ): Promise<void> => {
-    const stateAtEntry = state ? clone(state) : null;
-    const persistedAtEntry = persisted;
+    const stateAtEntry = persistence.state ? clone(persistence.state) : null;
+    const persistedAtEntry = persistence.persisted;
     const transientAtEntry = captureTransient();
     markManual(next, action);
     try {
       await persist(ctx);
-      pendingManual = false;
-      automaticFailure = null;
-      boundaryFailure = null;
+      ladder.pendingManual = false;
+      ladder.automaticFailure = null;
+      ladder.boundaryFailure = null;
     } catch (error) {
-      if (persisted === persistedAtEntry && stateAtEntry) {
-        state = stateAtEntry;
+      if (persistence.persisted === persistedAtEntry && stateAtEntry) {
+        persistence.state = stateAtEntry;
         restoreTransient(transientAtEntry);
       }
-      boundaryFailure = error instanceof Error ? error.message : String(error);
-      safeNotify(ctx, `Active-context change was not persisted: ${boundaryFailure}`, "error");
+      ladder.boundaryFailure = error instanceof Error ? error.message : String(error);
+      safeNotify(ctx, `Active-context change was not persisted: ${ladder.boundaryFailure}`, "error");
       throw error;
     }
   };
 
   const captureTransient = () => ({
-    pendingManual,
-    preparing,
-    pendingContextNote,
-    armedMilestone,
-    lastAutomaticAction,
-    automaticFailure: automaticFailure ? clone(automaticFailure) : null,
-    boundaryFailure,
+    pendingManual: ladder.pendingManual,
+    preparing: ladder.preparing,
+    pendingContextNote: ladder.pendingContextNote,
+    armedMilestone: advisory.armedMilestone,
+    lastAutomaticAction: ladder.lastAutomaticAction,
+    automaticFailure: ladder.automaticFailure ? clone(ladder.automaticFailure) : null,
+    boundaryFailure: ladder.boundaryFailure,
   });
   const restoreTransient = (saved: ReturnType<typeof captureTransient>): void => {
-    pendingManual = saved.pendingManual;
-    preparing = saved.preparing?.controller.signal.aborted ? null : saved.preparing;
-    pendingContextNote = saved.pendingContextNote;
-    armedMilestone = saved.armedMilestone;
-    lastAutomaticAction = saved.lastAutomaticAction;
-    automaticFailure = saved.automaticFailure;
-    boundaryFailure = saved.boundaryFailure;
+    ladder.pendingManual = saved.pendingManual;
+    ladder.preparing = saved.preparing?.controller.signal.aborted ? null : saved.preparing;
+    ladder.pendingContextNote = saved.pendingContextNote;
+    advisory.armedMilestone = saved.armedMilestone;
+    ladder.lastAutomaticAction = saved.lastAutomaticAction;
+    ladder.automaticFailure = saved.automaticFailure;
+    ladder.boundaryFailure = saved.boundaryFailure;
   };
   const automaticOperationKey = (
     phase: string,
-    snapshot: ActiveContextSnapshot | null = latestSnapshot,
-    ratio: number | null = latestRatio,
+    snapshot: ActiveContextSnapshot | null = lifecycle.latestSnapshot,
+    ratio: number | null = measurements.latestRatio,
   ): string => {
     const lifecyclePhase = ["context", "message-end", "turn-end"].includes(phase) ? "automatic-rung" : phase;
     let selection: Record<string, unknown> = { kind: lifecyclePhase };
     try {
-      if (state && snapshot && ratio !== null) {
-        const selected = selectAutomaticRung(snapshot, state, ratio, {
+      if (persistence.state && snapshot && ratio !== null) {
+        const selected = selectAutomaticRung(snapshot, persistence.state, ratio, {
           summarizerAvailable: Boolean(options.summarizeContextSpan),
-          failedPreparationIds: failedPreparations,
+          failedPreparationIds: ladder.failedPreparations,
         });
         if (selected?.kind === "refold") {
           selection = { kind: "refold", foldId: selected.foldId };
@@ -814,10 +848,10 @@ export function registerActiveContext(pi: any, options: {
       selection = { kind: `${lifecyclePhase}-selection` };
     }
     return sha256Value({
-      sessionId: state?.sessionId ?? snapshot?.sessionId ?? null,
-      revision: state?.revision ?? null,
-      topology: state ? topologySha256(state) : null,
-      protection: state ? protectionSha256(state) : null,
+      sessionId: persistence.state?.sessionId ?? snapshot?.sessionId ?? null,
+      revision: persistence.state?.revision ?? null,
+      topology: persistence.state ? topologySha256(persistence.state) : null,
+      protection: persistence.state ? protectionSha256(persistence.state) : null,
       selection,
       policy: snapshot ? {
         toolFoldRatio: snapshot.policy.toolFoldRatio,
@@ -841,17 +875,17 @@ export function registerActiveContext(pi: any, options: {
       1_200,
       "automatic context failure",
     );
-    boundaryFailure = message;
+    ladder.boundaryFailure = message;
     cancelPreparation();
-    if (state?.prepared) state = clearPrepared(state);
-    if (automaticFailure) {
-      automaticFailure.suppressedCallbacks = Math.min(
+    if (persistence.state?.prepared) persistence.state = clearPrepared(persistence.state);
+    if (ladder.automaticFailure) {
+      ladder.automaticFailure.suppressedCallbacks = Math.min(
         Number.MAX_SAFE_INTEGER,
-        automaticFailure.suppressedCallbacks + 1,
+        ladder.automaticFailure.suppressedCallbacks + 1,
       );
       return;
     }
-    automaticFailure = {
+    ladder.automaticFailure = {
       key,
       phase,
       message,
@@ -860,7 +894,7 @@ export function registerActiveContext(pi: any, options: {
       suppressedCallbacks: 0,
       persistenceDisposition,
     };
-    pendingContextNote = `Automatic context management suspended after one ${phase} failure; exact Pi context remains raw and manual context actions remain available.`;
+    ladder.pendingContextNote = `Automatic context management suspended after one ${phase} failure; exact Pi context remains raw and manual context actions remain available.`;
     safeNotify(ctx, `Automatic context management suspended: ${message}`, "warning");
   };
 
@@ -869,9 +903,9 @@ export function registerActiveContext(pi: any, options: {
     ctx: any,
     allowUnmeasuredRevisionRelease = false,
   ): boolean => {
-    if (latestRatio === null || latestRatio < hardFenceRatio(snapshot ?? undefined, ctx) || !state) return false;
-    const measuredRevision = lastProviderMeasurement
-      ? providerMeasurementRevisionByMessageSha.get(lastProviderMeasurement.messageSha256)
+    if (measurements.latestRatio === null || measurements.latestRatio < hardFenceRatio(snapshot ?? undefined, ctx) || !persistence.state) return false;
+    const measuredRevision = measurements.lastProviderMeasurement
+      ? measurements.providerMeasurementRevisionByMessageSha.get(measurements.lastProviderMeasurement.messageSha256)
       : undefined;
     // A durable projection topology after the measured response gets exactly
     // one provider attempt so its fold can be measured. Concurrent
@@ -879,32 +913,32 @@ export function registerActiveContext(pi: any, options: {
     // that unmeasured projection. Non-structural state persistence does not
     // spend this release. A failed automatic transaction never gets this
     // escape, even if a record/state append preceded its projection failure.
-    if (allowUnmeasuredRevisionRelease && !automaticFailure &&
-        measuredRevision !== undefined && lastProviderMeasurement &&
-        !durableProviderMeasurementMatches(lastProviderMeasurement)) {
+    if (allowUnmeasuredRevisionRelease && !ladder.automaticFailure &&
+        measuredRevision !== undefined && measurements.lastProviderMeasurement &&
+        !durableProviderMeasurementMatches(measurements.lastProviderMeasurement)) {
       const releaseKey = sha256Value({
-        sessionId: state.sessionId,
-        topologySha256: topologySha256(state),
-        protectionSha256: protectionSha256(state),
+        sessionId: persistence.state.sessionId,
+        topologySha256: topologySha256(persistence.state),
+        protectionSha256: protectionSha256(persistence.state),
         measuredRevision,
-        providerMessageSha256: lastProviderMeasurement?.messageSha256 ?? null,
+        providerMessageSha256: measurements.lastProviderMeasurement?.messageSha256 ?? null,
       });
-      if (!hardFenceReleasedProjectionKeys.has(releaseKey) &&
-          hardFenceReleasedProjectionKeys.size < 4_096) {
-        hardFenceReleasedProjectionKeys.add(releaseKey);
+      if (!advisory.hardFenceReleasedProjectionKeys.has(releaseKey) &&
+          advisory.hardFenceReleasedProjectionKeys.size < 4_096) {
+        advisory.hardFenceReleasedProjectionKeys.add(releaseKey);
         return false;
       }
     }
-    const key = automaticFailure?.key ?? sha256Value({
-      sessionId: snapshot?.sessionId ?? state.sessionId,
-      revision: state.revision,
-      providerMessageSha256: lastProviderMeasurement?.messageSha256 ?? null,
+    const key = ladder.automaticFailure?.key ?? sha256Value({
+      sessionId: snapshot?.sessionId ?? persistence.state.sessionId,
+      revision: persistence.state.revision,
+      providerMessageSha256: measurements.lastProviderMeasurement?.messageSha256 ?? null,
       phase: "hard-provider-fence",
     });
-    pendingContextNote = `Provider context reached the hard ${brandNoun} fence without a newly committed lossless fold. ` +
+    ladder.pendingContextNote = `Provider context reached the hard ${brandNoun} fence without a newly committed lossless fold. ` +
       "The provider request was aborted before transmission; run /compact or make an explicit bounded context fold.";
-    if (hardFenceNoticeKey !== key) {
-      hardFenceNoticeKey = key;
+    if (advisory.hardFenceNoticeKey !== key) {
+      advisory.hardFenceNoticeKey = key;
       safeNotify(
         ctx,
         "Provider request aborted at the hard context fence; run /compact or make an explicit bounded context fold.",
@@ -916,65 +950,65 @@ export function registerActiveContext(pi: any, options: {
     // transform returns, so exact raw Pi messages remain canonical but are not
     // transmitted as an overflowing request.
     if (typeof ctx.abort !== "function") {
-      throw new Error(`Pi hard-fence abort capability is unavailable at ratio ${latestRatio}`);
+      throw new Error(`Pi hard-fence abort capability is unavailable at ratio ${measurements.latestRatio}`);
     }
     ctx.abort();
     return true;
   };
 
   const startPreparation = (snapshot: ActiveContextSnapshot, ratio: number | null, ctx: any): void => {
-    if (shuttingDown || !state || automaticFailure || ratio === null || state.prepared || preparing ||
+    if (lifecycle.shuttingDown || !persistence.state || ladder.automaticFailure || ratio === null || persistence.state.prepared || ladder.preparing ||
         ratio < snapshot.policy.warmRatio ||
-        !lastProviderMeasurement || !durableProviderMeasurementMatches(lastProviderMeasurement)) return;
+        !measurements.lastProviderMeasurement || !durableProviderMeasurementMatches(measurements.lastProviderMeasurement)) return;
     // Preparation is asynchronous but never jumps ahead of an immediately
     // committable deterministic fold on the same measured projection.
-    const selection = selectAutomaticRung(snapshot, state, ratio, {
+    const selection = selectAutomaticRung(snapshot, persistence.state, ratio, {
       summarizerAvailable: Boolean(options.summarizeContextSpan),
-      failedPreparationIds: failedPreparations,
+      failedPreparationIds: ladder.failedPreparations,
     });
-    lastSelectionKind = selection && "candidate" in selection ? selection.candidate.kind : null;
-    lastSelectionSourceIds = selection && "candidate" in selection
+    ladder.lastSelectionKind = selection && "candidate" in selection ? selection.candidate.kind : null;
+    ladder.lastSelectionSourceIds = selection && "candidate" in selection
       ? selection.candidate.sourceRefs.slice(0, 8).map((ref) => ref.entryId)
       : [];
     if (selection?.kind !== "chapter-prepare") return;
     const candidate = selection.candidate;
-    const id = automaticPreparationId(candidate, state);
+    const id = automaticPreparationId(candidate, persistence.state);
     const controller = new AbortController();
-    lastPreparationError = null;
-    lastPreparationCandidateId = id;
+    ladder.lastPreparationError = null;
+    ladder.lastPreparationCandidateId = id;
     const slot = { id, controller, promise: Promise.resolve() };
-    preparing = slot;
-    const capturedState = clone(state);
-    const capturedGeneration = generation;
+    ladder.preparing = slot;
+    const capturedState = clone(persistence.state);
+    const capturedGeneration = lifecycle.generation;
     slot.promise = prepareFold({
       candidate,
       snapshot,
       state: capturedState,
       generation: capturedGeneration,
-      summarize: failedPreparations.has(id) ? undefined : options.summarizeContextSpan,
+      summarize: ladder.failedPreparations.has(id) ? undefined : options.summarizeContextSpan,
       onSummarizerFailure: (error) => {
-        lastPreparationError = error instanceof Error ? error.message : String(error);
-        failedPreparations.add(id);
+        ladder.lastPreparationError = error instanceof Error ? error.message : String(error);
+        ladder.failedPreparations.add(id);
       },
       ctx,
       signal: controller.signal,
     }).then((preparedFold) => {
-      const operation = actionQueue.then(() => {
+      const operation = ladder.actionQueue.then(() => {
         if (controller.signal.aborted ||
             !sessionIdentityStillValid(ctx, snapshot.sessionId, capturedGeneration)) return;
-        const currentState = state;
+        const currentState = persistence.state;
         if (!currentState || topologySha256(currentState) !== preparedFold.topologySha256 ||
             protectionSha256(currentState) !== preparedFold.protectionSha256) return;
-        state = { ...currentState, prepared: preparedFold };
+        persistence.state = { ...currentState, prepared: preparedFold };
         return persist(ctx);
       });
-      actionQueue = operation.catch(() => undefined);
+      ladder.actionQueue = operation.catch(() => undefined);
       return operation;
     }).catch((error) => {
       if (controller.signal.aborted ||
           !sessionIdentityStillValid(ctx, snapshot.sessionId, capturedGeneration)) return;
-      lastPreparationError = error instanceof Error ? error.message : String(error);
-      failedPreparations.add(id);
+      ladder.lastPreparationError = error instanceof Error ? error.message : String(error);
+      ladder.failedPreparations.add(id);
       suspendAutomatic(
         error,
         "chapter-prepare",
@@ -982,34 +1016,34 @@ export function registerActiveContext(pi: any, options: {
         sha256Value({ sessionId: snapshot.sessionId, operation: "chapter-prepare", candidateId: id }),
       );
     }).finally(() => {
-      const ownsSlot = preparing === slot;
-      if (ownsSlot) preparing = null;
+      const ownsSlot = ladder.preparing === slot;
+      if (ownsSlot) ladder.preparing = null;
       if (ownsSlot && sessionIdentityStillValid(ctx, snapshot.sessionId, capturedGeneration)) updateStatus(ctx);
     });
   };
   const projectWithAdvisory = (snapshot: ActiveContextSnapshot): unknown[] => {
-    const projected = projectActiveContext(snapshot, state!).filter((message) => {
+    const projected = projectActiveContext(snapshot, persistence.state!).filter((message) => {
       const customType = ownValue(message, "customType");
       return customType !== milestoneProjectionType && customType !== advisoryProjectionType;
     });
-    const armed = advisoryState(state!).armed;
-    if (!armed || armed.milestone !== armedMilestone || latestRatio === null ||
-        latestRatio < 0.85 * armed.threshold) return projected;
-    const status = activeContextStatus(snapshot, state!, 0, 1, snapshot.policy.maxFoldSourceRefs);
+    const armed = advisoryState(persistence.state!).armed;
+    if (!armed || armed.milestone !== advisory.armedMilestone || measurements.latestRatio === null ||
+        measurements.latestRatio < 0.85 * armed.threshold) return projected;
+    const status = activeContextStatus(snapshot, persistence.state!, 0, 1, snapshot.policy.maxFoldSourceRefs);
     const eligible = ownValue(status, "eligibleChapter");
     const startId = ownValue(eligible, "startId");
     const endId = ownValue(eligible, "endId");
     const chapterEndpoints = typeof startId === "string" && typeof endId === "string"
       ? [startId, endId]
       : [];
-    const toolEndpoints = selectAutomaticToolBatch(snapshot, state!, 1)
+    const toolEndpoints = selectAutomaticToolBatch(snapshot, persistence.state!, 1)
       .flatMap((candidate) => candidate.sourceRefs.at(-1)?.entryId ?? [])
       .slice(0, 3);
-    const remediationCount = advisoryState(state!).delivered[armed.milestone] ?? 0;
+    const remediationCount = advisoryState(persistence.state!).delivered[armed.milestone] ?? 0;
     projected.push({
       role: "custom",
       customType: milestoneProjectionType,
-      content: milestoneText(armed.milestone, state!.sessionId, armed.threshold, toolName, brandNoun),
+      content: milestoneText(armed.milestone, persistence.state!.sessionId, armed.threshold, toolName, brandNoun),
       display: false,
       details: { source: activeContextSource(entryTypePrefix), ephemeral: true, milestone: armed.milestone },
       timestamp: 0,
@@ -1019,7 +1053,7 @@ export function registerActiveContext(pi: any, options: {
       customType: advisoryProjectionType,
       content: liveAdvisoryText({
         milestone: armed.milestone,
-        ratio: latestRatio,
+        ratio: measurements.latestRatio,
         toolEndpoints,
         chapterEndpoints,
         remediationCount,
@@ -1041,12 +1075,17 @@ export function registerActiveContext(pi: any, options: {
     const preparedFold = await prepareFold({
       candidate,
       snapshot,
-      state: state!,
-      generation,
+      state: persistence.state!,
+      generation: lifecycle.generation,
       brief,
       briefProvenance: "deterministic",
     });
-    state = commitPreparedFold({ prepared: preparedFold, snapshot, state: state!, generation });
+    persistence.state = commitPreparedFold({
+      prepared: preparedFold,
+      snapshot,
+      state: persistence.state!,
+      generation: lifecycle.generation,
+    });
     return preparedFold.id;
   };
 
@@ -1058,8 +1097,8 @@ export function registerActiveContext(pi: any, options: {
     signal?: AbortSignal;
     maximumSourceChars?: number;
   }): Promise<{ preparedFold: PreparedFold; nextState: ActiveContextState }> => {
-    const baseState = state!;
-    const generationAtStart = generation;
+    const baseState = persistence.state!;
+    const generationAtStart = lifecycle.generation;
     const sessionId = baseState.sessionId;
     const sourceChars = bytes(encodedFoldSource(input.snapshot, baseState, input.candidate.parts, input.candidate.kind));
     if (sourceChars > (input.maximumSourceChars ?? USER_RESCUE_MAX_SOURCE_CHARS)) {
@@ -1085,7 +1124,7 @@ export function registerActiveContext(pi: any, options: {
     const nextState = commitPreparedFold({
       prepared: preparedFold,
       snapshot: current,
-      state: state!,
+      state: persistence.state!,
       generation: generationAtStart,
     });
     return { preparedFold, nextState };
@@ -1096,32 +1135,37 @@ export function registerActiveContext(pi: any, options: {
     ratio: number,
     rungOptions: { waiveToolCadence?: boolean; toolOnly?: boolean } = {},
   ): Promise<Record<string, unknown> | null> => {
-    if (!state || automaticFailure || preparing) return null;
-    const selection = selectAutomaticRung(snapshot, state, ratio, {
+    if (!persistence.state || ladder.automaticFailure || ladder.preparing) return null;
+    const selection = selectAutomaticRung(snapshot, persistence.state, ratio, {
       waiveToolCadence: rungOptions.waiveToolCadence,
       toolOnly: rungOptions.toolOnly,
       summarizerAvailable: Boolean(options.summarizeContextSpan),
-      failedPreparationIds: failedPreparations,
+      failedPreparationIds: ladder.failedPreparations,
     });
     if (!selection) return null;
-    const before = bytes(projectActiveContext(snapshot, state));
+    const before = bytes(projectActiveContext(snapshot, persistence.state));
     let action: Record<string, unknown> | null = null;
-    if (selection.kind === "prepared-chapter" && state.prepared) {
+    if (selection.kind === "prepared-chapter" && persistence.state.prepared) {
       const error = preparedFoldError({
-        prepared: state.prepared,
+        prepared: persistence.state.prepared,
         snapshot,
-        state,
-        generation,
+        state: persistence.state,
+        generation: lifecycle.generation,
         ratio,
       });
       if (error) {
-        state = clearPrepared(state);
+        persistence.state = clearPrepared(persistence.state);
       } else {
-        const id = state.prepared.id;
-        const sourceIds = state.prepared.sourceRefs.map((ref) => ref.entryId);
-        state = commitPreparedFold({ prepared: state.prepared, snapshot, state, generation });
+        const id = persistence.state.prepared.id;
+        const sourceIds = persistence.state.prepared.sourceRefs.map((ref) => ref.entryId);
+        persistence.state = commitPreparedFold({
+          prepared: persistence.state.prepared,
+          snapshot,
+          state: persistence.state,
+          generation: lifecycle.generation,
+        });
         action = { kind: "chapter-fold", foldIds: [id], sourceIds };
-        pendingContextNote = `A coherent stale chapter was folded under ${id}; exact evidence remains expandable.`;
+        ladder.pendingContextNote = `A coherent stale chapter was folded under ${id}; exact evidence remains expandable.`;
       }
     } else if (selection.kind === "tool") {
       cancelPreparation();
@@ -1132,26 +1176,26 @@ export function registerActiveContext(pi: any, options: {
         foldIds: [id],
         sourceIds: tool.sourceRefs.map((ref) => ref.entryId),
       };
-      pendingContextNote = `${tool.sourceRefs.length} stale completed read-only tool result(s) were folded.`;
+      ladder.pendingContextNote = `${tool.sourceRefs.length} stale completed read-only tool result(s) were folded.`;
     } else if (selection.kind === "refold") {
       cancelPreparation();
-      state = setFoldProjectionState(state, selection.foldId, "folded");
+      persistence.state = setFoldProjectionState(persistence.state, selection.foldId, "folded");
       action = { kind: "refold", foldIds: [selection.foldId] };
-      pendingContextNote = `Stale expanded fold ${selection.foldId} returned to its identical placeholder.`;
+      ladder.pendingContextNote = `Stale expanded fold ${selection.foldId} returned to its identical placeholder.`;
     } else if (selection.kind === "consolidation") {
       cancelPreparation();
       const consolidation = selection.candidate;
       const id = await commitDeterministicCandidate(
         snapshot,
         consolidation,
-        deterministicConsolidationBrief(consolidation, state),
+        deterministicConsolidationBrief(consolidation, persistence.state),
       );
       action = {
         kind: "consolidation",
         foldIds: [id],
         sourceIds: consolidation.sourceRefs.map((ref) => ref.entryId),
       };
-      pendingContextNote =
+      ladder.pendingContextNote =
         `Stale folded chapters were consolidated under ${id}; every child remains expandable.`;
     } else if (selection.kind === "chapter") {
       const chapter = selection.candidate;
@@ -1165,15 +1209,15 @@ export function registerActiveContext(pi: any, options: {
         foldIds: [id],
         sourceIds: chapter.sourceRefs.map((ref) => ref.entryId),
       };
-      pendingContextNote =
+      ladder.pendingContextNote =
         `A coherent stale chapter was folded under ${id}; exact evidence remains expandable.`;
     }
-    if (!action || !state) return null;
-    const after = bytes(projectActiveContext(snapshot, state));
-    state = clearArmedAdvisory(state);
-    armedMilestone = null;
-    lastAutomaticAction = { ...action, sourceBytesSaved: Math.max(0, before - after) };
-    return lastAutomaticAction;
+    if (!action || !persistence.state) return null;
+    const after = bytes(projectActiveContext(snapshot, persistence.state));
+    persistence.state = clearArmedAdvisory(persistence.state);
+    advisory.armedMilestone = null;
+    ladder.lastAutomaticAction = { ...action, sourceBytesSaved: Math.max(0, before - after) };
+    return ladder.lastAutomaticAction;
   };
   const runAutomaticRungTransaction = async (
     snapshot: ActiveContextSnapshot,
@@ -1182,31 +1226,31 @@ export function registerActiveContext(pi: any, options: {
     phase: string,
     rungOptions: { waiveToolCadence?: boolean; toolOnly?: boolean } = {},
   ): Promise<Record<string, unknown> | null> => {
-    if (!state || !lastProviderMeasurement ||
-        !durableProviderMeasurementMatches(lastProviderMeasurement)) return null;
-    if (automaticFailure) {
-      automaticFailure.suppressedCallbacks = Math.min(
+    if (!persistence.state || !measurements.lastProviderMeasurement ||
+        !durableProviderMeasurementMatches(measurements.lastProviderMeasurement)) return null;
+    if (ladder.automaticFailure) {
+      ladder.automaticFailure.suppressedCallbacks = Math.min(
         Number.MAX_SAFE_INTEGER,
-        automaticFailure.suppressedCallbacks + 1,
+        ladder.automaticFailure.suppressedCallbacks + 1,
       );
       return null;
     }
     const key = automaticOperationKey(phase, snapshot, ratio);
-    const stateAtEntry = clone(state);
-    const persistedAtEntry = persisted;
-    const recordsAtEntry = persistedFoldRecords.size;
+    const stateAtEntry = clone(persistence.state);
+    const persistedAtEntry = persistence.persisted;
+    const recordsAtEntry = persistence.persistedFoldRecords.size;
     const transientAtEntry = captureTransient();
     let action: Record<string, unknown> | null = null;
     try {
       action = await applyAutomaticRung(snapshot, ratio, rungOptions);
       if (action) await persist(ctx);
-      if (action) boundaryFailure = null;
+      if (action) ladder.boundaryFailure = null;
       return action;
     } catch (error) {
-      const stateCommitted = persisted !== persistedAtEntry;
-      const recordOnly = !stateCommitted && persistedFoldRecords.size > recordsAtEntry;
+      const stateCommitted = persistence.persisted !== persistedAtEntry;
+      const recordOnly = !stateCommitted && persistence.persistedFoldRecords.size > recordsAtEntry;
       if (!stateCommitted) {
-        state = stateAtEntry;
+        persistence.state = stateAtEntry;
         restoreTransient(transientAtEntry);
       }
       suspendAutomatic(
@@ -1226,15 +1270,15 @@ export function registerActiveContext(pi: any, options: {
     ctx: any,
     phase: string,
   ): Promise<Record<string, unknown> | null> => {
-    const operation = actionQueue.then(() =>
+    const operation = ladder.actionQueue.then(() =>
       runAutomaticRungTransaction(snapshot, ratio, ctx, phase));
-    actionQueue = operation.catch(() => undefined);
+    ladder.actionQueue = operation.catch(() => undefined);
     return operation;
   };
   const projectionCandidates = (ctx: any): Array<Record<string, unknown>> => {
-    if (shuttingDown || !state) return [];
+    if (lifecycle.shuttingDown || !persistence.state) return [];
     try {
-      return projectionSlateCandidates(state, authoritativeSnapshotFor(ctx));
+      return projectionSlateCandidates(persistence.state, authoritativeSnapshotFor(ctx));
     } catch {
       return [];
     }
@@ -1242,21 +1286,15 @@ export function registerActiveContext(pi: any, options: {
   options.setProjectionProvider?.(projectionCandidates);
 
   const enqueueLifecycleLoad = async (ctx: any): Promise<void> => {
-    // A same-session start/tree reload is a projection-generation mutation.
-    // Queue it behind every context authority → preparation → commit →
-    // projection transaction, then serialize the actual load with the action
-    // queue. Appending to actionQueue only after the context queue drains is
-    // deliberate: a running context may itself need actionQueue to commit its
-    // final-rung chapter, so capturing both queues up front would deadlock.
-    const operation = contextQueue.then(() => {
-      const loadOperation = actionQueue.then(async () => {
+    const operation = lifecycle.contextQueue.then(() => {
+      const loadOperation = ladder.actionQueue.then(async () => {
         load(ctx);
         await recoverNativeReceipts(ctx);
       });
-      actionQueue = loadOperation.catch(() => undefined);
+      ladder.actionQueue = loadOperation.catch(() => undefined);
       return loadOperation;
     });
-    contextQueue = operation.then(() => undefined, () => undefined);
+    lifecycle.contextQueue = operation.then(() => undefined, () => undefined);
     await operation;
   };
 
@@ -1264,9 +1302,9 @@ export function registerActiveContext(pi: any, options: {
     try { await enqueueLifecycleLoad(ctx); }
     catch (error) {
       const sessionId = ctx.sessionManager.getSessionId();
-      if (!state || state.sessionId !== sessionId) state = emptyActiveContextState(sessionId);
-      if (!persisted || persisted.sessionId !== sessionId) persisted = clone(state);
-      latestSnapshotError = error instanceof Error ? error.message : String(error);
+      if (!persistence.state || persistence.state.sessionId !== sessionId) persistence.state = emptyActiveContextState(sessionId);
+      if (!persistence.persisted || persistence.persisted.sessionId !== sessionId) persistence.persisted = clone(persistence.state);
+      lifecycle.latestSnapshotError = error instanceof Error ? error.message : String(error);
       suspendAutomatic(error, phase, ctx);
       updateStatus(ctx);
     }
@@ -1296,9 +1334,9 @@ export function registerActiveContext(pi: any, options: {
       safeNotify(ctx, `Native completion decision could not persist for recovery: ${String(error)}`, "error");
     }
     const receipt = buildNativeCompletion(event, ctx, decision);
-    pendingNativeReceipt = receipt;
+    nativeCompaction.pendingNativeReceipt = receipt;
     load(ctx, true);
-    lastThresholdDecision = {
+    nativeCompaction.lastThresholdDecision = {
       handled: true,
       retry: false,
       reason: `native compaction completed; ${brandNoun} folding state rebuilt`,
@@ -1317,14 +1355,14 @@ export function registerActiveContext(pi: any, options: {
   });
 
   const attributionChanged = async (_event: unknown, ctx: any): Promise<void> => {
-    generation += 1;
+    lifecycle.generation += 1;
     cancelPreparation();
-    if (state?.prepared) state = clearPrepared(state);
-    latestRatio = null;
-    lastProviderMeasurement = null;
-    armedMilestone = state ? advisoryState(state).armed?.milestone ?? null : null;
-    advisoryScheduleKey = "pending-reseed";
-    lastThresholdDecision = null;
+    if (persistence.state?.prepared) persistence.state = clearPrepared(persistence.state);
+    measurements.latestRatio = null;
+    measurements.lastProviderMeasurement = null;
+    advisory.armedMilestone = persistence.state ? advisoryState(persistence.state).armed?.milestone ?? null : null;
+    advisory.advisoryScheduleKey = "pending-reseed";
+    nativeCompaction.lastThresholdDecision = null;
     updateStatus(ctx);
   };
   pi.on("model_select", attributionChanged);
@@ -1334,7 +1372,7 @@ export function registerActiveContext(pi: any, options: {
     snapshot: ActiveContextSnapshot,
     measurement: ProviderContextMeasurement,
   ): boolean => {
-    if (!state) return false;
+    if (!persistence.state) return false;
     const ratio = contextUsageRatio(measurement);
     if (ratio === null) return false;
     const schedule = advisorySchedule(snapshot);
@@ -1344,57 +1382,57 @@ export function registerActiveContext(pi: any, options: {
       model: measurement.model,
       contextWindow: measurement.contextWindow,
     });
-    const scheduleChanged = advisoryScheduleKey !== null && advisoryScheduleKey !== scheduleKey;
-    advisoryScheduleKey = scheduleKey;
-    const before = stableStringify(advisoryState(state));
-    const updated = updateAdvisoryMilestone(state, ratio, schedule, scheduleChanged, scheduleKey);
-    state = updated.state;
-    const armed = advisoryState(state).armed;
+    const scheduleChanged = advisory.advisoryScheduleKey !== null && advisory.advisoryScheduleKey !== scheduleKey;
+    advisory.advisoryScheduleKey = scheduleKey;
+    const before = stableStringify(advisoryState(persistence.state));
+    const updated = updateAdvisoryMilestone(persistence.state, ratio, schedule, scheduleChanged, scheduleKey);
+    persistence.state = updated.state;
+    const armed = advisoryState(persistence.state).armed;
     if (armed && ratio < 0.85 * armed.threshold) {
-      state = clearArmedAdvisory(state);
-      armedMilestone = null;
+      persistence.state = clearArmedAdvisory(persistence.state);
+      advisory.armedMilestone = null;
     } else {
-      armedMilestone = armed?.milestone ?? null;
+      advisory.armedMilestone = armed?.milestone ?? null;
     }
-    return before !== stableStringify(advisoryState(state));
+    return before !== stableStringify(advisoryState(persistence.state));
   };
 
   const accountAnchoredMeasurement = (measurement: ProviderContextMeasurement): boolean => {
-    if (!state) return false;
-    if (!lastProviderMeasurement) {
-      lastProviderMeasurement = measurement;
+    if (!persistence.state) return false;
+    if (!measurements.lastProviderMeasurement) {
+      measurements.lastProviderMeasurement = measurement;
       return false;
     }
-    if (lastProviderMeasurement.messageSha256 === measurement.messageSha256) return false;
-    const previousTokens = lastProviderMeasurement.tokens;
+    if (measurements.lastProviderMeasurement.messageSha256 === measurement.messageSha256) return false;
+    const previousTokens = measurements.lastProviderMeasurement.tokens;
     const delta = Math.max(0, measurement.tokens - previousTokens);
-    const tokensSinceToolFold = Math.min(Number.MAX_SAFE_INTEGER, state.tokensSinceToolFold + delta);
-    const leases = Object.fromEntries(Object.entries(state.leases)
+    const tokensSinceToolFold = Math.min(Number.MAX_SAFE_INTEGER, persistence.state.tokensSinceToolFold + delta);
+    const leases = Object.fromEntries(Object.entries(persistence.state.leases)
       .flatMap(([id, remaining]) => remaining > 1 ? [[id, remaining - 1]] : []));
-    const changed = tokensSinceToolFold !== state.tokensSinceToolFold ||
-      stableStringify(leases) !== stableStringify(state.leases);
-    if (changed) state = { ...state, tokensSinceToolFold, leases };
+    const changed = tokensSinceToolFold !== persistence.state.tokensSinceToolFold ||
+      stableStringify(leases) !== stableStringify(persistence.state.leases);
+    if (changed) persistence.state = { ...persistence.state, tokensSinceToolFold, leases };
     return changed;
   };
 
   const handleContext = async (event: { messages: unknown[] }, ctx: any) => {
-    if (shuttingDown) return { messages: event.messages };
-    if (!state) state = emptyActiveContextState(ctx.sessionManager.getSessionId());
-    latestSnapshot = null;
-    latestSnapshotError = null;
-    const stateAtEntry = clone(state);
-    const persistedAtEntry = persisted;
+    if (lifecycle.shuttingDown) return { messages: event.messages };
+    if (!persistence.state) persistence.state = emptyActiveContextState(ctx.sessionManager.getSessionId());
+    lifecycle.latestSnapshot = null;
+    lifecycle.latestSnapshotError = null;
+    const stateAtEntry = clone(persistence.state);
+    const persistedAtEntry = persistence.persisted;
     const transientAtEntry = captureTransient();
-    const generationAtEntry = generation;
-    let mutationAttempted = pendingManual;
+    const generationAtEntry = lifecycle.generation;
+    let mutationAttempted = ladder.pendingManual;
     let persistedSucceeded = false;
     try {
       const snapshot = snapshotForEvent(ctx, event.messages);
-      latestSnapshot = snapshot;
-      if (automaticFailure) {
-        automaticFailure.suppressedCallbacks = Math.min(
+      lifecycle.latestSnapshot = snapshot;
+      if (ladder.automaticFailure) {
+        ladder.automaticFailure.suppressedCallbacks = Math.min(
           Number.MAX_SAFE_INTEGER,
-          automaticFailure.suppressedCallbacks + 1,
+          ladder.automaticFailure.suppressedCallbacks + 1,
         );
       }
       let observed = latestProviderContextMeasurement(
@@ -1406,38 +1444,38 @@ export function registerActiveContext(pi: any, options: {
       let advisoryChanged = false;
       let measurementStateChanged = false;
       if (observed) {
-        const boundRevision = providerMeasurementRevisionByMessageSha.get(observed.messageSha256);
+        const boundRevision = measurements.providerMeasurementRevisionByMessageSha.get(observed.messageSha256);
         if (boundRevision !== undefined &&
             !durableProviderMeasurementReceiptMatches(observed, boundRevision)) {
           try { await persistProviderMeasurement(ctx, observed, boundRevision); }
           catch (error) { suspendAutomatic(error, "provider-measurement", ctx); }
         }
-        latestRatio = contextUsageRatio(observed);
-        if (durableProviderMeasurementMatches(observed) && latestRatio !== null) {
+        measurements.latestRatio = contextUsageRatio(observed);
+        if (durableProviderMeasurementMatches(observed) && measurements.latestRatio !== null) {
           measurementStateChanged = accountAnchoredMeasurement(observed);
-          lastProviderMeasurement = observed;
+          measurements.lastProviderMeasurement = observed;
           advisoryChanged = armMilestoneForMeasurement(snapshot, observed);
-          startPreparation(snapshot, latestRatio, ctx);
-          if (!automaticFailure && latestRatio >= hardFenceRatio(snapshot) && preparing) {
+          startPreparation(snapshot, measurements.latestRatio, ctx);
+          if (!ladder.automaticFailure && measurements.latestRatio >= hardFenceRatio(snapshot) && ladder.preparing) {
             mutationAttempted = true;
-            await preparing.promise;
+            await ladder.preparing.promise;
             if (!sessionIdentityStillValid(ctx, snapshot.sessionId, generationAtEntry)) {
               return { messages: event.messages };
             }
           }
-          if (selectAutomaticToolForRung(snapshot, state, latestRatio)) mutationAttempted = true;
-          const action = await attemptAutomaticRung(snapshot, latestRatio, ctx, "context");
+          if (selectAutomaticToolForRung(snapshot, persistence.state, measurements.latestRatio)) mutationAttempted = true;
+          const action = await attemptAutomaticRung(snapshot, measurements.latestRatio, ctx, "context");
           if (action) {
             mutationAttempted = true;
             persistedSucceeded = true;
             advisoryChanged = false;
           }
-        } else lastProviderMeasurement = observed;
+        } else measurements.lastProviderMeasurement = observed;
       } else {
-        latestRatio = contextUsageRatio(lastProviderMeasurement);
+        measurements.latestRatio = contextUsageRatio(measurements.lastProviderMeasurement);
       }
-      if ((advisoryChanged || measurementStateChanged) && state && persisted &&
-          !sameStateProjection(state, persisted)) {
+      if ((advisoryChanged || measurementStateChanged) && persistence.state && persistence.persisted &&
+          !sameStateProjection(persistence.state, persistence.persisted)) {
         mutationAttempted = true;
         await persistThroughActionQueue(ctx);
         persistedSucceeded = true;
@@ -1456,27 +1494,22 @@ export function registerActiveContext(pi: any, options: {
       updateStatus(ctx);
       return { messages: projected };
     } catch (error) {
-      if (!persistedSucceeded && persisted === persistedAtEntry) {
-        state = stateAtEntry;
+      if (!persistedSucceeded && persistence.persisted === persistedAtEntry) {
+        persistence.state = stateAtEntry;
         restoreTransient(transientAtEntry);
       }
-      latestSnapshotError = error instanceof Error ? error.message : String(error);
+      lifecycle.latestSnapshotError = error instanceof Error ? error.message : String(error);
       if (mutationAttempted) {
-        if (!persistedSucceeded) boundaryFailure = latestSnapshotError;
+        if (!persistedSucceeded) ladder.boundaryFailure = lifecycle.latestSnapshotError;
         suspendAutomatic(error, persistedSucceeded ? "post-persist-projection" : "context", ctx);
       }
-      abortUnsafeHardContext(latestSnapshot, ctx);
+      abortUnsafeHardContext(lifecycle.latestSnapshot, ctx);
       return { messages: event.messages };
     }
   };
   pi.on("context", (event: { messages: unknown[] }, ctx: any) => {
-    // Pi normally requests context serially, but retries, reloads, and host
-    // integrations can overlap callbacks. Serialize the entire authority →
-    // preparation → commit → projection transaction so a follower cannot
-    // observe a published measurement before the leader's durable receipt or
-    // return raw final-rung context while the leader is preparing a brief.
-    const operation = contextQueue.then(() => handleContext(event, ctx));
-    contextQueue = operation.then(() => undefined, () => undefined);
+    const operation = lifecycle.contextQueue.then(() => handleContext(event, ctx));
+    lifecycle.contextQueue = operation.then(() => undefined, () => undefined);
     return operation;
   });
 
@@ -1489,10 +1522,10 @@ export function registerActiveContext(pi: any, options: {
     capturedTopologySha256: string,
     capturedProtectionSha256: string,
   ): Promise<void> => {
-    if (shuttingDown ||
+    if (lifecycle.shuttingDown ||
         !sessionIdentityStillValid(ctx, capturedSessionId, capturedGeneration) ||
-        topologySha256(state!) !== capturedTopologySha256 ||
-        protectionSha256(state!) !== capturedProtectionSha256) return;
+        topologySha256(persistence.state!) !== capturedTopologySha256 ||
+        protectionSha256(persistence.state!) !== capturedProtectionSha256) return;
     try {
       await persistProviderMeasurement(ctx, measurement, capturedProjectionRevision);
     } catch (error) {
@@ -1504,8 +1537,8 @@ export function registerActiveContext(pi: any, options: {
         !durableProviderMeasurementMatches(measurement) ||
         measuredRatio === null) return;
     const measurementStateChanged = accountAnchoredMeasurement(measurement);
-    lastProviderMeasurement = measurement;
-    latestRatio = measuredRatio;
+    measurements.lastProviderMeasurement = measurement;
+    measurements.latestRatio = measuredRatio;
     let snapshot: ActiveContextSnapshot;
     try { snapshot = authoritativeSnapshotFor(ctx); }
     catch {
@@ -1513,25 +1546,25 @@ export function registerActiveContext(pi: any, options: {
       return;
     }
     const advisoryChanged = armMilestoneForMeasurement(snapshot, measurement);
-    startPreparation(snapshot, latestRatio, ctx);
-    if (latestRatio >= hardFenceRatio(measurement, ctx) && preparing) await preparing.promise;
+    startPreparation(snapshot, measurements.latestRatio, ctx);
+    if (measurements.latestRatio >= hardFenceRatio(measurement, ctx) && ladder.preparing) await ladder.preparing.promise;
     if (!sessionIdentityStillValid(ctx, capturedSessionId, capturedGeneration) ||
         !durableProviderMeasurementMatches(measurement)) return;
     const action = await attemptAutomaticRung(
       authoritativeSnapshotFor(ctx),
-      latestRatio,
+      measurements.latestRatio,
       ctx,
       "message-end",
     );
-    if (!action && (advisoryChanged || measurementStateChanged) && state && persisted &&
-        !sameStateProjection(state, persisted)) {
+    if (!action && (advisoryChanged || measurementStateChanged) && persistence.state && persistence.persisted &&
+        !sameStateProjection(persistence.state, persistence.persisted)) {
       await persistThroughActionQueue(ctx);
     }
     updateStatus(ctx);
   };
 
   pi.on("message_end", async (event: Record<string, unknown>, ctx: any) => {
-    if (shuttingDown) return;
+    if (lifecycle.shuttingDown) return;
     try {
       const message = ownValue(event, "message");
       const measurement = providerContextMeasurement(
@@ -1539,12 +1572,12 @@ export function registerActiveContext(pi: any, options: {
         contextWindowFor(ctx) ?? DEFAULT_CONTEXT_WINDOW,
         ctx.model,
       );
-      if (!measurement || !state) return;
+      if (!measurement || !persistence.state) return;
       const capturedSessionId = ctx.sessionManager.getSessionId();
-      const capturedGeneration = generation;
-      const capturedProjectionRevision = state.revision;
-      const capturedTopologySha256 = topologySha256(state);
-      const capturedProtectionSha256 = protectionSha256(state);
+      const capturedGeneration = lifecycle.generation;
+      const capturedProjectionRevision = persistence.state.revision;
+      const capturedTopologySha256 = topologySha256(persistence.state);
+      const capturedProtectionSha256 = protectionSha256(persistence.state);
       await applyAnchoredProviderMeasurement(
         measurement,
         ctx,
@@ -1561,58 +1594,58 @@ export function registerActiveContext(pi: any, options: {
   });
   pi.on("tool_call", (event: Record<string, unknown>, ctx: any) => {
     const calledTool = ownValue(event, "toolName");
-    if (shuttingDown || blockingToolHarvestedThisTurn || blockingToolHarvestQueuedThisTurn ||
+    if (lifecycle.shuttingDown || lifecycle.blockingToolHarvestedThisTurn || lifecycle.blockingToolHarvestQueuedThisTurn ||
         typeof calledTool !== "string" || !blockingTools.has(calledTool)) return;
-    blockingToolHarvestQueuedThisTurn = true;
-    const operation = actionQueue.then(async () => {
+    lifecycle.blockingToolHarvestQueuedThisTurn = true;
+    const operation = ladder.actionQueue.then(async () => {
       try {
-        if (!state || latestRatio === null || !lastProviderMeasurement || automaticFailure ||
-            !durableProviderMeasurementMatches(lastProviderMeasurement)) return null;
+        if (!persistence.state || measurements.latestRatio === null || !measurements.lastProviderMeasurement || ladder.automaticFailure ||
+            !durableProviderMeasurementMatches(measurements.lastProviderMeasurement)) return null;
         cancelPreparation();
         let snapshot: ActiveContextSnapshot;
         try { snapshot = authoritativeSnapshotFor(ctx); }
         catch { return null; }
-        const candidate = selectAutomaticToolForRung(snapshot, state, latestRatio, true);
+        const candidate = selectAutomaticToolForRung(snapshot, persistence.state, measurements.latestRatio, true);
         if (!candidate) {
-          blockingToolHarvestedThisTurn = true;
+          lifecycle.blockingToolHarvestedThisTurn = true;
           return null;
         }
         const action = await runAutomaticRungTransaction(
           snapshot,
-          latestRatio,
+          measurements.latestRatio,
           ctx,
           "tool-call",
           { waiveToolCadence: true, toolOnly: true },
         );
-        if (action) blockingToolHarvestedThisTurn = true;
+        if (action) lifecycle.blockingToolHarvestedThisTurn = true;
         return action;
       } finally {
-        blockingToolHarvestQueuedThisTurn = false;
+        lifecycle.blockingToolHarvestQueuedThisTurn = false;
         try { updateStatus(ctx); } catch { /* A blocking tool call must never wait on presentation. */ }
       }
     });
-    actionQueue = operation.catch(() => undefined);
+    ladder.actionQueue = operation.catch(() => undefined);
   });
   pi.on("turn_end", async (_event: unknown, ctx: any) => {
-    blockingToolHarvestedThisTurn = false;
-    blockingToolHarvestQueuedThisTurn = false;
-    if (shuttingDown || !state || !persisted) return;
-    const stateAtEntry = clone(state);
-    const persistedAtEntry = persisted;
+    lifecycle.blockingToolHarvestedThisTurn = false;
+    lifecycle.blockingToolHarvestQueuedThisTurn = false;
+    if (lifecycle.shuttingDown || !persistence.state || !persistence.persisted) return;
+    const stateAtEntry = clone(persistence.state);
+    const persistedAtEntry = persistence.persisted;
     const transientAtEntry = captureTransient();
     try {
       const snapshot = authoritativeSnapshotFor(ctx);
-      if (!pendingManual && !automaticFailure && latestRatio !== null && lastProviderMeasurement &&
-          durableProviderMeasurementMatches(lastProviderMeasurement)) {
-        startPreparation(snapshot, latestRatio, ctx);
-        if (latestRatio >= hardFenceRatio(snapshot) && preparing) await preparing.promise;
-        await attemptAutomaticRung(snapshot, latestRatio, ctx, "turn-end");
+      if (!ladder.pendingManual && !ladder.automaticFailure && measurements.latestRatio !== null && measurements.lastProviderMeasurement &&
+          durableProviderMeasurementMatches(measurements.lastProviderMeasurement)) {
+        startPreparation(snapshot, measurements.latestRatio, ctx);
+        if (measurements.latestRatio >= hardFenceRatio(snapshot) && ladder.preparing) await ladder.preparing.promise;
+        await attemptAutomaticRung(snapshot, measurements.latestRatio, ctx, "turn-end");
       }
-      pendingManual = false;
-      if (!automaticFailure) boundaryFailure = null;
+      ladder.pendingManual = false;
+      if (!ladder.automaticFailure) ladder.boundaryFailure = null;
     } catch (error) {
-      if (persisted === persistedAtEntry) {
-        state = stateAtEntry;
+      if (persistence.persisted === persistedAtEntry) {
+        persistence.state = stateAtEntry;
         restoreTransient(transientAtEntry);
       }
       suspendAutomatic(error, "turn-end", ctx);
@@ -1628,7 +1661,7 @@ export function registerActiveContext(pi: any, options: {
   pi.on("session_before_compact", (event: Record<string, unknown>, ctx: any) => {
     const reason = ownValue(event, "reason");
     if (reason === "manual") {
-      lastThresholdDecision = {
+      nativeCompaction.lastThresholdDecision = {
         handled: false,
         retry: false,
         reason: "manual native compaction explicitly requested by the user",
@@ -1637,7 +1670,7 @@ export function registerActiveContext(pi: any, options: {
       try { updateStatus(ctx); } catch { /* Manual rescue must survive presentation failure. */ }
       return undefined;
     }
-    lastThresholdDecision = {
+    nativeCompaction.lastThresholdDecision = {
       handled: true,
       retry: false,
       reason: `blocked stock automatic compaction; ${contextBrand(brandNoun)} folding remains authoritative`,
@@ -1647,14 +1680,14 @@ export function registerActiveContext(pi: any, options: {
     return { cancel: true };
   });
   pi.on("agent_settled", async (_event: unknown, ctx: any) => {
-    if (pendingManual && persisted && boundaryFailure === null) {
+    if (ladder.pendingManual && persistence.persisted && ladder.boundaryFailure === null) {
       cancelPreparation();
-      state = clone(persisted);
-      pendingManual = false;
+      persistence.state = clone(persistence.persisted);
+      ladder.pendingManual = false;
     }
     try {
       const snapshot = authoritativeSnapshotFor(ctx);
-      startPreparation(snapshot, latestRatio, ctx);
+      startPreparation(snapshot, measurements.latestRatio, ctx);
     } catch {
       // The next authoritative context event will retry mapping.
     }
@@ -1668,19 +1701,19 @@ export function registerActiveContext(pi: any, options: {
     signal: AbortSignal | undefined,
     ctx: any,
   ): Promise<unknown> => {
-    if (shuttingDown) throw new Error("Active-context runtime is shut down");
-    if (!state) state = emptyActiveContextState(ctx.sessionManager.getSessionId());
+    if (lifecycle.shuttingDown) throw new Error("Active-context runtime is shut down");
+    if (!persistence.state) persistence.state = emptyActiveContextState(ctx.sessionManager.getSessionId());
     const executionArgumentsSha256 = sha256Value(params);
     const action = String(params.action ?? "");
     if (!allowedToolActionSet.has(action)) {
       throw new Error(`${toolName} action '${action}' is not enabled in this runtime`);
     }
-    if (action === "status" && !latestSnapshot) {
+    if (action === "status" && !lifecycle.latestSnapshot) {
       return toolPayload({
         version: 1,
         service: "active-context-folding",
         available: false,
-        contextEventError: latestSnapshotError ?? "No current same-session Pi context event has been observed",
+        contextEventError: lifecycle.latestSnapshotError ?? "No current same-session Pi context event has been observed",
       });
     }
     const snapshot = authoritativeSnapshotFor(ctx);
@@ -1693,21 +1726,21 @@ export function registerActiveContext(pi: any, options: {
       return toolPayload({
         ...activeContextStatus(
           snapshot,
-          state,
+          persistence.state,
           boundedInteger(params.offset, 0, 0, 1_000_000, "offset"),
           boundedInteger(params.limit, 40, 1, 100, "limit"),
           snapshot.policy.maxFoldSourceRefs,
         ),
         available: true,
         automatic: {
-          pressureRatio: latestRatio,
+          pressureRatio: measurements.latestRatio,
           milestones: Object.fromEntries(schedule.rungs.map((rung) => [
             rung.milestone,
             { threshold: rung.threshold, budget: rung.budget },
           ])),
-          armedMilestone,
-          advisory: advisoryState(state),
-          historicalGuidanceEntries,
+          armedMilestone: advisory.armedMilestone,
+          advisory: advisoryState(persistence.state),
+          historicalGuidanceEntries: advisory.historicalGuidanceEntries,
           warningRatio: snapshot.policy.warningRatio,
           toolFoldRatio: snapshot.policy.toolFoldRatio,
           refoldRatio: snapshot.policy.refoldRatio,
@@ -1719,28 +1752,28 @@ export function registerActiveContext(pi: any, options: {
           ),
           windowSource: snapshot.windowSource,
           consolidationRatio: snapshot.policy.consolidationRatio,
-          providerMeasurement: lastProviderMeasurement ? {
-            tokens: lastProviderMeasurement.tokens,
-            contextWindow: lastProviderMeasurement.contextWindow,
-            messageSha256: lastProviderMeasurement.messageSha256,
-            provider: lastProviderMeasurement.provider,
-            model: lastProviderMeasurement.model,
+          providerMeasurement: measurements.lastProviderMeasurement ? {
+            tokens: measurements.lastProviderMeasurement.tokens,
+            contextWindow: measurements.lastProviderMeasurement.contextWindow,
+            messageSha256: measurements.lastProviderMeasurement.messageSha256,
+            provider: measurements.lastProviderMeasurement.provider,
+            model: measurements.lastProviderMeasurement.model,
           } : null,
-          measurementFresh: Boolean(lastProviderMeasurement &&
-            durableProviderMeasurementMatches(lastProviderMeasurement)),
-          preparing: Boolean(preparing),
-          preparedFoldId: state.prepared?.id ?? null,
-          preparedSourceCount: state.prepared?.sourceRefs.length ?? null,
-          pendingContextNote,
-          lastCandidateId: lastPreparationCandidateId,
-          lastPreparationError,
-          boundaryFailure,
-          lastSelectionKind,
-          lastSelectionSourceIds,
-          lastAutomaticAction,
-          automaticSuspended: automaticFailure !== null,
-          automaticFailure: automaticFailure ? clone(automaticFailure) : null,
-          lastCompactionDecision: lastThresholdDecision,
+          measurementFresh: Boolean(measurements.lastProviderMeasurement &&
+            durableProviderMeasurementMatches(measurements.lastProviderMeasurement)),
+          preparing: Boolean(ladder.preparing),
+          preparedFoldId: persistence.state.prepared?.id ?? null,
+          preparedSourceCount: persistence.state.prepared?.sourceRefs.length ?? null,
+          pendingContextNote: ladder.pendingContextNote,
+          lastCandidateId: ladder.lastPreparationCandidateId,
+          lastPreparationError: ladder.lastPreparationError,
+          boundaryFailure: ladder.boundaryFailure,
+          lastSelectionKind: ladder.lastSelectionKind,
+          lastSelectionSourceIds: ladder.lastSelectionSourceIds,
+          lastAutomaticAction: ladder.lastAutomaticAction,
+          automaticSuspended: ladder.automaticFailure !== null,
+          automaticFailure: ladder.automaticFailure ? clone(ladder.automaticFailure) : null,
+          lastCompactionDecision: nativeCompaction.lastThresholdDecision,
           nativeSummaries: "disabled",
           freeHarvest: blockingTools.size === 0 ? "disabled" : "enabled",
           pressureSource: "last-successful-provider-response-only",
@@ -1748,14 +1781,14 @@ export function registerActiveContext(pi: any, options: {
           sameOperationRetry: false,
         },
         ...(detail === "fold_candidates" ? {
-          candidates: foldCandidatesDetail(snapshot, state, latestRatio, {
+          candidates: foldCandidatesDetail(snapshot, persistence.state, measurements.latestRatio, {
             summarizerAvailable: Boolean(options.summarizeContextSpan),
-            generation,
-            measurementFresh: Boolean(lastProviderMeasurement &&
-              durableProviderMeasurementMatches(lastProviderMeasurement)),
-            automaticFailure: automaticFailure !== null,
-            preparing: Boolean(preparing),
-            failedPreparationIds: failedPreparations,
+            generation: lifecycle.generation,
+            measurementFresh: Boolean(measurements.lastProviderMeasurement &&
+              durableProviderMeasurementMatches(measurements.lastProviderMeasurement)),
+            automaticFailure: ladder.automaticFailure !== null,
+            preparing: Boolean(ladder.preparing),
+            failedPreparationIds: ladder.failedPreparations,
           }),
         } : {}),
       });
@@ -1763,8 +1796,8 @@ export function registerActiveContext(pi: any, options: {
     if (action === "expand" || action === "refold") {
       const id = String(params.id ?? "").trim();
       if (!id) throw new Error(`${action} requires id`);
-      requireActiveFold(snapshot, state, id);
-      let next = setFoldProjectionState(state, id, action === "expand" ? "expanded" : "folded");
+      requireActiveFold(snapshot, persistence.state, id);
+      let next = setFoldProjectionState(persistence.state, id, action === "expand" ? "expanded" : "folded");
       if (action === "expand") next = withExpandLease(next, id);
       else {
         const leases = { ...next.leases };
@@ -1787,7 +1820,7 @@ export function registerActiveContext(pi: any, options: {
     }
     if (action === "protect" || action === "unprotect") {
       const ids = stringIds(params.ids);
-      await persistManual(protectEvidence(snapshot, state, ids, action === "protect"), action, ctx);
+      await persistManual(protectEvidence(snapshot, persistence.state, ids, action === "protect"), action, ctx);
       updateStatus(ctx);
       return toolPayload({
         version: 1,
@@ -1798,7 +1831,7 @@ export function registerActiveContext(pi: any, options: {
     }
     if (action === "fold") {
       const ids = stringIds(params.ids);
-      const candidate = manualFoldCandidate(snapshot, state, ids);
+      const candidate = manualFoldCandidate(snapshot, persistence.state, ids);
       const supplied = typeof params.brief === "string" && params.brief.trim() ? params.brief : undefined;
       const { preparedFold, nextState } = await prepareAndCommitExplicit({
         snapshot,
@@ -1807,7 +1840,7 @@ export function registerActiveContext(pi: any, options: {
         ctx,
         signal,
       });
-      armedMilestone = null;
+      advisory.armedMilestone = null;
       await persistManual(clearArmedAdvisory(nextState), "fold", ctx);
       updateStatus(ctx);
       return toolPayload({
@@ -1818,7 +1851,7 @@ export function registerActiveContext(pi: any, options: {
         brief: preparedFold.fold.brief,
         provenance: normalizeLegacyProvenance(preparedFold.fold.provenance),
         argumentsSha256: executionArgumentsSha256,
-        durableRevision: state.revision,
+        durableRevision: persistence.state.revision,
         activation: "durable immediately; projected on the next model call in this same turn",
         expand: { action: "expand", id: preparedFold.id },
       });
@@ -1852,8 +1885,8 @@ export function registerActiveContext(pi: any, options: {
       },
     },
     async execute(_toolCallId: string, params: Record<string, unknown>, signal: AbortSignal, _onUpdate: unknown, ctx: any) {
-      const operation = actionQueue.then(() => executeAction(params, signal, ctx));
-      actionQueue = operation.catch(() => undefined);
+      const operation = ladder.actionQueue.then(() => executeAction(params, signal, ctx));
+      ladder.actionQueue = operation.catch(() => undefined);
       return operation;
     },
   });
@@ -1861,10 +1894,10 @@ export function registerActiveContext(pi: any, options: {
   pi.registerCommand(commandNames.status, {
     description: "Show active-context fold roots and paging state",
     handler: async (_args: string, ctx: any) => {
-      if (!state) state = emptyActiveContextState(ctx.sessionManager.getSessionId());
+      if (!persistence.state) persistence.state = emptyActiveContextState(ctx.sessionManager.getSessionId());
       try {
         const snapshot = authoritativeSnapshotFor(ctx);
-        const status = activeContextStatus(snapshot, state, 0, 40);
+        const status = activeContextStatus(snapshot, persistence.state, 0, 40);
         safeNotify(
           ctx,
           `Active context: ${status.totalFolds} fold(s), roots ${(status.roots as string[]).join(", ") || "none"}. ` +
@@ -1880,23 +1913,23 @@ export function registerActiveContext(pi: any, options: {
   pi.registerCommand(commandNames.fold, {
     description: "Losslessly fold a stale context span; works without a main-model request",
     handler: async (args: string, ctx: any) => {
-      const operation = actionQueue.then(async () => {
-        if (!state) state = emptyActiveContextState(ctx.sessionManager.getSessionId());
-        const snapshot = latestSnapshot
+      const operation = ladder.actionQueue.then(async () => {
+        if (!persistence.state) persistence.state = emptyActiveContextState(ctx.sessionManager.getSessionId());
+        const snapshot = lifecycle.latestSnapshot
           ? authoritativeSnapshotFor(ctx)
           : snapshotForEvent(ctx, ctx.sessionManager.buildSessionContext().messages);
-        if (!latestSnapshot) latestSnapshot = snapshot;
+        if (!lifecycle.latestSnapshot) lifecycle.latestSnapshot = snapshot;
         const divider = args.indexOf(" -- ");
         const selector = (divider >= 0 ? args.slice(0, divider) : args).trim();
         const supplied = (divider >= 0 ? args.slice(divider + 4) : "").trim() || undefined;
         const ids = selector ? selector.replace(/\.\./g, " ").split(/[\s,]+/).filter(Boolean) : [];
         const candidate = ids.length
-          ? manualFoldCandidate(snapshot, state!, ids)
-          : selectAutomaticChapter(snapshot, state!) ?? selectAutomaticToolBatch(snapshot, state!, 1)[0] ?? null;
+          ? manualFoldCandidate(snapshot, persistence.state!, ids)
+          : selectAutomaticChapter(snapshot, persistence.state!) ?? selectAutomaticToolBatch(snapshot, persistence.state!, 1)[0] ?? null;
         if (!candidate) throw new Error("No exact stale rescue span is currently eligible");
-        const stateBefore = state!;
-        const persistedBefore = persisted ? clone(persisted) : null;
-        const generationBefore = generation;
+        const stateBefore = persistence.state!;
+        const persistedBefore = persistence.persisted ? clone(persistence.persisted) : null;
+        const generationBefore = lifecycle.generation;
         const { preparedFold, nextState } = await prepareAndCommitExplicit({
           snapshot,
           candidate,
@@ -1907,22 +1940,22 @@ export function registerActiveContext(pi: any, options: {
         if (!sessionIdentityStillValid(ctx, stateBefore.sessionId, generationBefore)) {
           throw new Error("Active-context session changed before rescue persistence");
         }
-        state = clearArmedAdvisory(nextState);
-        armedMilestone = null;
+        persistence.state = clearArmedAdvisory(nextState);
+        advisory.armedMilestone = null;
         try { await persist(ctx); }
         catch (error) {
           if (sessionIdentityStillValid(ctx, stateBefore.sessionId, generationBefore)) {
-            state = stateBefore;
-            persisted = persistedBefore;
+            persistence.state = stateBefore;
+            persistence.persisted = persistedBefore;
           }
           throw error;
         }
-        pendingManual = false;
-        automaticFailure = null;
-        armedMilestone = null;
-        pendingContextNote =
+        ladder.pendingManual = false;
+        ladder.automaticFailure = null;
+        advisory.armedMilestone = null;
+        ladder.pendingContextNote =
           `User rescue folded stale context under ${preparedFold.id}; exact source remains expandable.`;
-        lastAutomaticAction = {
+        ladder.lastAutomaticAction = {
           kind: "user-rescue-fold",
           foldIds: [preparedFold.id],
           sourceIds: preparedFold.sourceRefs.map((ref) => ref.entryId),
@@ -1934,7 +1967,7 @@ export function registerActiveContext(pi: any, options: {
           "info",
         );
       });
-      actionQueue = operation.catch(() => undefined);
+      ladder.actionQueue = operation.catch(() => undefined);
       try { await operation; }
       catch (error) {
         safeNotify(ctx, `Context rescue failed: ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -1942,13 +1975,13 @@ export function registerActiveContext(pi: any, options: {
     },
   });
   pi.on("session_shutdown", (_event: unknown, ctx: any) => {
-    generation += 1;
-    shuttingDown = true;
+    lifecycle.generation += 1;
+    lifecycle.shuttingDown = true;
     cancelPreparation();
-    state = null;
-    persisted = null;
-    latestSnapshot = null;
-    armedMilestone = null;
+    persistence.state = null;
+    persistence.persisted = null;
+    lifecycle.latestSnapshot = null;
+    advisory.armedMilestone = null;
     try { ctx.ui?.setStatus?.(entryTypePrefix, undefined); } catch { /* Shutdown cannot be blocked by UI. */ }
   });
 
