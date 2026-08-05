@@ -2,6 +2,10 @@
 
 pi-fold provides lossless, agent-governed context folding for Pi. It changes only the oldest eligible context while leaving the fresh window untouched.
 
+![pi-fold folding a live session](https://raw.githubusercontent.com/shaneconner/pi-fold/main/docs/demo.gif)
+
+*A live session at 5.5× speed: the autonomous ladder folds a completed read batch mid-conversation — no command issued — and `/context` reports the fold.*
+
 ## Status
 
 This package is pre-release. Its API may move until 0.1.0. Licensed under [MIT](./LICENSE).
