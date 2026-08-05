@@ -16,6 +16,9 @@ import {
 import {
   ACTIVE_CONTEXT_POLICY,
   BYTES_PER_TOKEN_FLOOR,
+  DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
+  DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX,
+  DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   DEFAULT_CONTEXT_WINDOW,
   READ_ONLY_TOOLS_DEFAULT,
 } from "./policy.ts";
@@ -69,7 +72,7 @@ export function leadingCompactionContinuation(messages: unknown[]): CompleteTurn
 export function isReadOnlyContextTool(
   name: string,
   args?: unknown,
-  toolName = "quorum_context",
+  toolName = DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   readOnlyTools: ReadonlySet<string> = READ_ONLY_TOOLS_DEFAULT,
 ): boolean {
   if (readOnlyTools.has(name)) return true;
@@ -105,7 +108,7 @@ export function scanTurnToolBatches(
   messages: unknown[],
   turn: CompleteTurn,
   allowIncomplete = false,
-  toolName = "quorum_context",
+  toolName = DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   readOnlyTools: ReadonlySet<string> = READ_ONLY_TOOLS_DEFAULT,
 ): ScannedToolBatches | null {
   if (!Number.isSafeInteger(turn.start) || !Number.isSafeInteger(turn.end) ||
@@ -189,7 +192,7 @@ export function scanTurnToolBatches(
 export function validateTurnToolBatch(
   messages: unknown[],
   turn: CompleteTurn,
-  toolName = "quorum_context",
+  toolName = DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   readOnlyTools: ReadonlySet<string> = READ_ONLY_TOOLS_DEFAULT,
 ): ValidatedToolBatch | null {
   const scanned = scanTurnToolBatches(messages, turn, false, toolName, readOnlyTools);
@@ -374,6 +377,7 @@ export function mapActiveContext(input: {
   projectEntry?: (entry: Record<string, unknown>) => unknown[];
   policy?: Partial<typeof ACTIVE_CONTEXT_POLICY>;
   toolName?: string;
+  brandNoun?: string;
   entryTypePrefix?: string;
   readOnlyTools?: ReadonlySet<string>;
   contextWindow?: number;
@@ -465,8 +469,9 @@ export function mapActiveContext(input: {
     protectedIndices,
     toolProtectedIndices,
     policy: tailPolicy,
-    toolName: input.toolName ?? "quorum_context",
-    entryTypePrefix: input.entryTypePrefix ?? "quorum-active-context",
+    toolName: input.toolName ?? DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
+    brandNoun: input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
+    entryTypePrefix: input.entryTypePrefix ?? DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX,
     readOnlyTools: input.readOnlyTools ?? READ_ONLY_TOOLS_DEFAULT,
     contextWindow: reportedContextWindow ?? DEFAULT_CONTEXT_WINDOW,
     windowSource: reportedContextWindow === null ? "fallback" : "reported",

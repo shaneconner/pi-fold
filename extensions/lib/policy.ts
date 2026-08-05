@@ -1,11 +1,41 @@
 import type { EvidenceRef } from "../json.ts";
 
-export const ACTIVE_CONTEXT_STATE_ENTRY = "quorum-active-context-state";
-export const ACTIVE_CONTEXT_FOLD_RECORD_ENTRY = "quorum-active-context-fold-record";
-export const NATIVE_COMPACTION_RECEIPT_ENTRY = "quorum-native-compaction-receipt";
-export const NATIVE_COMPACTION_DECISION_ENTRY = "quorum-native-compaction-decision";
-export const PROVIDER_CONTEXT_MEASUREMENT_ENTRY = "quorum-provider-context-measurement";
-export const ACTIVE_CONTEXT_STATUS_KEY = "quorum-active-context";
+export const DEFAULT_ACTIVE_CONTEXT_TOOL_NAME = "active_context";
+export const DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX = "pi-fold-active-context";
+export const DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL = "Active Context";
+export const DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN = "active-context";
+export const DEFAULT_ACTIVE_CONTEXT_COMMAND_NAMES = Object.freeze({
+  status: "context",
+  fold: "fold-context",
+});
+
+export function entryTypeNamespace(entryTypePrefix: string): string {
+  const suffix = "-active-context";
+  return entryTypePrefix.endsWith(suffix) && entryTypePrefix.length > suffix.length
+    ? entryTypePrefix.slice(0, -suffix.length)
+    : entryTypePrefix;
+}
+
+export function activeContextSource(entryTypePrefix: string): string {
+  const namespace = entryTypeNamespace(entryTypePrefix);
+  return namespace === entryTypePrefix ? entryTypePrefix : `${namespace}/active-context`;
+}
+
+export function activeContextBrand(brandNoun: string): string {
+  return /active-context$/i.test(brandNoun) ? brandNoun : `${brandNoun} active-context`;
+}
+
+export function contextBrand(brandNoun: string): string {
+  return /context$/i.test(brandNoun) ? brandNoun : `${brandNoun} context`;
+}
+
+const DEFAULT_ENTRY_NAMESPACE = entryTypeNamespace(DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX);
+export const ACTIVE_CONTEXT_STATE_ENTRY = `${DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX}-state`;
+export const ACTIVE_CONTEXT_FOLD_RECORD_ENTRY = `${DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX}-fold-record`;
+export const NATIVE_COMPACTION_RECEIPT_ENTRY = `${DEFAULT_ENTRY_NAMESPACE}-native-compaction-receipt`;
+export const NATIVE_COMPACTION_DECISION_ENTRY = `${DEFAULT_ENTRY_NAMESPACE}-native-compaction-decision`;
+export const PROVIDER_CONTEXT_MEASUREMENT_ENTRY = `${DEFAULT_ENTRY_NAMESPACE}-provider-context-measurement`;
+export const ACTIVE_CONTEXT_STATUS_KEY = DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX;
 export const ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
   "status", "fold", "expand", "refold", "protect", "unprotect",
 ] as const);
@@ -185,6 +215,7 @@ export interface ActiveContextSnapshot {
   toolProtectedIndices: Set<number>;
   policy: typeof ACTIVE_CONTEXT_POLICY;
   toolName: string;
+  brandNoun: string;
   entryTypePrefix: string;
   readOnlyTools: ReadonlySet<string>;
   contextWindow: number;

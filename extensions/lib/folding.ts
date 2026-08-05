@@ -41,6 +41,8 @@ import {
   validateFoldForest,
 } from "./persistence.ts";
 import {
+  activeContextBrand,
+  activeContextSource,
   CONSOLIDATION_WIDTH_THRESHOLD,
   EXPAND_LEASE_GENERATIONS,
   MAX_EXPAND_LEASES,
@@ -697,7 +699,7 @@ export function foldPlaceholder(fold: ActiveFold, state: ActiveContextState, sna
   const navigation = foldNavigation(fold, state, snapshot);
   const parent = fold.parentId ?? "root";
   return [
-    `[Quorum active-context fold ${fold.id}]`,
+    `[${activeContextBrand(snapshot.brandNoun)} fold ${fold.id}]`,
     fold.brief,
     `Topology: kind=${fold.kind}; parent=${parent}; children=${childFoldIds(fold).length}; ` +
       `previous=${navigation.previous ?? "none"}; next=${navigation.next ?? "none"}.`,
@@ -729,7 +731,7 @@ export function renderFold(
       customType: `${snapshot.entryTypePrefix}-fold`,
       content: text,
       display: false,
-      details: { source: "quorum/active-context", foldId: fold.id },
+      details: { source: activeContextSource(snapshot.entryTypePrefix), foldId: fold.id },
       timestamp: typeof first?.timestamp === "number" ? first.timestamp : 0,
     }];
   }

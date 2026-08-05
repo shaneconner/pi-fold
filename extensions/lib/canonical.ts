@@ -4,7 +4,7 @@ import {
   isPlainRecord,
   stableStringify,
 } from "../json.ts";
-import { ACTIVE_CONTEXT_POLICY } from "./policy.ts";
+import { ACTIVE_CONTEXT_POLICY, DEFAULT_ACTIVE_CONTEXT_TOOL_NAME } from "./policy.ts";
 import type { ActiveContextState } from "./policy.ts";
 
 export function clone<T>(value: T): T {
@@ -137,7 +137,7 @@ export function emptyActiveContextState(sessionId: string): ActiveContextState {
 export function usefulBrief(
   value: unknown,
   maximum = ACTIVE_CONTEXT_POLICY.maxBriefChars,
-  toolName = "quorum_context",
+  toolName = DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
 ): value is string {
   if (typeof value !== "string") return false;
   const brief = value.trim();

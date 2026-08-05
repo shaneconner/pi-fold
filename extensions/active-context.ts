@@ -74,13 +74,18 @@ import {
 } from "./lib/persistence.ts";
 import type { MaterializedStatePersistence } from "./lib/persistence.ts";
 import {
+  activeContextSource,
   ACTIVE_CONTEXT_POLICY,
   ACTIVE_CONTEXT_STATUS_KEY,
   ACTIVE_CONTEXT_TOOL_ACTIONS,
+  contextBrand,
+  DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
+  DEFAULT_ACTIVE_CONTEXT_COMMAND_NAMES,
+  DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX,
+  DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL,
+  DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   DEFAULT_CONTEXT_WINDOW,
-  NATIVE_COMPACTION_DECISION_ENTRY,
-  NATIVE_COMPACTION_RECEIPT_ENTRY,
-  PROVIDER_CONTEXT_MEASUREMENT_ENTRY,
+  entryTypeNamespace,
   READ_ONLY_TOOLS_DEFAULT,
   USER_RESCUE_MAX_SOURCE_CHARS,
 } from "./lib/policy.ts";
@@ -119,17 +124,21 @@ export function registerActiveContext(pi: any, options: {
   setProjectionProvider?: (provider: (ctx: any) => Array<Record<string, unknown>>) => void;
   toolActions?: readonly ActiveContextToolAction[];
   toolName?: string;
+  toolLabel?: string;
+  brandNoun?: string;
   entryTypePrefix?: string;
   commandPrefix?: string;
   commandNames?: { status?: string; fold?: string };
   readOnlyTools?: ReadonlySet<string>;
   blockingTools?: readonly string[];
 }): { projectionCandidates: (ctx: any) => Array<Record<string, unknown>> } {
-  const toolName = options.toolName ?? "quorum_context";
-  const entryTypePrefix = options.entryTypePrefix ?? "quorum-active-context";
+  const toolName = options.toolName ?? DEFAULT_ACTIVE_CONTEXT_TOOL_NAME;
+  const toolLabel = options.toolLabel ?? DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL;
+  const brandNoun = options.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN;
+  const entryTypePrefix = options.entryTypePrefix ?? DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX;
   const commandPrefix = options.commandPrefix ?? "";
   const readOnlyTools = options.readOnlyTools ?? READ_ONLY_TOOLS_DEFAULT;
-  if (!toolName || !entryTypePrefix || typeof commandPrefix !== "string" ||
+  if (!toolName || !toolLabel || !brandNoun || !entryTypePrefix || typeof commandPrefix !== "string" ||
       (commandPrefix && !/^[a-z0-9-]+$/.test(commandPrefix)) ||
       [...readOnlyTools].some((name) => typeof name !== "string" || !name)) {
     throw new Error("Active-context names and read-only tools must be nonempty strings");
@@ -138,8 +147,8 @@ export function registerActiveContext(pi: any, options: {
   // Full-name override for hosts that need non-default command names (e.g. the
   // pi-fold package's neutral "context"); commandPrefix remains the derived form.
   const commandNames = {
-    status: options.commandNames?.status ?? `${commandStem}quorum-context`,
-    fold: options.commandNames?.fold ?? `${commandStem}fold-context`,
+    status: options.commandNames?.status ?? `${commandStem}${DEFAULT_ACTIVE_CONTEXT_COMMAND_NAMES.status}`,
+    fold: options.commandNames?.fold ?? `${commandStem}${DEFAULT_ACTIVE_CONTEXT_COMMAND_NAMES.fold}`,
   };
   if (![commandNames.status, commandNames.fold].every((name) =>
       typeof name === "string" && /^[a-z0-9][a-z0-9-]*$/.test(name)) ||
@@ -156,16 +165,10 @@ export function registerActiveContext(pi: any, options: {
   const foldRecordEntryType = `${entryTypePrefix}-fold-record`;
   const milestoneProjectionType = `${entryTypePrefix}-milestone`;
   const advisoryProjectionType = `${entryTypePrefix}-advisory`;
-  const defaultEntryTypes = entryTypePrefix === ACTIVE_CONTEXT_STATUS_KEY;
-  const providerMeasurementEntryType = defaultEntryTypes
-    ? PROVIDER_CONTEXT_MEASUREMENT_ENTRY
-    : `${entryTypePrefix}-provider-context-measurement`;
-  const nativeReceiptEntryType = defaultEntryTypes
-    ? NATIVE_COMPACTION_RECEIPT_ENTRY
-    : `${entryTypePrefix}-native-compaction-receipt`;
-  const nativeDecisionEntryType = defaultEntryTypes
-    ? NATIVE_COMPACTION_DECISION_ENTRY
-    : `${entryTypePrefix}-native-compaction-decision`;
+  const entryNamespace = entryTypeNamespace(entryTypePrefix);
+  const providerMeasurementEntryType = `${entryNamespace}-provider-context-measurement`;
+  const nativeReceiptEntryType = `${entryNamespace}-native-compaction-receipt`;
+  const nativeDecisionEntryType = `${entryNamespace}-native-compaction-decision`;
   const configuredToolActions = denseOwnArrayValues(
     options.toolActions ?? ACTIVE_CONTEXT_TOOL_ACTIONS,
   );
@@ -291,6 +294,7 @@ export function registerActiveContext(pi: any, options: {
     eventMessages: messages,
     contextEntries: ctx.sessionManager.buildContextEntries(),
     toolName,
+    brandNoun,
     entryTypePrefix,
     readOnlyTools,
     contextWindow: contextWindowFor(ctx) ?? undefined,
@@ -307,6 +311,7 @@ export function registerActiveContext(pi: any, options: {
       contextEntries: ctx.sessionManager.buildContextEntries(),
       policy: latestSnapshot.policy,
       toolName,
+      brandNoun,
       entryTypePrefix,
       readOnlyTools,
       contextWindow: contextWindowFor(ctx) ?? undefined,
@@ -718,7 +723,7 @@ export function registerActiveContext(pi: any, options: {
       lastThresholdDecision = {
         handled: true,
         retry: false,
-        reason: "native compaction completed; Quorum folding state rebuilt",
+        reason: `native compaction completed; ${brandNoun} folding state rebuilt`,
         compactionReason: latest.reason,
         nativeCompactionCompleted: true,
         receiptKey: latest.receiptKey,
@@ -896,7 +901,8 @@ export function registerActiveContext(pi: any, options: {
       providerMessageSha256: lastProviderMeasurement?.messageSha256 ?? null,
       phase: "hard-provider-fence",
     });
-    pendingContextNote = "Provider context reached the hard Quorum fence without a newly committed lossless fold. The provider request was aborted before transmission; run /compact or make an explicit bounded context fold.";
+    pendingContextNote = `Provider context reached the hard ${brandNoun} fence without a newly committed lossless fold. ` +
+      "The provider request was aborted before transmission; run /compact or make an explicit bounded context fold.";
     if (hardFenceNoticeKey !== key) {
       hardFenceNoticeKey = key;
       safeNotify(
@@ -1003,9 +1009,9 @@ export function registerActiveContext(pi: any, options: {
     projected.push({
       role: "custom",
       customType: milestoneProjectionType,
-      content: milestoneText(armed.milestone, state!.sessionId, armed.threshold, toolName),
+      content: milestoneText(armed.milestone, state!.sessionId, armed.threshold, toolName, brandNoun),
       display: false,
-      details: { source: "quorum/active-context", ephemeral: true, milestone: armed.milestone },
+      details: { source: activeContextSource(entryTypePrefix), ephemeral: true, milestone: armed.milestone },
       timestamp: 0,
     });
     projected.push({
@@ -1017,9 +1023,10 @@ export function registerActiveContext(pi: any, options: {
         toolEndpoints,
         chapterEndpoints,
         remediationCount,
+        brandNoun,
       }),
       display: false,
-      details: { source: "quorum/active-context", ephemeral: true, milestone: armed.milestone },
+      details: { source: activeContextSource(entryTypePrefix), ephemeral: true, milestone: armed.milestone },
       timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
         ? ownValue(snapshot.messages.at(-1), "timestamp")
         : 0,
@@ -1294,7 +1301,7 @@ export function registerActiveContext(pi: any, options: {
     lastThresholdDecision = {
       handled: true,
       retry: false,
-      reason: "native compaction completed; Quorum folding state rebuilt",
+      reason: `native compaction completed; ${brandNoun} folding state rebuilt`,
       compactionReason: reason,
       nativeCompactionCompleted: true,
       receiptKey: receipt.receiptKey,
@@ -1305,7 +1312,7 @@ export function registerActiveContext(pi: any, options: {
     } catch (error) {
       safeNotify(ctx, `Native compaction completed; its receipt remains queued for retry: ${String(error)}`, "error");
     }
-    safeNotify(ctx, "Pi native compaction ran; Quorum folding state was rebuilt.", "warning");
+    safeNotify(ctx, `Pi native compaction ran; ${brandNoun} folding state was rebuilt.`, "warning");
     updateStatus(ctx);
   });
 
@@ -1633,7 +1640,7 @@ export function registerActiveContext(pi: any, options: {
     lastThresholdDecision = {
       handled: true,
       retry: false,
-      reason: "blocked stock automatic compaction; Quorum context folding remains authoritative",
+      reason: `blocked stock automatic compaction; ${contextBrand(brandNoun)} folding remains authoritative`,
       compactionReason: reason,
       nativeCompactionCompleted: false,
     };
@@ -1821,7 +1828,7 @@ export function registerActiveContext(pi: any, options: {
   const fullToolSurface = allowedToolActions.length === ACTIVE_CONTEXT_TOOL_ACTIONS.length;
   pi.registerTool({
     name: toolName,
-    label: "Quorum Active Context",
+    label: toolLabel,
     description: fullToolSurface
       ? "Page, fold, expand, refold, or protect exact Pi active-context evidence. Mutations persist immediately and affect the next model call inside the same continuing turn; no turn boundary is required. Supplied fold briefs have a hard 1200-character maximum."
       : `Use only the configured active-context actions: ${allowedToolActions.join(", ")}. Call fold only by copying the exact eligibleChapter.action returned by status; if status has no eligibleChapter, continue the task without folding. Supplied fold briefs have a hard 1200-character maximum.`,

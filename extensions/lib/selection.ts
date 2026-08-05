@@ -27,6 +27,7 @@ import {
 import {
   ACTIVE_CONTEXT_POLICY,
   CONSOLIDATION_WIDTH_THRESHOLD,
+  DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
 } from "./policy.ts";
 import type {
   ActiveContextSnapshot,
@@ -455,7 +456,7 @@ export function oneLine(value: string, maximum: number): string {
 export function deterministicChapterBrief(
   refs: EvidenceRef[],
   messages: unknown[],
-  toolName = "quorum_context",
+  toolName = DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
 ): string {
   if (refs.length !== messages.length || !refs.length) {
     throw new Error("Deterministic chapter brief requires aligned exact evidence");
@@ -481,8 +482,7 @@ export function deterministicChapterBrief(
     .join(" ") || "no tools", 500);
   const escapeName = (name: string) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const composed = `User: ${ask} · Tools: ${tools} · Assistant: ${assistant}`
-    .replace(new RegExp(escapeName(toolName), "gi"), "active-context service")
-    .replace(new RegExp(escapeName("quorum_context"), "gi"), "active-context service");
+    .replace(new RegExp(escapeName(toolName), "gi"), "active-context service");
   if (usefulBrief(composed, ACTIVE_CONTEXT_POLICY.maxBriefChars, toolName)) return composed;
   // Constant floor-of-the-floor: provably passes usefulBrief (no tool name, no structural pattern).
   return `Folded ${refs.length} exact messages from this span's complete turns.`;

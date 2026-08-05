@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { denseOwnArrayValues, evidenceValue, isPlainRecord, ownDataProperty, stableStringify } from "./json.ts";
+import { DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX, entryTypeNamespace } from "./lib/policy.ts";
 
 export const EVIDENCE_REFERENCE_VERSION = 1;
 export const TOOL_RESULT_PROJECTION_BYTES = 16 * 1024;
@@ -22,7 +23,8 @@ const AGENT_DETAILS_PROJECTION_BYTES = 12 * 1024;
 const MAX_AGENT_JOBS = 8;
 const MAX_AGENT_NODES_PER_JOB = 4;
 const MAX_AGENT_PROFILES = 16;
-const OWNER_KINDS = new Set(["pi-session", "pi-subagents", "quorum-mcp"]);
+const OWNER_KINDS = new Set(["pi-session", "pi-subagents", "pi-fold-mcp"]);
+const DEFAULT_EVIDENCE_DIRECTORY = "pi-fold-evidence";
 const evidenceProjectors = new Map();
 
 export function registerEvidenceProjector(toolName, projector) {
@@ -127,12 +129,25 @@ async function temporaryPath(root) {
   return join(directory, `.${process.pid}.${Date.now()}.${randomUUID()}.tmp`);
 }
 
-function ownerRoot(sessionFile, ownerKind) {
+function ownerRoot(
+  sessionFile,
+  ownerKind,
+  evidenceDirectory = DEFAULT_EVIDENCE_DIRECTORY,
+  additionalOwnerKind = undefined,
+) {
   if (typeof sessionFile !== "string" || !isAbsolute(sessionFile)) {
     throw new Error("Evidence ingestion requires an absolute Pi session file");
   }
-  if (!OWNER_KINDS.has(ownerKind)) throw new Error(`Unsupported evidence owner kind: ${ownerKind}`);
-  return join(dirname(sessionFile), ownerKind === "pi-subagents" ? "subagent-artifacts/.evidence" : "quorum-evidence");
+  if (!OWNER_KINDS.has(ownerKind) && ownerKind !== additionalOwnerKind) {
+    throw new Error(`Unsupported evidence owner kind: ${ownerKind}`);
+  }
+  if (safeSegment(evidenceDirectory, "evidence directory") !== evidenceDirectory) {
+    throw new Error("Evidence directory must be one safe path segment");
+  }
+  return join(
+    dirname(sessionFile),
+    ownerKind === "pi-subagents" ? "subagent-artifacts/.evidence" : evidenceDirectory,
+  );
 }
 
 function baseDescriptor({ ownerKind, ownerId, path, sha256, bytes, mediaType, encoding, source }) {
@@ -163,10 +178,12 @@ export async function writeEvidenceArtifact({
   mediaType = "application/octet-stream",
   encoding = "binary",
   source,
+  evidenceDirectory = DEFAULT_EVIDENCE_DIRECTORY,
+  additionalOwnerKind,
 }) {
   const value = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
   if (value.length > MAX_EVIDENCE_SOURCE_BYTES) throw new Error(`Evidence exceeds ${MAX_EVIDENCE_SOURCE_BYTES} bytes`);
-  const root = ownerRoot(sessionFile, ownerKind);
+  const root = ownerRoot(sessionFile, ownerKind, evidenceDirectory, additionalOwnerKind);
   const temporary = await temporaryPath(root);
   const handle = await open(temporary, "wx", 0o600);
   try {
@@ -227,10 +244,12 @@ export async function pinEvidenceFile({
   mediaType = "text/plain",
   encoding = "utf-8",
   source,
+  evidenceDirectory = DEFAULT_EVIDENCE_DIRECTORY,
+  additionalOwnerKind,
 }) {
   if (typeof sourcePath !== "string" || !isAbsolute(sourcePath)) throw new Error("Evidence source path must be absolute");
   const canonicalSource = await realpath(sourcePath);
-  const root = ownerRoot(sessionFile, ownerKind);
+  const root = ownerRoot(sessionFile, ownerKind, evidenceDirectory, additionalOwnerKind);
   const temporary = await temporaryPath(root);
   let sourceHandle;
   let destinationHandle;
@@ -533,7 +552,25 @@ function eventEnvelope(event) {
   };
 }
 
-export function registerEvidenceIngestion(pi, { isMcpTool = () => false } = {}) {
+function mcpServerForTool(toolName, fallback) {
+  if (!toolName.startsWith("mcp__")) return fallback;
+  const remainder = toolName.slice("mcp__".length);
+  const separator = remainder.indexOf("__");
+  return separator > 0 && separator < remainder.length - 2
+    ? remainder.slice(0, separator)
+    : fallback;
+}
+
+export function registerEvidenceIngestion(pi, {
+  isMcpTool = () => false,
+  entryTypePrefix = DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX,
+} = {}) {
+  const evidenceNamespace = safeSegment(
+    entryTypeNamespace(entryTypePrefix),
+    "entry type namespace",
+  );
+  const mcpOwnerKind = `${evidenceNamespace}-mcp`;
+  const evidenceDirectory = `${evidenceNamespace}-evidence`;
   pi.on("tool_result", async (event, ctx) => {
     if (ownDataProperty(event, "isError") === true) return;
     const toolName = ownDataProperty(event, "toolName");
@@ -558,6 +595,7 @@ export function registerEvidenceIngestion(pi, { isMcpTool = () => false } = {}) 
         ownerId: sessionId,
         sourcePath: fullOutputPath,
         source: { toolName, toolCallId, artifactKind: "bash-full-output" },
+        evidenceDirectory,
       });
       const text = textContent(ownDataProperty(event, "content"));
       const truncation = boundedTruncation(ownDataProperty(details, "truncation"));
@@ -578,6 +616,7 @@ export function registerEvidenceIngestion(pi, { isMcpTool = () => false } = {}) 
         mediaType: "text/plain",
         encoding: "utf-8",
         source: { toolName, toolCallId, artifactKind: "read-result" },
+        evidenceDirectory,
       });
       const truncation = boundedTruncation(ownDataProperty(details, "truncation"));
       return projectEvidenceText(text, descriptor, "utf8-head", truncation ? { truncation } : undefined);
@@ -589,15 +628,17 @@ export function registerEvidenceIngestion(pi, { isMcpTool = () => false } = {}) 
       if (utf8Bytes(serialized) <= TOOL_RESULT_PROJECTION_BYTES) return;
       const descriptor = await writeEvidenceArtifact({
         sessionFile,
-        ownerKind: "quorum-mcp",
-        ownerId: `quorum:${sessionId}`,
+        ownerKind: mcpOwnerKind,
+        ownerId: `${evidenceNamespace}:${sessionId}`,
         bytes: Buffer.from(serialized, "utf8"),
         mediaType: "application/json",
         encoding: "utf-8",
         source: { toolName, toolCallId, artifactKind: "mcp-tool-result" },
+        evidenceDirectory,
+        additionalOwnerKind: mcpOwnerKind,
       });
       return projectEvidenceText(text || "Oversized structured MCP result", descriptor, "utf8-head", {
-        mcpServer: "quorum",
+        mcpServer: mcpServerForTool(toolName, evidenceNamespace),
       });
     }
   });

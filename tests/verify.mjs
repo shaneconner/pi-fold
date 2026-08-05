@@ -2,6 +2,8 @@
 
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -12,6 +14,56 @@ const { createJiti } = await import(pathToFileURL(jitiPath));
 const jiti = createJiti(import.meta.url);
 const context = await jiti.import(join(projectRoot, "extensions", "active-context.ts"));
 const json = await jiti.import(join(projectRoot, "extensions", "json.ts"));
+const piFold = await jiti.import(join(projectRoot, "extensions", "index.js"));
+
+const LEGACY_REPRODUCTION_FIXTURE = Object.freeze({
+  originName: "Quorum",
+  registration: Object.freeze({
+    toolName: "quorum_context",
+    entryTypePrefix: "quorum-active-context",
+    commandNames: Object.freeze({ status: "quorum-context", fold: "fold-context" }),
+    toolLabel: "Quorum Active Context",
+    brandNoun: "Quorum",
+  }),
+  toolName: "quorum_context",
+  commands: Object.freeze(["fold-context", "quorum-context"]),
+  statusKey: "quorum-active-context",
+  statusText: "quorum_context folds: 0 · provider usage unmeasured",
+  entryTypes: Object.freeze([
+    "quorum-active-context-fold-record",
+    "quorum-active-context-state",
+    "quorum-native-compaction-decision",
+    "quorum-native-compaction-receipt",
+    "quorum-provider-context-measurement",
+  ]),
+  projectionTypes: Object.freeze([
+    "quorum-active-context-advisory",
+    "quorum-active-context-milestone",
+  ]),
+  source: "quorum/active-context",
+  placeholderPrefix: "[Quorum active-context fold ",
+  milestonePrefix: "[Quorum context milestone ",
+  advisoryPrefix: "[Quorum context advisory] ",
+  placeholder: (fold) => [
+    `[Quorum active-context fold ${fold.id}]`,
+    fold.brief,
+    `Topology: kind=${fold.kind}; parent=root; children=0; previous=none; next=none.`,
+    `Expand exactly: quorum_context {"action":"expand","id":"${fold.id}"}`,
+    "List/page exactly: quorum_context {\"action\":\"status\"}",
+  ].join("\n"),
+  milestoneText: "[Quorum context milestone tools; session active-context-t] The read-only tool-fold rung begins at 71%. Eligible completed tool batches can be folded now; current endpoint ids are in the live advisory.",
+  advisoryText: "[Quorum context advisory] pressure 80%; milestone tools; eligible read-only batch endpoints: none; eligibleChapter endpoints: none; session milestone count: 1.",
+  blockedCompaction: "blocked stock automatic compaction; Quorum context folding remains authoritative",
+  completedCompaction: "native compaction completed; Quorum folding state rebuilt",
+  compactionNotice: "Pi native compaction ran; Quorum folding state was rebuilt.",
+  hardFenceNote: "Provider context reached the hard Quorum fence without a newly committed lossless fold. The provider request was aborted before transmission; run /compact or make an explicit bounded context fold.",
+  mcpToolName: "mcp__quorum__fetch",
+  mcpOwnerKind: "quorum-mcp",
+  mcpOwnerId: "quorum:active-context-test",
+  evidenceDirectory: "quorum-evidence",
+  mcpServer: "quorum",
+  mcpFallbackServer: "quorum",
+});
 
 const MODEL_BRIEF = async () => ({
   brief: "The exact stale evidence records the completed inspection and its factual result.",
@@ -55,7 +107,7 @@ function makeFixture({
   };
   for (let turn = 0; turn < turns; turn += 1) {
     const ids = [];
-    const named = mentionToolName ? " Ask quorum_context for the exact candidate." : "";
+    const named = mentionToolName ? " Ask active_context for the exact candidate." : "";
     ids.push(add({
       role: "user",
       content: [{
@@ -123,6 +175,8 @@ async function commitCandidate(
 
 function makeRuntime(built, {
   toolName,
+  toolLabel,
+  brandNoun,
   entryTypePrefix,
   commandPrefix,
   commandNames,
@@ -130,6 +184,9 @@ function makeRuntime(built, {
   initialEntries,
   readOnlyTools,
   blockingTools,
+  isMcpTool,
+  packageRegistration = false,
+  sessionFile = join(tmpdir(), "pi-fold-test-session.jsonl"),
 } = {}) {
   const handlers = new Map();
   const tools = new Map();
@@ -191,6 +248,7 @@ function makeRuntime(built, {
     },
     sessionManager: {
       getSessionId: () => built.sessionId,
+      getSessionFile: () => sessionFile,
       getBranch: () => branch,
       getEntries: () => branch,
       getLeafId: () => branch.at(-1)?.id ?? null,
@@ -198,15 +256,20 @@ function makeRuntime(built, {
       buildSessionContext: () => ({ messages }),
     },
   };
-  context.registerActiveContext(pi, {
+  const registrationOptions = {
     ...(toolName ? { toolName } : {}),
+    ...(toolLabel ? { toolLabel } : {}),
+    ...(brandNoun ? { brandNoun } : {}),
     ...(entryTypePrefix ? { entryTypePrefix } : {}),
     ...(commandPrefix ? { commandPrefix } : {}),
     ...(commandNames ? { commandNames } : {}),
     ...(summarizeContextSpan ? { summarizeContextSpan } : {}),
     ...(readOnlyTools ? { readOnlyTools } : {}),
     ...(blockingTools ? { blockingTools } : {}),
-  });
+    ...(isMcpTool ? { isMcpTool } : {}),
+  };
+  if (packageRegistration) piFold.registerPiFold(pi, registrationOptions);
+  else context.registerActiveContext(pi, registrationOptions);
   return runtime;
 }
 
@@ -249,7 +312,7 @@ async function project(runtime) {
   return runtime.handlers.get("context")({ messages: runtime.messages }, runtime.ctx);
 }
 
-async function toolStatus(runtime, toolName = "quorum_context", detail) {
+async function toolStatus(runtime, toolName = "active_context", detail) {
   return runtime.tools.get(toolName).execute(
     "status-call",
     { action: "status", ...(detail ? { detail } : {}) },
@@ -290,10 +353,125 @@ async function chapterForest(count) {
   return { ...built, state };
 }
 
+async function collectRegistrationSurface(registration, mcpToolName) {
+  const scratch = await mkdtemp(join(tmpdir(), "pi-fold-branding-"));
+  try {
+    const runtimeOptions = {
+      ...registration,
+      packageRegistration: true,
+      sessionFile: join(scratch, "session.jsonl"),
+      isMcpTool: (name) => name === mcpToolName || name === "opaque_mcp_tool",
+    };
+    const runtime = makeRuntime(
+      makeFixture({ turns: 8, resultChars: 10_000, contextWindow: 100_000 }),
+      runtimeOptions,
+    );
+    const tool = [...runtime.tools.values()][0];
+    await startRuntime(runtime);
+    const initialStatus = structuredClone(runtime.statuses.at(-1));
+    await measure(runtime, 80_000, 100_000);
+    const foldedProjection = await project(runtime);
+    const foldedRecord = runtime.appended.find((entry) => entry.customType.endsWith("-fold-record"));
+    assert(foldedRecord?.data?.fold, `Branding fixture produced no fold: ${json.stableStringify({
+      toolName: tool.name, appendedTypes: runtime.appended.map((entry) => entry.customType),
+    })}`);
+    const placeholderTexts = foldedProjection.messages.flatMap((message) => {
+      const content = message?.content;
+      if (typeof content === "string" && content.includes("Topology: kind=")) return [content];
+      if (!Array.isArray(content)) return [];
+      return content.flatMap((part) =>
+        typeof part?.text === "string" && part.text.includes("Topology: kind=") ? [part.text] : []);
+    });
+    const advisoryRuntime = makeRuntime(
+      makeFixture({ turns: 3, tools: false, contextWindow: 100_000 }),
+      runtimeOptions,
+    );
+    await startRuntime(advisoryRuntime);
+    await measure(advisoryRuntime, 80_000, 100_000);
+    const advisoryProjection = await project(advisoryRuntime);
+    const advisoryMessages = advisoryProjection.messages.filter((message) =>
+      typeof message?.customType === "string" &&
+      (message.customType.endsWith("-milestone") || message.customType.endsWith("-advisory")));
+
+    await runtime.handlers.get("session_before_compact")({ reason: "threshold" }, runtime.ctx);
+    const blockedStatus = await toolStatus(runtime, tool.name);
+
+    const compactionEntry = {
+      type: "compaction",
+      id: "branding-native-compaction",
+      parentId: runtime.branch.at(-1)?.id ?? null,
+      timestamp: new Date(0).toISOString(),
+    };
+    runtime.branch.push(compactionEntry);
+    await runtime.handlers.get("session_compact")({
+      reason: "manual",
+      willRetry: false,
+      fromExtension: false,
+      compactionEntry,
+    }, runtime.ctx);
+    await project(runtime);
+    const completedStatus = await toolStatus(runtime, tool.name);
+
+    const evidenceProjection = await runtime.handlers.get("tool_result")({
+      toolName: mcpToolName,
+      toolCallId: "branding-mcp-call",
+      isError: false,
+      content: [{ type: "text", text: "m".repeat(20_000) }],
+      details: { structuredContent: { payload: "p".repeat(20_000) } },
+    }, runtime.ctx);
+    const fallbackEvidenceProjection = await runtime.handlers.get("tool_result")({
+      toolName: "opaque_mcp_tool",
+      toolCallId: "branding-mcp-fallback-call",
+      isError: false,
+      content: [{ type: "text", text: "f".repeat(20_000) }],
+      details: { structuredContent: { payload: "b".repeat(20_000) } },
+    }, runtime.ctx);
+
+    const fenceRuntime = makeRuntime(
+      makeFixture({ turns: 3, tools: false, contextWindow: 100_000 }),
+      runtimeOptions,
+    );
+    await startRuntime(fenceRuntime);
+    await measure(fenceRuntime, 95_000, 100_000);
+    await project(fenceRuntime);
+    const fenceStatus = await toolStatus(fenceRuntime, [...fenceRuntime.tools.keys()][0]);
+
+    return {
+      toolName: tool.name,
+      toolLabel: tool.label,
+      commands: [...runtime.commands.keys()].sort(),
+      initialStatus,
+      entryTypes: [...new Set(runtime.appended.map((entry) => entry.customType))].sort(),
+      fold: {
+        id: foldedRecord.data.fold.id,
+        brief: foldedRecord.data.fold.brief,
+        kind: foldedRecord.data.fold.kind,
+      },
+      placeholderTexts,
+      projectionTypes: advisoryMessages.map((message) => message.customType).sort(),
+      advisoryTexts: advisoryMessages.map((message) => message.content),
+      projectionSources: advisoryMessages.map((message) => message.details?.source),
+      blockedCompaction: blockedStatus.details.automatic.lastCompactionDecision?.reason,
+      completedCompaction: completedStatus.details.automatic.lastCompactionDecision?.reason,
+      compactionNotices: runtime.notifications.map((notice) => notice.message),
+      hardFenceNote: fenceStatus.details.automatic.pendingContextNote,
+      evidence: {
+        ownerKind: evidenceProjection.details.evidence.owner.kind,
+        ownerId: evidenceProjection.details.evidence.owner.id,
+        path: evidenceProjection.details.evidence.path,
+        mcpServer: evidenceProjection.details.mcpServer,
+        fallbackMcpServer: fallbackEvidenceProjection.details.mcpServer,
+      },
+    };
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+
 async function gateRegistration() {
   const defaults = makeRuntime(makeFixture({ turns: 4, resultChars: 3_000 }));
-  assert.deepEqual([...defaults.tools.keys()], ["quorum_context"]);
-  assert.deepEqual([...defaults.commands.keys()].sort(), ["fold-context", "quorum-context"]);
+  assert.deepEqual([...defaults.tools.keys()], ["active_context"]);
+  assert.deepEqual([...defaults.commands.keys()].sort(), ["context", "fold-context"]);
   await startRuntime(defaults);
 
   const custom = makeRuntime(makeFixture({ turns: 8, resultChars: 10_000, contextWindow: 100_000 }), {
@@ -302,7 +480,7 @@ async function gateRegistration() {
     commandPrefix: "sandbox",
   });
   assert.deepEqual([...custom.tools.keys()], ["ctx_tool"]);
-  assert.deepEqual([...custom.commands.keys()].sort(), ["sandbox-fold-context", "sandbox-quorum-context"]);
+  assert.deepEqual([...custom.commands.keys()].sort(), ["sandbox-context", "sandbox-fold-context"]);
   await startRuntime(custom);
   await measure(custom, 80_000, 100_000);
   const types = custom.appended.map((entry) => entry.customType);
@@ -319,11 +497,104 @@ async function gateRegistration() {
     commandNames: { status: "same", fold: "same" },
   }).tools, /distinct kebab-case/i);
   return {
-    defaultTool: "quorum_context",
+    defaultTool: "active_context",
     defaultCommands: [...defaults.commands.keys()].sort(),
     commands: [...custom.commands.keys()].sort(),
     namedCommands: [...named.commands.keys()].sort(),
     customTypes: types,
+  };
+}
+
+async function gateNeutralDefaultBranding() {
+  const surface = await collectRegistrationSurface({}, "mcp__docs__fetch");
+  assert.equal(surface.toolName, "active_context");
+  assert.equal(surface.toolLabel, "Active Context");
+  assert.deepEqual(surface.commands, ["context", "fold-context"]);
+  assert.deepEqual(surface.initialStatus, {
+    key: "pi-fold-active-context",
+    text: "active_context folds: 0 · provider usage unmeasured",
+  });
+  assert.deepEqual(surface.entryTypes, [
+    "pi-fold-active-context-fold-record",
+    "pi-fold-active-context-state",
+    "pi-fold-native-compaction-decision",
+    "pi-fold-native-compaction-receipt",
+    "pi-fold-provider-context-measurement",
+  ]);
+  assert(surface.placeholderTexts.some((text) => text.startsWith("[active-context fold ")));
+  assert.deepEqual(surface.projectionTypes, [
+    "pi-fold-active-context-advisory",
+    "pi-fold-active-context-milestone",
+  ]);
+  assert(surface.advisoryTexts.some((text) => text.startsWith("[active-context milestone ")));
+  assert(surface.advisoryTexts.some((text) => text.startsWith("[active-context advisory] ")));
+  assert.deepEqual(surface.projectionSources, ["pi-fold/active-context", "pi-fold/active-context"]);
+  assert.equal(
+    surface.blockedCompaction,
+    "blocked stock automatic compaction; active-context folding remains authoritative",
+  );
+  assert.equal(
+    surface.completedCompaction,
+    "native compaction completed; active-context folding state rebuilt",
+  );
+  assert(surface.compactionNotices.includes(
+    "Pi native compaction ran; active-context folding state was rebuilt.",
+  ));
+  assert.equal(
+    surface.hardFenceNote,
+    "Provider context reached the hard active-context fence without a newly committed lossless fold. " +
+      "The provider request was aborted before transmission; run /compact or make an explicit bounded context fold.",
+  );
+  assert.equal(surface.evidence.ownerKind, "pi-fold-mcp");
+  assert.equal(surface.evidence.ownerId, "pi-fold:active-context-test");
+  assert(surface.evidence.path.includes("/pi-fold-evidence/"));
+  assert.equal(surface.evidence.mcpServer, "docs");
+  assert.equal(surface.evidence.fallbackMcpServer, "pi-fold");
+  assert.equal(new RegExp(LEGACY_REPRODUCTION_FIXTURE.originName, "i").test(json.stableStringify(surface)), false);
+  return {
+    tool: surface.toolName,
+    label: surface.toolLabel,
+    commands: surface.commands,
+    entryTypes: surface.entryTypes,
+    evidenceOwner: surface.evidence.ownerKind,
+    mcpServer: surface.evidence.mcpServer,
+    originOccurrences: 0,
+  };
+}
+
+async function gateLegacyBrandingReproduction() {
+  const fixture = LEGACY_REPRODUCTION_FIXTURE;
+  const surface = await collectRegistrationSurface(fixture.registration, fixture.mcpToolName);
+  assert.equal(surface.toolName, fixture.toolName);
+  assert.equal(surface.toolLabel, fixture.registration.toolLabel);
+  assert.deepEqual(surface.commands, fixture.commands);
+  assert.deepEqual(surface.initialStatus, { key: fixture.statusKey, text: fixture.statusText });
+  assert.deepEqual(surface.entryTypes, fixture.entryTypes);
+  assert(surface.placeholderTexts.some((text) => text.startsWith(fixture.placeholderPrefix)));
+  assert(surface.placeholderTexts.includes(fixture.placeholder(surface.fold)));
+  assert.deepEqual(surface.projectionTypes, fixture.projectionTypes);
+  assert(surface.advisoryTexts.some((text) => text.startsWith(fixture.milestonePrefix)));
+  assert(surface.advisoryTexts.some((text) => text.startsWith(fixture.advisoryPrefix)));
+  assert.deepEqual(surface.advisoryTexts, [fixture.milestoneText, fixture.advisoryText]);
+  assert.deepEqual(surface.projectionSources, [fixture.source, fixture.source]);
+  assert.equal(surface.blockedCompaction, fixture.blockedCompaction);
+  assert.equal(surface.completedCompaction, fixture.completedCompaction);
+  assert(surface.compactionNotices.includes(fixture.compactionNotice));
+  assert.equal(surface.hardFenceNote, fixture.hardFenceNote);
+  assert.equal(surface.evidence.ownerKind, fixture.mcpOwnerKind);
+  assert.equal(surface.evidence.ownerId, fixture.mcpOwnerId);
+  assert(surface.evidence.path.includes(`/${fixture.evidenceDirectory}/`));
+  assert.equal(surface.evidence.mcpServer, fixture.mcpServer);
+  assert.equal(surface.evidence.fallbackMcpServer, fixture.mcpFallbackServer);
+  return {
+    tool: surface.toolName,
+    label: surface.toolLabel,
+    commands: surface.commands,
+    entryTypes: surface.entryTypes,
+    exactCompactionNotices: 3,
+    evidenceOwner: surface.evidence.ownerKind,
+    evidenceDirectory: fixture.evidenceDirectory,
+    mcpServer: surface.evidence.mcpServer,
   };
 }
 
@@ -380,14 +651,14 @@ async function gateFoldLattice() {
   parentDrift[0].parentId = "missing-parent";
   assert.throws(() => context.validateFoldForest(parentDrift), /parent drift/);
   const structurallyValidHistoricalBrief = structuredClone(validated);
-  structurallyValidHistoricalBrief[0].brief = "quorum_context";
+  structurallyValidHistoricalBrief[0].brief = "active_context";
   assert.equal(context.validateFoldForest(structurallyValidHistoricalBrief).length, 1);
   await assert.rejects(() => context.prepareFold({
     candidate,
     snapshot,
     state: empty,
     generation: 1,
-    brief: "quorum_context",
+    brief: "active_context",
   }), /Supplied brief must be non-structural/);
 
   const recovered = context.recoverFoldMessages({
@@ -552,14 +823,14 @@ async function gateAdvisoryMilestones() {
   await measure(jump, 233_920, 272_000);
   const firstProjection = await project(jump);
   const projected = firstProjection.messages.filter((message) =>
-    ["quorum-active-context-milestone", "quorum-active-context-advisory"].includes(message.customType));
+    ["pi-fold-active-context-milestone", "pi-fold-active-context-advisory"].includes(message.customType));
   assert.equal(projected.length, 2);
   assert(projected.every((message) => message.role === "custom" && message.details?.ephemeral === true));
   assert.equal(projected[0].timestamp, 0);
   assert(Buffer.byteLength(projected[1].content, "utf8") <= 2_048);
   const repeatedProjection = await project(jump);
   const repeatedMilestone = repeatedProjection.messages.find((message) =>
-    message.customType === "quorum-active-context-milestone");
+    message.customType === "pi-fold-active-context-milestone");
   assert.equal(json.stableStringify(repeatedMilestone), json.stableStringify(projected[0]));
   let jumpStatus = await toolStatus(jump);
   assert.deepEqual(jumpStatus.details.automatic.advisory.delivered, { chapters: 1 });
@@ -569,7 +840,7 @@ async function gateAdvisoryMilestones() {
   jump.usage = { tokens: 233_920, contextWindow: 100_000 };
   const changedWindowProjection = await project(jump);
   const changedWindowMilestone = changedWindowProjection.messages.find((message) =>
-    message.customType === "quorum-active-context-milestone");
+    message.customType === "pi-fold-active-context-milestone");
   assert.equal(json.stableStringify(changedWindowMilestone), json.stableStringify(projected[0]),
     "An armed milestone hook changed bytes when the reported window changed");
 
@@ -596,7 +867,7 @@ async function gateAdvisoryMilestones() {
   await startRuntime(reloaded);
   const reloadProjection = await project(reloaded);
   const reloadedMilestone = reloadProjection.messages.find((message) =>
-    message.customType === "quorum-active-context-milestone");
+    message.customType === "pi-fold-active-context-milestone");
   assert.equal(reloadedMilestone.content, projected[0].content);
   assert.equal((await toolStatus(reloaded)).details.automatic.advisory.delivered.chapters, 2);
 
@@ -736,7 +1007,7 @@ async function gateLegacyLunaRegression() {
   assert.equal(slate.find((item) => item.source_id === legacyFold.id).generator, "projection-model");
   const next = context.selectAutomaticToolBatch(built.snapshot, loaded, 1)[0];
   assert(next, "Legacy fixture lacked a second tool fold for round-trip persistence");
-  const response = await runtime.tools.get("quorum_context").execute(
+  const response = await runtime.tools.get("active_context").execute(
     "legacy-round-trip",
     { action: "fold", ids: next.sourceRefs.map((ref) => ref.entryId) },
     new AbortController().signal,
@@ -773,7 +1044,7 @@ async function gatePoisonedFloorRegression() {
   assert(status.details.eligibleChapter, "Chapter-only fixture has no eligible chapter");
   const action = structuredClone(status.details.eligibleChapter.action);
   delete action.brief;
-  const response = await runtime.tools.get("quorum_context").execute(
+  const response = await runtime.tools.get("active_context").execute(
     "poisoned-floor",
     action,
     new AbortController().signal,
@@ -783,7 +1054,7 @@ async function gatePoisonedFloorRegression() {
   assert.equal(response.details.kind, "chapter");
   assert.equal(response.details.provenance.kind, "deterministic");
   assert(response.details.brief.length > 20 && response.details.brief.length <= 1_200);
-  assert(!/quorum_context/i.test(response.details.brief));
+  assert(!/active_context/i.test(response.details.brief));
   assert.equal(materialized(runtime).folds.at(-1).kind, "chapter");
   return {
     committed: true,
@@ -795,7 +1066,7 @@ async function gatePoisonedFloorRegression() {
 async function gateHistoricalTolerance() {
   const built = makeFixture({ turns: 3, tools: false });
   const historicalDefault = customEntry(
-    "quorum-active-context-guidance-reduction",
+    "pi-fold-active-context-guidance-reduction",
     { malformed: true },
     "historical-default-guidance",
     built.entries.at(-1).id,
@@ -842,7 +1113,7 @@ async function gatePersistenceChain() {
   assert(recordIndex >= 0 && stateIndex > recordIndex, "Fold record did not precede state");
   const firstState = materialized(runtime);
   const foldId = firstState.folds[0].id;
-  await runtime.tools.get("quorum_context").execute(
+  await runtime.tools.get("active_context").execute(
     "expand-for-delta",
     { action: "expand", id: foldId },
     new AbortController().signal,
@@ -982,7 +1253,7 @@ async function gateExpandLeases() {
   await measure(runtime, 10_000, 100_000);
   await measure(runtime, 40_000, 100_000);
   const foldId = materialized(runtime).folds[0].id;
-  await runtime.tools.get("quorum_context").execute(
+  await runtime.tools.get("active_context").execute(
     "lease-expand",
     { action: "expand", id: foldId },
     new AbortController().signal,
@@ -1016,7 +1287,7 @@ async function gateExpandLeases() {
   await startRuntime(boundedRuntime);
   const rootIds = wide.state.folds.filter((fold) => fold.parentId === null).map((fold) => fold.id);
   for (const id of rootIds) {
-    await boundedRuntime.tools.get("quorum_context").execute(
+    await boundedRuntime.tools.get("active_context").execute(
       `expand-${id}`,
       { action: "expand", id },
       new AbortController().signal,
@@ -1172,7 +1443,7 @@ async function gateFoldCandidatesDetail() {
   });
   const branchBefore = json.stableStringify(runtime.branch);
   const appendedBefore = runtime.appended.length;
-  const status = await toolStatus(runtime, "quorum_context", "fold_candidates");
+  const status = await toolStatus(runtime, "active_context", "fold_candidates");
   assert.equal(json.stableStringify(status.details.candidates), json.stableStringify(expected));
   assert.equal(status.details.automatic.measurementFresh, false);
   assert.equal(status.details.candidates.wouldFireNow, null);
@@ -1411,6 +1682,8 @@ const gates = [
   [17, "Phase-B wire forward/backward note", gateWireForwardBackwardNote],
   [18, "Follow-up fences & stale anchors", gateFollowupFencesAndAnchors],
   [19, "Fresh-tail share cap", gateFreshTailShareCap],
+  [20, "Neutral default branding", gateNeutralDefaultBranding],
+  [21, "Legacy branding reproduction", gateLegacyBrandingReproduction],
 ];
 
 let failures = 0;

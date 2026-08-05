@@ -11,6 +11,7 @@ import type {
   ActiveContextState,
   AdvisoryMilestone,
 } from "./policy.ts";
+import { contextBrand, DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN } from "./policy.ts";
 
 export { ADVISORY_BUDGETS };
 
@@ -104,9 +105,10 @@ export function milestoneText(
   sessionId: string,
   threshold: number,
   toolName: string,
+  brandNoun = DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
 ): string {
   const percent = Math.round(threshold * 100);
-  const prefix = `[Quorum context milestone ${milestone}; session ${sessionId.slice(0, 16)}]`;
+  const prefix = `[${contextBrand(brandNoun)} milestone ${milestone}; session ${sessionId.slice(0, 16)}]`;
   if (milestone === "notice") {
     return `${prefix} Context pressure has crossed ${percent}%. Automatic folding is available. ` +
       `Inspect candidates exactly with ${toolName} {"action":"status"}.`;
@@ -130,6 +132,7 @@ export function liveAdvisoryText(input: {
   toolEndpoints: string[];
   chapterEndpoints: string[];
   remediationCount: number;
+  brandNoun?: string;
 }): string {
   const tools = input.toolEndpoints.length
     ? input.toolEndpoints.slice(0, 3).join(", ")
@@ -138,10 +141,12 @@ export function liveAdvisoryText(input: {
     ? `${input.chapterEndpoints[0]}..${input.chapterEndpoints.at(-1)}`
     : "none";
   return boundReceiptText(
-    `[Quorum context advisory] pressure ${Math.round(input.ratio * 100)}%; milestone ${input.milestone}; ` +
+    `[${contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN)} advisory] ` +
+      `pressure ${Math.round(input.ratio * 100)}%; milestone ${input.milestone}; ` +
       `eligible read-only batch endpoints: ${tools}; eligibleChapter endpoints: ${chapter}; ` +
       `session milestone count: ${input.remediationCount}.`,
     2_048,
-    "[Quorum context advisory] Live pressure details are unavailable.",
+    `[${contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN)} advisory] ` +
+      "Live pressure details are unavailable.",
   );
 }
