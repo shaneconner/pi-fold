@@ -315,7 +315,12 @@ export async function prepareFold(input: {
   state: ActiveContextState;
   generation: number;
   brief?: string;
-  briefProvenance?: "supplied" | "deterministic";
+  /**
+   * Provenance for a supplied brief. A full record round-trips a brief whose
+   * generator already ran (a pending mark carrying a model brief); the string
+   * forms stay the shorthand for the two model-free kinds.
+   */
+  briefProvenance?: "supplied" | "deterministic" | BriefProvenance;
   summarize?: (request: Record<string, unknown>, ctx?: unknown) => Promise<Record<string, unknown>>;
   onSummarizerFailure?: (error: unknown) => void;
   ctx?: unknown;
@@ -350,7 +355,9 @@ export async function prepareFold(input: {
       throw new Error(`Supplied brief must be non-structural and at most ${snapshot.policy.maxBriefChars} characters`);
     }
     brief = input.brief.trim();
-    provenance = { kind: input.briefProvenance ?? "supplied" };
+    provenance = typeof input.briefProvenance === "object"
+      ? clone(input.briefProvenance)
+      : { kind: input.briefProvenance ?? "supplied" };
   } else {
     let modelBrief: { brief: string; provenance: BriefProvenance } | null = null;
     if (input.summarize) {

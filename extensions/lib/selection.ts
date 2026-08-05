@@ -87,6 +87,7 @@ export function resultCallIndex(snapshot: ActiveContextSnapshot, allowConsumedIn
       allowConsumedIncomplete,
       snapshot.toolName,
       snapshot.readOnlyTools,
+      snapshot.readOnlyContextActions,
     );
     if (!validated) continue;
     const batches = new Map<number, string[]>();
@@ -301,14 +302,20 @@ export function selectAutomaticConsolidation(
   return finish();
 }
 
+/**
+ * The stalest eligible completed read-only batch. `claimed` lets a caller exclude
+ * evidence already spoken for by something that is not yet a fold (a pending mark),
+ * so repeated calls walk forward instead of returning the same batch.
+ */
 export function selectAutomaticToolBatch(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
   ratio: number,
+  claimed: ReadonlySet<string> = new Set<string>(),
 ): FoldCandidate[] {
   if (!Number.isFinite(ratio) || ratio < snapshot.policy.toolFoldRatio) return [];
-  const owned = new Set(state.folds.flatMap((fold) => fold.parts.flatMap((part) =>
-    part.kind === "raw" ? [objectRefKey(part.ref)] : [])));
+  const owned = new Set([...claimed, ...state.folds.flatMap((fold) => fold.parts.flatMap((part) =>
+    part.kind === "raw" ? [objectRefKey(part.ref)] : []))]);
   const groups = new Map<number, Array<{ item: MappedMessage; call: NonNullable<ReturnType<typeof resultCall>> }>>();
   for (const item of snapshot.mapped) {
     if (messageRole(item.message) !== "toolResult") continue;

@@ -20,6 +20,7 @@ import {
   DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   DEFAULT_CONTEXT_WINDOW,
+  READ_ONLY_CONTEXT_ACTIONS_DEFAULT,
   READ_ONLY_TOOLS_DEFAULT,
 } from "./policy.ts";
 import type {
@@ -69,15 +70,29 @@ export function leadingCompactionContinuation(messages: unknown[]): CompleteTurn
   return end > 1 && terminalAssistant(messages[end - 1]) ? { start: 1, end } : null;
 }
 
+/**
+ * The exact argument surface each read-only active-context action may carry. A call
+ * outside this surface is not classified read-only, so its batch never folds.
+ */
+export const READ_ONLY_CONTEXT_ACTION_ARGUMENTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  status: Object.freeze(["action", "offset", "limit"]),
+  peek: Object.freeze(["action", "id"]),
+});
+
 export function isReadOnlyContextTool(
   name: string,
   args?: unknown,
   toolName = DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   readOnlyTools: ReadonlySet<string> = READ_ONLY_TOOLS_DEFAULT,
+  readOnlyContextActions: ReadonlySet<string> = READ_ONLY_CONTEXT_ACTIONS_DEFAULT,
 ): boolean {
   if (readOnlyTools.has(name)) return true;
-  if (name !== toolName || !isPlainRecord(args) || ownValue(args, "action") !== "status") return false;
-  const allowed = new Set(["action", "offset", "limit"]);
+  if (name !== toolName || !isPlainRecord(args)) return false;
+  const action = ownValue(args, "action");
+  if (typeof action !== "string" || !readOnlyContextActions.has(action)) return false;
+  const permitted = ownValue(READ_ONLY_CONTEXT_ACTION_ARGUMENTS, action);
+  if (!Array.isArray(permitted)) return false;
+  const allowed = new Set(permitted as string[]);
   const keys = Reflect.ownKeys(args);
   for (let index = 0; index < keys.length; index += 1) {
     if (typeof keys[index] !== "string" || !allowed.has(keys[index] as string)) return false;
@@ -110,6 +125,7 @@ export function scanTurnToolBatches(
   allowIncomplete = false,
   toolName = DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   readOnlyTools: ReadonlySet<string> = READ_ONLY_TOOLS_DEFAULT,
+  readOnlyContextActions: ReadonlySet<string> = READ_ONLY_CONTEXT_ACTIONS_DEFAULT,
 ): ScannedToolBatches | null {
   if (!Number.isSafeInteger(turn.start) || !Number.isSafeInteger(turn.end) ||
       turn.start < 0 || turn.end > messages.length || turn.start >= turn.end) return null;
@@ -146,7 +162,9 @@ export function scanTurnToolBatches(
       const id = ownValue(part, "id");
       const name = ownValue(part, "name");
       if (typeof id !== "string" || !id || typeof name !== "string" || !name ||
-          calls.has(id) || !isReadOnlyContextTool(name, ownValue(part, "arguments"), toolName, readOnlyTools)) safe = false;
+          calls.has(id) || !isReadOnlyContextTool(
+            name, ownValue(part, "arguments"), toolName, readOnlyTools, readOnlyContextActions,
+          )) safe = false;
       else calls.set(id, { id, name, assistantIndex: index });
     }
     for (let resultIndex = index + 1; resultIndex < end; resultIndex += 1) {
@@ -194,8 +212,11 @@ export function validateTurnToolBatch(
   turn: CompleteTurn,
   toolName = DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   readOnlyTools: ReadonlySet<string> = READ_ONLY_TOOLS_DEFAULT,
+  readOnlyContextActions: ReadonlySet<string> = READ_ONLY_CONTEXT_ACTIONS_DEFAULT,
 ): ValidatedToolBatch | null {
-  const scanned = scanTurnToolBatches(messages, turn, false, toolName, readOnlyTools);
+  const scanned = scanTurnToolBatches(
+    messages, turn, false, toolName, readOnlyTools, readOnlyContextActions,
+  );
   return scanned && scanned.unsafeIndices.size === 0 ? { calls: scanned.calls } : null;
 }
 
@@ -380,6 +401,7 @@ export function mapActiveContext(input: {
   brandNoun?: string;
   entryTypePrefix?: string;
   readOnlyTools?: ReadonlySet<string>;
+  readOnlyContextActions?: ReadonlySet<string>;
   contextWindow?: number;
 }): ActiveContextSnapshot {
   const policy = Object.freeze({ ...ACTIVE_CONTEXT_POLICY, ...(input.policy ?? {}) }) as typeof ACTIVE_CONTEXT_POLICY;
@@ -473,6 +495,7 @@ export function mapActiveContext(input: {
     brandNoun: input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
     entryTypePrefix: input.entryTypePrefix ?? DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX,
     readOnlyTools: input.readOnlyTools ?? READ_ONLY_TOOLS_DEFAULT,
+    readOnlyContextActions: input.readOnlyContextActions ?? READ_ONLY_CONTEXT_ACTIONS_DEFAULT,
     contextWindow: reportedContextWindow ?? DEFAULT_CONTEXT_WINDOW,
     windowSource: reportedContextWindow === null ? "fallback" : "reported",
   };

@@ -91,9 +91,12 @@ function makeFixture({
   resultChars = 10_000,
   chapterChars = 0,
   mentionToolName = false,
+  peekTurns = [],
+  peekTargetId = "fold_probe",
   policy = {},
   contextWindow = 272_000,
 } = {}) {
+  const peekAt = new Set(peekTurns);
   const entries = [];
   const messages = [];
   const turnEntries = [];
@@ -118,11 +121,14 @@ function makeFixture({
       timestamp: sequence,
     }));
     if (tools) {
+      const peek = peekAt.has(turn);
       ids.push(add({
         role: "assistant",
         content: [{
-          type: "toolCall", id: `call-${turn}`, name: "read",
-          arguments: { path: `file-${turn}.txt` },
+          type: "toolCall",
+          id: `call-${turn}`,
+          name: peek ? "active_context" : "read",
+          arguments: peek ? { action: "peek", id: peekTargetId } : { path: `file-${turn}.txt` },
         }],
         stopReason: "toolUse",
         timestamp: sequence,
@@ -130,7 +136,7 @@ function makeFixture({
       ids.push(add({
         role: "toolResult",
         toolCallId: `call-${turn}`,
-        toolName: "read",
+        toolName: peek ? "active_context" : "read",
         content: [{ type: "text", text: `Result ${turn}: ${"r".repeat(resultChars)}` }],
         isError: false,
         timestamp: sequence,
@@ -190,6 +196,7 @@ function makeRuntime(built, {
   summarizer,
   guidance,
   surfacing,
+  foldScheduling,
   setSuggestionSourceRegistrar,
   loadHostModule,
   packageRegistration = false,
@@ -278,6 +285,7 @@ function makeRuntime(built, {
     ...(summarizer === undefined ? {} : { summarizer }),
     ...(guidance === undefined ? {} : { guidance }),
     ...(surfacing === undefined ? {} : { surfacing }),
+    ...(foldScheduling === undefined ? {} : { foldScheduling }),
     ...(setSuggestionSourceRegistrar ? { setSuggestionSourceRegistrar } : {}),
   };
   runtime.registration = packageRegistration
@@ -2562,6 +2570,430 @@ async function gateSurfacingLogging() {
   };
 }
 
+function normalizedStateDigest(state) {
+  const normalized = structuredClone(state);
+  // createdAt is a wall clock and was never part of the comparable shape.
+  normalized.folds = normalized.folds.map((fold) => ({ ...fold, createdAt: 0 }));
+  return context.sha256Value(normalized);
+}
+
+function epochSnapshot(built) {
+  return context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: built.messages,
+    contextEntries: built.entries,
+    contextWindow: built.contextWindow,
+    readOnlyContextActions: context.EPOCH_READ_ONLY_CONTEXT_ACTIONS,
+  });
+}
+
+function toolCall(runtime, params, toolName = "active_context") {
+  return runtime.tools.get(toolName).execute(
+    `epoch-${params.action}`, params, new AbortController().signal, undefined, runtime.ctx,
+  );
+}
+
+async function epochToolRuntime(fixture = {}) {
+  const built = makeFixture({
+    turns: 8, resultChars: 10_000, contextWindow: 100_000, ...fixture,
+  });
+  const runtime = makeRuntime(built, { foldScheduling: "epoch" });
+  await startRuntime(runtime);
+  return runtime;
+}
+
+/**
+ * The identical scripted session both modes must produce, so the immediate-mode
+ * digest can be pinned against the pre-scheduling release.
+ */
+async function scriptedSession(foldScheduling) {
+  const runtime = makeRuntime(
+    makeFixture({ turns: 8, resultChars: 10_000, contextWindow: 100_000 }),
+    foldScheduling ? { foldScheduling } : {},
+  );
+  await startRuntime(runtime);
+  await measure(runtime, 50_000, 100_000);
+  await project(runtime);
+  await measure(runtime, 80_000, 100_000);
+  await project(runtime);
+  await measure(runtime, 88_000, 100_000);
+  await project(runtime);
+  return runtime;
+}
+
+async function gateEpochMarkCommit() {
+  const runtime = await epochToolRuntime();
+  const rawBytes = bytesOf((await project(runtime)).messages);
+  assert.equal([...runtime.tools.values()][0].parameters.properties.action.enum.length, 8);
+  await measure(runtime, 80_000, 100_000);
+  const marked = materialized(runtime);
+  assert.equal(marked.folds.length, 0, "A mark folded evidence");
+  assert.equal(marked.pendingMarks.length, 1);
+  assert.equal(marked.pendingMarks[0].mark, "fold");
+  assert.equal(marked.pendingMarks[0].kind, "tool-result");
+  assert.equal(marked.pendingMarks[0].origin, "ladder");
+
+  // The whole point: marking moves no projection byte: the durable projection is
+  // still the raw transcript, verbatim. Only the ephemeral advisory tail, appended
+  // after the stable prefix, differs, and that channel is cache-neutral by design.
+  const markedProjection = await project(runtime);
+  const durable = (messages) => messages.filter((message) =>
+    typeof message?.customType !== "string" ||
+    !message.customType.startsWith(context.DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX));
+  assert.equal(
+    json.stableStringify(durable(markedProjection.messages)),
+    json.stableStringify(runtime.messages),
+    "A pending mark changed the projection",
+  );
+
+  const status = await toolStatus(runtime);
+  const scheduling = status.details.automatic.scheduling;
+  assert.equal(scheduling.mode, "epoch");
+  assert(scheduling.pending >= 1);
+  assert(scheduling.freedWindowShare > 0);
+  assert(scheduling.rewriteTokens > 0);
+  assert.equal(scheduling.commitDue, false);
+
+  const committed = await toolCall(runtime, { action: "commit" });
+  assert(committed.details.applied.length >= 1);
+  assert.deepEqual(committed.details.refused, []);
+  const after = materialized(runtime);
+  assert.equal(after.pendingMarks, undefined);
+  assert.equal(after.folds.length, committed.details.applied.length);
+  const committedProjection = await project(runtime);
+  assert(bytesOf(committedProjection.messages) < rawBytes,
+    "The commit epoch did not shrink the projection");
+
+  // A protected span refuses at commit with a message rather than folding.
+  const blocked = await epochToolRuntime();
+  await measure(blocked, 80_000, 100_000);
+  const pending = materialized(blocked).pendingMarks[0];
+  const sourceIds = pending.parts.map((part) => part.ref.entryId);
+  await toolCall(blocked, { action: "protect", ids: sourceIds });
+  const refusal = await toolCall(blocked, { action: "commit" });
+  assert.deepEqual(refusal.details.applied, []);
+  assert.equal(refusal.details.refused.length, 1);
+  assert.match(refusal.details.refused[0].reason, /protected or fresh evidence/);
+  assert.equal(materialized(blocked).folds.length, 0);
+
+  return {
+    toolActions: 8,
+    markedFolds: marked.folds.length,
+    pendingAfterMark: marked.pendingMarks.length,
+    projectionUnchangedByMark: true,
+    committedFolds: after.folds.length,
+    pendingAfterCommit: 0,
+    protectedRefusals: refusal.details.refused.length,
+  };
+}
+
+function bytesOf(value) {
+  return Buffer.byteLength(json.stableStringify(value), "utf8");
+}
+
+// Captured from v0.1.1 (main, 340ac8d) by replaying `scriptedSession()` there. Only a
+// deliberate change to immediate-mode behavior may move it.
+const IMMEDIATE_SCRIPTED_STATE_DIGEST =
+  "95ea5b10be6918027ee2fd877c1f68698c0ae2325aff8799923e42c4dc442e4f";
+
+async function gateImmediateByteIdentity() {
+  const runtime = await scriptedSession();
+  const state = materialized(runtime);
+  assert.equal(state.pendingMarks, undefined, "Immediate mode wrote a pending-marks key");
+  const digest = normalizedStateDigest(state);
+  assert.equal(digest, IMMEDIATE_SCRIPTED_STATE_DIGEST,
+    "Immediate-mode durable state drifted from the pre-scheduling release");
+
+  // No wire event carries the new optional key, and the seven-action surface stands.
+  const stateEvents = runtime.appended.filter((entry) =>
+    entry.customType === context.ACTIVE_CONTEXT_STATE_ENTRY);
+  assert(stateEvents.length >= 1);
+  assert(stateEvents.every((entry) => !Object.hasOwn(entry.data, "pendingMarks")));
+  assert.deepEqual(
+    [...[...runtime.tools.values()][0].parameters.properties.action.enum],
+    [...context.ACTIVE_CONTEXT_TOOL_ACTIONS],
+  );
+  assert.equal([...runtime.tools.values()][0].description.includes("epoch mode"), false);
+  const immediateCommit = await toolCall(runtime, { action: "commit" }).catch((error) => error);
+  assert.match(String(immediateCommit), /'commit' is not enabled/);
+
+  // The same scripted session in epoch mode reaches a DIFFERENT state, which is the
+  // whole point; immediate mode is what must not move.
+  const epoch = await scriptedSession("epoch");
+  assert.notEqual(normalizedStateDigest(materialized(epoch)), digest);
+  return {
+    digest,
+    pendingMarksKey: "absent",
+    stateEvents: stateEvents.length,
+    toolActions: context.ACTIVE_CONTEXT_TOOL_ACTIONS.length,
+    commitRefusedInImmediateMode: true,
+  };
+}
+
+async function gateEpochQuotaTopUp() {
+  const runtime = await epochToolRuntime({ turns: 14 });
+  const built = runtime.built;
+  // The agent marks one old batch by hand; the ladder must fill the rest.
+  const agentFold = await toolCall(runtime, {
+    action: "fold",
+    ids: [built.turnEntries[0][2]],
+    brief: "The completed first inspection is stale and its exact output stays recoverable.",
+  });
+  assert.equal(agentFold.details.marked, true);
+  assert.equal(agentFold.details.scheduling, "epoch");
+  const agentMarkId = agentFold.details.id;
+  assert.equal(materialized(runtime).pendingMarks.length, 1);
+  assert.equal(materialized(runtime).pendingMarks[0].origin, "agent");
+  assert.equal(materialized(runtime).pendingMarks[0].briefProvenance.kind, "supplied");
+
+  await measure(runtime, 88_000, 100_000);
+  const status = await toolStatus(runtime);
+  const epoch = status.details.automatic.lastAutomaticAction.epoch;
+  assert.equal(status.details.automatic.lastAutomaticAction.kind, "epoch-commit");
+  assert.equal(epoch.agentMarks, 1);
+  assert(epoch.ladderMarks >= 1, "The quota top-up added nothing");
+  assert(epoch.applied.some((item) => item.id === agentMarkId && item.origin === "agent"));
+  assert(epoch.applied.some((item) => item.origin === "ladder"));
+  assert.deepEqual(epoch.refused, []);
+  const committed = materialized(runtime);
+  assert.equal(committed.pendingMarks, undefined);
+  assert.equal(committed.folds.length, epoch.applied.length);
+
+  // Precedence: a quota that is already met adds nothing at all.
+  const snapshot = epochSnapshot(built);
+  const empty = context.emptyActiveContextState(built.sessionId);
+  assert.deepEqual(
+    context.topUpMarks({ snapshot, state: empty, ordinal: 1, targetShare: 0 }),
+    [],
+  );
+  const hungry = context.topUpMarks({ snapshot, state: empty, ordinal: 1, targetShare: 1 });
+  assert(hungry.length >= 2 && hungry.length <= context.EPOCH_MAX_TOPUP_MARKS);
+  assert(hungry.every((mark) => mark.origin === "ladder"));
+  assert.equal(new Set(hungry.map((mark) => mark.id)).size, hungry.length);
+  return {
+    agentMarks: epoch.agentMarks,
+    ladderTopUps: epoch.ladderMarks,
+    appliedInOneEpoch: epoch.applied.length,
+    metQuotaAddsNothing: true,
+    hungryTopUps: hungry.length,
+    targetWindowShare: context.EPOCH_COMMIT_TARGET_WINDOW_SHARE,
+  };
+}
+
+async function gateTailAdjacentExemption() {
+  const runtime = await epochToolRuntime({ turns: 14 });
+  const built = runtime.built;
+  const snapshot = epochSnapshot(built);
+  const distant = context.manualFoldCandidate(
+    snapshot, context.emptyActiveContextState(built.sessionId), [built.turnEntries[0][2]],
+  );
+  const near = context.manualFoldCandidate(
+    snapshot, context.emptyActiveContextState(built.sessionId), [built.turnEntries[10][2]],
+  );
+  const empty = context.emptyActiveContextState(built.sessionId);
+  assert.equal(context.tailAdjacent(snapshot, distant, empty), false);
+  assert.equal(context.tailAdjacent(snapshot, near, empty), true);
+
+  const marked = await toolCall(runtime, {
+    action: "fold",
+    ids: [built.turnEntries[0][2]],
+    brief: "The oldest completed inspection is stale and its exact output stays recoverable.",
+  });
+  assert.equal(marked.details.marked, true);
+  const applied = await toolCall(runtime, {
+    action: "fold",
+    ids: [built.turnEntries[10][2]],
+    brief: "The recently completed inspection is stale and its exact output stays recoverable.",
+  });
+  assert.equal(applied.details.marked, undefined, "A tail-adjacent fold was deferred");
+  assert.equal(typeof applied.details.id, "string");
+  const state = materialized(runtime);
+  assert.equal(state.folds.length, 1, "The tail-adjacent fold did not apply immediately");
+  assert.equal(state.pendingMarks.length, 1);
+  assert.notEqual(state.folds[0].id, state.pendingMarks[0].id);
+  return {
+    tailAdjacentMessages: context.EPOCH_TAIL_ADJACENT_MESSAGES,
+    distantMarked: 1,
+    tailAdjacentApplied: 1,
+    immediateFolds: state.folds.length,
+  };
+}
+
+async function gateEphemeralPeekMark() {
+  const built = makeFixture({
+    turns: 10, resultChars: 10_000, contextWindow: 100_000, peekTurns: [0], peekTargetId: "fold_probe",
+  });
+  const snapshot = epochSnapshot(built);
+  const state = context.emptyActiveContextState(built.sessionId);
+  const marks = context.ephemeralPeekMarks({ snapshot, state, ordinal: 1 });
+  assert.equal(marks.length, 1, "The completed peek read was not marked for the next epoch");
+  assert.equal(marks[0].kind, "tool-result");
+  assert.equal(marks[0].origin, "ladder");
+  assert.equal(marks[0].parts.length, 1);
+  assert.equal(marks[0].parts[0].ref.entryId, built.turnEntries[0][2]);
+
+  // The agent committed to what it peeked: the read stays raw.
+  assert.deepEqual(
+    context.ephemeralPeekMarks({
+      snapshot, state: { ...state, expanded: ["fold_probe"] }, ordinal: 1,
+    }),
+    [],
+  );
+
+  // Immediate mode never classifies a peek result as a foldable read at all.
+  const immediate = context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: built.messages,
+    contextEntries: built.entries,
+    contextWindow: built.contextWindow,
+  });
+  assert.deepEqual(context.ephemeralPeekMarks({ snapshot: immediate, state, ordinal: 1 }), []);
+  assert.equal(
+    context.isReadOnlyContextTool("active_context", { action: "peek", id: "fold_probe" }),
+    false,
+  );
+  assert.equal(
+    context.isReadOnlyContextTool(
+      "active_context", { action: "peek", id: "fold_probe" }, "active_context",
+      context.READ_ONLY_TOOLS_DEFAULT, context.EPOCH_READ_ONLY_CONTEXT_ACTIONS,
+    ),
+    true,
+  );
+  assert.equal(
+    context.isReadOnlyContextTool(
+      "active_context", { action: "peek", id: "x", brief: "no" }, "active_context",
+      context.READ_ONLY_TOOLS_DEFAULT, context.EPOCH_READ_ONLY_CONTEXT_ACTIONS,
+    ),
+    false,
+  );
+
+  // End to end: the commit epoch folds the peek read without being asked.
+  const runtime = makeRuntime(built, { foldScheduling: "epoch" });
+  await startRuntime(runtime);
+  const committed = await toolCall(runtime, { action: "commit" });
+  assert.equal(committed.details.applied.length, 1);
+  assert.equal(committed.details.applied[0].origin, "ladder");
+  const folded = materialized(runtime);
+  assert.equal(folded.folds.length, 1);
+  assert.equal(folded.folds[0].kind, "tool-result");
+  return {
+    peekMarks: marks.length,
+    expandedPeekExempt: true,
+    immediateModePeekMarks: 0,
+    autoFoldedOnCommit: committed.details.applied.length,
+  };
+}
+
+async function gateCommitOnThreshold() {
+  const runtime = await epochToolRuntime({ turns: 12 });
+  await measure(runtime, 78_000, 100_000);
+  const belowStatus = await toolStatus(runtime);
+  assert.equal(belowStatus.details.automatic.lastAutomaticAction.kind, "mark");
+  assert.equal(belowStatus.details.automatic.scheduling.commitDue, false);
+  assert.equal(
+    belowStatus.details.automatic.scheduling.commitRatio,
+    context.ACTIVE_CONTEXT_POLICY.refoldRatio,
+  );
+  assert.equal(materialized(runtime).folds.length, 0);
+  const marksBelow = materialized(runtime).pendingMarks.length;
+  assert(marksBelow >= 1);
+
+  // Crossing the ladder's own refold/consolidation rung is the commit trigger; no
+  // new threshold was introduced for scheduling.
+  await measure(runtime, 86_000, 100_000);
+  const aboveStatus = await toolStatus(runtime);
+  assert.equal(aboveStatus.details.automatic.lastAutomaticAction.kind, "epoch-commit");
+  assert.equal(aboveStatus.details.automatic.scheduling.commitDue, true);
+  assert.equal(aboveStatus.details.automatic.scheduling.pending, 0);
+  const committed = materialized(runtime);
+  assert.equal(committed.pendingMarks, undefined);
+  assert(committed.folds.length >= marksBelow);
+  assert.equal(
+    aboveStatus.details.automatic.lastAutomaticAction.epoch.trigger,
+    "window-pressure",
+  );
+
+  // An expand with marks pending opens the epoch, so the restore plus the batch of
+  // folds cost one rewrite rather than two.
+  const rider = await epochToolRuntime({ turns: 12 });
+  await measure(rider, 78_000, 100_000);
+  const pendingId = materialized(rider).pendingMarks[0].id;
+  await toolCall(rider, { action: "commit" });
+  const target = materialized(rider).folds[0].id;
+  await toolCall(rider, { action: "fold", ids: [rider.built.turnEntries[1][2]],
+    brief: "A second completed inspection is stale and its exact output stays recoverable." });
+  assert.equal(materialized(rider).pendingMarks.length, 1);
+  const expanded = await toolCall(rider, { action: "expand", id: target });
+  assert.equal(expanded.details.committedMarks.length, 1);
+  assert.equal(materialized(rider).pendingMarks, undefined);
+  assert(materialized(rider).expanded.includes(target));
+  return {
+    markedBelowThreshold: marksBelow,
+    commitRatio: context.ACTIVE_CONTEXT_POLICY.refoldRatio,
+    foldsAfterCommit: committed.folds.length,
+    firstMark: pendingId.startsWith("fold_"),
+    expandRidesCommit: true,
+  };
+}
+
+async function gateSchedulingWireRoundTrip() {
+  const built = makeFixture({ turns: 10, resultChars: 10_000, contextWindow: 100_000 });
+  const snapshot = epochSnapshot(built);
+  const empty = context.emptyActiveContextState(built.sessionId);
+  const marks = context.topUpMarks({ snapshot, state: empty, ordinal: 3, targetShare: 1 }).slice(0, 2);
+  assert.equal(marks.length, 2);
+  const state = context.withPendingMarks(empty, marks);
+  assert.equal(state.pendingMarks.length, 2);
+
+  const parsed = context.parseActiveContextState(state, built.sessionId);
+  assert.deepEqual(parsed.pendingMarks, state.pendingMarks);
+  const checkpoint = context.makeStateCheckpoint(state);
+  assert.deepEqual(checkpoint.pendingMarks, state.pendingMarks);
+  const restored = context.stateFromFoldRefs(checkpoint, checkpoint.foldRefs, new Map());
+  assert.deepEqual(restored.pendingMarks, state.pendingMarks);
+  const delta = context.makeStateDelta(empty, { ...state, revision: 1 });
+  assert.deepEqual(delta.pendingMarks, state.pendingMarks);
+  assert.equal(context.semanticStateSha256(restored), context.semanticStateSha256(state));
+
+  // Empty is absent everywhere, so a pre-0.1.2 digest never moves.
+  const cleared = context.withPendingMarks(state, []);
+  assert.equal(cleared.pendingMarks, undefined);
+  assert.equal(Object.hasOwn(context.makeStateCheckpoint(cleared), "pendingMarks"), false);
+  assert.equal(context.semanticStateSha256(cleared), context.semanticStateSha256(empty));
+
+  assert.throws(() => context.parsePendingMarks([{ ...marks[0], origin: "someone" }]),
+    /Invalid active-context pending marks/);
+  assert.throws(() => context.parsePendingMarks([{ ...marks[0], id: "fold_wrong" }]),
+    /Invalid active-context pending marks/);
+  assert.throws(() => context.parsePendingMarks([marks[0], structuredClone(marks[0])]),
+    /Invalid active-context pending marks/);
+  assert.throws(() => context.parseActiveContextState(
+    { ...state, pendingMarks: [{ mark: "refold", id: "fold_missing", origin: "agent", ordinal: 1 }] },
+    built.sessionId,
+  ), /Invalid active-context pending marks/);
+  assert.throws(() => context.parsePendingMarks(
+    Array.from({ length: context.MAX_PENDING_MARKS + 1 }, () => marks[0]),
+  ), /Invalid active-context pending marks/);
+
+  // A mark whose evidence left the branch cannot survive projection.
+  const projected = context.persistenceProjection(state, context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: [],
+    contextEntries: [],
+    contextWindow: built.contextWindow,
+    readOnlyContextActions: context.EPOCH_READ_ONLY_CONTEXT_ACTIONS,
+  }));
+  assert.equal(projected.pendingMarks, undefined);
+  return {
+    marks: marks.length,
+    checkpointRoundTrip: true,
+    deltaRoundTrip: true,
+    emptyOmitted: true,
+    malformedRefused: 5,
+    unmappedMarksDropped: true,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -2594,6 +3026,13 @@ const gates = [
   [29, "Surfacing carrier ephemerality", gateSurfacingCarrier],
   [30, "Suggestion-source hook", gateSuggestionSourceHook],
   [31, "Surfacing accept/reject logging", gateSurfacingLogging],
+  [32, "Epoch mark/commit lifecycle", gateEpochMarkCommit],
+  [33, "Immediate-mode byte identity", gateImmediateByteIdentity],
+  [34, "Epoch quota top-up", gateEpochQuotaTopUp],
+  [35, "Tail-adjacent exemption", gateTailAdjacentExemption],
+  [36, "Ephemeral peek auto-mark", gateEphemeralPeekMark],
+  [37, "Commit on threshold", gateCommitOnThreshold],
+  [38, "Scheduling wire round-trip", gateSchedulingWireRoundTrip],
 ];
 
 let failures = 0;

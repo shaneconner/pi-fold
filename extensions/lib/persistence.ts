@@ -22,6 +22,7 @@ import {
   EXPAND_LEASE_GENERATIONS,
   MAX_ADVISORY_DELIVERIES_PER_MILESTONE,
   MAX_EXPAND_LEASES,
+  MAX_PENDING_MARKS,
   SURFACING_MAX_LOG_RECORDS,
 } from "./policy.ts";
 import type {
@@ -36,6 +37,8 @@ import type {
   FoldPart,
   FoldRecordEntry,
   FoldRecordRef,
+  MarkOrigin,
+  PendingMark,
   PreparedFold,
   SurfacingRecord,
 } from "./policy.ts";
@@ -53,6 +56,11 @@ export const FOLD_RECORD_REF_KEYS = ["id", "sha256"] as const;
 export const FOLD_RECORD_ENTRY_KEYS = ["version", "sessionId", "foldId", "recordSha256", "fold"] as const;
 export const SURFACING_RECORD_KEYS = ["source", "id", "score", "ordinal", "outcome"] as const;
 export const SURFACING_OUTCOMES = Object.freeze(["shown", "accept", "reject"] as const);
+export const PENDING_FOLD_MARK_KEYS = [
+  "mark", "id", "kind", "parts", "brief", "briefProvenance", "origin", "ordinal",
+] as const;
+export const PENDING_REFOLD_MARK_KEYS = ["mark", "id", "origin", "ordinal"] as const;
+export const MARK_ORIGINS = Object.freeze(["agent", "ladder"] as const);
 export const STATE_CHECKPOINT_V2_KEYS = [
   "version", "kind", "sessionId", "revision", "foldRefs", "expanded", "protected", "prepared", "stateSha256",
 ] as const;
@@ -87,6 +95,38 @@ export function parseSurfacingLog(value: unknown): SurfacingRecord[] {
     throw new Error("Invalid active-context surfacing log");
   }
   return clone(records) as SurfacingRecord[];
+}
+
+/** Stable identity of one pending mark: its phase plus the fold it names. */
+export function pendingMarkKey(mark: Pick<PendingMark, "mark" | "id">): string {
+  return `${mark.mark}:${mark.id}`;
+}
+
+export function validPendingMark(value: unknown): value is PendingMark {
+  const id = ownValue(value, "id");
+  const ordinal = ownValue(value, "ordinal");
+  if (typeof id !== "string" || !id ||
+      !MARK_ORIGINS.includes(ownValue(value, "origin") as MarkOrigin) ||
+      !Number.isSafeInteger(ordinal) || Number(ordinal) < 0) return false;
+  const mark = ownValue(value, "mark");
+  if (mark === "refold") return exactRecord(value, PENDING_REFOLD_MARK_KEYS);
+  if (mark !== "fold" || !exactRecord(value, PENDING_FOLD_MARK_KEYS)) return false;
+  const kind = ownValue(value, "kind");
+  const parts = denseOwnArrayValues(ownValue(value, "parts"));
+  return (kind === "tool-result" || kind === "chapter" || kind === "consolidation") &&
+    Boolean(parts?.length) && parts!.length <= ACTIVE_CONTEXT_POLICY.maxFoldSourceRefs &&
+    parts!.every(validFoldPart) && structurallyValidBrief(ownValue(value, "brief")) &&
+    validProvenance(ownValue(value, "briefProvenance")) &&
+    id === foldIdFor(kind as FoldKind, parts as FoldPart[]);
+}
+
+export function parsePendingMarks(value: unknown): PendingMark[] {
+  const marks = denseOwnArrayValues(value);
+  if (!marks || marks.length > MAX_PENDING_MARKS || !marks.every(validPendingMark) ||
+      new Set((marks as PendingMark[]).map(pendingMarkKey)).size !== marks.length) {
+    throw new Error("Invalid active-context pending marks");
+  }
+  return clone(marks) as PendingMark[];
 }
 
 export function parseLeases(value: unknown, foldIds?: ReadonlySet<string>): Record<string, number> {
@@ -258,12 +298,14 @@ export function parseActiveContextState(
     Object.prototype.hasOwnProperty.call(value, "tokensSinceToolFold");
   const hasLeases = recordLike && Object.prototype.hasOwnProperty.call(value, "leases");
   const hasSurfacing = recordLike && Object.prototype.hasOwnProperty.call(value, "surfacing");
+  const hasPendingMarks = recordLike && Object.prototype.hasOwnProperty.call(value, "pendingMarks");
   const extraKeys = [
     ...(hasPrepared ? ["prepared"] : []),
     ...(hasAdvisory ? ["advisory"] : []),
     ...(hasTokensSinceToolFold ? ["tokensSinceToolFold"] : []),
     ...(hasLeases ? ["leases"] : []),
     ...(hasSurfacing ? ["surfacing"] : []),
+    ...(hasPendingMarks ? ["pendingMarks"] : []),
   ];
   if (!exactRecord(value, [...ACTIVE_STATE_KEYS, ...extraKeys])) throw new Error("Invalid active-context state keys");
   const folds = denseOwnArrayValues(ownValue(value, "folds"));
@@ -290,6 +332,10 @@ export function parseActiveContextState(
   }
   const leases = hasLeases ? parseLeases(ownValue(value, "leases"), ids) : {};
   const surfacing = hasSurfacing ? parseSurfacingLog(ownValue(value, "surfacing")) : [];
+  const marks = hasPendingMarks ? parsePendingMarks(ownValue(value, "pendingMarks")) : [];
+  if (marks.some((mark) => mark.mark === "refold" && !ids.has(mark.id))) {
+    throw new Error("Invalid active-context pending marks");
+  }
   const source = clone(value) as unknown as ActiveContextState;
   // Provenance normalization is presentation-only; never mutate a durable
   // content-addressed fold record: changing its bytes causes the next re-persist
@@ -308,6 +354,7 @@ export function parseActiveContextState(
     // Omitted when empty so every state written before surfacing existed keeps its
     // exact digest; the replay digest is order- and presence-sensitive by design.
     ...(surfacing.length ? { surfacing } : {}),
+    ...(marks.length ? { pendingMarks: marks } : {}),
     ...(hasAdvisory
       ? { advisory: clone(source.advisory!) }
       : defaultAdvisory ? { advisory: { highWater: 0, delivered: {} } } : {}),
@@ -384,6 +431,7 @@ export function sameStateProjection(left: ActiveContextState, right: ActiveConte
     if (normalizedState.tokensSinceToolFold === 0) delete normalizedState.tokensSinceToolFold;
     if (normalizedState.leases && Object.keys(normalizedState.leases).length === 0) delete normalizedState.leases;
     if (normalizedState.surfacing && normalizedState.surfacing.length === 0) delete normalizedState.surfacing;
+    if (normalizedState.pendingMarks && normalizedState.pendingMarks.length === 0) delete normalizedState.pendingMarks;
     return normalizedState;
   };
   return stableStringify(normalized(left)) === stableStringify(normalized(right));
@@ -425,6 +473,7 @@ export function validateV2ProjectionFields(
   tokensSinceToolFoldValue: unknown,
   leasesValue: unknown,
   surfacingValue?: unknown,
+  pendingMarksValue?: unknown,
 ): {
   expanded: string[];
   protected: EvidenceRef[];
@@ -433,6 +482,7 @@ export function validateV2ProjectionFields(
   tokensSinceToolFold: number;
   leases: Record<string, number>;
   surfacing: SurfacingRecord[];
+  pendingMarks: PendingMark[];
 } {
   const expanded = denseOwnArrayValues(expandedValue);
   const protectedRefs = denseOwnArrayValues(protectedValue);
@@ -451,6 +501,7 @@ export function validateV2ProjectionFields(
   }
   const leases = leasesValue === undefined ? {} : parseLeases(leasesValue);
   const surfacing = surfacingValue === undefined ? [] : parseSurfacingLog(surfacingValue);
+  const pendingMarks = pendingMarksValue === undefined ? [] : parsePendingMarks(pendingMarksValue);
   return {
     expanded: clone(expanded) as string[],
     protected: clone(protectedRefs) as EvidenceRef[],
@@ -461,6 +512,7 @@ export function validateV2ProjectionFields(
     tokensSinceToolFold: tokensSinceToolFoldValue === undefined ? 0 : Number(tokensSinceToolFoldValue),
     leases,
     surfacing,
+    pendingMarks,
   };
 }
 
@@ -474,11 +526,14 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     Object.prototype.hasOwnProperty.call(value, "leases"));
   const hasSurfacing = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "surfacing"));
+  const hasPendingMarks = Boolean(value && typeof value === "object" &&
+    Object.prototype.hasOwnProperty.call(value, "pendingMarks"));
   const optionalKeys = [
     ...(hasAdvisory ? ["advisory"] : []),
     ...(hasTokensSinceToolFold ? ["tokensSinceToolFold"] : []),
     ...(hasLeases ? ["leases"] : []),
     ...(hasSurfacing ? ["surfacing"] : []),
+    ...(hasPendingMarks ? ["pendingMarks"] : []),
   ];
   const checkpoint = kind === "checkpoint" &&
     exactRecord(value, [...STATE_CHECKPOINT_V2_KEYS, ...optionalKeys]);
@@ -493,7 +548,7 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
   validateV2ProjectionFields(
     ownValue(value, "expanded"), ownValue(value, "protected"), ownValue(value, "prepared"),
     ownValue(value, "advisory"), ownValue(value, "tokensSinceToolFold"), ownValue(value, "leases"),
-    ownValue(value, "surfacing"),
+    ownValue(value, "surfacing"), ownValue(value, "pendingMarks"),
   );
   if (checkpoint) {
     const refs = denseOwnArrayValues(ownValue(value, "foldRefs"));
@@ -558,7 +613,7 @@ export function stateFromFoldRefs(
   wire: Pick<
     ActiveContextCheckpointV2,
     "sessionId" | "revision" | "expanded" | "protected" | "prepared" | "advisory" |
-      "tokensSinceToolFold" | "leases" | "surfacing"
+      "tokensSinceToolFold" | "leases" | "surfacing" | "pendingMarks"
   >,
   refs: FoldRecordRef[],
   records: Map<string, FoldRecordEntry>,
@@ -579,6 +634,7 @@ export function stateFromFoldRefs(
     tokensSinceToolFold: wire.tokensSinceToolFold ?? 0,
     leases: clone(wire.leases ?? {}),
     ...(wire.surfacing?.length ? { surfacing: clone(wire.surfacing) } : {}),
+    ...(wire.pendingMarks?.length ? { pendingMarks: clone(wire.pendingMarks) } : {}),
     ...(wire.advisory === undefined ? {} : { advisory: clone(wire.advisory) }),
     ...(wire.prepared === null || wire.prepared === undefined ? {} : { prepared: clone(wire.prepared) }),
   };
@@ -729,6 +785,7 @@ export function makeStateCheckpoint(state: ActiveContextState): ActiveContextChe
     tokensSinceToolFold: state.tokensSinceToolFold,
     leases: clone(state.leases),
     ...(state.surfacing?.length ? { surfacing: clone(state.surfacing) } : {}),
+    ...(state.pendingMarks?.length ? { pendingMarks: clone(state.pendingMarks) } : {}),
     ...(state.advisory ? { advisory: clone(state.advisory) } : {}),
     stateSha256: semanticStateSha256(state),
   }, state.sessionId) as ActiveContextCheckpointV2;
@@ -764,6 +821,7 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
     tokensSinceToolFold: next.tokensSinceToolFold,
     leases: clone(next.leases),
     ...(next.surfacing?.length ? { surfacing: clone(next.surfacing) } : {}),
+    ...(next.pendingMarks?.length ? { pendingMarks: clone(next.pendingMarks) } : {}),
     ...(next.advisory ? { advisory: clone(next.advisory) } : {}),
     stateSha256: semanticStateSha256(next),
   }, next.sessionId) as ActiveContextDeltaV2;

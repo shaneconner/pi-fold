@@ -268,6 +268,15 @@ export function persistenceProjection(state: ActiveContextState, snapshot: Activ
     leases: Object.fromEntries(Object.entries(state.leases)
       .filter(([id]) => retained.has(id))),
   };
+  // A pending mark is a promise about evidence that is still in the branch. Once its
+  // source or its named fold leaves, the mark is unfulfillable and must not survive.
+  const survivingMarks = (state.pendingMarks ?? []).filter((mark) => mark.mark === "refold"
+    ? retained.has(mark.id)
+    : mark.parts.every((part) => part.kind === "raw"
+      ? mapped.has(objectRefKey(part.ref))
+      : retained.has(part.foldId)));
+  if (survivingMarks.length) projected.pendingMarks = clone(survivingMarks);
+  else delete projected.pendingMarks;
   if (projected.prepared && projected.prepared.sourceRefs.some((ref) => !mapped.has(objectRefKey(ref)))) {
     delete projected.prepared;
   }

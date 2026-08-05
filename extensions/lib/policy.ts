@@ -42,7 +42,11 @@ export const ACTIVE_CONTEXT_STATUS_KEY = DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFI
 export const ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
   "status", "peek", "fold", "expand", "refold", "protect", "unprotect",
 ] as const);
-export type ActiveContextToolAction = typeof ACTIVE_CONTEXT_TOOL_ACTIONS[number];
+/** The immediate-mode surface plus the epoch-mode commit verb. */
+export const EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
+  ...ACTIVE_CONTEXT_TOOL_ACTIONS, "commit",
+] as const);
+export type ActiveContextToolAction = typeof EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS[number];
 export const USER_RESCUE_MAX_SOURCE_CHARS = 512_000;
 export const DEFAULT_CONTEXT_WINDOW = 272_000;
 export const TOOL_FOLD_CADENCE_MIN_TOKENS = 12_000;
@@ -74,6 +78,58 @@ export const SURFACING_SOURCE_ID = "fold-brief";
 // Conservative LOWER bound on UTF-8 bytes per provider token, used only to cap
 // the protected byte tail as a share of a small window; never to estimate usage.
 export const BYTES_PER_TOKEN_FLOOR = 2;
+
+// Two-phase fold scheduling. A provider prefix cache is positional: any mid-window
+// edit invalidates every byte after it, so the cost of folding is dominated by how
+// OFTEN the projection changes, not by how much it saves. In "epoch" mode a fold
+// decision becomes a free MARK and a later COMMIT applies every pending mark in one
+// rewrite. "immediate" is the default and is byte-identical to pre-0.1.2 behavior.
+export const FOLD_SCHEDULING_MODES = Object.freeze(["immediate", "epoch"] as const);
+export type FoldSchedulingMode = typeof FOLD_SCHEDULING_MODES[number];
+export const DEFAULT_FOLD_SCHEDULING: FoldSchedulingMode = "immediate";
+
+// Epoch knobs stay INTERNAL constants for the same reason the surfacing knobs do:
+// they are what the round-2 cost measurement exists to settle, and an option surface
+// fixed before that data would freeze a guess.
+/** An automatic commit tops up with stale tool batches until it would free this share of the window. */
+export const EPOCH_COMMIT_TARGET_WINDOW_SHARE = 0.20;
+/** A fold whose span ends within this many mapped messages of the tail invalidates almost nothing. */
+export const EPOCH_TAIL_ADJACENT_MESSAGES = 16;
+export const MAX_PENDING_MARKS = 256;
+export const EPOCH_MAX_TOPUP_MARKS = 32;
+/** Estimate only; provider token accounting always comes from a measured response. */
+export const ESTIMATED_BYTES_PER_TOKEN = 4;
+/** Rendered navigation/topology overhead assumed around a brief when estimating a placeholder. */
+export const ESTIMATED_PLACEHOLDER_OVERHEAD_BYTES = 240;
+
+/** Active-context tool actions that read without mutating, so their results may fold. */
+export const READ_ONLY_CONTEXT_ACTIONS_DEFAULT: ReadonlySet<string> = new Set(["status"]);
+export const EPOCH_READ_ONLY_CONTEXT_ACTIONS: ReadonlySet<string> = new Set(["status", "peek"]);
+
+export type MarkOrigin = "agent" | "ladder";
+
+/** A fold decided but not yet applied: no projection byte has moved for it. */
+export interface PendingFoldMark {
+  mark: "fold";
+  id: string;
+  kind: FoldKind;
+  parts: FoldPart[];
+  brief: string;
+  briefProvenance: BriefProvenance;
+  origin: MarkOrigin;
+  /** Transcript ordinal at mark time; orders the commit. Never a wall clock. */
+  ordinal: number;
+}
+
+/** An expanded fold decided to return to its placeholder at the next commit. */
+export interface PendingRefoldMark {
+  mark: "refold";
+  id: string;
+  origin: MarkOrigin;
+  ordinal: number;
+}
+
+export type PendingMark = PendingFoldMark | PendingRefoldMark;
 
 export const ACTIVE_CONTEXT_POLICY = Object.freeze({
   freshTurns: 3,
@@ -190,6 +246,8 @@ export interface ActiveContextState {
   tokensSinceToolFold: number;
   leases: Record<string, number>;
   surfacing?: SurfacingRecord[];
+  /** Epoch scheduling only; omitted when empty so pre-0.1.2 state digests never move. */
+  pendingMarks?: PendingMark[];
   prepared?: PreparedFold;
   advisory?: {
     highWater: number;
@@ -223,6 +281,7 @@ export interface ActiveContextCheckpointV2 {
   tokensSinceToolFold?: number;
   leases?: Record<string, number>;
   surfacing?: SurfacingRecord[];
+  pendingMarks?: PendingMark[];
   advisory?: NonNullable<ActiveContextState["advisory"]>;
   stateSha256: string;
 }
@@ -242,6 +301,7 @@ export interface ActiveContextDeltaV2 {
   tokensSinceToolFold?: number;
   leases?: Record<string, number>;
   surfacing?: SurfacingRecord[];
+  pendingMarks?: PendingMark[];
   advisory?: NonNullable<ActiveContextState["advisory"]>;
   stateSha256: string;
 }
@@ -279,6 +339,8 @@ export interface ActiveContextSnapshot {
   brandNoun: string;
   entryTypePrefix: string;
   readOnlyTools: ReadonlySet<string>;
+  /** Active-context tool actions treated as read-only when classifying tool batches. */
+  readOnlyContextActions: ReadonlySet<string>;
   contextWindow: number;
   windowSource: "reported" | "fallback";
 }

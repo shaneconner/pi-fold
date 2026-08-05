@@ -89,8 +89,13 @@ import {
   DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_FOLD_SCHEDULING,
   DEFAULT_SURFACING_ENABLED,
   entryTypeNamespace,
+  EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS,
+  EPOCH_READ_ONLY_CONTEXT_ACTIONS,
+  FOLD_SCHEDULING_MODES,
+  READ_ONLY_CONTEXT_ACTIONS_DEFAULT,
   READ_ONLY_TOOLS_DEFAULT,
   USER_RESCUE_MAX_SOURCE_CHARS,
 } from "./lib/policy.ts";
@@ -102,11 +107,26 @@ import type {
   FoldCandidate,
   FoldKind,
   FoldRecordEntry,
+  FoldSchedulingMode,
   GuidanceProfile,
   PreparedFold,
   SuggestionSource,
   SurfacingSuggestion,
 } from "./lib/policy.ts";
+import {
+  addPendingMark,
+  commitPendingMarks,
+  ephemeralPeekMarks,
+  epochCommitDue,
+  foldMarkFor,
+  ladderSelectionMark,
+  markAccounting,
+  markOrdinal,
+  pendingMarks,
+  schedulingStatus,
+  tailAdjacent,
+  topUpMarks,
+} from "./lib/scheduling.ts";
 import {
   automaticToolBrief,
   deterministicChapterCandidateBrief,
@@ -131,6 +151,7 @@ export * from "./lib/folding.ts";
 export * from "./lib/measurement.ts";
 export * from "./lib/persistence.ts";
 export * from "./lib/policy.ts";
+export * from "./lib/scheduling.ts";
 export * from "./lib/selection.ts";
 export * from "./lib/surfacing.ts";
 export * from "./lib/transcript.ts";
@@ -158,6 +179,7 @@ export function registerActiveContext(pi: any, options: {
   readOnlyTools?: ReadonlySet<string>;
   blockingTools?: readonly string[];
   guidance?: GuidanceProfile;
+  foldScheduling?: FoldSchedulingMode;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
   registerSuggestionSource: SuggestionSourceRegistrar;
@@ -173,6 +195,16 @@ export function registerActiveContext(pi: any, options: {
     throw new Error("surfacing must be a boolean");
   }
   const surfacingEnabled = options.surfacing ?? DEFAULT_SURFACING_ENABLED;
+  const foldScheduling = options.foldScheduling ?? DEFAULT_FOLD_SCHEDULING;
+  if (!FOLD_SCHEDULING_MODES.includes(foldScheduling)) {
+    throw new Error(`foldScheduling must be one of ${FOLD_SCHEDULING_MODES.join(", ")}`);
+  }
+  const epochScheduling = foldScheduling === "epoch";
+  // Peek mutates nothing, so in epoch mode its own tool result is a foldable read
+  // batch. Immediate mode keeps the pre-0.1.2 classification exactly.
+  const readOnlyContextActions = epochScheduling
+    ? EPOCH_READ_ONLY_CONTEXT_ACTIONS
+    : READ_ONLY_CONTEXT_ACTIONS_DEFAULT;
   if (!toolName || !toolLabel || !brandNoun || !entryTypePrefix || typeof commandPrefix !== "string" ||
       (commandPrefix && !/^[a-z0-9-]+$/.test(commandPrefix)) ||
       [...readOnlyTools].some((name) => typeof name !== "string" || !name)) {
@@ -205,8 +237,13 @@ export function registerActiveContext(pi: any, options: {
   const providerMeasurementEntryType = `${entryNamespace}-provider-context-measurement`;
   const nativeReceiptEntryType = `${entryNamespace}-native-compaction-receipt`;
   const nativeDecisionEntryType = `${entryNamespace}-native-compaction-decision`;
+  // The commit verb only exists where marks exist; immediate mode keeps its exact
+  // seven-action surface and description.
+  const defaultToolActions = epochScheduling
+    ? EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS
+    : ACTIVE_CONTEXT_TOOL_ACTIONS;
   const configuredToolActions = denseOwnArrayValues(
-    options.toolActions ?? ACTIVE_CONTEXT_TOOL_ACTIONS,
+    options.toolActions ?? defaultToolActions,
   );
   if (!configuredToolActions || configuredToolActions.length < 1) {
     throw new Error("Active-context tool actions must be one non-empty dense array");
@@ -215,7 +252,7 @@ export function registerActiveContext(pi: any, options: {
   const allowedToolActionSet = new Set<string>();
   for (const value of configuredToolActions) {
     if (typeof value !== "string" ||
-        !ACTIVE_CONTEXT_TOOL_ACTIONS.includes(value as ActiveContextToolAction) ||
+        !EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS.includes(value as ActiveContextToolAction) ||
         allowedToolActionSet.has(value)) {
       throw new Error(`Invalid or duplicate active-context tool action '${String(value)}'`);
     }
@@ -370,6 +407,7 @@ export function registerActiveContext(pi: any, options: {
     brandNoun,
     entryTypePrefix,
     readOnlyTools,
+    readOnlyContextActions,
     contextWindow: contextWindowFor(ctx) ?? undefined,
   });
 
@@ -387,6 +425,7 @@ export function registerActiveContext(pi: any, options: {
       brandNoun,
       entryTypePrefix,
       readOnlyTools,
+      readOnlyContextActions,
       contextWindow: contextWindowFor(ctx) ?? undefined,
     });
   };
@@ -1200,22 +1239,110 @@ export function registerActiveContext(pi: any, options: {
     return { preparedFold, nextState };
   };
 
+  /**
+   * The one mutation of an epoch: every pending mark, plus the automatic additions
+   * a commit is allowed to make, applied through the same machinery as an immediate
+   * fold. Free additions come first (peek reads the agent already discarded), then
+   * the quota top-up that guarantees the commit is worth its rewrite.
+   */
+  const runCommitEpoch = async (
+    snapshot: ActiveContextSnapshot,
+    trigger: string,
+    topUp: boolean,
+  ): Promise<Record<string, unknown> | null> => {
+    const ordinal = markOrdinal(snapshot);
+    let state = persistence.state!;
+    for (const mark of ephemeralPeekMarks({ snapshot, state, ordinal })) {
+      const addition = addPendingMark(state, mark);
+      if (addition.added) state = addition.state;
+    }
+    if (topUp) {
+      for (const mark of topUpMarks({ snapshot, state, ordinal })) {
+        const addition = addPendingMark(state, mark);
+        if (addition.added) state = addition.state;
+      }
+    }
+    const accounting = markAccounting(snapshot, state);
+    if (!accounting.pending) return null;
+    const bytesBefore = bytes(projectActiveContext(snapshot, state));
+    const result = await commitPendingMarks({
+      snapshot,
+      state,
+      generation: lifecycle.generation,
+    });
+    persistence.state = result.state;
+    const bytesAfter = bytes(projectActiveContext(snapshot, result.state));
+    return {
+      trigger,
+      applied: result.applied,
+      refused: result.refused,
+      agentMarks: accounting.agentMarks,
+      ladderMarks: accounting.ladderMarks,
+      estimatedRewriteTokens: accounting.rewriteTokens,
+      sourceBytesSaved: Math.max(0, bytesBefore - bytesAfter),
+    };
+  };
+
   const applyAutomaticRung = async (
     snapshot: ActiveContextSnapshot,
     ratio: number,
     rungOptions: { waiveToolCadence?: boolean; toolOnly?: boolean } = {},
   ): Promise<Record<string, unknown> | null> => {
     if (!persistence.state || ladder.automaticFailure || ladder.preparing) return null;
-    const selection = selectAutomaticRung(snapshot, persistence.state, ratio, {
+    const rungSelectionOptions = {
       waiveToolCadence: rungOptions.waiveToolCadence,
       toolOnly: rungOptions.toolOnly,
       summarizerAvailable: Boolean(options.summarizeContextSpan),
       failedPreparationIds: ladder.failedPreparations,
-    });
-    if (!selection) return null;
+    };
+    let epoch: Record<string, unknown> | null = null;
+    if (epochScheduling) {
+      if (!epochCommitDue(snapshot, ratio)) {
+        // Below the commit threshold the ladder decides but does not move bytes.
+        const decision = selectAutomaticRung(snapshot, persistence.state, ratio, rungSelectionOptions);
+        const mark = decision
+          ? ladderSelectionMark({
+            snapshot, state: persistence.state, selection: decision, ordinal: markOrdinal(snapshot),
+          })
+          : null;
+        if (!mark) return null;
+        const addition = addPendingMark(persistence.state, mark);
+        if (!addition.added) return null;
+        persistence.state = addition.state;
+        ladder.pendingContextNote =
+          `Pending ${mark.mark} mark ${mark.id} recorded; no context bytes moved. ` +
+          "It applies at the next commit epoch.";
+        ladder.lastAutomaticAction = {
+          kind: "mark",
+          foldIds: [mark.id],
+          sourceIds: [],
+          markKind: mark.mark,
+          markOrigin: mark.origin,
+          pendingMarks: pendingMarks(persistence.state).length,
+          sourceBytesSaved: 0,
+        };
+        return ladder.lastAutomaticAction;
+      }
+      epoch = await runCommitEpoch(snapshot, "window-pressure", true);
+    }
+    const selection = selectAutomaticRung(snapshot, persistence.state, ratio, rungSelectionOptions);
+    // In epoch mode the accumulated marks ARE the ladder's action; the one rung that
+    // still applies inline is the prepared chapter, which only fires at the hard
+    // provider fence, above the commit threshold and inside this same epoch.
+    const applicable = !epochScheduling || selection?.kind === "prepared-chapter" ? selection : null;
+    if (!applicable) {
+      if (!epoch || !persistence.state) return null;
+      persistence.state = clearArmedAdvisory(persistence.state);
+      advisory.armedMilestone = null;
+      ladder.pendingContextNote =
+        `A commit epoch applied ${(epoch.applied as unknown[]).length} pending mark(s) in one rewrite; ` +
+        "exact evidence remains expandable.";
+      ladder.lastAutomaticAction = { kind: "epoch-commit", foldIds: [], sourceIds: [], epoch };
+      return ladder.lastAutomaticAction;
+    }
     const projectedBytesBefore = bytes(projectActiveContext(snapshot, persistence.state));
     let action: Record<string, unknown> | null = null;
-    if (selection.kind === "prepared-chapter" && persistence.state.prepared) {
+    if (applicable.kind === "prepared-chapter" && persistence.state.prepared) {
       const error = preparedFoldError({
         prepared: persistence.state.prepared,
         snapshot,
@@ -1237,9 +1364,9 @@ export function registerActiveContext(pi: any, options: {
         action = { kind: "chapter-fold", foldIds: [id], sourceIds };
         ladder.pendingContextNote = `A coherent stale chapter was folded under ${id}; exact evidence remains expandable.`;
       }
-    } else if (selection.kind === "tool") {
+    } else if (applicable.kind === "tool") {
       cancelPreparation();
-      const tool = selection.candidate;
+      const tool = applicable.candidate;
       const id = await commitDeterministicCandidate(snapshot, tool, automaticToolBrief(snapshot, tool));
       action = {
         kind: "tool-fold",
@@ -1247,14 +1374,14 @@ export function registerActiveContext(pi: any, options: {
         sourceIds: tool.sourceRefs.map((ref) => ref.entryId),
       };
       ladder.pendingContextNote = `${tool.sourceRefs.length} stale completed read-only tool result(s) were folded.`;
-    } else if (selection.kind === "refold") {
+    } else if (applicable.kind === "refold") {
       cancelPreparation();
-      persistence.state = setFoldProjectionState(persistence.state, selection.foldId, "folded");
-      action = { kind: "refold", foldIds: [selection.foldId] };
-      ladder.pendingContextNote = `Stale expanded fold ${selection.foldId} returned to its identical placeholder.`;
-    } else if (selection.kind === "consolidation") {
+      persistence.state = setFoldProjectionState(persistence.state, applicable.foldId, "folded");
+      action = { kind: "refold", foldIds: [applicable.foldId] };
+      ladder.pendingContextNote = `Stale expanded fold ${applicable.foldId} returned to its identical placeholder.`;
+    } else if (applicable.kind === "consolidation") {
       cancelPreparation();
-      const consolidation = selection.candidate;
+      const consolidation = applicable.candidate;
       const id = await commitDeterministicCandidate(
         snapshot,
         consolidation,
@@ -1267,8 +1394,8 @@ export function registerActiveContext(pi: any, options: {
       };
       ladder.pendingContextNote =
         `Stale folded chapters were consolidated under ${id}; every child remains expandable.`;
-    } else if (selection.kind === "chapter") {
-      const chapter = selection.candidate;
+    } else if (applicable.kind === "chapter") {
+      const chapter = applicable.candidate;
       const id = await commitDeterministicCandidate(
         snapshot,
         chapter,
@@ -1282,12 +1409,13 @@ export function registerActiveContext(pi: any, options: {
       ladder.pendingContextNote =
         `A coherent stale chapter was folded under ${id}; exact evidence remains expandable.`;
     }
-    if (!action || !persistence.state) return null;
+    if ((!action && !epoch) || !persistence.state) return null;
     const projectedBytesAfter = bytes(projectActiveContext(snapshot, persistence.state));
     persistence.state = clearArmedAdvisory(persistence.state);
     advisory.armedMilestone = null;
     ladder.lastAutomaticAction = {
-      ...action,
+      ...(action ?? { kind: "epoch-commit", foldIds: [], sourceIds: [] }),
+      ...(epoch ? { epoch } : {}),
       sourceBytesSaved: Math.max(0, projectedBytesBefore - projectedBytesAfter),
     };
     return ladder.lastAutomaticAction;
@@ -1929,6 +2057,12 @@ export function registerActiveContext(pi: any, options: {
           automaticSuspended: ladder.automaticFailure !== null,
           automaticFailure: ladder.automaticFailure ? clone(ladder.automaticFailure) : null,
           lastCompactionDecision: nativeCompaction.lastThresholdDecision,
+          scheduling: schedulingStatus({
+            snapshot,
+            state: persistence.state,
+            mode: foldScheduling,
+            ratio: measurements.latestRatio,
+          }),
           nativeSummaries: "disabled",
           freeHarvest: blockingTools.size === 0 ? "disabled" : "enabled",
           pressureSource: "last-successful-provider-response-only",
@@ -1968,9 +2102,68 @@ export function registerActiveContext(pi: any, options: {
       noteSurfacingAccept(id);
       return payload;
     }
+    if (action === "commit") {
+      if (!epochScheduling) {
+        return toolPayload({
+          version: 1,
+          action,
+          mode: foldScheduling,
+          applied: [],
+          refused: [],
+          note: "Fold scheduling is immediate; every fold already applied when it was made.",
+        });
+      }
+      const ordinal = markOrdinal(snapshot);
+      let staged = persistence.state;
+      for (const mark of ephemeralPeekMarks({ snapshot, state: staged, ordinal })) {
+        const addition = addPendingMark(staged, mark);
+        if (addition.added) staged = addition.state;
+      }
+      const pending = pendingMarks(staged).length;
+      const accounting = markAccounting(snapshot, staged);
+      const result = await commitPendingMarks({
+        snapshot,
+        state: staged,
+        generation: lifecycle.generation,
+      });
+      if (result.applied.length) {
+        advisory.armedMilestone = null;
+        await persistManual(clearArmedAdvisory(result.state), action, ctx);
+      } else if (pending) {
+        await persistManual(result.state, action, ctx);
+      }
+      updateStatus(ctx);
+      return toolPayload({
+        version: 1,
+        action,
+        mode: foldScheduling,
+        pending,
+        applied: result.applied,
+        refused: result.refused,
+        agentMarks: accounting.agentMarks,
+        ladderMarks: accounting.ladderMarks,
+        estimatedRewriteTokens: accounting.rewriteTokens,
+        durableRevision: persistence.state.revision,
+        activation: pending
+          ? "one batched projection rewrite; durable immediately and projected on the next model call"
+          : "no pending marks; nothing was rewritten",
+      });
+    }
     if (action === "expand" || action === "refold") {
       const id = String(params.id ?? "").trim();
       if (!id) throw new Error(`${action} requires id`);
+      // An expand with marks pending opens the commit epoch: the restore and the
+      // batch of folds then cost one rewrite between them instead of two.
+      let epochApplied: unknown[] = [];
+      if (epochScheduling && action === "expand" && pendingMarks(persistence.state).length) {
+        const result = await commitPendingMarks({
+          snapshot,
+          state: persistence.state,
+          generation: lifecycle.generation,
+        });
+        persistence.state = result.state;
+        epochApplied = result.applied;
+      }
       requireActiveFold(snapshot, persistence.state, id);
       if (action === "expand") noteSurfacingAccept(id);
       let next = setFoldProjectionState(persistence.state, id, action === "expand" ? "expanded" : "folded");
@@ -1991,6 +2184,7 @@ export function registerActiveContext(pi: any, options: {
         action,
         id,
         state: action === "expand" ? "expanded" : "folded",
+        ...(epochApplied.length ? { committedMarks: epochApplied } : {}),
         activation: "durable immediately; projected on the next model call in this same turn",
       });
     }
@@ -2009,6 +2203,51 @@ export function registerActiveContext(pi: any, options: {
       const ids = stringIds(params.ids);
       const candidate = manualFoldCandidate(snapshot, persistence.state, ids);
       const supplied = typeof params.brief === "string" && params.brief.trim() ? params.brief : undefined;
+      // Tail-adjacent spans invalidate almost nothing, so they still apply at once.
+      if (epochScheduling && !tailAdjacent(snapshot, candidate, persistence.state)) {
+        // Resolve the brief now, while the source is in hand, so the commit epoch
+        // itself stays deterministic and free of provider calls.
+        const briefed = await prepareFold({
+          candidate,
+          snapshot,
+          state: persistence.state,
+          generation: lifecycle.generation,
+          brief: supplied,
+          summarize: options.summarizeContextSpan,
+          ctx,
+          signal,
+        });
+        const mark = foldMarkFor({
+          candidate,
+          brief: briefed.fold.brief,
+          briefProvenance: briefed.fold.provenance,
+          origin: "agent",
+          ordinal: markOrdinal(snapshot),
+        });
+        const addition = addPendingMark(persistence.state, mark);
+        if (!addition.added) throw new Error(`Fold mark refused: ${addition.reason}`);
+        await persistManual(addition.state, action, ctx);
+        updateStatus(ctx);
+        const accounting = markAccounting(snapshot, persistence.state);
+        return toolPayload({
+          version: 1,
+          action,
+          scheduling: "epoch",
+          marked: true,
+          id: mark.id,
+          kind: mark.kind,
+          brief: mark.brief,
+          provenance: normalizeLegacyProvenance(mark.briefProvenance),
+          argumentsSha256: executionArgumentsSha256,
+          durableRevision: persistence.state.revision,
+          pendingMarks: accounting.pending,
+          estimatedFreedWindowShare: accounting.freedWindowShare,
+          estimatedRewriteTokens: accounting.rewriteTokens,
+          activation: "recorded as a pending mark; no context bytes moved. It applies at the next " +
+            "commit epoch, which you can open with the commit action or leave to window pressure.",
+          commit: { action: "commit" },
+        });
+      }
       const { preparedFold, nextState } = await prepareAndCommitExplicit({
         snapshot,
         candidate,
@@ -2126,7 +2365,7 @@ export function registerActiveContext(pi: any, options: {
     name: toolName,
     label: toolLabel,
     allowedActions: allowedToolActions,
-    fullSurface: allowedToolActions.length === ACTIVE_CONTEXT_TOOL_ACTIONS.length,
+    fullSurface: allowedToolActions.length === defaultToolActions.length,
     maxBriefChars: ACTIVE_CONTEXT_POLICY.maxBriefChars,
     handler: toolHandler,
   }));

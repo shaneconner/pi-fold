@@ -19,12 +19,15 @@ export function buildActiveContextTool(input: {
   const peekGuidance = input.allowedActions.includes("peek")
     ? " Peek is the ephemeral point read: it returns one fold's exact source at any depth, ancestors still collapsed, and changes nothing, so the content arrives as a tool result that can later fold away as a completed read batch; expand is the durable in-place restoration."
     : "";
+  const commitGuidance = input.allowedActions.includes("commit")
+    ? " Fold scheduling is epoch mode: fold records a pending mark and moves no context bytes, and commit applies every pending mark in one rewrite. Mark freely as you work; commit when you are between tasks, or let window pressure commit for you."
+    : "";
   return {
     name: input.name,
     label: input.label,
     description: input.fullSurface
-      ? `Page, peek, fold, expand, refold, or protect exact Pi active-context evidence.${peekGuidance} Mutations persist immediately and affect the next model call inside the same continuing turn; no turn boundary is required. Supplied fold briefs have a hard 1200-character maximum.`
-      : `Use only the configured active-context actions: ${input.allowedActions.join(", ")}.${peekGuidance} Call fold only by copying the exact eligibleChapter.action returned by status; if status has no eligibleChapter, continue the task without folding. Supplied fold briefs have a hard 1200-character maximum.`,
+      ? `Page, peek, fold, expand, refold, or protect exact Pi active-context evidence.${peekGuidance}${commitGuidance} Mutations persist immediately and affect the next model call inside the same continuing turn; no turn boundary is required. Supplied fold briefs have a hard 1200-character maximum.`
+      : `Use only the configured active-context actions: ${input.allowedActions.join(", ")}.${peekGuidance}${commitGuidance} Call fold only by copying the exact eligibleChapter.action returned by status; if status has no eligibleChapter, continue the task without folding. Supplied fold briefs have a hard 1200-character maximum.`,
     parameters: {
       type: "object",
       additionalProperties: false,
