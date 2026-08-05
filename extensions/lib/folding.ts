@@ -581,15 +581,15 @@ export function preparedFoldError(input: {
 
 export function descendantIds(state: ActiveContextState, id: string): Set<string> {
   const byId = foldMap(state);
-  const out = new Set<string>();
+  const descendants = new Set<string>();
   const visit = (foldId: string): void => {
     for (const child of childFoldIds(byId.get(foldId)!)) {
-      out.add(child);
+      descendants.add(child);
       visit(child);
     }
   };
   if (byId.has(id)) visit(id);
-  return out;
+  return descendants;
 }
 
 export function commitPreparedFold(input: {
@@ -784,12 +784,12 @@ export function toolLinkageCounts(messages: unknown[]): Map<string, ToolLinkageC
 }
 
 export function assertProjectionPreservesToolLinkage(source: unknown[], projected: unknown[]): void {
-  const before = toolLinkageCounts(source);
-  const after = toolLinkageCounts(projected);
-  const ids = new Set([...before.keys(), ...after.keys()]);
+  const sourceLinkage = toolLinkageCounts(source);
+  const projectedLinkage = toolLinkageCounts(projected);
+  const ids = new Set([...sourceLinkage.keys(), ...projectedLinkage.keys()]);
   for (const id of ids) {
-    const original = before.get(id) ?? { calls: 0, results: 0 };
-    const visible = after.get(id) ?? { calls: 0, results: 0 };
+    const original = sourceLinkage.get(id) ?? { calls: 0, results: 0 };
+    const visible = projectedLinkage.get(id) ?? { calls: 0, results: 0 };
     const uniquelyClosed = original.calls === 1 && original.results === 1;
     const valid = uniquelyClosed
       ? (visible.calls === 1 && visible.results === 1) ||

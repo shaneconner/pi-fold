@@ -350,10 +350,10 @@ export function phaseAReplayOrderStateSha256(state: ActiveContextState): string 
 
 export function sameStateProjection(left: ActiveContextState, right: ActiveContextState): boolean {
   const normalized = (value: ActiveContextState): Partial<ActiveContextState> => {
-    const out = { ...clone(value), revision: 0 } as Partial<ActiveContextState>;
-    if (out.tokensSinceToolFold === 0) delete out.tokensSinceToolFold;
-    if (out.leases && Object.keys(out.leases).length === 0) delete out.leases;
-    return out;
+    const normalizedState = { ...clone(value), revision: 0 } as Partial<ActiveContextState>;
+    if (normalizedState.tokensSinceToolFold === 0) delete normalizedState.tokensSinceToolFold;
+    if (normalizedState.leases && Object.keys(normalizedState.leases).length === 0) delete normalizedState.leases;
+    return normalizedState;
   };
   return stableStringify(normalized(left)) === stableStringify(normalized(right));
 }
@@ -695,8 +695,10 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
     return [ref.id, ref] as const;
   }));
   for (const [id, ref] of nextRefs) {
-    const before = previousRefs.get(id);
-    if (before && before.sha256 !== ref.sha256) throw new Error(`Active-context fold record changed for ${id}`);
+    const previousRef = previousRefs.get(id);
+    if (previousRef && previousRef.sha256 !== ref.sha256) {
+      throw new Error(`Active-context fold record changed for ${id}`);
+    }
   }
   return parseActiveContextStateV2({
     version: 2,

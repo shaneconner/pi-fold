@@ -457,8 +457,8 @@ export function registerActiveContext(pi: any, options: {
           throw new Error("One provider response is bound to multiple projection revisions");
         }
         measurements.providerMeasurementRevisionByMessageSha.set(receipt.messageSha256, receipt.projectionRevision);
-        const priorMeasurement = measurements.providerMeasurementByMessageSha.get(receipt.messageSha256);
-        if (priorMeasurement && stableStringify(priorMeasurement) !== stableStringify(receipt)) {
+        const priorReceipt = measurements.providerMeasurementByMessageSha.get(receipt.messageSha256);
+        if (priorReceipt && stableStringify(priorReceipt) !== stableStringify(receipt)) {
           throw new Error("One provider response has conflicting durable measurement receipts");
         }
         measurements.providerMeasurementByMessageSha.set(receipt.messageSha256, receipt);
@@ -753,16 +753,18 @@ export function registerActiveContext(pi: any, options: {
       completions.set(decision.decisionKey, receipt);
       usedCompactions.add(compaction.id);
     }
-    const latest = [...completions.values()].sort((left, right) => left.occurredAt - right.occurredAt).at(-1);
-    if (latest) {
+    const latestCompletion = [...completions.values()]
+      .sort((left, right) => left.occurredAt - right.occurredAt)
+      .at(-1);
+    if (latestCompletion) {
       nativeCompaction.lastThresholdDecision = {
         handled: true,
         retry: false,
         reason: `native compaction completed; ${brandNoun} folding state rebuilt`,
-        compactionReason: latest.reason,
+        compactionReason: latestCompletion.reason,
         nativeCompactionCompleted: true,
-        receiptKey: latest.receiptKey,
-        decision: latest.decision,
+        receiptKey: latestCompletion.receiptKey,
+        decision: latestCompletion.decision,
       };
     }
   };
@@ -1144,7 +1146,7 @@ export function registerActiveContext(pi: any, options: {
       failedPreparationIds: ladder.failedPreparations,
     });
     if (!selection) return null;
-    const before = bytes(projectActiveContext(snapshot, persistence.state));
+    const projectedBytesBefore = bytes(projectActiveContext(snapshot, persistence.state));
     let action: Record<string, unknown> | null = null;
     if (selection.kind === "prepared-chapter" && persistence.state.prepared) {
       const error = preparedFoldError({
@@ -1214,10 +1216,13 @@ export function registerActiveContext(pi: any, options: {
         `A coherent stale chapter was folded under ${id}; exact evidence remains expandable.`;
     }
     if (!action || !persistence.state) return null;
-    const after = bytes(projectActiveContext(snapshot, persistence.state));
+    const projectedBytesAfter = bytes(projectActiveContext(snapshot, persistence.state));
     persistence.state = clearArmedAdvisory(persistence.state);
     advisory.armedMilestone = null;
-    ladder.lastAutomaticAction = { ...action, sourceBytesSaved: Math.max(0, before - after) };
+    ladder.lastAutomaticAction = {
+      ...action,
+      sourceBytesSaved: Math.max(0, projectedBytesBefore - projectedBytesAfter),
+    };
     return ladder.lastAutomaticAction;
   };
   const runAutomaticRungTransaction = async (
@@ -1385,9 +1390,9 @@ export function registerActiveContext(pi: any, options: {
     });
     const scheduleChanged = advisory.advisoryScheduleKey !== null && advisory.advisoryScheduleKey !== scheduleKey;
     advisory.advisoryScheduleKey = scheduleKey;
-    const before = stableStringify(advisoryState(persistence.state));
-    const updated = updateAdvisoryMilestone(persistence.state, ratio, schedule, scheduleChanged, scheduleKey);
-    persistence.state = updated.state;
+    const advisoryBefore = stableStringify(advisoryState(persistence.state));
+    const advisoryUpdate = updateAdvisoryMilestone(persistence.state, ratio, schedule, scheduleChanged, scheduleKey);
+    persistence.state = advisoryUpdate.state;
     const armed = advisoryState(persistence.state).armed;
     if (armed && ratio < 0.85 * armed.threshold) {
       persistence.state = clearArmedAdvisory(persistence.state);
@@ -1395,7 +1400,7 @@ export function registerActiveContext(pi: any, options: {
     } else {
       advisory.armedMilestone = armed?.milestone ?? null;
     }
-    return before !== stableStringify(advisoryState(persistence.state));
+    return advisoryBefore !== stableStringify(advisoryState(persistence.state));
   };
 
   const accountAnchoredMeasurement = (measurement: ProviderContextMeasurement): boolean => {
@@ -1436,26 +1441,30 @@ export function registerActiveContext(pi: any, options: {
           ladder.automaticFailure.suppressedCallbacks + 1,
         );
       }
-      let observed = latestProviderContextMeasurement(
+      let observedMeasurement = latestProviderContextMeasurement(
         snapshot.messages,
         contextWindowFor(ctx) ?? DEFAULT_CONTEXT_WINDOW,
         ctx.model,
       );
-      if (observed && providerMeasurementBranchIndex(ctx, observed) < 0) observed = null;
+      if (observedMeasurement && providerMeasurementBranchIndex(ctx, observedMeasurement) < 0) {
+        observedMeasurement = null;
+      }
       let advisoryChanged = false;
       let measurementStateChanged = false;
-      if (observed) {
-        const boundRevision = measurements.providerMeasurementRevisionByMessageSha.get(observed.messageSha256);
+      if (observedMeasurement) {
+        const boundRevision = measurements.providerMeasurementRevisionByMessageSha.get(
+          observedMeasurement.messageSha256,
+        );
         if (boundRevision !== undefined &&
-            !durableProviderMeasurementReceiptMatches(observed, boundRevision)) {
-          try { await persistProviderMeasurement(ctx, observed, boundRevision); }
+            !durableProviderMeasurementReceiptMatches(observedMeasurement, boundRevision)) {
+          try { await persistProviderMeasurement(ctx, observedMeasurement, boundRevision); }
           catch (error) { suspendAutomatic(error, "provider-measurement", ctx); }
         }
-        measurements.latestRatio = contextUsageRatio(observed);
-        if (durableProviderMeasurementMatches(observed) && measurements.latestRatio !== null) {
-          measurementStateChanged = accountAnchoredMeasurement(observed);
-          measurements.lastProviderMeasurement = observed;
-          advisoryChanged = armMilestoneForMeasurement(snapshot, observed);
+        measurements.latestRatio = contextUsageRatio(observedMeasurement);
+        if (durableProviderMeasurementMatches(observedMeasurement) && measurements.latestRatio !== null) {
+          measurementStateChanged = accountAnchoredMeasurement(observedMeasurement);
+          measurements.lastProviderMeasurement = observedMeasurement;
+          advisoryChanged = armMilestoneForMeasurement(snapshot, observedMeasurement);
           startPreparation(snapshot, measurements.latestRatio, ctx);
           if (!ladder.automaticFailure && measurements.latestRatio >= hardFenceRatio(snapshot) && ladder.preparing) {
             mutationAttempted = true;
@@ -1471,7 +1480,7 @@ export function registerActiveContext(pi: any, options: {
             persistedSucceeded = true;
             advisoryChanged = false;
           }
-        } else measurements.lastProviderMeasurement = observed;
+        } else measurements.lastProviderMeasurement = observedMeasurement;
       } else {
         measurements.latestRatio = contextUsageRatio(measurements.lastProviderMeasurement);
       }

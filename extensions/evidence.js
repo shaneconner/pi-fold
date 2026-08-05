@@ -92,8 +92,8 @@ async function verifyArtifact(path, sha256, bytes) {
   try {
     const file = await handle.stat({ bigint: true });
     if (!file.isFile() || file.size !== BigInt(bytes)) throw new Error(`Evidence artifact size drift at ${path}`);
-    const observed = await hashOpenFile(handle, bytes);
-    if (observed.bytes !== bytes || observed.sha256 !== sha256) {
+    const observedArtifact = await hashOpenFile(handle, bytes);
+    if (observedArtifact.bytes !== bytes || observedArtifact.sha256 !== sha256) {
       throw new Error(`Evidence artifact digest drift at ${path}`);
     }
   } finally {
@@ -258,13 +258,14 @@ export async function pinEvidenceFile({
   try {
     sourceHandle = await open(canonicalSource, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     destinationHandle = await open(temporary, "wx", 0o600);
-    const before = await sourceHandle.stat({ bigint: true });
-    if (!before.isFile()) throw new Error(`Evidence source is not a regular file: ${canonicalSource}`);
+    const sourceBeforeCopy = await sourceHandle.stat({ bigint: true });
+    if (!sourceBeforeCopy.isFile()) throw new Error(`Evidence source is not a regular file: ${canonicalSource}`);
     snapshot = await copyAndHashOpenFile(sourceHandle, destinationHandle);
     await destinationHandle.sync();
-    const after = await sourceHandle.stat({ bigint: true });
-    const named = await stat(canonicalSource, { bigint: true });
-    if (!sameIdentity(before, after) || !sameIdentity(after, named) || BigInt(snapshot.bytes) !== named.size) {
+    const sourceAfterCopy = await sourceHandle.stat({ bigint: true });
+    const namedSource = await stat(canonicalSource, { bigint: true });
+    if (!sameIdentity(sourceBeforeCopy, sourceAfterCopy) || !sameIdentity(sourceAfterCopy, namedSource) ||
+        BigInt(snapshot.bytes) !== namedSource.size) {
       throw new Error(`Evidence source changed while snapshotting: ${canonicalSource}`);
     }
   } catch (error) {

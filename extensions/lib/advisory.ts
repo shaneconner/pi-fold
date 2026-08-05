@@ -38,7 +38,7 @@ export function clearArmedAdvisory(state: ActiveContextState): ActiveContextStat
 export function advisorySchedule(
   snapshot: Pick<ActiveContextSnapshot, "policy" | "contextWindow">,
 ): AdvisorySchedule {
-  const raw = [
+  const rungs = [
     { milestone: "notice" as const, threshold: 0.50, budget: ADVISORY_BUDGETS.notice },
     { milestone: "tools" as const, threshold: snapshot.policy.toolFoldRatio - 0.04,
       budget: ADVISORY_BUDGETS.tools },
@@ -47,13 +47,13 @@ export function advisorySchedule(
     { milestone: "urgent" as const, threshold: hardFenceRatio(snapshot) - 0.03,
       budget: ADVISORY_BUDGETS.urgent },
   ];
-  for (let index = raw.length - 2; index >= 0; index -= 1) {
-    raw[index].threshold = Math.min(raw[index].threshold, raw[index + 1].threshold - 0.02);
+  for (let index = rungs.length - 2; index >= 0; index -= 1) {
+    rungs[index].threshold = Math.min(rungs[index].threshold, rungs[index + 1].threshold - 0.02);
   }
-  for (const rung of raw) rung.threshold = Math.max(0, Math.min(1, rung.threshold));
+  for (const rung of rungs) rung.threshold = Math.max(0, Math.min(1, rung.threshold));
   return {
-    key: sha256Value(raw.map(({ milestone, threshold }) => ({ milestone, threshold }))),
-    rungs: raw,
+    key: sha256Value(rungs.map(({ milestone, threshold }) => ({ milestone, threshold }))),
+    rungs,
   };
 }
 
