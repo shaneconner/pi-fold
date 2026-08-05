@@ -97,7 +97,6 @@ export function selectAutomaticChapter(
       if (size > snapshot.policy.maxChapterChars) break;
       if (size >= snapshot.policy.minChapterChars) best = { kind: "chapter", parts, sourceRefs: refs };
     }
-    // Prefer the largest bounded segment beginning at the oldest eligible unit.
     if (best) return best;
   }
   return null;
