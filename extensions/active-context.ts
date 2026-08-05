@@ -600,9 +600,9 @@ export function parseActiveContextState(
   }
   const leases = hasLeases ? parseLeases(ownValue(value, "leases"), ids) : {};
   const source = clone(value) as unknown as ActiveContextState;
-  // Legacy "luna" provenance is normalized at PRESENTATION only — never here: the durable
-  // content-addressed fold record must keep its original bytes, or the first re-persist
-  // reports a conflicting durable fold and suspends automatic management.
+  // Provenance normalization is presentation-only — never mutate a durable
+  // content-addressed fold record: changing its bytes causes the next re-persist
+  // to report a conflicting durable fold and suspend automatic management.
   return {
     version: 1,
     sessionId: source.sessionId,
@@ -972,10 +972,10 @@ function materializeStatePersistence(
       state = stateFromFoldRefs(wire, [...byId.values()], records);
     }
     const calculated = semanticStateSha256(state);
-    // Compatibility window: accept the canonical current digest, the pre-Phase-B
-    // digest that omitted zero cadence/empty leases, and Phase-A's historical
-    // replay-property order. These shims exist only so already-written v2 events
-    // remain readable; remove both legacy alternatives at the next wire-version bump.
+    // Compatibility window: accept the current digest plus two legacy shapes: one
+    // omitted zero cadence/empty leases; the other used a different replay-property
+    // order. These shims keep already-written v2 events readable and can be removed
+    // at the next wire-version bump.
     if (calculated !== wire.stateSha256 &&
         prePhaseBSemanticStateSha256(state) !== wire.stateSha256 &&
         phaseAReplayOrderStateSha256(state) !== wire.stateSha256) {
@@ -1459,10 +1459,10 @@ export function mapActiveContext(input: {
     Number.isFinite(input.contextWindow) && input.contextWindow > 0
     ? input.contextWindow
     : null;
-  // A fixed byte floor can dominate a small or shrunken window (memex: floors once
-  // protected 86% of a shrunk window while the ladder said "fold now"). Cap the
-  // protected tail at freshWindowShare of the window via a conservative
-  // bytes-per-token floor: binds only on genuinely small windows, never widens.
+  // A fixed byte floor can dominate a small or shrunken window. Cap the protected
+  // tail at freshWindowShare of the window via a conservative bytes-per-token
+  // floor: this binds only on genuinely small windows and never widens the
+  // protected tail.
   const tailPolicy = reportedContextWindow === null ? policy : Object.freeze({
     ...policy,
     freshBytes: Math.min(policy.freshBytes, Math.floor(

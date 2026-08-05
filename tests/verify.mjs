@@ -1265,8 +1265,8 @@ async function gateWireForwardBackwardNote() {
   assert(Object.hasOwn(canonicalDeltaEntry.data, "tokensSinceToolFold"));
   assert(Object.hasOwn(canonicalDeltaEntry.data, "leases"));
 
-  // Phase A used an exact-record reader. Its rejection of Phase-B-only fields
-  // is expected forward incompatibility until the next explicit wire bump;
+  // An older exact-record reader rejects the newer optional state fields. That
+  // forward incompatibility is expected until the next explicit wire bump;
   // immutable fold-record entries remain independently valid evidence.
   const phaseADeltaKeys = new Set([
     "version", "kind", "sessionId", "revision", "baseRevision", "baseStateSha256",
