@@ -4062,6 +4062,10 @@ async function gateMarkAccumulation() {
  * inline rung stays reachable. Restricting the inline selection to prepared chapters
  * stranded the refold rung: a session whose reducible bytes sat in expanded folds
  * re-committed forever without ever re-collapsing one.
+ *
+ * Reachability is the property, not the mechanism: a refold decision taken on a pass
+ * whose epoch applied nothing lands as a MARK and re-collapses at the next commit,
+ * which is the batching contract gate 55 pins.
  */
 async function gateEpochInlineRungs() {
   const wide = await epochToolRuntime({ turns: 40 });
@@ -4080,10 +4084,14 @@ async function gateEpochInlineRungs() {
     await measure(runtime, 86_000 + step * 100, 100_000);
     const action = (await toolStatus(runtime)).details.automatic.lastAutomaticAction;
     kinds.push(action.kind);
-    if (action.kind === "refold") break;
+    if (!materialized(runtime).expanded.includes(target)) break;
   }
-  assert.equal(kinds.at(-1), "refold", `The refold rung never fired in epoch mode: ${kinds.join(",")}`);
-  assert.equal(materialized(runtime).expanded.includes(target), false);
+  assert.equal(materialized(runtime).expanded.includes(target), false,
+    `The refold rung never fired in epoch mode: ${kinds.join(",")}`);
+  assert(["refold", "epoch-commit"].includes(kinds.at(-1)),
+    `The fold re-collapsed outside the refold rung: ${kinds.join(",")}`);
+  assert(kinds.includes("mark") || kinds.includes("refold"),
+    `The refold decision was never taken: ${kinds.join(",")}`);
 
   // The mark-side branch for a refold selection maps to a refold mark, not a fold one.
   const snapshot = epochSnapshot(runtime.built);
@@ -4590,6 +4598,177 @@ async function gatePerPeekEphemeral() {
   };
 }
 
+/** Every iteration-3 lever at once, which is the shape the live runs seal. */
+const FULL_LEVER_SET = Object.freeze({
+  foldScheduling: "epoch",
+  ephemeralPeek: true,
+  truthfulCapacity: true,
+  providerTotalWindow: 100_000,
+  admissionControl: true,
+  retainPendingMarks: true,
+  eligibleShareCommit: true,
+  statusIndexDiet: true,
+  advisoryDelivery: true,
+  projectionInstrumentation: true,
+  stageIdentifiedBriefs: true,
+  currentTurnCommitGuard: true,
+  pinnedMassBackstop: true,
+  perPeekEphemeral: true,
+});
+
+/**
+ * A session in the shape the guard was built for: a long excursion of read batches
+ * with NO terminal assistant message after them, so every result belongs to the turn
+ * still in progress.
+ */
+async function fullLeverExcursionRuntime(overrides = {}) {
+  const runtime = makeRuntime(
+    makeFixture({ turns: 6, resultChars: 2_000, contextWindow: 100_000 }),
+    { ...FULL_LEVER_SET, ...overrides },
+  );
+  await startRuntime(runtime);
+  for (let step = 0; step < 24; step += 1) {
+    runtime.appendMessage({
+      role: "assistant",
+      content: [{ type: "toolCall", id: `exc-${step}`, name: "read", arguments: { path: `exc-${step}.txt` } }],
+      stopReason: "toolUse",
+      timestamp: 900 + step,
+    }, "excursion");
+    runtime.appendMessage({
+      role: "toolResult",
+      toolCallId: `exc-${step}`,
+      toolName: "read",
+      content: [{ type: "text", text: `Excursion ${step}: ${"e".repeat(12_000)}` }],
+      isError: false,
+      timestamp: 900 + step,
+    }, "excursion");
+  }
+  // Two further tool-calling generations, so the consumed-batch index accepts reads
+  // inside a turn the agent has not closed yet.
+  for (let step = 0; step < 2; step += 1) {
+    runtime.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: `Still working ${step}.` }],
+      stopReason: "toolUse",
+      timestamp: 950 + step,
+    }, "excursion");
+  }
+  await project(runtime);
+  return runtime;
+}
+
+/**
+ * Epoch batching under the FULL lever set. The economic property of epoch scheduling
+ * is that folds land in commit epochs and nowhere else: a projection rewrite outside
+ * one buys a single fold at the price of the whole prefix cache.
+ *
+ * Measured 2026-08-06 (rep 10, all twelve levers, foldScheduling epoch): 52 contiguous
+ * fold-record blocks of exactly ONE fold each against two real commit accountings, a
+ * median per-request cache share of 0.000, and pending marks frozen at nine for the
+ * whole run. The current-turn guard retained every mark, so the epoch applied nothing
+ * and paid for no rewrite, and the inline rung folded one batch per pass ANYWAY -- the
+ * same evidence the guard had just protected, because the inline selection did not
+ * exclude what a pending mark already claimed. The iteration-1 control (epoch, levers
+ * off) batched 8-16 folds per block and produced no singles.
+ */
+async function gateEpochBatchingUnderFullLevers() {
+  const runtime = await fullLeverExcursionRuntime();
+  const passes = [];
+  const step = async (tokens) => {
+    await measure(runtime, tokens, 100_000, undefined, "toolUse");
+    const state = materialized(runtime);
+    const action = (await toolStatus(runtime)).details.automatic.lastAutomaticAction;
+    passes.push({
+      tokens,
+      marks: state.pendingMarks?.length ?? 0,
+      folds: state.folds.length,
+      kind: action?.kind ?? null,
+      appliedMarks: action?.epoch ? action.epoch.appliedMarks : null,
+      retainedMarks: action?.epoch ? action.epoch.retainedMarks : null,
+    });
+    return passes.at(-1);
+  };
+
+  // Below the commit threshold every pass MARKS and moves no byte.
+  const below = [];
+  for (const tokens of [76_000, 77_000, 78_000, 79_000, 80_000, 81_000, 82_000, 83_000, 84_000]) {
+    below.push(await step(tokens));
+  }
+  assert(below.every((pass) => pass.kind === "mark"),
+    `A pass below the commit threshold did not mark: ${below.map((pass) => pass.kind).join(",")}`);
+  assert.equal(below.at(-1).folds, 0, "A fold landed below the commit threshold");
+  assert.equal(below.at(-1).marks - below[0].marks, below.length - 1,
+    "Marks did not accumulate one per pass below the threshold");
+
+  // Above it, with the turn still OPEN, the guard retains every mark, so the epoch
+  // applies nothing. That epoch paid for no rewrite, so no fold may land either: the
+  // ladder keeps marking and the batch keeps growing.
+  const accumulated = below.at(-1).marks;
+  const above = [];
+  for (let index = 0; index < 8; index += 1) above.push(await step(86_000 + index * 100));
+  const starved = above.filter((pass) => pass.appliedMarks === 0);
+  assert(starved.length >= 6,
+    `The guard did not starve the commit, so the regression shape was never entered: ${
+      above.map((pass) => pass.appliedMarks).join(",")}`);
+  assert(starved.every((pass) => pass.retainedMarks > 0), "A starved epoch retained no mark");
+  const foldsAtStarvation = new Set(starved.map((pass) => pass.folds));
+  assert.equal(foldsAtStarvation.size, 1,
+    `A fold landed on a pass whose commit epoch applied nothing: ${
+      above.map((pass) => `${pass.kind}/${pass.folds}`).join(",")}`);
+  assert(above.at(-1).marks > accumulated,
+    "Marks stopped accumulating while the turn stayed open");
+  assert(starved.every((pass) => pass.kind === "mark" || pass.kind === "epoch-commit"),
+    `A pass folded outside a commit epoch: ${above.map((pass) => pass.kind).join(",")}`);
+
+  // Nothing anywhere folded without an epoch that applied at least one mark.
+  assert(passes.every((pass, index) =>
+    index === 0 || pass.folds === passes[index - 1].folds || pass.appliedMarks > 0),
+    "A fold landed outside a commit epoch that applied marks");
+
+  // The turn closes and its evidence ages past the fresh window. Now ONE commit
+  // applies the whole accumulated batch in a single rewrite.
+  const pendingAtClose = materialized(runtime).pendingMarks.length;
+  const foldsAtClose = materialized(runtime).folds.length;
+  for (let turn = 0; turn < 3; turn += 1) {
+    runtime.appendMessage({
+      role: "user", content: [{ type: "text", text: `Next task ${turn}.` }], timestamp: 990 + turn,
+    }, "closing");
+    runtime.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: `Completed the follow-up ${turn}.` }],
+      stopReason: "stop",
+      timestamp: 990 + turn,
+    }, "closing");
+  }
+  await project(runtime);
+  await measure(runtime, 87_000, 100_000);
+  const closing = (await toolStatus(runtime)).details.automatic.lastAutomaticAction;
+  assert(closing.epoch, "The closed turn did not open a commit epoch");
+  assert.equal(closing.epoch.retainedMarks, 0,
+    "The guard still held marks after the turn closed and its evidence aged");
+  assert.deepEqual(closing.epoch.refused, [], "The closing commit refused a mark");
+  assert.equal(closing.epoch.appliedMarks, closing.epoch.pendingMarks,
+    "The closing commit left pending marks behind");
+  assert(closing.epoch.appliedMarks >= 5,
+    `The commit applied ${closing.epoch.appliedMarks} marks; the batch never formed`);
+  const foldsAdded = materialized(runtime).folds.length - foldsAtClose;
+  assert(foldsAdded >= closing.epoch.appliedMarks,
+    `The batched commit added ${foldsAdded} folds; the accumulated marks did not land together`);
+  assert.equal(materialized(runtime).pendingMarks, undefined, "The batched commit left marks pending");
+
+  return {
+    belowThresholdPasses: below.length,
+    belowThresholdFolds: below.at(-1).folds,
+    accumulatedMarks: accumulated,
+    starvedPasses: starved.length,
+    foldsWhileStarved: 0,
+    marksAtClose: pendingAtClose,
+    committedInOneEpoch: true,
+    appliedInOneCommit: closing.epoch.appliedMarks,
+    foldsAddedByThatCommit: foldsAdded,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -4645,6 +4824,7 @@ const gates = [
   [52, "Current-turn commit guard", gateCurrentTurnCommitGuard],
   [53, "Pinned mass backstop", gatePinnedMassBackstop],
   [54, "Per-peek ephemeral override", gatePerPeekEphemeral],
+  [55, "Epoch batching under the full lever set", gateEpochBatchingUnderFullLevers],
 ];
 
 let failures = 0;

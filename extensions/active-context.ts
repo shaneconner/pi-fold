@@ -1568,55 +1568,86 @@ export function registerActiveContext(pi: any, options: {
       summarizerAvailable: Boolean(options.summarizeContextSpan),
       failedPreparationIds: ladder.failedPreparations,
     };
+    // The ladder decides but does not move bytes. Marks already pending are decisions
+    // already made: excluding the evidence they cover makes every eligible turn choose
+    // NEW stale content, so marks accumulate with stale growth instead of re-proposing
+    // one stale batch.
+    const markLadderSelection = (): Record<string, unknown> | null => {
+      if (!persistence.state) return null;
+      const decision = selectAutomaticRung(snapshot, persistence.state, ratio, {
+        ...rungSelectionOptions,
+        claimed: claimedRefKeys(persistence.state),
+        claimedFoldIds: markedFoldIds(persistence.state),
+      });
+      const mark = decision
+        ? ladderSelectionMark({
+          snapshot, state: persistence.state, selection: decision, ordinal: markOrdinal(snapshot),
+        })
+        : null;
+      if (!mark) return null;
+      const addition = addPendingMark(persistence.state, mark);
+      if (!addition.added) return null;
+      persistence.state = addition.state;
+      ladder.pendingContextNote =
+        `Pending ${mark.mark} mark ${mark.id} recorded; no context bytes moved. ` +
+        "It applies at the next commit epoch.";
+      ladder.lastAutomaticAction = {
+        kind: "mark",
+        foldIds: [mark.id],
+        sourceIds: [],
+        markKind: mark.mark,
+        markOrigin: mark.origin,
+        pendingMarks: pendingMarks(persistence.state).length,
+        sourceBytesSaved: 0,
+      };
+      return ladder.lastAutomaticAction;
+    };
     let epoch: Record<string, unknown> | null = null;
+    let inlineRungs = true;
     if (epochScheduling) {
       const commitDue = epochCommitDue(snapshot, ratio, {
         eligibleShareThreshold,
         eligibleShare: markAccounting(snapshot, persistence.state).eligibleFreedWindowShare,
       });
-      if (!commitDue) {
-        // Below the commit threshold the ladder decides but does not move bytes.
-        // Marks already pending are decisions already made: excluding the evidence
-        // they cover makes every eligible turn choose NEW stale content, so marks
-        // accumulate with stale growth instead of re-proposing one stale batch.
-        const decision = selectAutomaticRung(snapshot, persistence.state, ratio, {
+      if (commitDue) {
+        epoch = await runCommitEpoch(
+          snapshot,
+          eligibleShareThreshold !== null &&
+            markAccounting(snapshot, persistence.state).eligibleFreedWindowShare >= eligibleShareThreshold
+            ? "eligible-share"
+            : "window-pressure",
+          true,
+        );
+      }
+      // An inline rung is free only INSIDE a rewrite the epoch already paid for. Below
+      // the threshold no commit ran, and an epoch that applied NOTHING -- every mark
+      // held back by an open turn or by ineligibility -- paid for no rewrite either,
+      // so folding inline there is a fresh single-fold rewrite of its own. Measured
+      // 2026-08-06 (rep 10): the current-turn guard retained all nine marks every turn
+      // while the inline rung folded one batch per turn anyway, 52 single-fold
+      // rewrites that left the prefix cache share at zero. Below a paid rewrite the
+      // ladder MARKS, so the decisions batch into the first commit that can apply them.
+      inlineRungs = Boolean(epoch) && Number(epoch?.appliedMarks ?? 0) > 0;
+      if (!inlineRungs) {
+        const marked = markLadderSelection();
+        if (marked) {
+          if (epoch) ladder.lastAutomaticAction = { ...marked, epoch };
+          return ladder.lastAutomaticAction;
+        }
+      }
+    }
+    // Evidence a pending mark already covers is not the inline rung's to fold: a mark
+    // the commit RETAINED (the open turn's own reads) would otherwise be folded here
+    // by the very pass that just protected it.
+    const selection = inlineRungs
+      ? selectAutomaticRung(snapshot, persistence.state, ratio, epochScheduling
+        ? {
           ...rungSelectionOptions,
           claimed: claimedRefKeys(persistence.state),
           claimedFoldIds: markedFoldIds(persistence.state),
-        });
-        const mark = decision
-          ? ladderSelectionMark({
-            snapshot, state: persistence.state, selection: decision, ordinal: markOrdinal(snapshot),
-          })
-          : null;
-        if (!mark) return null;
-        const addition = addPendingMark(persistence.state, mark);
-        if (!addition.added) return null;
-        persistence.state = addition.state;
-        ladder.pendingContextNote =
-          `Pending ${mark.mark} mark ${mark.id} recorded; no context bytes moved. ` +
-          "It applies at the next commit epoch.";
-        ladder.lastAutomaticAction = {
-          kind: "mark",
-          foldIds: [mark.id],
-          sourceIds: [],
-          markKind: mark.mark,
-          markOrigin: mark.origin,
-          pendingMarks: pendingMarks(persistence.state).length,
-          sourceBytesSaved: 0,
-        };
-        return ladder.lastAutomaticAction;
-      }
-      epoch = await runCommitEpoch(
-        snapshot,
-        eligibleShareThreshold !== null &&
-          markAccounting(snapshot, persistence.state).eligibleFreedWindowShare >= eligibleShareThreshold
-          ? "eligible-share"
-          : "window-pressure",
-        true,
-      );
-    }
-    const selection = selectAutomaticRung(snapshot, persistence.state, ratio, rungSelectionOptions);
+        }
+        : rungSelectionOptions)
+      : null;
     // Above the commit threshold we are already inside the epoch's rewrite turn, so
     // every rung applies inline: the extra rung costs at most one more invalidation
     // in a turn that has already paid one. Restricting this to prepared chapters made
