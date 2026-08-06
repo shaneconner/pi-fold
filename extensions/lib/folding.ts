@@ -1332,10 +1332,15 @@ export function peekFoldSource(input: {
     returnedBytes,
     nextOffset,
     truncated,
-    // Narrower reads that are always constructible, so a refusal can name one.
+    // Narrower reads that are always constructible, so a refusal can name one. The tail
+    // read exists because chain keys and conclusions live at the END of a source, and a
+    // truncated head slice silently omits exactly that region.
     children,
     narrower: {
       slice: { action: "peek", id: fold.id, offset: nextOffset ?? 0, bytes: returnedBytes },
+      ...(truncated
+        ? { tail: { action: "peek", id: fold.id, offset: Math.max(0, sourceBytes - returnedBytes) } }
+        : {}),
       ...(children.length ? { child: { action: "peek", id: children[0] } } : {}),
     },
     retained: input.retained === true,
@@ -1353,5 +1358,17 @@ export function peekFoldSource(input: {
         `source bytes; continue at offset ${nextOffset} or expand ${fold.id} to restore it in place.`
       : "Complete exact source; the fold stayed collapsed and no projection changed.",
     source: returned,
+    // Serialized AFTER the source on purpose: a reader that just consumed a bounded slice
+    // decides its next action at the end of the reply, and a notice buried before ten
+    // thousand source bytes is a notice unread (measured: a run concluded a staged chain
+    // was finished because the chain key lived in the unshown tail of a truncated peek).
+    ...(truncated
+      ? {
+        truncationReminder: `STOP: you have read bytes ${offset}..${offset + returnedBytes} of ` +
+          `${sourceBytes}. The remainder, INCLUDING THE TAIL of this fold, was NOT shown. ` +
+          `Read on with {"action":"peek","id":"${fold.id}","offset":${nextOffset}} or jump to ` +
+          `the tail with {"action":"peek","id":"${fold.id}","offset":${Math.max(0, sourceBytes - returnedBytes)}}.`,
+      }
+      : {}),
   };
 }

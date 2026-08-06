@@ -2142,6 +2142,18 @@ async function gatePeekAndFoldIndex() {
   assert.equal(bounded.source, complete.slice(0, bounded.source.length));
   assert(bounded.note.startsWith("Truncated:"));
   assert(bounded.note.includes(String(bounded.sourceBytes)));
+  // A truncated peek must name the tail read (chain keys live at the END of a source) and
+  // must repeat the continuation AFTER the source bytes, where the reader decides its
+  // next action; a complete peek carries neither.
+  assert.deepEqual(bounded.narrower.tail,
+    { action: "peek", id: oversized.prepared.id, offset: bounded.sourceBytes - bounded.returnedBytes });
+  assert(bounded.truncationReminder.startsWith("STOP:"));
+  assert(bounded.truncationReminder.includes(`"offset":${bounded.nextOffset}`));
+  assert(bounded.truncationReminder.includes(`"offset":${bounded.sourceBytes - bounded.returnedBytes}`));
+  assert.equal(Object.keys(bounded).indexOf("truncationReminder"), Object.keys(bounded).length - 1);
+  assert(Object.keys(bounded).indexOf("source") === Object.keys(bounded).length - 2);
+  assert.equal(peek.details.narrower.tail, undefined);
+  assert.equal(peek.details.truncationReminder, undefined);
 
   const tree = (await toolStatus(runtime, "active_context", "tree")).details.tree;
   assert.deepEqual(tree.map((row) => [row.id, row.depth, row.parentId, row.state, row.peekable]), [
