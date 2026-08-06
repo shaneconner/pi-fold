@@ -21,15 +21,6 @@ import {
 
 export { ADVISORY_BUDGETS };
 
-/**
- * Every delivered advisory ends with this clause. An advisory is ambient state, not a
- * prompt: the agent alone decides whether to act on it, and it must never read as a
- * message that wants an answer.
- */
-export const ADVISORY_CONTINUATION_CLAUSE =
-  "This is a background capacity note, not a message to answer: act on it only if you " +
-  "judge the moment right, and in every case CONTINUE the task you were working on.";
-
 export interface AdvisorySchedule {
   key: string;
   rungs: Array<{ milestone: AdvisoryMilestone; threshold: number; budget: number }>;
@@ -296,19 +287,13 @@ export function liveAdvisoryText(input: {
       `together freeing about ${input.curation.eligibleFreedTokens} tokens of the ` +
       `${input.curation.freedTokens} marked; `
     : "";
-  // The continuation clause is the LAST sentence on purpose. The advisory rides the
-  // ephemeral tail of the projection, so it is the final thing the model reads before
-  // choosing its next action; without an explicit "carry on", a session at a natural
-  // pause treats the capacity note as the thing to answer and ends its turn (measured:
-  // two staged-chain runs stopped mid-assignment on the first day deliveries worked).
   return boundReceiptText(
     `[${contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN)} advisory] ` +
       `pressure ${Math.round(input.ratio * 100)}%; milestone ${input.milestone}; ${curation}` +
       `eligible read-only batch endpoints: ${tools}; eligibleChapter endpoints: ${chapter}; ` +
-      `session milestone count: ${input.remediationCount}. ` +
-      ADVISORY_CONTINUATION_CLAUSE,
+      `session milestone count: ${input.remediationCount}.`,
     2_048,
     `[${contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN)} advisory] ` +
-      `Live pressure details are unavailable. ${ADVISORY_CONTINUATION_CLAUSE}`,
+      "Live pressure details are unavailable.",
   );
 }

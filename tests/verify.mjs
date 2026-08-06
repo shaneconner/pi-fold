@@ -53,7 +53,7 @@ const LEGACY_REPRODUCTION_FIXTURE = Object.freeze({
     "List/page exactly: quorum_context {\"action\":\"status\"}",
   ].join("\n"),
   milestoneText: "[Quorum context milestone tools; session active-context-t] The read-only tool-fold rung begins at 71%. Eligible completed tool batches can be folded now; current endpoint ids are in the live advisory.",
-  advisoryText: "[Quorum context advisory] pressure 80%; milestone tools; eligible read-only batch endpoints: none; eligibleChapter endpoints: none; session milestone count: 1. This is a background capacity note, not a message to answer: act on it only if you judge the moment right, and in every case CONTINUE the task you were working on.",
+  advisoryText: "[Quorum context advisory] pressure 80%; milestone tools; eligible read-only batch endpoints: none; eligibleChapter endpoints: none; session milestone count: 1.",
   blockedCompaction: "blocked stock automatic compaction; Quorum context folding remains authoritative",
   completedCompaction: "native compaction completed; Quorum folding state rebuilt",
   compactionNotice: "Pi native compaction ran; Quorum folding state was rebuilt.",
@@ -3296,11 +3296,16 @@ async function gateAdvisoryDelivery() {
   assert.match(text, /freeing about \d+ tokens/);
   assert.equal(/freeing about \d+%/.test(text), false, "Freed mass was reported as a percentage");
   assert.equal(/headroom \d+%/.test(text), false, "Headroom was reported as a percentage");
-  // An advisory is ambient state, not a prompt. It rides the tail of the projection, so
-  // its LAST sentence must tell the agent to carry on; without it, two staged-chain runs
-  // ended their turn to "answer" the capacity note the day deliveries first worked.
-  assert(text.endsWith(context.ADVISORY_CONTINUATION_CLAUSE),
-    "A delivered advisory did not close with the continuation clause");
+  // An advisory states capacity and stops. It carried an imperative continuation
+  // clause for one day (2efc81e, reverted): it commanded behavior rather than
+  // reporting state, and it was not in position in either death it was written for.
+  // The wording is factual to its last character.
+  assert.match(text, /session milestone count: \d+\.$/,
+    "A delivered advisory did not end with its factual content");
+  assert.equal(/CONTINUE|not a message to answer|carry on/i.test(text), false,
+    "A delivered advisory told the agent what to do");
+  assert.equal(Object.hasOwn(context, "ADVISORY_CONTINUATION_CLAUSE"), false,
+    "The continuation clause is still constructible");
 
   // The ratchet repair. A milestone that armed and was cleared before it spoke used to
   // be locked out forever, because the high-water mark had already passed its
