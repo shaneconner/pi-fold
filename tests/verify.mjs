@@ -202,6 +202,7 @@ function makeRuntime(built, {
   truthfulCapacity,
   providerTotalWindow,
   admissionControl,
+  retainPendingMarks,
   setSuggestionSourceRegistrar,
   loadHostModule,
   packageRegistration = false,
@@ -296,6 +297,7 @@ function makeRuntime(built, {
     ...(truthfulCapacity === undefined ? {} : { truthfulCapacity }),
     ...(providerTotalWindow === undefined ? {} : { providerTotalWindow }),
     ...(admissionControl === undefined ? {} : { admissionControl }),
+    ...(retainPendingMarks === undefined ? {} : { retainPendingMarks }),
     ...(setSuggestionSourceRegistrar ? { setSuggestionSourceRegistrar } : {}),
   };
   runtime.registration = packageRegistration
@@ -3078,6 +3080,108 @@ function peekSnapshot(built, { ephemeralPeek = false, messages = built.messages 
   });
 }
 
+async function gateRetainedPendingMarks() {
+  const fixture = { turns: 10, resultChars: 8_000, contextWindow: 100_000 };
+  const built = makeFixture(fixture);
+  const freshSpan = [built.turnEntries[9][0], built.turnEntries[9].at(-1)];
+
+  // The defect, reproduced. Marking a fresh span is refused outright today, and a
+  // mark that becomes ineligible before the commit is dropped without a trace.
+  const legacy = makeRuntime(makeFixture(fixture), { foldScheduling: "epoch" });
+  await startRuntime(legacy);
+  await assert.rejects(
+    () => toolCall(legacy, { action: "fold", ids: freshSpan, brief: "Closing task remains recoverable." }),
+    /fresh, unfinished, unmatched, unmapped, or protected/,
+  );
+  assert.equal(materialized(legacy).pendingMarks, undefined);
+
+  const runtime = makeRuntime(built, { foldScheduling: "epoch", retainPendingMarks: true });
+  await startRuntime(runtime);
+  const tool = [...runtime.tools.values()][0];
+  assert.deepEqual([...tool.parameters.properties.action.enum], [
+    ...context.RETAINED_MARK_ACTIVE_CONTEXT_TOOL_ACTIONS,
+  ]);
+
+  // Mark always means mark: the fresh span is accepted, and no byte moved.
+  const before = bytesOf((await project(runtime)).messages);
+  const marked = await toolCall(runtime, {
+    action: "fold", ids: freshSpan, brief: "The closing task stays exactly recoverable behind this fold.",
+  });
+  assert.equal(marked.details.marked, true);
+  assert.equal(marked.details.eligibleNow, false);
+  assert.equal(bytesOf((await project(runtime)).messages), before, "A mark moved projection bytes");
+  const pendingId = marked.details.id;
+  assert.equal(materialized(runtime).pendingMarks.length, 1);
+
+  // A tail-adjacent span no longer takes the inline shortcut: it is a mark too.
+  const tailSpan = [built.turnEntries[8][0], built.turnEntries[8].at(-1)];
+  const tailMark = await toolCall(runtime, {
+    action: "fold", ids: tailSpan, brief: "The previous task stays exactly recoverable behind this fold.",
+  });
+  assert.equal(tailMark.details.marked, true, "A tail-adjacent span still folded inline");
+  assert.equal(materialized(runtime).folds.length, 0);
+
+  // A stale span alongside them, so one commit has both kinds of mark to sort.
+  const staleSpan = [built.turnEntries[1][0], built.turnEntries[1].at(-1)];
+  const staleMark = await toolCall(runtime, {
+    action: "fold", ids: staleSpan, brief: "An early completed task stays exactly recoverable behind this fold.",
+  });
+  assert.equal(staleMark.details.eligibleNow, true);
+
+  const scheduling = (await toolStatus(runtime)).details.automatic.scheduling;
+  assert.equal(scheduling.pending, 3);
+  assert.equal(scheduling.eligibleMarks + scheduling.retainedMarks, 3);
+  assert(scheduling.eligibleMarks >= 1, "The stale mark was not counted as eligible");
+  assert(scheduling.retainedMarks >= 1, "The fresh mark was not counted as retained");
+  assert(scheduling.marks.every((mark) => ["eligible", "protected"].includes(mark.eligibility)));
+
+  // The commit applies what it can and KEEPS the rest, with the reason stated.
+  const committed = await toolCall(runtime, { action: "commit" });
+  assert(committed.details.retainedMarks >= 1, "An ineligible mark was dropped by the commit");
+  assert(committed.details.applied.length >= 1, "The eligible mark was not applied");
+  assert.equal(
+    committed.details.applied.length + committed.details.retainedMarks,
+    committed.details.pending,
+  );
+  const survivors = materialized(runtime).pendingMarks;
+  assert(survivors.some((mark) => mark.id === pendingId), "The retained mark did not survive the commit");
+  const retainedRefusal = committed.details.refused.find((item) => item.id === pendingId);
+  assert.equal(retainedRefusal.retained, true);
+  assert.match(retainedRefusal.reason, /stays pending until it is eligible/);
+
+  // Retention is not a leak: the agent can withdraw a standing decision.
+  const withdrawn = await toolCall(runtime, { action: "unmark", ids: [pendingId] });
+  assert.equal(withdrawn.details.unmarked.length, 1);
+  assert.equal(withdrawn.details.unmarked[0].id, pendingId);
+  assert(!(materialized(runtime).pendingMarks ?? []).some((mark) => mark.id === pendingId));
+  await assert.rejects(
+    () => toolCall(runtime, { action: "unmark", ids: [pendingId] }),
+    /No pending mark named/,
+  );
+
+  // The lever needs marks to exist at all, and it never reaches immediate mode.
+  assert.throws(
+    () => makeRuntime(makeFixture(fixture), { retainPendingMarks: true }).tools,
+    /retainPendingMarks requires epoch fold scheduling/,
+  );
+  const plainEpoch = makeRuntime(makeFixture(fixture), { foldScheduling: "epoch" });
+  await startRuntime(plainEpoch);
+  assert.equal(
+    [...plainEpoch.tools.values()][0].parameters.properties.action.enum.includes("unmark"),
+    false,
+  );
+
+  return {
+    freshSpanRefusedBefore: true,
+    freshSpanMarkedNow: true,
+    tailAdjacentSpecialCaseDissolved: true,
+    pendingAfterCommit: survivors.length,
+    retainedAtCommit: committed.details.retainedMarks,
+    appliedAtCommit: committed.details.applied.length,
+    unmarked: withdrawn.details.unmarked.length,
+  };
+}
+
 async function gateTruthfulCapacityAdmission() {
   // The arithmetic first. A 272k per-request descriptor assumes a full output
   // reservation; the truthful budget is the 400k serving window minus the reservation
@@ -3621,6 +3725,7 @@ const gates = [
   [43, "Peek-fold override absence is byte-identical", gatePeekFoldOverrideAbsence],
   [44, "Ephemeral peek reclamation", gateEphemeralPeekReclamation],
   [45, "Truthful capacity & admission control", gateTruthfulCapacityAdmission],
+  [46, "Retained pending marks", gateRetainedPendingMarks],
 ];
 
 let failures = 0;

@@ -57,7 +57,9 @@ import {
   parseProviderContextMeasurementReceipt,
   persistenceProjection,
   providerContextMeasurement,
+  refsProtected,
   stringIds,
+  toolRefsProtected,
   toolPayload,
 } from "./lib/measurement.ts";
 import type {
@@ -98,12 +100,14 @@ import {
   DEFAULT_EPHEMERAL_PEEK,
   DEFAULT_FOLD_SCHEDULING,
   DEFAULT_PROVIDER_TOTAL_WINDOW,
+  DEFAULT_RETAIN_PENDING_MARKS,
   DEFAULT_TRUTHFUL_CAPACITY,
   ESTIMATED_BYTES_PER_TOKEN,
   DEFAULT_SURFACING_ENABLED,
   entryTypeNamespace,
   EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS,
   EPOCH_COMMIT_TARGET_WINDOW_SHARE,
+  RETAINED_MARK_ACTIVE_CONTEXT_TOOL_ACTIONS,
   PEEK_MIN_SLICE_BYTES,
   PEEK_READ_ONLY_CONTEXT_ACTIONS,
   FOLD_SCHEDULING_MODES,
@@ -134,6 +138,7 @@ import {
   estimatedTokens,
   foldMarkFor,
   ladderSelectionMark,
+  ladderBrief,
   markAccounting,
   markedFoldIds,
   markOrdinal,
@@ -141,6 +146,7 @@ import {
   schedulingStatus,
   tailAdjacent,
   topUpMarks,
+  withPendingMarks,
 } from "./lib/scheduling.ts";
 import {
   automaticToolBrief,
@@ -200,6 +206,7 @@ export function registerActiveContext(pi: any, options: {
   truthfulCapacity?: boolean;
   providerTotalWindow?: number;
   admissionControl?: boolean;
+  retainPendingMarks?: boolean;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
   registerSuggestionSource: SuggestionSourceRegistrar;
@@ -248,6 +255,16 @@ export function registerActiveContext(pi: any, options: {
   }
   const providerTotalWindow = options.providerTotalWindow ?? DEFAULT_PROVIDER_TOTAL_WINDOW;
   const admissionControl = options.admissionControl ?? DEFAULT_ADMISSION_CONTROL;
+  if (options.retainPendingMarks !== undefined && typeof options.retainPendingMarks !== "boolean") {
+    throw new Error("retainPendingMarks must be a boolean");
+  }
+  if (options.retainPendingMarks && !epochScheduling) {
+    throw new Error("retainPendingMarks requires epoch fold scheduling; immediate mode has no marks");
+  }
+  // Mark always means mark: a mark is accepted on any span, and a commit applies the
+  // eligible ones and KEEPS the rest. The tail-adjacent inline special case dissolves
+  // with it, because "mark" no longer sometimes means "fold now".
+  const retainPendingMarks = options.retainPendingMarks ?? DEFAULT_RETAIN_PENDING_MARKS;
   const readOnlyContextActions = foldPeekResults
     ? PEEK_READ_ONLY_CONTEXT_ACTIONS
     : READ_ONLY_CONTEXT_ACTIONS_DEFAULT;
@@ -285,9 +302,11 @@ export function registerActiveContext(pi: any, options: {
   const nativeDecisionEntryType = `${entryNamespace}-native-compaction-decision`;
   // The commit verb only exists where marks exist; immediate mode keeps its exact
   // seven-action surface and description.
-  const defaultToolActions = epochScheduling
-    ? EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS
-    : ACTIVE_CONTEXT_TOOL_ACTIONS;
+  const defaultToolActions = retainPendingMarks
+    ? RETAINED_MARK_ACTIVE_CONTEXT_TOOL_ACTIONS
+    : epochScheduling
+      ? EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS
+      : ACTIVE_CONTEXT_TOOL_ACTIONS;
   const configuredToolActions = denseOwnArrayValues(
     options.toolActions ?? defaultToolActions,
   );
@@ -298,7 +317,7 @@ export function registerActiveContext(pi: any, options: {
   const allowedToolActionSet = new Set<string>();
   for (const value of configuredToolActions) {
     if (typeof value !== "string" ||
-        !EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS.includes(value as ActiveContextToolAction) ||
+        !RETAINED_MARK_ACTIVE_CONTEXT_TOOL_ACTIONS.includes(value as ActiveContextToolAction) ||
         allowedToolActionSet.has(value)) {
       throw new Error(`Invalid or duplicate active-context tool action '${String(value)}'`);
     }
@@ -1337,6 +1356,7 @@ export function registerActiveContext(pi: any, options: {
       snapshot,
       state,
       generation: lifecycle.generation,
+      retainIneligible: retainPendingMarks,
     });
     persistence.state = result.state;
     const bytesAfter = bytes(projectActiveContext(snapshot, result.state));
@@ -1354,6 +1374,8 @@ export function registerActiveContext(pi: any, options: {
       topUpMarks: topUpAdded,
       appliedMarks: result.applied.length,
       refusedMarks: result.refused.length,
+      retainedMarks: result.retained.length,
+      eligibleMarks: accounting.eligibleMarks,
       estimatedRewriteTokens: accounting.rewriteTokens,
       estimatedFreedTokens: accounting.freedTokens,
       freedWindowShare: accounting.freedWindowShare,
@@ -2318,6 +2340,7 @@ export function registerActiveContext(pi: any, options: {
         snapshot,
         state: staged,
         generation: lifecycle.generation,
+        retainIneligible: retainPendingMarks,
       });
       if (result.applied.length) {
         advisory.armedMilestone = null;
@@ -2340,8 +2363,11 @@ export function registerActiveContext(pi: any, options: {
         topUpMarks: 0,
         appliedMarks: result.applied.length,
         refusedMarks: result.refused.length,
+        retainedMarks: result.retained.length,
+        eligibleMarks: accounting.eligibleMarks,
         estimatedRewriteTokens: accounting.rewriteTokens,
         estimatedFreedTokens: accounting.freedTokens,
+        estimatedEligibleFreedTokens: accounting.eligibleFreedTokens,
         freedWindowShare: accounting.freedWindowShare,
         durableRevision: persistence.state.revision,
         activation: pending
@@ -2360,6 +2386,7 @@ export function registerActiveContext(pi: any, options: {
           snapshot,
           state: persistence.state,
           generation: lifecycle.generation,
+          retainIneligible: retainPendingMarks,
         });
         persistence.state = result.state;
         epochApplied = result.applied;
@@ -2408,28 +2435,63 @@ export function registerActiveContext(pi: any, options: {
         activation: "durable immediately; projected on the next model call in this same turn",
       });
     }
+    if (action === "unmark") {
+      const ids = stringIds(params.ids);
+      const requested = new Set(ids);
+      const before = pendingMarks(persistence.state);
+      const kept = before.filter((mark) => !requested.has(mark.id));
+      const removed = before.filter((mark) => requested.has(mark.id));
+      const unknown = ids.filter((id) => !before.some((mark) => mark.id === id));
+      if (unknown.length) throw new Error(`No pending mark named ${unknown.join(", ")}`);
+      await persistManual(withPendingMarks(persistence.state, kept), action, ctx);
+      updateStatus(ctx);
+      const accounting = markAccounting(snapshot, persistence.state);
+      return toolPayload({
+        version: 1,
+        action,
+        unmarked: removed.map((mark) => ({ mark: mark.mark, id: mark.id, origin: mark.origin })),
+        pendingMarks: accounting.pending,
+        eligibleMarks: accounting.eligibleMarks,
+        retainedMarks: accounting.retainedMarks,
+        durableRevision: persistence.state.revision,
+        activation: "the withdrawn marks will never be applied; no context bytes moved",
+      });
+    }
     if (action === "fold") {
       const ids = stringIds(params.ids);
-      const candidate = manualFoldCandidate(snapshot, persistence.state, ids);
+      const candidate = manualFoldCandidate(snapshot, persistence.state, ids, {
+        allowProtected: retainPendingMarks,
+      });
       const supplied = typeof params.brief === "string" && params.brief.trim() ? params.brief : undefined;
-      // Tail-adjacent spans invalidate almost nothing, so they still apply at once.
-      if (epochScheduling && !tailAdjacent(snapshot, candidate, persistence.state)) {
+      // Tail-adjacent spans invalidate almost nothing, so they still apply at once --
+      // unless marks are retained, where mark always means mark and nothing else.
+      if (epochScheduling &&
+          (retainPendingMarks || !tailAdjacent(snapshot, candidate, persistence.state))) {
         // Resolve the brief now, while the source is in hand, so the commit epoch
-        // itself stays deterministic and free of provider calls.
-        const briefed = await prepareFold({
-          candidate,
-          snapshot,
-          state: persistence.state,
-          generation: lifecycle.generation,
-          brief: supplied,
-          summarize: options.summarizeContextSpan,
-          ctx,
-          signal,
-        });
+        // itself stays deterministic and free of provider calls. A span that is not
+        // eligible YET cannot go through preparation at all, so it takes the
+        // deterministic brief: the mark is a decision, and refusing to record it
+        // because the span is momentarily fresh is exactly the drop being fixed.
+        const eligibleNow = !refsProtected(candidate.sourceRefs, persistence.state, snapshot) &&
+          (candidate.kind !== "tool-result" ||
+            !toolRefsProtected(candidate.sourceRefs, persistence.state, snapshot));
+        const briefed = eligibleNow
+          ? await prepareFold({
+            candidate,
+            snapshot,
+            state: persistence.state,
+            generation: lifecycle.generation,
+            brief: supplied,
+            summarize: options.summarizeContextSpan,
+            ctx,
+            signal,
+          })
+          : null;
         const mark = foldMarkFor({
           candidate,
-          brief: briefed.fold.brief,
-          briefProvenance: briefed.fold.provenance,
+          brief: briefed?.fold.brief ?? supplied ?? ladderBrief(snapshot, persistence.state, candidate),
+          briefProvenance: briefed?.fold.provenance ??
+            (supplied ? { kind: "supplied" } : { kind: "deterministic" }),
           origin: "agent",
           ordinal: markOrdinal(snapshot),
         });
@@ -2450,7 +2512,11 @@ export function registerActiveContext(pi: any, options: {
           argumentsSha256: executionArgumentsSha256,
           durableRevision: persistence.state.revision,
           pendingMarks: accounting.pending,
+          eligibleMarks: accounting.eligibleMarks,
+          retainedMarks: accounting.retainedMarks,
+          eligibleNow,
           estimatedFreedWindowShare: accounting.freedWindowShare,
+          estimatedEligibleWindowShare: accounting.eligibleFreedWindowShare,
           estimatedRewriteTokens: accounting.rewriteTokens,
           activation: "recorded as a pending mark; no context bytes moved. It applies at the next " +
             "commit epoch, which you can open with the commit action or leave to window pressure.",

@@ -173,6 +173,36 @@ export function markFreedBytes(
   return Math.max(0, bytes(source) - placeholder);
 }
 
+export type MarkEligibility = "eligible" | "protected" | "unfulfillable";
+
+/**
+ * Whether a pending mark can be applied right now.
+ *
+ * "protected" is a WAITING state, not a failure: the span is fresh or the agent
+ * protected it, and both conditions expire. "unfulfillable" is terminal: the evidence
+ * or the fold the mark names has left the branch, so no later commit can honour it.
+ * Collapsing the two is what made a refusal look like a drop.
+ */
+export function markEligibility(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+  mark: PendingMark,
+): MarkEligibility {
+  if (mark.mark === "refold") {
+    const fold = state.folds.find((item) => item.id === mark.id);
+    if (!fold || !foldInterval(fold, state, snapshot)) return "unfulfillable";
+    return state.expanded.includes(mark.id) ? "eligible" : "unfulfillable";
+  }
+  const refs = candidateSourceRefs(mark.parts, state);
+  if (!refs.length) return "unfulfillable";
+  const mapped = new Set(snapshot.mapped.flatMap((item) => item.ref ? [objectRefKey(item.ref)] : []));
+  if (refs.some((ref) => !mapped.has(objectRefKey(ref)))) return "unfulfillable";
+  const blocked = mark.kind === "tool-result"
+    ? toolRefsProtected(refs, state, snapshot)
+    : refsProtected(refs, state, snapshot);
+  return blocked ? "protected" : "eligible";
+}
+
 export interface MarkAccounting {
   pending: number;
   agentMarks: number;
@@ -181,6 +211,14 @@ export interface MarkAccounting {
   freedTokens: number;
   freedWindowShare: number;
   rewriteTokens: number;
+  /** Marks a commit could apply right now. */
+  eligibleMarks: number;
+  /** Marks whose span is still fresh or protected, waiting rather than lost. */
+  retainedMarks: number;
+  eligibleFreedBytes: number;
+  eligibleFreedTokens: number;
+  /** The ROI signal: eligible marked mass as a share of the truthful window. */
+  eligibleFreedWindowShare: number;
 }
 
 /**
@@ -196,9 +234,18 @@ export function markAccounting(
   const indexByKey = new Map(snapshot.mapped.flatMap((item) =>
     item.ref ? [[objectRefKey(item.ref), item.index] as const] : []));
   let freedBytes = 0;
+  let eligibleFreedBytes = 0;
+  let eligibleMarks = 0;
+  let retainedMarks = 0;
   let earliest = -1;
   for (const mark of marks) {
-    freedBytes += markFreedBytes(snapshot, state, mark);
+    const freed = markFreedBytes(snapshot, state, mark);
+    freedBytes += freed;
+    const eligibility = markEligibility(snapshot, state, mark);
+    if (eligibility === "eligible") {
+      eligibleMarks += 1;
+      eligibleFreedBytes += freed;
+    } else if (eligibility === "protected") retainedMarks += 1;
     const fold = mark.mark === "refold" ? state.folds.find((item) => item.id === mark.id) : null;
     const refs = mark.mark === "refold"
       ? (fold ? flattenFoldRefs(fold, state) : [])
@@ -213,6 +260,7 @@ export function markAccounting(
     ? 0
     : bytes(snapshot.messages.slice(earliest));
   const freedTokens = estimatedTokens(freedBytes);
+  const eligibleFreedTokens = estimatedTokens(eligibleFreedBytes);
   return {
     pending: marks.length,
     agentMarks: marks.filter((mark) => mark.origin === "agent").length,
@@ -221,6 +269,13 @@ export function markAccounting(
     freedTokens,
     freedWindowShare: snapshot.contextWindow > 0 ? freedTokens / snapshot.contextWindow : 0,
     rewriteTokens: estimatedTokens(rewriteBytes),
+    eligibleMarks,
+    retainedMarks,
+    eligibleFreedBytes,
+    eligibleFreedTokens,
+    eligibleFreedWindowShare: snapshot.contextWindow > 0
+      ? eligibleFreedTokens / snapshot.contextWindow
+      : 0,
   };
 }
 
@@ -442,12 +497,15 @@ export interface RefusedMark {
   id: string;
   origin: MarkOrigin;
   reason: string;
+  /** Whether the mark survives as pending rather than being discarded. */
+  retained: boolean;
 }
 
 export interface CommitEpochResult {
   state: ActiveContextState;
   applied: AppliedMark[];
   refused: RefusedMark[];
+  retained: PendingMark[];
 }
 
 /**
@@ -460,11 +518,33 @@ export async function commitPendingMarks(input: {
   state: ActiveContextState;
   generation: number;
   now?: () => number;
+  /**
+   * Keep marks the commit could not apply YET. A mark is a standing decision; dropping
+   * it because the span happened to be fresh at commit time silently discards the
+   * agent's judgment and leaves nothing for the next commit to act on.
+   */
+  retainIneligible?: boolean;
 }): Promise<CommitEpochResult> {
   const marks = pendingMarks(input.state);
-  let state = withPendingMarks(input.state, []);
+  const retained: PendingMark[] = [];
+  if (input.retainIneligible) {
+    const applicable: PendingMark[] = [];
+    for (const mark of marks) {
+      if (markEligibility(input.snapshot, input.state, mark) === "protected") retained.push(mark);
+      else applicable.push(mark);
+    }
+    marks.length = 0;
+    marks.push(...applicable);
+  }
+  let state = withPendingMarks(input.state, retained);
   const applied: AppliedMark[] = [];
-  const refused: RefusedMark[] = [];
+  const refused: RefusedMark[] = retained.map((mark) => ({
+    mark: mark.mark,
+    id: mark.id,
+    origin: mark.origin,
+    reason: "span is still fresh or protected; the mark stays pending until it is eligible",
+    retained: true,
+  }));
   // Oldest first, then by id: a chapter mark that absorbs an earlier tool-result
   // mark must find that child already folded, which is transcript order.
   const ordered = [...marks].sort((left, right) =>
@@ -514,10 +594,11 @@ export async function commitPendingMarks(input: {
         id: mark.id,
         origin: mark.origin,
         reason: error instanceof Error ? error.message : String(error),
+        retained: false,
       });
     }
   }
-  return { state, applied, refused };
+  return { state, applied, refused, retained };
 }
 
 /** The scheduling block reported by the status action. */
@@ -540,6 +621,7 @@ export function schedulingStatus(input: {
       id: mark.id,
       origin: mark.origin,
       ordinal: mark.ordinal,
+      eligibility: markEligibility(input.snapshot, input.state, mark),
       ...(mark.mark === "fold" ? { kind: mark.kind, brief: mark.brief } : {}),
     })),
     actions: { commit: { action: "commit" } },

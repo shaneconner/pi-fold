@@ -414,7 +414,18 @@ export function manualFoldCandidate(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
   ids: string[],
+  /**
+   * Accept a span that is still fresh or protected. Only a caller that will DEFER the
+   * fold may pass this: it relaxes eligibility, never structure, so contiguity, unit
+   * alignment and batch completeness are still enforced and the commit still refuses
+   * to apply a mark whose span is protected at commit time.
+   */
+  options: { allowProtected?: boolean } = {},
 ): FoldCandidate {
+  const blockedTool = (refs: EvidenceRef[]): boolean =>
+    !options.allowProtected && toolRefsProtected(refs, state, snapshot);
+  const blocked = (refs: EvidenceRef[]): boolean =>
+    !options.allowProtected && refsProtected(refs, state, snapshot);
   const bounded = (candidate: FoldCandidate): FoldCandidate => {
     if (candidate.sourceRefs.length > snapshot.policy.maxFoldSourceRefs) {
       throw new Error(`Folds may include at most ${snapshot.policy.maxFoldSourceRefs} exact source references`);
@@ -433,10 +444,10 @@ export function manualFoldCandidate(
       calls.length === first.batch.length &&
       new Set(calls.map((call) => call!.id)).size === first.batch.length &&
       first.batch.every((id) => calls.some((call) => call!.id === id));
-    if (completeBatch && !toolRefsProtected(refs, state, snapshot)) {
+    if (completeBatch && !blockedTool(refs)) {
       return bounded({ kind: "tool-result", parts: refs.map((ref) => ({ kind: "raw", ref })), sourceRefs: refs });
     }
-    if (one && first && first.batch.length === 1 && !toolRefsProtected(refs, state, snapshot)) {
+    if (one && first && first.batch.length === 1 && !blockedTool(refs)) {
       return bounded({ kind: "tool-result", parts: [{ kind: "raw", ref: refs[0] }], sourceRefs: refs });
     }
   }
@@ -445,7 +456,7 @@ export function manualFoldCandidate(
   if (exactFolds && selected.length >= 2) {
     const parts: FoldPart[] = selected.map((item) => ({ kind: "fold", foldId: item.fold!.id }));
     const refs = candidateSourceRefs(parts, state);
-    if (refsProtected(refs, state, snapshot)) throw new Error("Manual consolidation contains protected evidence");
+    if (blocked(refs)) throw new Error("Manual consolidation contains protected evidence");
     return bounded({ kind: "consolidation", parts, sourceRefs: refs });
   }
   if (!chapterRangeIsUnitAligned(snapshot, start, end)) {
@@ -454,7 +465,7 @@ export function manualFoldCandidate(
   const parts = partsForRange(snapshot, state, start, end, new Set<FoldKind>(["tool-result"]));
   if (!parts) throw new Error("Chapter fold would partially overlap or swallow an existing chapter");
   const refs = candidateSourceRefs(parts, state);
-  if (refsProtected(refs, state, snapshot)) throw new Error("Manual chapter contains fresh, unfinished, unmatched, unmapped, or protected evidence");
+  if (blocked(refs)) throw new Error("Manual chapter contains fresh, unfinished, unmatched, unmapped, or protected evidence");
   return bounded({ kind: "chapter", parts, sourceRefs: refs });
 }
 
