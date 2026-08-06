@@ -4695,7 +4695,8 @@ async function gateEpochBatchingUnderFullLevers() {
 
   // The turn closes and its evidence ages past the fresh window. Now ONE commit
   // applies the whole accumulated batch in a single rewrite.
-  const pendingAtClose = materialized(runtime).pendingMarks.length;
+  const marksAtCloseIds = new Set(materialized(runtime).pendingMarks.map((mark) => mark.id));
+  const pendingAtClose = marksAtCloseIds.size;
   const foldsAtClose = materialized(runtime).folds.length;
   for (let turn = 0; turn < 3; turn += 1) {
     runtime.appendMessage({
@@ -4721,7 +4722,18 @@ async function gateEpochBatchingUnderFullLevers() {
   const foldsAdded = materialized(runtime).folds.length - foldsAtClose;
   assert(foldsAdded >= closing.epoch.appliedMarks,
     `The batched commit added ${foldsAdded} folds; the accumulated marks did not land together`);
-  assert.equal(materialized(runtime).pendingMarks, undefined, "The batched commit left marks pending");
+  // The ACCUMULATED batch leaves nothing behind. What may still be pending afterwards is
+  // a mark this same pass created by topping the epoch up, over a span the fresh window
+  // still protects -- refused with a stated reason and retained, never silently dropped.
+  const stillPending = materialized(runtime).pendingMarks ?? [];
+  assert(stillPending.every((mark) => !marksAtCloseIds.has(mark.id)),
+    `The batched commit left ${stillPending.filter((mark) => marksAtCloseIds.has(mark.id)).length} ` +
+    "accumulated marks pending");
+  assert(stillPending.every((mark) => closing.epoch.refused.some((refusal) =>
+    refusal.id === mark.id && refusal.retained === true && typeof refusal.reason === "string")),
+  "A mark survived the batched commit without a stated retention reason");
+  assert(stillPending.length <= 1,
+    `The batched commit left ${stillPending.length} marks pending; only the newest read may survive it`);
 
   return {
     belowThresholdPasses: below.length,
@@ -4733,6 +4745,7 @@ async function gateEpochBatchingUnderFullLevers() {
     passesThatMovedBytes: foldingPasses.length,
     passesTotal: passes.length,
     marksAtClose: pendingAtClose,
+    marksStillPending: stillPending.length,
     committedInOneEpoch: true,
     appliedInOneCommit: closing.epoch.appliedMarks,
     foldsAddedByThatCommit: foldsAdded,
