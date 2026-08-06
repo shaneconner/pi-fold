@@ -11,6 +11,7 @@ import {
   liveAdvisoryText,
   milestoneText,
   normalizeGuidanceProfile,
+  recordAdvisoryDelivery,
   surfacingText,
   updateAdvisoryMilestone,
 } from "./lib/advisory.ts";
@@ -96,6 +97,7 @@ import {
   DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   DEFAULT_ADMISSION_CONTROL,
+  DEFAULT_ADVISORY_DELIVERY,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_ELIGIBLE_SHARE_COMMIT,
   DEFAULT_ELIGIBLE_SHARE_COMMIT_THRESHOLD,
@@ -213,6 +215,7 @@ export function registerActiveContext(pi: any, options: {
   eligibleShareCommit?: boolean;
   eligibleShareCommitThreshold?: number;
   statusIndexDiet?: boolean;
+  advisoryDelivery?: boolean;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
   registerSuggestionSource: SuggestionSourceRegistrar;
@@ -292,6 +295,12 @@ export function registerActiveContext(pi: any, options: {
     throw new Error("statusIndexDiet must be a boolean");
   }
   const statusIndexDiet = options.statusIndexDiet ?? DEFAULT_STATUS_INDEX_DIET;
+  if (options.advisoryDelivery !== undefined && typeof options.advisoryDelivery !== "boolean") {
+    throw new Error("advisoryDelivery must be a boolean");
+  }
+  // Spend the milestone budget when the advisory REACHES the agent, and stop letting
+  // an automatic fold discard an arm that has not spoken yet.
+  const advisoryDelivery = options.advisoryDelivery ?? DEFAULT_ADVISORY_DELIVERY;
   const readOnlyContextActions = foldPeekResults
     ? PEEK_READ_ONLY_CONTEXT_ACTIONS
     : READ_ONLY_CONTEXT_ACTIONS_DEFAULT;
@@ -1237,6 +1246,33 @@ export function registerActiveContext(pi: any, options: {
     });
     return projected;
   };
+  /**
+   * What the advisory says, keyed on what the agent can act on: how much room is
+   * actually left, how much of what it is paying for no pending decision reclaims, and
+   * how many TOKENS the marks it already has would free. A percentage is not a
+   * quantity anyone can budget against.
+   */
+  const advisoryCuration = (snapshot: ActiveContextSnapshot) => {
+    const accounting = markAccounting(snapshot, persistence.state!);
+    const used = measurements.lastProviderMeasurement?.tokens ?? null;
+    const reserve = Math.min(
+      ACTIVE_CONTEXT_POLICY.responseReserve,
+      Math.floor(snapshot.contextWindow * 0.1),
+    );
+    const budgetTokens = snapshot.contextWindow - reserve;
+    return {
+      headroomTokens: used === null ? null : budgetTokens - used,
+      budgetTokens,
+      pendingMarks: accounting.pending,
+      eligibleMarks: accounting.eligibleMarks,
+      freedTokens: accounting.freedTokens,
+      eligibleFreedTokens: accounting.eligibleFreedTokens,
+      unmarkedShare: used && used > 0
+        ? Math.max(0, Math.min(1, 1 - accounting.freedTokens / used))
+        : 1,
+    };
+  };
+
   const projectWithAdvisory = (snapshot: ActiveContextSnapshot): unknown[] => {
     const projected = projectActiveContext(snapshot, persistence.state!).filter((message) => {
       const customType = ownValue(message, "customType");
@@ -1277,6 +1313,7 @@ export function registerActiveContext(pi: any, options: {
         chapterEndpoints,
         remediationCount,
         brandNoun,
+        curation: advisoryDelivery ? advisoryCuration(snapshot) : null,
       }),
       display: false,
       details: { source: activeContextSource(entryTypePrefix), ephemeral: true, milestone: armed.milestone },
@@ -1284,6 +1321,12 @@ export function registerActiveContext(pi: any, options: {
         ? ownValue(snapshot.messages.at(-1), "timestamp")
         : 0,
     });
+    // The budget is spent HERE, where the advisory actually reaches the agent, and the
+    // arm is released only once it has spoken.
+    if (advisoryDelivery) {
+      persistence.state = recordAdvisoryDelivery(persistence.state!, armed.milestone);
+      advisory.armedMilestone = null;
+    }
     // A suggestion never shares an advisory with urgent fence text: at the fence the
     // only useful next action is the fold that keeps the request transmissible.
     return armed.milestone === "urgent" ? projected : appendSurfacing(projected, snapshot);
@@ -1483,8 +1526,10 @@ export function registerActiveContext(pi: any, options: {
     const applicable = selection;
     if (!applicable || applicable.kind === "chapter-prepare") {
       if (!epoch || !persistence.state) return null;
-      persistence.state = clearArmedAdvisory(persistence.state);
-      advisory.armedMilestone = null;
+      if (!advisoryDelivery) {
+        persistence.state = clearArmedAdvisory(persistence.state);
+        advisory.armedMilestone = null;
+      }
       ladder.pendingContextNote =
         `A commit epoch applied ${(epoch.applied as unknown[]).length} pending mark(s) in one rewrite; ` +
         "exact evidence remains expandable.";
@@ -1562,8 +1607,12 @@ export function registerActiveContext(pi: any, options: {
     }
     if ((!action && !epoch) || !persistence.state) return null;
     const projectedBytesAfter = bytes(projectActiveContext(snapshot, persistence.state));
-    persistence.state = clearArmedAdvisory(persistence.state);
-    advisory.armedMilestone = null;
+    // An automatic fold used to clear the armed advisory here, in the same pass that
+    // armed it and BEFORE the projection was built. That is why the channel was dark.
+    if (!advisoryDelivery) {
+      persistence.state = clearArmedAdvisory(persistence.state);
+      advisory.armedMilestone = null;
+    }
     ladder.lastAutomaticAction = {
       ...(action ?? { kind: "epoch-commit", foldIds: [], sourceIds: [] }),
       ...(epoch ? { epoch } : {}),
@@ -1804,7 +1853,9 @@ export function registerActiveContext(pi: any, options: {
     const scheduleChanged = advisory.advisoryScheduleKey !== null && advisory.advisoryScheduleKey !== scheduleKey;
     advisory.advisoryScheduleKey = scheduleKey;
     const advisoryBefore = stableStringify(advisoryState(persistence.state));
-    const advisoryUpdate = updateAdvisoryMilestone(persistence.state, ratio, schedule, scheduleChanged, scheduleKey);
+    const advisoryUpdate = updateAdvisoryMilestone(
+      persistence.state, ratio, schedule, scheduleChanged, scheduleKey, advisoryDelivery,
+    );
     persistence.state = advisoryUpdate.state;
     const armed = advisoryState(persistence.state).armed;
     if (armed && ratio < 0.85 * armed.threshold) {

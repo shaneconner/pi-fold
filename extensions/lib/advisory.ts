@@ -87,12 +87,36 @@ export function advisorySchedule(
   };
 }
 
+/**
+ * Record that an armed advisory actually REACHED the agent.
+ *
+ * The budget used to be spent when a milestone armed. Any automatic fold in the same
+ * context pass then cleared the arm before the projection was built, so a working
+ * ladder drained every milestone budget without ever emitting a word. Measured
+ * 2026-08-06 on an identical pressure schedule: an idle-ladder session delivered 7
+ * advisories, and a tool-using session delivered 0 while reporting notice, tools and
+ * chapters each "delivered" once. All four instrumented runs were the second case.
+ */
+export function recordAdvisoryDelivery(
+  state: ActiveContextState,
+  milestone: AdvisoryMilestone,
+): ActiveContextState {
+  const current = advisoryState(state);
+  const delivered = { ...current.delivered };
+  delivered[milestone] = (delivered[milestone] ?? 0) + 1;
+  const advisory = { ...current, delivered };
+  delete advisory.armed;
+  return { ...state, advisory };
+}
+
 export function updateAdvisoryMilestone(
   currentState: ActiveContextState,
   ratio: number,
   schedule: AdvisorySchedule,
   scheduleChanged: boolean,
   scheduleKey: string,
+  /** Spend the milestone budget on DELIVERY rather than on arming. */
+  countOnDelivery = false,
 ): { state: ActiveContextState; milestone: AdvisoryMilestone | null } {
   const current = advisoryState(currentState);
   if (scheduleChanged) {
@@ -108,12 +132,28 @@ export function updateAdvisoryMilestone(
       highWater = Math.min(highWater, index > 0 ? schedule.rungs[index - 1].threshold : 0);
     }
   }
-  const crossed = schedule.rungs.filter((rung) =>
-    highWater < rung.threshold && ratio >= rung.threshold &&
-    (current.delivered[rung.milestone] ?? 0) < rung.budget);
-  const selected = crossed.at(-1) ?? null;
+  let selected: AdvisorySchedule["rungs"][number] | null;
+  if (countOnDelivery) {
+    // Only ever the highest rung the current pressure has reached, so a plateau does
+    // not replay a descending cascade of stale milestones. A rung that has never been
+    // DELIVERED stays armable even after the high-water mark has passed it: the old
+    // ratchet locked out every rung that armed once and was cleared before it spoke.
+    const reached = schedule.rungs.filter((rung) => ratio >= rung.threshold).at(-1) ?? null;
+    const deliveries = reached ? current.delivered[reached.milestone] ?? 0 : 0;
+    selected = reached && deliveries < reached.budget &&
+      (highWater < reached.threshold || deliveries === 0)
+      ? reached
+      : null;
+  } else {
+    const crossed = schedule.rungs.filter((rung) =>
+      highWater < rung.threshold && ratio >= rung.threshold &&
+      (current.delivered[rung.milestone] ?? 0) < rung.budget);
+    selected = crossed.at(-1) ?? null;
+  }
   const delivered = { ...current.delivered };
-  if (selected) delivered[selected.milestone] = (delivered[selected.milestone] ?? 0) + 1;
+  if (selected && !countOnDelivery) {
+    delivered[selected.milestone] = (delivered[selected.milestone] ?? 0) + 1;
+  }
   const armed = selected
     ? { milestone: selected.milestone, threshold: selected.threshold, scheduleKey }
     : current.armed;
@@ -212,6 +252,19 @@ export function surfacingText(input: {
   );
 }
 
+export interface AdvisoryCuration {
+  /** Room left before the truthful fence, in tokens. */
+  headroomTokens: number | null;
+  budgetTokens: number;
+  pendingMarks: number;
+  eligibleMarks: number;
+  /** What the pending marks would free, in TOKENS. A percentage is not actionable. */
+  freedTokens: number;
+  eligibleFreedTokens: number;
+  /** The share of what the request currently pays for that no pending decision reclaims. */
+  unmarkedShare: number;
+}
+
 export function liveAdvisoryText(input: {
   milestone: AdvisoryMilestone;
   ratio: number;
@@ -219,6 +272,7 @@ export function liveAdvisoryText(input: {
   chapterEndpoints: string[];
   remediationCount: number;
   brandNoun?: string;
+  curation?: AdvisoryCuration | null;
 }): string {
   const tools = input.toolEndpoints.length
     ? input.toolEndpoints.slice(0, 3).join(", ")
@@ -226,9 +280,16 @@ export function liveAdvisoryText(input: {
   const chapter = input.chapterEndpoints.length
     ? `${input.chapterEndpoints[0]}..${input.chapterEndpoints.at(-1)}`
     : "none";
+  const curation = input.curation
+    ? `headroom ${input.curation.headroomTokens ?? "unmeasured"} of ${input.curation.budgetTokens} tokens; ` +
+      `unmarked share ${Math.round(input.curation.unmarkedShare * 100)}%; ` +
+      `${input.curation.pendingMarks} pending mark(s), ${input.curation.eligibleMarks} eligible now, ` +
+      `together freeing about ${input.curation.eligibleFreedTokens} tokens of the ` +
+      `${input.curation.freedTokens} marked; `
+    : "";
   return boundReceiptText(
     `[${contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN)} advisory] ` +
-      `pressure ${Math.round(input.ratio * 100)}%; milestone ${input.milestone}; ` +
+      `pressure ${Math.round(input.ratio * 100)}%; milestone ${input.milestone}; ${curation}` +
       `eligible read-only batch endpoints: ${tools}; eligibleChapter endpoints: ${chapter}; ` +
       `session milestone count: ${input.remediationCount}.`,
     2_048,

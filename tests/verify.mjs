@@ -206,6 +206,7 @@ function makeRuntime(built, {
   eligibleShareCommit,
   eligibleShareCommitThreshold,
   statusIndexDiet,
+  advisoryDelivery,
   setSuggestionSourceRegistrar,
   loadHostModule,
   packageRegistration = false,
@@ -304,6 +305,7 @@ function makeRuntime(built, {
     ...(eligibleShareCommit === undefined ? {} : { eligibleShareCommit }),
     ...(eligibleShareCommitThreshold === undefined ? {} : { eligibleShareCommitThreshold }),
     ...(statusIndexDiet === undefined ? {} : { statusIndexDiet }),
+    ...(advisoryDelivery === undefined ? {} : { advisoryDelivery }),
     ...(setSuggestionSourceRegistrar ? { setSuggestionSourceRegistrar } : {}),
   };
   runtime.registration = packageRegistration
@@ -3086,6 +3088,103 @@ function peekSnapshot(built, { ephemeralPeek = false, messages = built.messages 
   });
 }
 
+function advisoryMessages(projection) {
+  return projection.messages.filter((message) =>
+    typeof message?.customType === "string" && message.customType.endsWith("-advisory"));
+}
+
+async function runAdvisorySession(options) {
+  const runtime = makeRuntime(
+    makeFixture({ turns: 12, resultChars: 9_000, contextWindow: 272_000 }),
+    options,
+  );
+  await startRuntime(runtime);
+  const advisories = [];
+  for (const tokens of [40_000, 140_000, 200_000, 210_000, 220_000, 235_000, 240_000, 245_000]) {
+    await measure(runtime, tokens, 272_000);
+    advisories.push(...advisoryMessages(await project(runtime)));
+  }
+  return { runtime, advisories };
+}
+
+async function gateAdvisoryDelivery() {
+  // The defect, isolated. Identical pressure schedule; the only difference is whether
+  // the ladder has anything to fold, which is to say whether the session is real.
+  const idle = makeRuntime(makeFixture({ turns: 12, tools: false, contextWindow: 272_000 }));
+  await startRuntime(idle);
+  let idleAdvisories = 0;
+  for (const tokens of [40_000, 140_000, 200_000, 220_000, 240_000]) {
+    await measure(idle, tokens, 272_000);
+    idleAdvisories += advisoryMessages(await project(idle)).length;
+  }
+  assert(idleAdvisories >= 1, "The idle-ladder session never delivered an advisory");
+
+  const dark = await runAdvisorySession({});
+  const darkState = (await toolStatus(dark.runtime)).details.automatic.advisory;
+  assert.equal(dark.advisories.length, 0, "The pre-fix working-ladder session was not dark");
+  assert(materialized(dark.runtime).folds.length >= 1, "The dark fixture never folded");
+  // The budget was spent anyway: armed, then cleared by the fold in the same pass,
+  // before the projection carrying it was ever built.
+  assert(Object.values(darkState.delivered).reduce((sum, count) => sum + count, 0) >= 1,
+    "The dark session did not even spend its milestone budget");
+
+  const lit = await runAdvisorySession({ advisoryDelivery: true });
+  const litState = (await toolStatus(lit.runtime)).details.automatic.advisory;
+  assert(lit.advisories.length >= 1, "Delivery counting did not light the channel");
+  assert(materialized(lit.runtime).folds.length >= 1, "The lit fixture stopped folding");
+  // The books now balance: one budget unit per advisory that actually reached the agent.
+  assert.equal(
+    Object.values(litState.delivered).reduce((sum, count) => sum + count, 0),
+    lit.advisories.length,
+  );
+  assert.equal(litState.armed, undefined, "A delivered advisory stayed armed and would repeat");
+
+  // Content is keyed on what the agent can act on, and freed mass is in TOKENS.
+  const text = String(lit.advisories.at(-1).content);
+  assert.match(text, /headroom \d+ of \d+ tokens/);
+  assert.match(text, /unmarked share \d+%/);
+  assert.match(text, /freeing about \d+ tokens/);
+  assert.equal(/freeing about \d+%/.test(text), false, "Freed mass was reported as a percentage");
+  assert.equal(/headroom \d+%/.test(text), false, "Headroom was reported as a percentage");
+
+  // The ratchet repair. A milestone that armed and was cleared before it spoke used to
+  // be locked out forever, because the high-water mark had already passed its
+  // threshold. An undelivered milestone stays armable.
+  const schedule = guidanceSchedule(272_000, "pressure");
+  const tools = schedule.rungs.find((rung) => rung.milestone === "tools");
+  const ratcheted = {
+    ...context.emptyActiveContextState("ratchet"),
+    advisory: { highWater: 0.99, delivered: {} },
+  };
+  const scheduleKey = "a".repeat(64);
+  const legacy = context.updateAdvisoryMilestone(ratcheted, tools.threshold, schedule, false, scheduleKey);
+  assert.equal(legacy.milestone, null, "The legacy ratchet no longer locks out a passed rung");
+  const repaired = context.updateAdvisoryMilestone(
+    ratcheted, tools.threshold, schedule, false, scheduleKey, true,
+  );
+  assert.equal(repaired.milestone, "tools", "An undelivered milestone stayed locked out");
+  // Once delivered, it does not repeat on the same plateau.
+  const afterDelivery = context.recordAdvisoryDelivery(repaired.state, "tools");
+  assert.equal(afterDelivery.advisory.delivered.tools, 1);
+  assert.equal(afterDelivery.advisory.armed, undefined);
+  assert.equal(
+    context.updateAdvisoryMilestone(afterDelivery, tools.threshold, schedule, false, scheduleKey, true)
+      .milestone,
+    null,
+  );
+
+  return {
+    idleLadderAdvisories: idleAdvisories,
+    workingLadderAdvisoriesBefore: dark.advisories.length,
+    workingLadderBudgetSpentBefore: Object.values(darkState.delivered)
+      .reduce((sum, count) => sum + count, 0),
+    workingLadderAdvisoriesAfter: lit.advisories.length,
+    deliveriesRecorded: Object.values(litState.delivered).reduce((sum, count) => sum + count, 0),
+    ratchetLockedOutBefore: true,
+    ratchetRepaired: true,
+  };
+}
+
 async function gateStatusIndexDiet() {
   const built = makeFixture({ turns: 16, resultChars: 9_000, contextWindow: 100_000 });
   const fat = makeRuntime(built, { foldScheduling: "epoch" });
@@ -3899,6 +3998,7 @@ const gates = [
   [46, "Retained pending marks", gateRetainedPendingMarks],
   [47, "Eligible-share commit trigger", gateEligibleShareCommitTrigger],
   [48, "Status index diet", gateStatusIndexDiet],
+  [49, "Advisory delivery accounting", gateAdvisoryDelivery],
 ];
 
 let failures = 0;
