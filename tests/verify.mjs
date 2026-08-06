@@ -4323,6 +4323,114 @@ async function gateCurrentTurnCommitGuard() {
   };
 }
 
+/**
+ * Pinned peek mass is ineligible for reclamation by construction. Measured 2026-08-06
+ * (rep 7): retain-pinned peeks held the eligible share below the ROI threshold, no
+ * commit ever fired, the window grew to 235k tokens, and no accounting field named
+ * the cause. Two things have to hold: the mass is VISIBLE, and the pressure backstop
+ * keeps reclaiming non-pinned evidence no matter what the ineligible marks add up to.
+ */
+async function gatePinnedMassBackstop() {
+  // A session whose window carries two pinned peek reads of a real fold.
+  const probe = makeFixture({
+    turns: 10, resultChars: 12_000, contextWindow: 100_000, peekTurns: [0, 8], peekTargetId: "placeholder",
+  });
+  const seed = context.emptyActiveContextState(probe.sessionId);
+  const foldId = (await commitCandidate(
+    seed, peekSnapshot(probe), context.selectAutomaticToolBatch(peekSnapshot(probe), seed, 1)[0],
+    { brief: "The exact stale inspection result stays recoverable behind this fold." },
+  )).prepared.id;
+  const built = makeFixture({
+    turns: 10, resultChars: 12_000, contextWindow: 100_000, peekTurns: [0, 8], peekTargetId: foldId,
+  });
+  const empty = context.emptyActiveContextState(built.sessionId);
+  const snapshot = peekSnapshot(built, { ephemeralPeek: true });
+  const folded = (await commitCandidate(
+    empty, snapshot, context.selectAutomaticToolBatch(snapshot, empty, 1)[0],
+    { brief: "The exact stale inspection result stays recoverable behind this fold." },
+  )).state;
+  assert.equal(folded.folds[0].id, foldId, "The peeked fold id shifted with the peek argument");
+
+  // Unpinned, those reads are reclaimable mass and count as nothing pinned.
+  assert.equal(context.markAccounting(snapshot, folded).pinnedBytes, 0);
+  const pinned = context.withPinnedPeek(folded, foldId, true);
+  const pinnedAccounting = context.markAccounting(snapshot, pinned);
+  assert(pinnedAccounting.pinnedBytes > 0, "Pinned peek mass is still invisible in the accounting");
+  assert.equal(pinnedAccounting.pinnedResults, 2);
+  assert.deepEqual(context.reclaimedPeeks(snapshot, pinned), [], "A pinned read was reclaimed anyway");
+
+  // The starvation itself: marks the commit cannot apply inflate the freed share the
+  // top-up measures against, so the top-up concludes its work is already done.
+  const wide = makeFixture({ turns: 24, resultChars: 26_000, contextWindow: 100_000 });
+  const wideSnapshot = wide.snapshot;
+  let starved = context.emptyActiveContextState(wide.sessionId);
+  const ineligible = [];
+  for (let turn = 0; turn < 8; turn += 1) {
+    const resultId = wide.turnEntries[turn][2];
+    const candidate = context.manualFoldCandidate(wideSnapshot, starved, [resultId], { allowProtected: true });
+    const mark = context.foldMarkFor({
+      candidate,
+      brief: context.automaticToolBrief(wideSnapshot, candidate),
+      briefProvenance: { kind: "deterministic" },
+      origin: "agent",
+      ordinal: turn,
+    });
+    starved = context.addPendingMark(starved, mark).state;
+    ineligible.push(...candidate.sourceRefs);
+  }
+  // Exactly the rep-7 shape: the agent protected what it marked, so none of it can move.
+  starved = { ...starved, protected: ineligible.map((ref) => structuredClone(ref)) };
+  const starvedAccounting = context.markAccounting(wideSnapshot, starved);
+  assert.equal(starvedAccounting.eligibleMarks, 0, "The fixture left an applicable mark");
+  assert(starvedAccounting.freedWindowShare >= context.EPOCH_COMMIT_TARGET_WINDOW_SHARE,
+    `Ineligible marks reached only ${starvedAccounting.freedWindowShare} of the target`);
+
+  const anchorTopUp = context.topUpMarks({ snapshot: wideSnapshot, state: starved, ordinal: 100 });
+  const eligibleTopUp = context.topUpMarks({
+    snapshot: wideSnapshot, state: starved, ordinal: 100, eligibleOnly: true,
+  });
+  assert.equal(anchorTopUp.length, 0, "The anchor top-up is no longer starved; the fixture proves nothing");
+  assert(eligibleTopUp.length >= 1, "The backstop top-up stayed starved by ineligible mass");
+  let toppedUp = starved;
+  for (const mark of eligibleTopUp) toppedUp = context.addPendingMark(toppedUp, mark).state;
+  const toppedUpAccounting = context.markAccounting(wideSnapshot, toppedUp);
+  assert(toppedUpAccounting.eligibleMarks >= 1);
+  assert(toppedUpAccounting.eligibleFreedWindowShare > 0,
+    "The topped-up commit would still free nothing");
+  // The pressure backstop itself is untouched and still fires on ratio alone.
+  assert.equal(context.epochCommitDue(wideSnapshot, 0.85, { eligibleShareThreshold: 0.30, eligibleShare: 0 }), true);
+
+  // And a live commit reports the pinned mass in its own envelope.
+  const runtime = makeRuntime(
+    makeFixture({ turns: 40, resultChars: 20_000, contextWindow: 100_000 }),
+    {
+      foldScheduling: "epoch",
+      ephemeralPeek: true,
+      retainPendingMarks: true,
+      eligibleShareCommit: true,
+      pinnedMassBackstop: true,
+    },
+  );
+  await startRuntime(runtime);
+  for (const tokens of [76_000, 78_000, 80_000]) await measure(runtime, tokens, 100_000);
+  await measure(runtime, 88_000, 100_000);
+  const epoch = (await toolStatus(runtime)).details.automatic.lastAutomaticAction?.epoch;
+  assert(epoch, "The pressure backstop did not commit");
+  assert.equal(epoch.trigger, "window-pressure");
+  assert(epoch.appliedMarks >= 1, "The backstop commit applied nothing");
+  assert.equal(typeof epoch.pinnedBytes, "number");
+
+  return {
+    pinnedBytes: pinnedAccounting.pinnedBytes,
+    pinnedResults: pinnedAccounting.pinnedResults,
+    ineligibleFreedShare: Number(starvedAccounting.freedWindowShare.toFixed(3)),
+    anchorTopUpMarks: anchorTopUp.length,
+    backstopTopUpMarks: eligibleTopUp.length,
+    backstopEligibleShare: Number(toppedUpAccounting.eligibleFreedWindowShare.toFixed(3)),
+    backstopAppliedMarks: epoch.appliedMarks,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -4376,6 +4484,7 @@ const gates = [
   [50, "Projection instrumentation", gateProjectionInstrumentation],
   [51, "Stage-identified fold briefs", gateStageIdentifiedBriefs],
   [52, "Current-turn commit guard", gateCurrentTurnCommitGuard],
+  [53, "Pinned mass backstop", gatePinnedMassBackstop],
 ];
 
 let failures = 0;

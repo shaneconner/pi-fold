@@ -107,6 +107,7 @@ import {
   DEFAULT_PROVIDER_TOTAL_WINDOW,
   DEFAULT_RETAIN_PENDING_MARKS,
   DEFAULT_CURRENT_TURN_COMMIT_GUARD,
+  DEFAULT_PINNED_MASS_BACKSTOP,
   DEFAULT_STAGE_IDENTIFIED_BRIEFS,
   DEFAULT_STATUS_INDEX_DIET,
   DEFAULT_TRUTHFUL_CAPACITY,
@@ -230,6 +231,7 @@ export function registerActiveContext(pi: any, options: {
   eligibleShareCommit?: boolean;
   eligibleShareCommitThreshold?: number;
   currentTurnCommitGuard?: boolean;
+  pinnedMassBackstop?: boolean;
   stageIdentifiedBriefs?: boolean;
   statusIndexDiet?: boolean;
   advisoryDelivery?: boolean;
@@ -317,6 +319,14 @@ export function registerActiveContext(pi: any, options: {
   }
   // An automatic commit never folds what this turn just gathered.
   const currentTurnCommitGuard = options.currentTurnCommitGuard ?? DEFAULT_CURRENT_TURN_COMMIT_GUARD;
+  if (options.pinnedMassBackstop !== undefined && typeof options.pinnedMassBackstop !== "boolean") {
+    throw new Error("pinnedMassBackstop must be a boolean");
+  }
+  if (options.pinnedMassBackstop && !epochScheduling) {
+    throw new Error("pinnedMassBackstop requires epoch fold scheduling; immediate mode has no commits");
+  }
+  // Pinned mass can never be reclaimed, so it may never count as freeing already done.
+  const pinnedMassBackstop = options.pinnedMassBackstop ?? DEFAULT_PINNED_MASS_BACKSTOP;
   if (options.stageIdentifiedBriefs !== undefined && typeof options.stageIdentifiedBriefs !== "boolean") {
     throw new Error("stageIdentifiedBriefs must be a boolean");
   }
@@ -1481,7 +1491,12 @@ export function registerActiveContext(pi: any, options: {
     }
     const guarded = currentTurnCommitGuard ? currentTurnRefKeys(snapshot) : new Set<string>();
     if (topUp) {
-      for (const mark of topUpMarks({ snapshot, state, ordinal, excludeRefKeys: guarded })) {
+      // Measuring top-up progress against ELIGIBLE mass is what keeps the pressure
+      // backstop working under a peek-heavy agent: pinned and retained marks are mass
+      // no commit can move, and counting them as progress stops the top-up dead.
+      for (const mark of topUpMarks({
+        snapshot, state, ordinal, excludeRefKeys: guarded, eligibleOnly: pinnedMassBackstop,
+      })) {
         const addition = addPendingMark(state, mark);
         if (addition.added) { state = addition.state; topUpAdded += 1; }
       }
@@ -1512,6 +1527,8 @@ export function registerActiveContext(pi: any, options: {
       topUpMarks: topUpAdded,
       appliedMarks: result.applied.length,
       refusedMarks: result.refused.length,
+      pinnedBytes: accounting.pinnedBytes,
+      pinnedResults: accounting.pinnedResults,
       retainedMarks: result.retained.length,
       currentTurnRetained: result.retained.filter((mark) =>
         markTouchesCurrentTurn(state, mark, guarded)).length,

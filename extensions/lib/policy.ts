@@ -172,6 +172,17 @@ export const DEFAULT_STAGE_IDENTIFIED_BRIEFS = false;
  */
 export const DEFAULT_CURRENT_TURN_COMMIT_GUARD = false;
 
+/**
+ * Pinned peek mass is ineligible for reclamation by construction, and the freeing
+ * target a commit tops up against counted it as progress already made. Measured
+ * 2026-08-06 (rep 7): retain-pinned peeks held the eligible share below the ROI
+ * threshold forever, no commit ever fired, and the window grew to 235k tokens with
+ * no accounting field naming the cause. With this on, an automatic commit measures
+ * its top-up against ELIGIBLE mass, so the backstop keeps reclaiming non-pinned
+ * evidence no matter what the ineligible marks add up to.
+ */
+export const DEFAULT_PINNED_MASS_BACKSTOP = false;
+
 /** The default status payload stops carrying the whole fold tree. */
 export const DEFAULT_STATUS_INDEX_DIET = false;
 export const STATUS_DIET_SUGGESTIONS = 5;

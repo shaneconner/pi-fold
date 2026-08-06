@@ -6,6 +6,7 @@ import {
 } from "./canonical.ts";
 import {
   commitPreparedFold,
+  pinnedPeekMass,
   prepareFold,
   renderFold,
   renderFoldParts,
@@ -266,6 +267,10 @@ export interface MarkAccounting {
   eligibleFreedTokens: number;
   /** The ROI signal: eligible marked mass as a share of the truthful window. */
   eligibleFreedWindowShare: number;
+  /** Raw peek mass no reclamation can take: pinned reads and protected results. */
+  pinnedBytes: number;
+  /** How many peek results that mass is spread over. */
+  pinnedResults: number;
 }
 
 /**
@@ -308,6 +313,7 @@ export function markAccounting(
     : bytes(snapshot.messages.slice(earliest));
   const freedTokens = estimatedTokens(freedBytes);
   const eligibleFreedTokens = estimatedTokens(eligibleFreedBytes);
+  const pinned = pinnedPeekMass(snapshot, state);
   return {
     pending: marks.length,
     agentMarks: marks.filter((mark) => mark.origin === "agent").length,
@@ -323,6 +329,8 @@ export function markAccounting(
     eligibleFreedWindowShare: snapshot.contextWindow > 0
       ? eligibleFreedTokens / snapshot.contextWindow
       : 0,
+    pinnedBytes: pinned.bytes,
+    pinnedResults: pinned.results,
   };
 }
 

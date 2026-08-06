@@ -854,6 +854,51 @@ export interface ReclaimedPeek {
   sourceBytes: number;
 }
 
+/**
+ * Peek mass no reclamation can take: results whose fold the agent pinned with
+ * retain, or whose evidence it protected outright. This is the number that made
+ * rep 7's starvation invisible. The mass sat raw in the window, the ROI trigger's
+ * eligibility arithmetic could never reach its threshold over it, and no accounting
+ * field said so while the window grew to 235k tokens.
+ */
+export function pinnedPeekMass(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+): { bytes: number; results: number } {
+  const pinned = new Set(state.pinnedPeeks ?? []);
+  const explicitProtected = explicitProtectedKeys(state);
+  const folded = new Set<string>();
+  for (const fold of state.folds) {
+    for (const ref of flattenFoldRefs(fold, state)) folded.add(objectRefKey(ref));
+  }
+  const peekCalls = new Map<string, string>();
+  for (const message of snapshot.messages) {
+    if (messageRole(message) !== "assistant") continue;
+    for (const part of denseOwnArrayValues(ownValue(message, "content")) ?? []) {
+      if (ownValue(part, "type") !== "toolCall" || ownValue(part, "name") !== snapshot.toolName) continue;
+      const callId = ownValue(part, "id");
+      const args = ownValue(part, "arguments");
+      const foldId = ownValue(args, "id");
+      if (typeof callId !== "string" || !callId || ownValue(args, "action") !== "peek" ||
+          typeof foldId !== "string" || !foldId) continue;
+      peekCalls.set(callId, foldId);
+    }
+  }
+  let total = 0;
+  let results = 0;
+  for (const item of snapshot.mapped) {
+    if (messageRole(item.message) !== "toolResult" || !item.ref) continue;
+    if (folded.has(objectRefKey(item.ref))) continue;
+    const toolCallId = ownValue(item.message, "toolCallId");
+    const foldId = typeof toolCallId === "string" ? peekCalls.get(toolCallId) : undefined;
+    if (!foldId) continue;
+    if (!pinned.has(foldId) && !explicitProtected.has(objectRefKey(item.ref))) continue;
+    total += bytes(item.message);
+    results += 1;
+  }
+  return { bytes: total, results };
+}
+
 export function peekReclaimText(
   foldId: string,
   snapshot: ActiveContextSnapshot,
