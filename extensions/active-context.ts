@@ -465,6 +465,16 @@ export function registerActiveContext(pi: any, options: {
   const measurements = {
     latestRatio: null as number | null,
     lastProviderMeasurement: null as ProviderContextMeasurement | null,
+    /** Serialized size of the projection this process last handed the host. */
+    lastProjectedChars: null as number | null,
+    /**
+     * Ground truth for the transmission fence: the size of a projection we sent and the
+     * token count the provider reported for it. A fixed bytes-per-token constant is a
+     * guess about a tokenizer, and it is wrong by different amounts in different
+     * sessions -- measured 2026-08-06, 4.7 chars/token in rep11 and 7.0 in rep12 for
+     * the SAME workload. The fence uses the session's own measured ratio instead.
+     */
+    projectionCalibration: null as { chars: number; tokens: number } | null,
     providerMeasurementQueue: Promise.resolve<void>(undefined),
     providerMeasurementReceipts: new Set<string>(),
     providerMeasurementRevisionByMessageSha: new Map<string, number>(),
@@ -1234,6 +1244,50 @@ export function registerActiveContext(pi: any, options: {
   };
 
   /**
+   * Bytes per token, measured rather than assumed.
+   *
+   * `ESTIMATED_BYTES_PER_TOKEN` is a constant over RAW text, and the fence weighs a
+   * SERIALIZED projection: roles, ids, custom types and JSON escaping all count toward
+   * the bytes and none of them reach the provider's tokenizer the same way. Measured
+   * 2026-08-06 on one workload: rep11 ran at 4.7 serialized chars per measured token
+   * and rep12 at 7.0. Against the fixed 4 that is a 76% over-estimate in rep12, which
+   * is exactly how a session whose real window was 49% full (187,805 tokens of a
+   * 400,000 window, ratio 0.47) had its request judged over a 383,616-token budget,
+   * reduced, judged over again, and finally ABORTED at stage 37 of 64.
+   *
+   * So the ratio is calibrated per session against ground truth: the size of a
+   * projection this process handed the host, paired with the token count the provider
+   * reported for it. Tiny early requests are ignored -- a 466-char first projection
+   * measured against a system prompt gives a meaningless 0.46 -- and the result is
+   * bounded, so a pathological pairing can neither disable the fence nor trip it.
+   */
+  const PROJECTION_CALIBRATION_MIN_CHARS = 20_000;
+  const PROJECTION_CALIBRATION_MIN_TOKENS = 5_000;
+  const PROJECTION_CHARS_PER_TOKEN_FLOOR = 2;
+  const PROJECTION_CHARS_PER_TOKEN_CEILING = 12;
+
+  const noteProjectionCalibration = (measurement: ProviderContextMeasurement): void => {
+    const chars = measurements.lastProjectedChars;
+    if (chars === null || chars < PROJECTION_CALIBRATION_MIN_CHARS) return;
+    if (!Number.isFinite(measurement.tokens) || measurement.tokens < PROJECTION_CALIBRATION_MIN_TOKENS) return;
+    measurements.projectionCalibration = { chars, tokens: measurement.tokens };
+  };
+
+  const projectionCharsPerToken = (): number => {
+    const calibration = measurements.projectionCalibration;
+    if (!calibration || calibration.tokens <= 0) return ESTIMATED_BYTES_PER_TOKEN;
+    const measured = calibration.chars / calibration.tokens;
+    if (!Number.isFinite(measured) || measured <= 0) return ESTIMATED_BYTES_PER_TOKEN;
+    return Math.min(
+      PROJECTION_CHARS_PER_TOKEN_CEILING,
+      Math.max(PROJECTION_CHARS_PER_TOKEN_FLOOR, measured),
+    );
+  };
+
+  const projectedTokenEstimate = (projected: unknown[]): number =>
+    Math.ceil(bytes(projected) / projectionCharsPerToken());
+
+  /**
    * The TRANSMISSION fence.
    *
    * `abortUnsafeHardContext` gates on `measurements.latestRatio`, which describes the
@@ -1262,7 +1316,7 @@ export function registerActiveContext(pi: any, options: {
     const budgetTokens = Number.isFinite(capacity.budgetTokens) && capacity.budgetTokens > 0
       ? capacity.budgetTokens
       : Number.POSITIVE_INFINITY;
-    const tokens = estimatedTokens(bytes(projected));
+    const tokens = projectedTokenEstimate(projected);
     return { tokens, budgetTokens, over: tokens > budgetTokens };
   };
 
@@ -1311,7 +1365,7 @@ export function registerActiveContext(pi: any, options: {
         reduced = projectWithAdvisory(snapshot);
         measured = projectionExceedsBudget(reduced, ctx);
         ladder.overBudgetReduction = {
-          estimatedTokensBefore: estimatedTokens(bytes(projected)),
+          estimatedTokensBefore: projectedTokenEstimate(projected),
           estimatedTokensAfter: measured.tokens,
           budgetTokens: measured.budgetTokens,
           transmitted: !measured.over,
@@ -2191,6 +2245,7 @@ export function registerActiveContext(pi: any, options: {
         if (durableProviderMeasurementMatches(observedMeasurement) && measurements.latestRatio !== null) {
           measurementStateChanged = accountAnchoredMeasurement(observedMeasurement);
           measurements.lastProviderMeasurement = observedMeasurement;
+          noteProjectionCalibration(observedMeasurement);
           advisoryChanged = armMilestoneForMeasurement(snapshot, observedMeasurement);
           startPreparation(snapshot, measurements.latestRatio, ctx);
           if (!ladder.automaticFailure && measurements.latestRatio >= hardFenceRatio(snapshot) && ladder.preparing) {
@@ -2233,9 +2288,21 @@ export function registerActiveContext(pi: any, options: {
       // last measured ratio says about the request before it.
       const budgeted = await enforceProjectionBudget(snapshot, projected, ctx);
       projected = budgeted.projected;
+      // Every projection this process BUILDS is a size reference for the calibration,
+      // including one the fence aborted. Recording only sent projections locks an
+      // already-large session out of calibrating at all: its first projection aborts
+      // under the uncalibrated constant, so nothing is ever sent, so nothing ever
+      // measures the ratio, so it aborts forever.
+      measurements.lastProjectedChars = bytes(projected);
+      // An aborted request still returns the PROJECTION. Handing back the raw branch
+      // instead makes the aborted turn the largest message list the session ever
+      // produced -- the corpus, folds and all -- which is the exact inverse of what a
+      // fence is for, and it is what an abort looked like in rep12: 3,952,934 chars
+      // against a 1,322,385-char projection of the same session. It is not noted as a
+      // cache observation, because it was never sent.
       if (budgeted.aborted) {
         updateStatus(ctx);
-        return { messages: event.messages };
+        return { messages: projected };
       }
       noteProjection(projected);
       updateStatus(ctx);
@@ -2610,6 +2677,10 @@ export function registerActiveContext(pi: any, options: {
           lastAutomaticAction: ladder.lastAutomaticAction,
           overBudgetReduction: ladder.overBudgetReduction ? clone(ladder.overBudgetReduction) : null,
           projectionBudgetTokens: currentCapacity(ctx).budgetTokens,
+          projectionCharsPerToken: projectionCharsPerToken(),
+          projectionEstimatedTokens: measurements.lastProjectedChars === null
+            ? null
+            : Math.ceil(measurements.lastProjectedChars / projectionCharsPerToken()),
           automaticSuspended: ladder.automaticFailure !== null,
           automaticFailure: ladder.automaticFailure ? clone(ladder.automaticFailure) : null,
           lastCompactionDecision: nativeCompaction.lastThresholdDecision,

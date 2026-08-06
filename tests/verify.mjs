@@ -4236,8 +4236,14 @@ async function currentTurnRuntime({ guard }) {
   // The fixture stays INSIDE the serving budget on purpose: the guard is a
   // batching-economics rule, and above the budget the transmission fence waives it to
   // keep the request sendable. Gate 56 measures that regime.
+  //
+  // The declared token counts are also kept CONSISTENT with the fixture's byte size,
+  // at roughly four serialized chars per token. The fence calibrates itself against the
+  // session's own measured chars-per-token, so a fixture that claims 88,000 tokens for
+  // a 170,000-char projection is describing a session that genuinely cannot send its
+  // next request, and the fence is right to reduce it.
   const runtime = makeRuntime(
-    makeFixture({ turns: 40, resultChars: 4_000, contextWindow: 100_000 }),
+    makeFixture({ turns: 40, resultChars: 4_000, contextWindow: 200_000 }),
     {
       foldScheduling: "epoch",
       retainPendingMarks: true,
@@ -4245,8 +4251,8 @@ async function currentTurnRuntime({ guard }) {
     },
   );
   await startRuntime(runtime);
-  for (const tokens of [76_000, 78_000, 80_000, 82_000, 84_000]) {
-    await measure(runtime, tokens, 100_000);
+  for (const tokens of [152_000, 156_000, 160_000, 164_000, 168_000]) {
+    await measure(runtime, tokens, 200_000);
   }
   const before = (materialized(runtime).pendingMarks ?? []).map((mark) => mark.id);
 
@@ -4300,7 +4306,7 @@ async function gateCurrentTurnCommitGuard() {
     sessionId: runtime.built.sessionId,
     eventMessages: runtime.messages,
     contextEntries: runtime.branch,
-    contextWindow: 100_000,
+    contextWindow: 200_000,
   });
   const turnKeys = context.currentTurnRefKeys(snapshot);
   assert.equal(turnKeys.size, excursion.length, "The turn boundary did not find the excursion");
@@ -4318,7 +4324,7 @@ async function gateCurrentTurnCommitGuard() {
     `Current-turn eligible mass share was ${turnShare}; the fixture proves nothing`);
 
   // The commit fires with the turn still OPEN.
-  await measure(runtime, 88_000, 100_000, undefined, "toolUse");
+  await measure(runtime, 176_000, 200_000, undefined, "toolUse");
   const epoch = (await toolStatus(runtime)).details.automatic.lastAutomaticAction?.epoch;
   assert(epoch, "No commit epoch ran");
   assert.equal(epoch.currentTurnRetained, eligibleTurn.length + (state.pendingMarks.length - eligible.length),
@@ -4345,7 +4351,7 @@ async function gateCurrentTurnCommitGuard() {
   // guard is what held it and not the fresh tail.
   const control = await currentTurnRuntime({ guard: false });
   for (const id of control.excursion) await toolCall(control.runtime, { action: "fold", ids: [id] });
-  await measure(control.runtime, 88_000, 100_000, undefined, "toolUse");
+  await measure(control.runtime, 176_000, 200_000, undefined, "toolUse");
   const controlState = materialized(control.runtime);
   const controlFolded = new Set(controlState.folds.flatMap((fold) =>
     fold.parts.filter((part) => part.kind === "raw").map((part) => part.ref.entryId)));
@@ -4873,9 +4879,12 @@ async function gateProjectionBudgetFence() {
   // The request is built. Either it now fits, or it was aborted; it is NEVER sent over
   // budget. Both outcomes are proven against the same projection the host would send.
   const projection = await project(runtime);
-  const projectedTokens = context.estimatedTokens(bytesOf(projection.messages));
   const abortedRequests = runtime.aborts;
-  const reduction = (await toolStatus(runtime)).details.automatic.overBudgetReduction;
+  const settled = (await toolStatus(runtime)).details.automatic;
+  // Weighed the way the FENCE weighs it: the session's own measured chars per token,
+  // not a fixed constant the fence stopped using.
+  const projectedTokens = Math.ceil(bytesOf(projection.messages) / settled.projectionCharsPerToken);
+  const reduction = settled.overBudgetReduction;
   assert(reduction, "The over-budget projection was neither reduced nor recorded");
   assert(reduction.estimatedTokensBefore > budgetTokens,
     `The fixture projected ${reduction.estimatedTokensBefore} tokens, inside the ${budgetTokens} budget`);
@@ -4937,11 +4946,17 @@ async function gateProjectionBudgetFence() {
   assert.equal(guardedEpoch.retainedMarks, 0, "The fence held marks back with the request unsendable");
   assert(materialized(guardedOnly).folds.length >= 1, "The fence-level waiver folded nothing");
 
-  // The invariant, stated once: no projection this runtime returns exceeds the budget.
+  // The invariant, stated once: a projection the fence weighs as over budget is never
+  // transmitted. It may still be RETURNED -- an aborted turn hands back the projection,
+  // never the raw corpus -- but the abort is what stops the send.
+  const abortsBeforeFinal = runtime.aborts;
   const finalProjection = await project(runtime);
-  const finalTokens = context.estimatedTokens(bytesOf(finalProjection.messages));
-  assert(finalTokens <= budgetTokens || runtime.aborts > abortedRequests,
-    `A ${finalTokens}-token projection was returned against a ${budgetTokens}-token budget`);
+  const finalStatus = (await toolStatus(runtime)).details.automatic;
+  const finalTokens = Math.ceil(bytesOf(finalProjection.messages) / finalStatus.projectionCharsPerToken);
+  assert(finalTokens <= budgetTokens || runtime.aborts > abortsBeforeFinal,
+    `A ${finalTokens}-token projection was transmitted against a ${budgetTokens}-token budget`);
+  assert(bytesOf(finalProjection.messages) < bytesOf(runtime.messages),
+    "An aborted pass handed back the raw branch instead of the projection");
 
   return {
     waiverBelowBackstop: 0,
@@ -4955,6 +4970,139 @@ async function gateProjectionBudgetFence() {
     fenceAppliedMarks: epoch.appliedMarks,
     allGuardedWaivedMarks: guardedEpoch.waivedMarks,
     allGuardedFolds: materialized(guardedOnly).folds.length,
+  };
+}
+
+/**
+ * What a projection weighs, and what it is made of, after the fence has acted.
+ *
+ * Measured 2026-08-06 (rep 12, running the fence from the previous fix). The fence
+ * used a fixed four bytes per token over the SERIALIZED projection. That constant is
+ * about raw text; a projection also carries roles, ids, custom types and JSON escaping.
+ * The same workload ran at 4.7 serialized chars per measured token in rep11 and 7.0 in
+ * rep12, so in rep12 the estimate was 76% high: a session sitting at 187,805 tokens of
+ * a 400,000 window -- less than half full -- had its request judged over a 383,616
+ * token budget, reduced, judged over again, and aborted. The worker died at stage 36
+ * of 64 with 41 folds in hand and a window that was never actually full.
+ *
+ * The aborted pass then returned the RAW branch, which is how a 1,322,385-char
+ * projection was recorded as 3,952,934 chars: not an exploding projection but the
+ * corpus handed back in its place, the largest message list the session ever produced.
+ */
+async function gateProjectionCalibration() {
+  // A session whose declared measurements say SEVEN serialized chars per token, which
+  // is what rep12 actually ran at. Under the old fixed constant every one of these
+  // projections reads as far over budget; against the session's own measured ratio
+  // they are barely half of it.
+  const built = makeFixture({ turns: 64, resultChars: 24_000, contextWindow: 400_000 });
+  const runtime = makeRuntime(built, { ...FULL_LEVER_SET, providerTotalWindow: 400_000 });
+  await startRuntime(runtime);
+  const sevenChars = (chars) => Math.round(chars / 7);
+  const baseline = bytesOf((await project(runtime)).messages);
+  await measure(runtime, sevenChars(baseline), 400_000);
+  const budgetTokens = (await toolStatus(runtime)).details.automatic.projectionBudgetTokens;
+  assert.equal(budgetTokens, 383_616, "The truthful serving budget moved");
+
+  const projection = await project(runtime);
+  const projectedChars = bytesOf(projection.messages);
+  const naiveTokens = context.estimatedTokens(projectedChars);
+  const status = (await toolStatus(runtime)).details.automatic;
+  // The separation this gate exists for: the fixed constant says over budget, the
+  // session's own measured ratio says half full. rep12 died on that difference.
+  assert(naiveTokens > budgetTokens,
+    `The naive estimate was ${naiveTokens}, inside the ${budgetTokens} budget; the regression is not reproduced`);
+  assert(sevenChars(projectedChars) < budgetTokens * 0.75,
+    "The fixture is genuinely near the budget, so a reduction would be correct");
+  // Once the session has calibrated, the fence leaves it alone: no further reduction
+  // and no further abort, at a size the fixed constant called over budget.
+  const abortsBefore = runtime.aborts;
+  await project(runtime);
+  assert.equal(runtime.aborts, abortsBefore,
+    `A session at ${sevenChars(projectedChars)} real tokens was aborted against a ${budgetTokens} budget`);
+  assert.equal((await toolStatus(runtime)).details.automatic.overBudgetReduction?.transmitted ?? true, true,
+    "A calibrated, half-full session was still being reduced");
+
+  // The estimator tracks the measured size: within 25% of what the provider counted for
+  // a projection of this size, where the fixed constant was 76% high in rep12.
+  const measuredTokens = sevenChars(projectedChars);
+  const estimated = status.projectionEstimatedTokens;
+  assert(typeof estimated === "number", "The status does not report what the fence weighed");
+  const drift = Math.abs(estimated - measuredTokens) / measuredTokens;
+  assert(drift <= 0.25,
+    `The calibrated estimate drifted ${(drift * 100).toFixed(1)}% from the measured token count`);
+  assert(Math.abs(status.projectionCharsPerToken - 7) <= 1.5,
+    `The session calibrated to ${status.projectionCharsPerToken} chars per token, not the measured 7`);
+
+  // Now force the fence with a genuinely oversized projection and keep going. Whatever
+  // it does, the next projection is built FROM THE FOLD STATE and is never the corpus.
+  const dense = makeRuntime(
+    makeFixture({ turns: 40, resultChars: 20_000, contextWindow: 100_000 }),
+    { ...FULL_LEVER_SET, providerTotalWindow: 100_000 },
+  );
+  await startRuntime(dense);
+  // Calibrate on a healthy pass, then let the excursion outgrow that baseline by half.
+  // This is the real over-budget shape: not a mis-estimated session, a session that
+  // genuinely gathered more than it can send.
+  await measure(dense, 84_000, 100_000);
+  for (let step = 0; step < 12; step += 1) {
+    dense.appendMessage({
+      role: "assistant",
+      content: [{ type: "toolCall", id: `grow-${step}`, name: "read", arguments: { path: `grow-${step}.txt` } }],
+      stopReason: "toolUse",
+      timestamp: 700 + step,
+    }, "growth");
+    dense.appendMessage({
+      role: "toolResult",
+      toolCallId: `grow-${step}`,
+      toolName: "read",
+      content: [{ type: "text", text: `Growth ${step}: ${"g".repeat(40_000)}` }],
+      isError: false,
+      timestamp: 700 + step,
+    }, "growth");
+  }
+  const denseRaw = bytesOf(dense.messages);
+  const afterFence = await project(dense);
+  const reduction = (await toolStatus(dense)).details.automatic.overBudgetReduction;
+  assert(reduction, "The oversized fixture never reached the fence");
+  assert(reduction.estimatedTokensAfter < reduction.estimatedTokensBefore,
+    "The emergency reduction freed nothing");
+  assert(bytesOf(afterFence.messages) < denseRaw,
+    "The pass that hit the fence handed back the raw branch instead of the projection");
+
+  // Every subsequent pass keeps projecting from the durable folds: placeholders stay
+  // placeholders, the raw sources never come back, and nothing approaches corpus size.
+  const sizes = [];
+  for (let step = 0; step < 6; step += 1) {
+    await measure(dense, 84_000 + step * 100, 100_000, undefined, "toolUse");
+    const pass = await project(dense);
+    const state = materialized(dense);
+    const serialized = json.stableStringify(pass.messages);
+    const folded = state.folds.filter((fold) => fold.parentId === null && !state.expanded.includes(fold.id));
+    assert(folded.length >= 1, "The reduced session lost its folds");
+    for (const fold of folded) {
+      assert(serialized.includes(fold.id),
+        `Fold ${fold.id} vanished from the projection, which means the raw source came back`);
+    }
+    sizes.push(bytesOf(pass.messages));
+  }
+  assert(sizes.every((size) => size < denseRaw),
+    `A projection reached corpus size after the fence: ${sizes.join(",")} against ${denseRaw} raw`);
+  const growth = sizes.at(-1) - sizes[0];
+  assert(growth < denseRaw / 2,
+    `The projection grew ${growth} chars after the fence, which no fold state explains`);
+
+  return {
+    budgetTokens,
+    naiveTokensOverBudget: naiveTokens > budgetTokens,
+    measuredTokens,
+    calibratedEstimate: estimated,
+    driftPercent: Number((drift * 100).toFixed(1)),
+    charsPerToken: Number(status.projectionCharsPerToken.toFixed(2)),
+    fenceReducedFrom: reduction.estimatedTokensBefore,
+    fenceReducedTo: reduction.estimatedTokensAfter,
+    rawChars: denseRaw,
+    projectionsAfterFence: sizes.length,
+    largestProjectionAfterFence: Math.max(...sizes),
   };
 }
 
@@ -5015,6 +5163,7 @@ const gates = [
   [54, "Per-peek ephemeral override", gatePerPeekEphemeral],
   [55, "Epoch batching under the full lever set", gateEpochBatchingUnderFullLevers],
   [56, "Projection budget fence & guard waiver", gateProjectionBudgetFence],
+  [57, "Projection estimator calibration & post-fence integrity", gateProjectionCalibration],
 ];
 
 let failures = 0;
