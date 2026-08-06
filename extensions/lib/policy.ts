@@ -46,7 +46,15 @@ export const ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
 export const EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
   ...ACTIVE_CONTEXT_TOOL_ACTIONS, "commit",
 ] as const);
-export type ActiveContextToolAction = typeof EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS[number];
+/**
+ * Retained pending marks make "mark" a standing decision rather than a one-shot
+ * attempt, so withdrawing one needs a verb of its own. It exists only where marks
+ * can be retained; nothing else grows a surface it cannot use.
+ */
+export const RETAINED_MARK_ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
+  ...EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS, "unmark",
+] as const);
+export type ActiveContextToolAction = typeof RETAINED_MARK_ACTIVE_CONTEXT_TOOL_ACTIONS[number];
 export const USER_RESCUE_MAX_SOURCE_CHARS = 512_000;
 export const DEFAULT_CONTEXT_WINDOW = 272_000;
 export const TOOL_FOLD_CADENCE_MIN_TOKENS = 12_000;
@@ -106,6 +114,60 @@ export const EPOCH_MAX_TOPUP_MARKS = 64;
 export const ESTIMATED_BYTES_PER_TOKEN = 4;
 /** Rendered navigation/topology overhead assumed around a brief when estimating a placeholder. */
 export const ESTIMATED_PLACEHOLDER_OVERHEAD_BYTES = 240;
+
+// ---------------------------------------------------------------------------
+// Iteration-2 reliability levers. Every one of them is OFF by default, because
+// the immediate-mode default projection and durable state are pinned byte-for-byte
+// by an offline gate; a lever that changed either without being asked for would be
+// a regression no matter how good it is.
+// ---------------------------------------------------------------------------
+
+/**
+ * A peek copies a fold's stored source back into the window. Those bytes are a pure
+ * duplicate of evidence the runtime still holds losslessly, and once the model call
+ * that asked for them has answered, keeping them costs a full window slot for nothing.
+ * With this on, a CONSUMED peek result renders as a short recall stub in the next
+ * projection unless the agent expanded the fold or pinned the read.
+ */
+export const DEFAULT_EPHEMERAL_PEEK = false;
+
+/**
+ * The provider serving window is the TOTAL admission budget minus whatever output
+ * reservation the deployment actually asked for; the per-request max-input descriptor
+ * assumes a full output reservation and understates the real ceiling. Measured
+ * 2026-08-06: a run aborted at ~297k projected tokens against a 272k descriptor while
+ * the same provider had just accepted 339,689 tokens.
+ */
+export const DEFAULT_TRUTHFUL_CAPACITY = false;
+export const DEFAULT_PROVIDER_TOTAL_WINDOW = 400_000;
+
+/** Preflight a peek/expand against the target's exact stored size and real headroom. */
+export const DEFAULT_ADMISSION_CONTROL = false;
+/** Narrowing is what makes a refusal governance instead of denial. */
+export const PEEK_MIN_SLICE_BYTES = 1_024;
+
+/** Marks refused at commit are kept pending instead of silently dropped. */
+export const DEFAULT_RETAIN_PENDING_MARKS = false;
+
+/** Commit when the ELIGIBLE marked mass is worth its one rewrite, not when the window is nearly full. */
+export const DEFAULT_ELIGIBLE_SHARE_COMMIT = false;
+export const DEFAULT_ELIGIBLE_SHARE_COMMIT_THRESHOLD = 0.30;
+
+/** The default status payload stops carrying the whole fold tree. */
+export const DEFAULT_STATUS_INDEX_DIET = false;
+export const STATUS_DIET_SUGGESTIONS = 5;
+
+/**
+ * Count an advisory when it is DELIVERED, not when it is armed. Arming used to spend
+ * the milestone budget, and any automatic fold in the same context pass cleared the arm
+ * before it was ever projected, so the budget drained with zero deliveries.
+ */
+export const DEFAULT_ADVISORY_DELIVERY = false;
+
+/** Split real projection rewrites from provider-side cache-miss observations. */
+export const DEFAULT_PROJECTION_INSTRUMENTATION = false;
+export const MAX_PROJECTION_HASH_RECORDS = 64;
+export const MAX_PINNED_PEEKS = 64;
 
 /** Active-context tool actions that read without mutating, so their results may fold. */
 export const READ_ONLY_CONTEXT_ACTIONS_DEFAULT: ReadonlySet<string> = new Set(["status"]);
@@ -259,6 +321,12 @@ export interface ActiveContextState {
   surfacing?: SurfacingRecord[];
   /** Epoch scheduling only; omitted when empty so pre-0.1.2 state digests never move. */
   pendingMarks?: PendingMark[];
+  /**
+   * Fold ids whose peek result the agent asked to keep raw. Ephemeral peek only, and
+   * omitted when empty for the same reason `pendingMarks` is: a key that appears only
+   * when a lever is used cannot move a default digest.
+   */
+  pinnedPeeks?: string[];
   prepared?: PreparedFold;
   advisory?: {
     highWater: number;
@@ -354,6 +422,8 @@ export interface ActiveContextSnapshot {
   readOnlyContextActions: ReadonlySet<string>;
   contextWindow: number;
   windowSource: "reported" | "fallback";
+  /** Consumed peek results render as recall stubs instead of duplicate source bytes. */
+  ephemeralPeek: boolean;
 }
 
 export interface FoldCandidate {

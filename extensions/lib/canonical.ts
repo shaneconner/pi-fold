@@ -23,6 +23,18 @@ export function boundedUtf8(text: string, maximumBytes: number): string {
   return buffer.subarray(0, maximumBytes).toString("utf8").replace(/\uFFFD$/, "");
 }
 
+/**
+ * The suffix of `text` beginning at a byte offset. A multi-byte sequence cut by the
+ * offset decodes to one leading replacement character; dropping it keeps the slice an
+ * exact suffix of the source, which is what makes a paged peek losslessly rejoinable.
+ */
+export function utf8Slice(text: string, offsetBytes: number): string {
+  if (offsetBytes <= 0) return text;
+  const buffer = Buffer.from(text, "utf8");
+  if (offsetBytes >= buffer.length) return "";
+  return buffer.subarray(offsetBytes).toString("utf8").replace(/^�/, "");
+}
+
 export function ownValue(value: unknown, key: string): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const descriptor = Object.getOwnPropertyDescriptor(value, key);

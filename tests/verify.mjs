@@ -198,6 +198,7 @@ function makeRuntime(built, {
   surfacing,
   foldScheduling,
   foldPeekResults,
+  ephemeralPeek,
   setSuggestionSourceRegistrar,
   loadHostModule,
   packageRegistration = false,
@@ -288,6 +289,7 @@ function makeRuntime(built, {
     ...(surfacing === undefined ? {} : { surfacing }),
     ...(foldScheduling === undefined ? {} : { foldScheduling }),
     ...(foldPeekResults === undefined ? {} : { foldPeekResults }),
+    ...(ephemeralPeek === undefined ? {} : { ephemeralPeek }),
     ...(setSuggestionSourceRegistrar ? { setSuggestionSourceRegistrar } : {}),
   };
   runtime.registration = packageRegistration
@@ -3060,6 +3062,148 @@ async function gateEphemeralPeekMark() {
   };
 }
 
+function peekSnapshot(built, { ephemeralPeek = false, messages = built.messages } = {}) {
+  return context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: messages,
+    contextEntries: built.entries,
+    contextWindow: built.contextWindow,
+    ephemeralPeek,
+  });
+}
+
+async function gateEphemeralPeekReclamation() {
+  // A fold the agent can actually peek. Entry ids are positional and the fold's refs
+  // come from a later turn, so the id does not depend on what the earlier peek names.
+  const probe = makeFixture({
+    turns: 10, resultChars: 12_000, contextWindow: 100_000, peekTurns: [0, 9], peekTargetId: "placeholder",
+  });
+  const seed = context.emptyActiveContextState(probe.sessionId);
+  const candidate = context.selectAutomaticToolBatch(peekSnapshot(probe), seed, 1)[0];
+  const foldId = (await commitCandidate(seed, peekSnapshot(probe), candidate, {
+    brief: "The exact stale inspection result stays recoverable behind this fold.",
+  })).prepared.id;
+
+  const built = makeFixture({
+    turns: 10, resultChars: 12_000, contextWindow: 100_000, peekTurns: [0, 9], peekTargetId: foldId,
+  });
+  const state = (await commitCandidate(
+    context.emptyActiveContextState(built.sessionId),
+    peekSnapshot(built),
+    context.selectAutomaticToolBatch(
+      peekSnapshot(built), context.emptyActiveContextState(built.sessionId), 1,
+    )[0],
+    { brief: "The exact stale inspection result stays recoverable behind this fold." },
+  )).state;
+  assert.equal(state.folds[0].id, foldId, "The peeked fold id shifted with the peek argument");
+
+  const off = peekSnapshot(built);
+  const on = peekSnapshot(built, { ephemeralPeek: true });
+  const baseline = context.projectActiveContext(off, state);
+  const reclaimed = context.projectActiveContext(on, state);
+
+  // Both peeks sit before the last assistant message, so both have been consumed.
+  const consumed = context.reclaimedPeeks(on, state);
+  assert.equal(consumed.length, 2, "Consumed peek reads were not identified");
+  assert.deepEqual(consumed.map((item) => item.foldId), [foldId, foldId]);
+  assert.deepEqual(context.reclaimedPeeks(off, state), [], "Reclamation fired with the lever off");
+  assert.equal(bytesOf(baseline), bytesOf(context.projectActiveContext(off, state)));
+  assert(bytesOf(reclaimed) < bytesOf(baseline), "Reclaiming consumed peeks freed nothing");
+  assert.equal(baseline.length, reclaimed.length, "Reclamation changed the message count");
+
+  const stubs = reclaimed.filter((message) =>
+    message?.role === "toolResult" && String(message.content?.[0]?.text ?? "").includes("peek reclaimed"));
+  assert.equal(stubs.length, 2);
+  assert(stubs.every((message) => String(message.content[0].text).includes(foldId)));
+  assert(stubs.every((message) => String(message.content[0].text).includes('"retain":true')));
+  assert(stubs.every((message) => String(message.content[0].text).includes('"offset"')));
+  // The deletion is tail-local and never touches call/result linkage.
+  context.assertProjectionPreservesToolLinkage(built.messages, reclaimed);
+
+  // The newest peek has not been read by any model call yet, so it stays raw.
+  const unconsumed = peekSnapshot(built, {
+    ephemeralPeek: true, messages: built.messages.slice(0, -1),
+  });
+  const stillFresh = context.reclaimedPeeks(unconsumed, state);
+  assert.equal(stillFresh.length, 1, "The unread peek at the tail was reclaimed");
+  assert.equal(stillFresh[0].index, context.reclaimedPeeks(on, state)[0].index);
+
+  // Expanding is committing to the fold; pinning is committing to the read. Either
+  // one keeps the exact source in the window.
+  assert.deepEqual(context.reclaimedPeeks(on, { ...state, expanded: [foldId] }), []);
+  const pinned = context.withPinnedPeek(state, foldId, true);
+  assert.deepEqual(pinned.pinnedPeeks, [foldId]);
+  assert.deepEqual(context.reclaimedPeeks(on, pinned), []);
+  assert.equal(context.withPinnedPeek(pinned, foldId, false).pinnedPeeks, undefined);
+  assert.equal(bytesOf(context.projectActiveContext(on, pinned)), bytesOf(baseline));
+
+  // A pin is durable state, and it never leaks into a session that did not pin.
+  const roundTrip = context.parseActiveContextState(
+    JSON.parse(json.stableStringify(pinned)), built.sessionId,
+  );
+  assert.deepEqual(roundTrip.pinnedPeeks, [foldId]);
+  assert.throws(
+    () => context.parseActiveContextState(
+      { ...JSON.parse(json.stableStringify(state)), pinnedPeeks: ["no-such-fold"] }, built.sessionId,
+    ),
+    /Invalid active-context pinned peeks/,
+  );
+
+  // End to end, and in immediate mode: the lever applies to both schedulers, the
+  // envelope says the read is ephemeral, and retain persists the choice.
+  const runtime = makeRuntime(built, { ephemeralPeek: true });
+  await startRuntime(runtime);
+  await measure(runtime, 80_000, 100_000);
+  await project(runtime);
+  assert(materialized(runtime).folds.some((fold) => fold.id === foldId),
+    "The runtime ladder did not fold the batch the transcript peeks");
+  const read = await toolCall(runtime, { action: "peek", id: foldId });
+  assert.equal(read.details.retained, false);
+  assert.match(String(read.details.lifetime), /one model call/);
+  assert.equal(read.details.offset, 0);
+  const slice = await toolCall(runtime, { action: "peek", id: foldId, offset: 64, bytes: 2_048 });
+  assert.equal(slice.details.offset, 64);
+  assert.equal(slice.details.returnedBytes, 2_048);
+  assert.equal(slice.details.truncated, true);
+  assert.equal(slice.details.nextOffset, 64 + 2_048);
+  assert.equal(read.details.source.slice(64, 64 + 2_048), slice.details.source);
+  const kept = await toolCall(runtime, { action: "peek", id: foldId, retain: true });
+  assert.equal(kept.details.retained, true);
+  assert.deepEqual(materialized(runtime).pinnedPeeks, [foldId]);
+  const status = (await toolStatus(runtime)).details.automatic.peek;
+  assert.equal(status.ephemeral, true);
+  assert.deepEqual(status.pinned, [foldId]);
+  assert.equal(status.reclaimed.length, 0, "A pinned read was still counted as reclaimable");
+  await toolCall(runtime, { action: "peek", id: foldId, retain: false });
+  assert.equal(materialized(runtime).pinnedPeeks, undefined);
+  assert.equal((await toolStatus(runtime)).details.automatic.peek.reclaimed.length, 2);
+
+  // Default off: the lever is invisible, including in the tool schema.
+  const plain = makeRuntime(built, {});
+  await startRuntime(plain);
+  await measure(plain, 80_000, 100_000);
+  await project(plain);
+  const schema = [...plain.tools.values()][0].parameters.properties;
+  assert.equal(Object.hasOwn(schema, "retain"), false);
+  assert.equal(Object.hasOwn(schema, "bytes"), true);
+  assert.equal([...plain.tools.values()][0].description.includes("one model call"), false);
+  await assert.rejects(
+    () => toolCall(plain, { action: "peek", id: foldId, retain: true }),
+    /peek retain requires ephemeralPeek/,
+  );
+  assert.equal(materialized(plain).pinnedPeeks, undefined);
+
+  return {
+    reclaimedPeeks: consumed.length,
+    reclaimedBytes: bytesOf(baseline) - bytesOf(reclaimed),
+    unreadPeekKeptRaw: stillFresh.length,
+    pinnedKeepsSourceRaw: true,
+    expandedKeepsSourceRaw: true,
+    sliceBytes: slice.details.returnedBytes,
+    defaultOffSchemaKeys: Object.keys(schema).length,
+  };
+}
+
 async function gateCommitOnThreshold() {
   const runtime = await epochToolRuntime({ turns: 12 });
   await measure(runtime, 78_000, 100_000);
@@ -3351,6 +3495,7 @@ const gates = [
   [41, "Surfacing key-order digest stability", gateSurfacingKeyOrder],
   [42, "Peek-fold override reaches a starved ladder", gatePeekFoldOverride],
   [43, "Peek-fold override absence is byte-identical", gatePeekFoldOverrideAbsence],
+  [44, "Ephemeral peek reclamation", gateEphemeralPeekReclamation],
 ];
 
 let failures = 0;

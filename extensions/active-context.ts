@@ -37,8 +37,10 @@ import {
   requireActiveFold,
   selectAutomaticChapter,
   selectAutomaticRung,
+  reclaimedPeeks,
   setFoldProjectionState,
   withExpandLease,
+  withPinnedPeek,
 } from "./lib/folding.ts";
 import {
   boundReceiptText,
@@ -89,11 +91,13 @@ import {
   DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_EPHEMERAL_PEEK,
   DEFAULT_FOLD_SCHEDULING,
   DEFAULT_SURFACING_ENABLED,
   entryTypeNamespace,
   EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS,
   EPOCH_COMMIT_TARGET_WINDOW_SHARE,
+  PEEK_MIN_SLICE_BYTES,
   PEEK_READ_ONLY_CONTEXT_ACTIONS,
   FOLD_SCHEDULING_MODES,
   READ_ONLY_CONTEXT_ACTIONS_DEFAULT,
@@ -185,6 +189,7 @@ export function registerActiveContext(pi: any, options: {
   guidance?: GuidanceProfile;
   foldScheduling?: FoldSchedulingMode;
   foldPeekResults?: boolean;
+  ephemeralPeek?: boolean;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
   registerSuggestionSource: SuggestionSourceRegistrar;
@@ -213,6 +218,13 @@ export function registerActiveContext(pi: any, options: {
   // classification unless the deployment opts in, because a peek copies a fold's stored
   // source back into the window and a window that cannot reclaim it grows without bound.
   const foldPeekResults = options.foldPeekResults ?? epochScheduling;
+  if (options.ephemeralPeek !== undefined && typeof options.ephemeralPeek !== "boolean") {
+    throw new Error("ephemeralPeek must be a boolean");
+  }
+  // A deletion, not a fold: the duplicate bytes of a peek the model has already read
+  // leave the projection while the fold store keeps the source. Off by default so the
+  // pinned immediate-mode projection and durable state do not move.
+  const ephemeralPeek = options.ephemeralPeek ?? DEFAULT_EPHEMERAL_PEEK;
   const readOnlyContextActions = foldPeekResults
     ? PEEK_READ_ONLY_CONTEXT_ACTIONS
     : READ_ONLY_CONTEXT_ACTIONS_DEFAULT;
@@ -420,6 +432,7 @@ export function registerActiveContext(pi: any, options: {
     readOnlyTools,
     readOnlyContextActions,
     contextWindow: contextWindowFor(ctx) ?? undefined,
+    ephemeralPeek,
   });
 
   const authoritativeSnapshotFor = (ctx: any): ActiveContextSnapshot => {
@@ -438,6 +451,7 @@ export function registerActiveContext(pi: any, options: {
       readOnlyTools,
       readOnlyContextActions,
       contextWindow: contextWindowFor(ctx) ?? undefined,
+      ephemeralPeek,
     });
   };
 
@@ -2101,6 +2115,17 @@ export function registerActiveContext(pi: any, options: {
           }),
           nativeSummaries: "disabled",
           foldPeekResults,
+          peek: {
+            ephemeral: ephemeralPeek,
+            pinned: clone(persistence.state.pinnedPeeks ?? []),
+            reclaimed: reclaimedPeeks(snapshot, persistence.state).map((item) => ({
+              id: item.foldId,
+              toolCallId: item.toolCallId,
+              sourceBytes: item.sourceBytes,
+            })),
+            reclaimedBytes: reclaimedPeeks(snapshot, persistence.state)
+              .reduce((total, item) => total + item.sourceBytes, 0),
+          },
           freeHarvest: blockingTools.size === 0 ? "disabled" : "enabled",
           pressureSource: "last-successful-provider-response-only",
           postOverflowCallback: "blocked-while-stock-native-compaction-is-disabled",
@@ -2129,13 +2154,40 @@ export function registerActiveContext(pi: any, options: {
     if (action === "peek") {
       const id = String(params.id ?? "").trim();
       if (!id) throw new Error("peek requires id");
+      if (params.retain !== undefined) {
+        if (typeof params.retain !== "boolean") throw new Error("peek retain must be a boolean");
+        // Never accept a retention the runtime cannot honour: without ephemeral peek
+        // nothing reclaims a read, so "retain" would be a silently ignored promise.
+        if (!ephemeralPeek) {
+          throw new Error("peek retain requires ephemeralPeek; peek results are never reclaimed in this runtime");
+        }
+      }
+      const offset = boundedInteger(params.offset, 0, 0, 1_000_000_000, "offset");
+      const sliceBytes = boundedInteger(
+        params.bytes,
+        snapshot.policy.maxChapterChars,
+        PEEK_MIN_SLICE_BYTES,
+        snapshot.policy.maxChapterChars,
+        "bytes",
+      );
+      const retain = params.retain === true;
       const payload = toolPayload(peekFoldSource({
         foldId: id,
         state: persistence.state,
         entries: ctx.sessionManager.getEntries?.() ?? ctx.sessionManager.getBranch(),
         sessionId: ctx.sessionManager.getSessionId(),
-        maximumBytes: snapshot.policy.maxChapterChars,
+        maximumBytes: sliceBytes,
+        offset,
+        retained: retain,
+        ephemeral: ephemeralPeek,
+        toolName,
       }));
+      // Pinning is the informed choice the envelope names, so it is durable state:
+      // a read the agent decided to keep must survive the next projection rebuild.
+      if (ephemeralPeek && params.retain !== undefined) {
+        const next = withPinnedPeek(persistence.state, id, retain);
+        if (next !== persistence.state) await persistManual(next, "peek", ctx);
+      }
       noteSurfacingAccept(id);
       return payload;
     }
@@ -2412,6 +2464,8 @@ export function registerActiveContext(pi: any, options: {
     allowedActions: allowedToolActions,
     fullSurface: allowedToolActions.length === defaultToolActions.length,
     maxBriefChars: ACTIVE_CONTEXT_POLICY.maxBriefChars,
+    ephemeralPeek,
+    minPeekSliceBytes: PEEK_MIN_SLICE_BYTES,
     handler: toolHandler,
   }));
   for (const command of buildActiveContextCommands({

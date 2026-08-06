@@ -16,6 +16,7 @@ import {
   ownValue,
   sessionEntryMessages,
   usefulBrief,
+  utf8Slice,
 } from "./canonical.ts";
 import {
   branchSha256,
@@ -48,6 +49,7 @@ import {
   CONSOLIDATION_WIDTH_THRESHOLD,
   EXPAND_LEASE_GENERATIONS,
   MAX_EXPAND_LEASES,
+  MAX_PINNED_PEEKS,
 } from "./policy.ts";
 import type {
   ActiveContextSnapshot,
@@ -810,6 +812,125 @@ export function assertProjectionPreservesToolLinkage(source: unknown[], projecte
   }
 }
 
+/**
+ * Pin or unpin one fold's peek result. Property ORDER is load-bearing: the state
+ * digest is a stable stringify, so the optional tail is rebuilt in exactly the order
+ * `parseActiveContextState` produces it.
+ */
+export function withPinnedPeek(
+  state: ActiveContextState,
+  foldId: string,
+  pinned: boolean,
+): ActiveContextState {
+  const current = new Set(state.pinnedPeeks ?? []);
+  if (pinned === current.has(foldId)) return state;
+  if (pinned) {
+    if (current.size >= MAX_PINNED_PEEKS) {
+      throw new Error(`At most ${MAX_PINNED_PEEKS} peek results may be pinned; unpin one first`);
+    }
+    current.add(foldId);
+  } else current.delete(foldId);
+  const next = [...current].sort();
+  const head = { ...state };
+  delete head.pendingMarks;
+  delete head.pinnedPeeks;
+  delete head.advisory;
+  delete head.prepared;
+  return {
+    ...head,
+    revision: state.revision + 1,
+    ...(state.pendingMarks?.length ? { pendingMarks: clone(state.pendingMarks) } : {}),
+    ...(next.length ? { pinnedPeeks: next } : {}),
+    ...(state.advisory ? { advisory: clone(state.advisory) } : {}),
+  };
+}
+
+/** One consumed peek result whose duplicate source bytes the next projection drops. */
+export interface ReclaimedPeek {
+  toolCallId: string;
+  foldId: string;
+  index: number;
+  sourceBytes: number;
+}
+
+export function peekReclaimText(
+  foldId: string,
+  snapshot: ActiveContextSnapshot,
+): string {
+  return [
+    `[${activeContextBrand(snapshot.brandNoun)} peek reclaimed ${foldId}]`,
+    `This peek returned fold ${foldId}'s exact source to an earlier model call. Those bytes were a ` +
+      "duplicate of evidence the fold store still holds losslessly, so they were dropped from this " +
+      "projection; nothing was lost and the fold is unchanged.",
+    `Read it again exactly: ${snapshot.toolName} {"action":"peek","id":"${foldId}"}`,
+    `Read a bounded slice: ${snapshot.toolName} {"action":"peek","id":"${foldId}","offset":0,"bytes":8192}`,
+    `Keep the next read in the window: ${snapshot.toolName} {"action":"peek","id":"${foldId}","retain":true}`,
+  ].join("\n");
+}
+
+/**
+ * Peek results the agent has already had a model call to act on. A peek is the
+ * ephemeral read by construction: look, decide, discard. The newest peek is never
+ * reclaimed (no model call has seen it yet), a peek whose fold the agent expanded or
+ * whose read it pinned is never reclaimed, and neither is one already inside a fold.
+ * Deterministic in transcript positions; no wall clock and no randomness.
+ */
+export function reclaimedPeeks(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+): ReclaimedPeek[] {
+  if (!snapshot.ephemeralPeek) return [];
+  const pinned = new Set(state.pinnedPeeks ?? []);
+  const expanded = new Set(state.expanded);
+  const explicitProtected = explicitProtectedKeys(state);
+  const folded = new Set<string>();
+  for (const fold of state.folds) {
+    for (const ref of flattenFoldRefs(fold, state)) folded.add(objectRefKey(ref));
+  }
+  // Deliberately independent of the read-only batch index: whether a peek result may
+  // be FOLDED is a scheduling question, but whether its bytes are a duplicate is not,
+  // and immediate mode does not classify peek as a foldable read at all.
+  let lastAssistant = -1;
+  const peekCalls = new Map<string, string>();
+  for (let index = 0; index < snapshot.messages.length; index += 1) {
+    const message = snapshot.messages[index];
+    if (messageRole(message) !== "assistant") continue;
+    lastAssistant = index;
+    for (const part of denseOwnArrayValues(ownValue(message, "content")) ?? []) {
+      if (ownValue(part, "type") !== "toolCall" || ownValue(part, "name") !== snapshot.toolName) continue;
+      const callId = ownValue(part, "id");
+      const args = ownValue(part, "arguments");
+      const foldId = ownValue(args, "id");
+      if (typeof callId !== "string" || !callId || ownValue(args, "action") !== "peek" ||
+          typeof foldId !== "string" || !foldId) continue;
+      peekCalls.set(callId, foldId);
+    }
+  }
+  const reclaimed: ReclaimedPeek[] = [];
+  for (const item of snapshot.mapped) {
+    if (item.index >= lastAssistant || messageRole(item.message) !== "toolResult" || !item.ref) continue;
+    if (folded.has(objectRefKey(item.ref))) continue;
+    const toolCallId = ownValue(item.message, "toolCallId");
+    const foldId = typeof toolCallId === "string" ? peekCalls.get(toolCallId) : undefined;
+    if (!foldId || ownValue(item.message, "isError") !== false) continue;
+    if (pinned.has(foldId) || expanded.has(foldId)) continue;
+    // EXPLICIT protection only. The fresh-tail set exists to keep recent context
+    // unfolded for the prefix cache, but a consumed peek is precisely the tail-local
+    // edit this lever is for: honouring freshness here would forbid reclamation for
+    // the whole burst that makes it worth having, and leave the duplicate bytes to
+    // age into the fence. An agent that wants a specific read kept says so, with
+    // retain or protect.
+    if (explicitProtected.has(objectRefKey(item.ref))) continue;
+    reclaimed.push({
+      toolCallId: toolCallId as string,
+      foldId,
+      index: item.index,
+      sourceBytes: bytes(item.message),
+    });
+  }
+  return reclaimed;
+}
+
 export function projectActiveContext(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -831,8 +952,22 @@ export function projectActiveContext(
       index += 1;
     }
   }
-  assertProjectionPreservesToolLinkage(snapshot.messages, output);
-  return output;
+  // Tail-local by construction: every reclaimed peek keeps its message, its role and
+  // its toolCallId, so linkage is untouched and only the duplicate payload shrinks.
+  const reclaim = new Map(reclaimedPeeks(snapshot, state).map((item) => [item.toolCallId, item.foldId]));
+  const projected = reclaim.size
+    ? output.map((message) => {
+      const toolCallId = ownValue(message, "toolCallId");
+      const foldId = typeof toolCallId === "string" ? reclaim.get(toolCallId) : undefined;
+      if (!foldId || messageRole(message) !== "toolResult") return message;
+      return {
+        ...clone(message as Record<string, unknown>),
+        content: [{ type: "text", text: peekReclaimText(foldId, snapshot) }],
+      };
+    })
+    : output;
+  assertProjectionPreservesToolLinkage(snapshot.messages, projected);
+  return projected;
 }
 
 export function foldStatusRow(fold: ActiveFold, state: ActiveContextState, snapshot: ActiveContextSnapshot): Record<string, unknown> {
@@ -1072,6 +1207,13 @@ export function peekFoldSource(input: {
   entries: Array<Record<string, unknown>>;
   sessionId: string;
   maximumBytes?: number;
+  /** Byte offset into the exact stored source; the narrowing half of admission control. */
+  offset?: number;
+  /** Whether this read is pinned against ephemeral reclamation, for the envelope only. */
+  retained?: boolean;
+  /** Whether consumed peek results are reclaimed at all, so the envelope tells the truth. */
+  ephemeral?: boolean;
+  toolName?: string;
   projectEntry?: (entry: Record<string, unknown>) => unknown[];
 }): Record<string, unknown> {
   const fold = input.state.folds.find((item) => item.id === input.foldId);
@@ -1085,9 +1227,14 @@ export function peekFoldSource(input: {
   });
   const source = stableStringify(messages);
   const sourceBytes = bytes(source);
-  const returned = boundedUtf8(source, input.maximumBytes ?? ACTIVE_CONTEXT_POLICY.maxChapterChars);
+  const offset = Math.min(Math.max(0, input.offset ?? 0), sourceBytes);
+  const window = offset > 0 ? utf8Slice(source, offset) : source;
+  const returned = boundedUtf8(window, input.maximumBytes ?? ACTIVE_CONTEXT_POLICY.maxChapterChars);
   const returnedBytes = bytes(returned);
-  const truncated = returnedBytes < sourceBytes;
+  const nextOffset = offset + returnedBytes < sourceBytes ? offset + returnedBytes : null;
+  const truncated = nextOffset !== null;
+  const children = childFoldIds(fold);
+  const toolName = input.toolName ?? "active_context";
   return {
     version: 1,
     action: "peek",
@@ -1099,11 +1246,29 @@ export function peekFoldSource(input: {
     sourceCount: messages.length,
     sourceSha256: fold.sourceSha256,
     sourceBytes,
+    offset,
     returnedBytes,
+    nextOffset,
     truncated,
+    // Narrower reads that are always constructible, so a refusal can name one.
+    children,
+    narrower: {
+      slice: { action: "peek", id: fold.id, offset: nextOffset ?? 0, bytes: returnedBytes },
+      ...(children.length ? { child: { action: "peek", id: children[0] } } : {}),
+    },
+    retained: input.retained === true,
+    ...(input.ephemeral
+      ? {
+        lifetime: input.retained === true
+          ? "pinned: these bytes stay in the window until you refold or unpin the fold."
+          : "one model call: after the reply that reads this result, these duplicate bytes are dropped " +
+            `from the projection and the fold keeps the exact source. Pin it with ${toolName} ` +
+            `{"action":"peek","id":"${fold.id}","retain":true}.`,
+      }
+      : {}),
     note: truncated
-      ? `Truncated: this reply carries the first ${returnedBytes} of ${sourceBytes} exact source bytes; ` +
-        `expand ${fold.id} to restore the complete source in place.`
+      ? `Truncated: this reply carries bytes ${offset}..${offset + returnedBytes} of ${sourceBytes} exact ` +
+        `source bytes; continue at offset ${nextOffset} or expand ${fold.id} to restore it in place.`
       : "Complete exact source; the fold stayed collapsed and no projection changed.",
     source: returned,
   };

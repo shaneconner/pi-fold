@@ -403,6 +403,7 @@ export function mapActiveContext(input: {
   readOnlyTools?: ReadonlySet<string>;
   readOnlyContextActions?: ReadonlySet<string>;
   contextWindow?: number;
+  ephemeralPeek?: boolean;
 }): ActiveContextSnapshot {
   const policy = Object.freeze({ ...ACTIVE_CONTEXT_POLICY, ...(input.policy ?? {}) }) as typeof ACTIVE_CONTEXT_POLICY;
   const projectEntry = input.projectEntry ?? sessionEntryMessages;
@@ -498,5 +499,6 @@ export function mapActiveContext(input: {
     readOnlyContextActions: input.readOnlyContextActions ?? READ_ONLY_CONTEXT_ACTIONS_DEFAULT,
     contextWindow: reportedContextWindow ?? DEFAULT_CONTEXT_WINDOW,
     windowSource: reportedContextWindow === null ? "fallback" : "reported",
+    ephemeralPeek: input.ephemeralPeek === true,
   };
 }
