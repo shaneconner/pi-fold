@@ -915,6 +915,19 @@ export function peekReclaimText(
 }
 
 /**
+ * The lifetime a single peek actually has: the deployment default unless the call
+ * said otherwise. An `ephemeral` argument is only honoured where per-peek lifetimes
+ * are enabled, so a deployment that never opted in cannot be steered by an argument.
+ */
+export function peekLifetimeIsEphemeral(
+  snapshot: Pick<ActiveContextSnapshot, "ephemeralPeek" | "perPeekEphemeral">,
+  requested: unknown,
+): boolean {
+  if (snapshot.perPeekEphemeral && typeof requested === "boolean") return requested;
+  return snapshot.ephemeralPeek;
+}
+
+/**
  * Peek results the agent has already had a model call to act on. A peek is the
  * ephemeral read by construction: look, decide, discard. The newest peek is never
  * reclaimed (no model call has seen it yet), a peek whose fold the agent expanded or
@@ -925,7 +938,9 @@ export function reclaimedPeeks(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
 ): ReclaimedPeek[] {
-  if (!snapshot.ephemeralPeek) return [];
+  // With per-peek lifetimes the deployment default is only a default: a call that
+  // carried an explicit `ephemeral` decides for itself, in either direction.
+  if (!snapshot.ephemeralPeek && !snapshot.perPeekEphemeral) return [];
   const pinned = new Set(state.pinnedPeeks ?? []);
   const expanded = new Set(state.expanded);
   const explicitProtected = explicitProtectedKeys(state);
@@ -937,7 +952,7 @@ export function reclaimedPeeks(
   // be FOLDED is a scheduling question, but whether its bytes are a duplicate is not,
   // and immediate mode does not classify peek as a foldable read at all.
   let lastAssistant = -1;
-  const peekCalls = new Map<string, string>();
+  const peekCalls = new Map<string, { foldId: string; ephemeral: boolean }>();
   for (let index = 0; index < snapshot.messages.length; index += 1) {
     const message = snapshot.messages[index];
     if (messageRole(message) !== "assistant") continue;
@@ -949,7 +964,7 @@ export function reclaimedPeeks(
       const foldId = ownValue(args, "id");
       if (typeof callId !== "string" || !callId || ownValue(args, "action") !== "peek" ||
           typeof foldId !== "string" || !foldId) continue;
-      peekCalls.set(callId, foldId);
+      peekCalls.set(callId, { foldId, ephemeral: peekLifetimeIsEphemeral(snapshot, ownValue(args, "ephemeral")) });
     }
   }
   const reclaimed: ReclaimedPeek[] = [];
@@ -957,8 +972,9 @@ export function reclaimedPeeks(
     if (item.index >= lastAssistant || messageRole(item.message) !== "toolResult" || !item.ref) continue;
     if (folded.has(objectRefKey(item.ref))) continue;
     const toolCallId = ownValue(item.message, "toolCallId");
-    const foldId = typeof toolCallId === "string" ? peekCalls.get(toolCallId) : undefined;
-    if (!foldId || ownValue(item.message, "isError") !== false) continue;
+    const call = typeof toolCallId === "string" ? peekCalls.get(toolCallId) : undefined;
+    if (!call || !call.ephemeral || ownValue(item.message, "isError") !== false) continue;
+    const foldId = call.foldId;
     if (pinned.has(foldId) || expanded.has(foldId)) continue;
     // EXPLICIT protection only. The fresh-tail set exists to keep recent context
     // unfolded for the prefix cache, but a consumed peek is precisely the tail-local
@@ -1345,6 +1361,8 @@ export function peekFoldSource(input: {
   retained?: boolean;
   /** Whether consumed peek results are reclaimed at all, so the envelope tells the truth. */
   ephemeral?: boolean;
+  /** State a non-ephemeral lifetime out loud, where the lifetime was a per-peek choice. */
+  reportDurableLifetime?: boolean;
   toolName?: string;
   projectEntry?: (entry: Record<string, unknown>) => unknown[];
 }): Record<string, unknown> {
@@ -1394,13 +1412,17 @@ export function peekFoldSource(input: {
       ...(children.length ? { child: { action: "peek", id: children[0] } } : {}),
     },
     retained: input.retained === true,
-    ...(input.ephemeral
+    ...(input.ephemeral || input.reportDurableLifetime
       ? {
         lifetime: input.retained === true
           ? "pinned: these bytes stay in the window until you refold or unpin the fold."
-          : "one model call: after the reply that reads this result, these duplicate bytes are dropped " +
-            `from the projection and the fold keeps the exact source. Pin it with ${toolName} ` +
-            `{"action":"peek","id":"${fold.id}","retain":true}.`,
+          : (input.ephemeral
+            ? "one model call: after the reply that reads this result, these duplicate bytes are dropped " +
+              `from the projection and the fold keeps the exact source. Pin it with ${toolName} ` +
+              `{"action":"peek","id":"${fold.id}","retain":true}.`
+            : "durable: these bytes stay in the window like any other tool result until the ladder " +
+              "folds them. Release them after one read with " +
+              `${toolName} {"action":"peek","id":"${fold.id}","ephemeral":true}.`),
       }
       : {}),
     note: truncated

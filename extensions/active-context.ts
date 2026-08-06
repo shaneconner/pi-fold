@@ -30,6 +30,7 @@ import {
   foldCandidatesDetail,
   foldTreeDetail,
   peekFoldSource,
+  peekLifetimeIsEphemeral,
   prepareFold,
   preparedFoldError,
   projectActiveContext,
@@ -107,6 +108,7 @@ import {
   DEFAULT_PROVIDER_TOTAL_WINDOW,
   DEFAULT_RETAIN_PENDING_MARKS,
   DEFAULT_CURRENT_TURN_COMMIT_GUARD,
+  DEFAULT_PER_PEEK_EPHEMERAL,
   DEFAULT_PINNED_MASS_BACKSTOP,
   DEFAULT_STAGE_IDENTIFIED_BRIEFS,
   DEFAULT_STATUS_INDEX_DIET,
@@ -224,6 +226,7 @@ export function registerActiveContext(pi: any, options: {
   foldScheduling?: FoldSchedulingMode;
   foldPeekResults?: boolean;
   ephemeralPeek?: boolean;
+  perPeekEphemeral?: boolean;
   truthfulCapacity?: boolean;
   providerTotalWindow?: number;
   admissionControl?: boolean;
@@ -271,6 +274,12 @@ export function registerActiveContext(pi: any, options: {
   // leave the projection while the fold store keeps the source. Off by default so the
   // pinned immediate-mode projection and durable state do not move.
   const ephemeralPeek = options.ephemeralPeek ?? DEFAULT_EPHEMERAL_PEEK;
+  if (options.perPeekEphemeral !== undefined && typeof options.perPeekEphemeral !== "boolean") {
+    throw new Error("perPeekEphemeral must be a boolean");
+  }
+  // The deployment default answers whether peeks are ephemeral HERE; only the caller
+  // knows whether THIS read is a glance or a fact it is about to work from.
+  const perPeekEphemeral = options.perPeekEphemeral ?? DEFAULT_PER_PEEK_EPHEMERAL;
   if (options.truthfulCapacity !== undefined && typeof options.truthfulCapacity !== "boolean") {
     throw new Error("truthfulCapacity must be a boolean");
   }
@@ -586,6 +595,7 @@ export function registerActiveContext(pi: any, options: {
     readOnlyContextActions,
     contextWindow: budgetWindowFor(ctx) ?? undefined,
     ephemeralPeek,
+    perPeekEphemeral,
     stageIdentifiedBriefs,
   });
 
@@ -606,6 +616,7 @@ export function registerActiveContext(pi: any, options: {
       readOnlyContextActions,
       contextWindow: budgetWindowFor(ctx) ?? undefined,
       ephemeralPeek,
+      perPeekEphemeral,
       stageIdentifiedBriefs,
     });
   };
@@ -2447,6 +2458,7 @@ export function registerActiveContext(pi: any, options: {
           foldPeekResults,
           peek: {
             ephemeral: ephemeralPeek,
+            perPeekOverride: perPeekEphemeral,
             pinned: clone(persistence.state.pinnedPeeks ?? []),
             reclaimed: reclaimedPeeks(snapshot, persistence.state).map((item) => ({
               id: item.foldId,
@@ -2500,6 +2512,16 @@ export function registerActiveContext(pi: any, options: {
         snapshot.policy.maxChapterChars,
         "bytes",
       );
+      if (params.ephemeral !== undefined) {
+        if (!perPeekEphemeral) {
+          throw new Error("peek ephemeral requires perPeekEphemeral; this runtime has one peek lifetime");
+        }
+        if (typeof params.ephemeral !== "boolean") throw new Error("peek ephemeral must be a boolean");
+      }
+      const effectiveEphemeral = peekLifetimeIsEphemeral(
+        { ephemeralPeek, perPeekEphemeral },
+        params.ephemeral,
+      );
       const retain = params.retain === true;
       const target = persistence.state.folds.find((item) => item.id === id);
       if (!target) throw new Error(`Unknown active-context fold ${id}`);
@@ -2518,7 +2540,8 @@ export function registerActiveContext(pi: any, options: {
         maximumBytes: sliceBytes,
         offset,
         retained: retain,
-        ephemeral: ephemeralPeek,
+        ephemeral: effectiveEphemeral,
+        reportDurableLifetime: perPeekEphemeral,
         toolName,
       }));
       // Pinning is the informed choice the envelope names, so it is durable state:
@@ -2858,6 +2881,7 @@ export function registerActiveContext(pi: any, options: {
     fullSurface: allowedToolActions.length === defaultToolActions.length,
     maxBriefChars: ACTIVE_CONTEXT_POLICY.maxBriefChars,
     ephemeralPeek,
+    perPeekEphemeral,
     statusDetails: statusIndexDiet
       ? ["fold_candidates", "tree", "folds", "objects"]
       : ["fold_candidates", "tree"],

@@ -208,6 +208,7 @@ function makeRuntime(built, {
   currentTurnCommitGuard,
   stageIdentifiedBriefs,
   ephemeralPeek,
+  perPeekEphemeral,
   truthfulCapacity,
   providerTotalWindow,
   admissionControl,
@@ -310,6 +311,7 @@ function makeRuntime(built, {
     ...(currentTurnCommitGuard === undefined ? {} : { currentTurnCommitGuard }),
     ...(stageIdentifiedBriefs === undefined ? {} : { stageIdentifiedBriefs }),
     ...(ephemeralPeek === undefined ? {} : { ephemeralPeek }),
+    ...(perPeekEphemeral === undefined ? {} : { perPeekEphemeral }),
     ...(truthfulCapacity === undefined ? {} : { truthfulCapacity }),
     ...(providerTotalWindow === undefined ? {} : { providerTotalWindow }),
     ...(admissionControl === undefined ? {} : { admissionControl }),
@@ -4431,6 +4433,134 @@ async function gatePinnedMassBackstop() {
   };
 }
 
+/**
+ * Peek lifetime as a per-call decision. The deployment default answers whether peeks
+ * are ephemeral HERE; only the caller knows whether THIS read is a glance or a fact
+ * it is about to work from. The override runs in both directions and the envelope
+ * states the lifetime the read actually has.
+ */
+async function gatePerPeekEphemeral() {
+  const probe = makeFixture({
+    turns: 10, resultChars: 12_000, contextWindow: 100_000, peekTurns: [0, 8], peekTargetId: "placeholder",
+  });
+  const seed = context.emptyActiveContextState(probe.sessionId);
+  const foldId = (await commitCandidate(
+    seed, peekSnapshot(probe), context.selectAutomaticToolBatch(peekSnapshot(probe), seed, 1)[0],
+    { brief: "The exact stale inspection result stays recoverable behind this fold." },
+  )).prepared.id;
+
+  // Two peeks of that fold: the first opts out of reclamation, the second opts in.
+  const built = makeFixture({
+    turns: 10, resultChars: 12_000, contextWindow: 100_000, peekTurns: [0, 8], peekTargetId: foldId,
+  });
+  const withOverrides = structuredClone(built.messages);
+  const overrides = new Map([[0, false], [1, true]]);
+  let seen = 0;
+  for (const message of withOverrides) {
+    if (message.role !== "assistant") continue;
+    for (const part of message.content ?? []) {
+      if (part.type !== "toolCall" || part.arguments?.action !== "peek") continue;
+      const decision = overrides.get(seen);
+      seen += 1;
+      if (decision !== undefined) part.arguments.ephemeral = decision;
+    }
+  }
+  assert.equal(seen, 2, "The fixture did not carry two peek calls");
+  const empty = context.emptyActiveContextState(built.sessionId);
+  const base = peekSnapshot(built, { ephemeralPeek: true });
+  const state = (await commitCandidate(
+    empty, base, context.selectAutomaticToolBatch(base, empty, 1)[0],
+    { brief: "The exact stale inspection result stays recoverable behind this fold." },
+  )).state;
+
+  const snapshotWith = (options) => context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: withOverrides,
+    contextEntries: built.entries,
+    contextWindow: built.contextWindow,
+    ...options,
+  });
+
+  // Absent the lever, an `ephemeral` argument decides nothing: both reads follow the
+  // deployment default, exactly as they did before it existed.
+  const plainOn = context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: built.messages,
+    contextEntries: built.entries,
+    contextWindow: built.contextWindow,
+    ephemeralPeek: true,
+  });
+  const ignoredOverrides = snapshotWith({ ephemeralPeek: true });
+  assert.equal(context.reclaimedPeeks(ignoredOverrides, state).length,
+    context.reclaimedPeeks(plainOn, state).length,
+    "An ephemeral argument changed behavior with the lever off");
+  assert.deepEqual(context.reclaimedPeeks(snapshotWith({}), state), [],
+    "An ephemeral argument reclaimed with both levers off");
+
+  // Opt OUT of an ephemeral deployment: the pinned-by-argument read stays raw.
+  const optOut = snapshotWith({ ephemeralPeek: true, perPeekEphemeral: true });
+  const reclaimedOptOut = context.reclaimedPeeks(optOut, state);
+  assert.equal(reclaimedOptOut.length, 1, "The per-peek opt-out did not hold its read");
+  assert.equal(context.reclaimedPeeks(plainOn, state).length, 2);
+
+  // Opt IN on a durable deployment: only the read that asked is released.
+  const optIn = snapshotWith({ perPeekEphemeral: true });
+  const reclaimedOptIn = context.reclaimedPeeks(optIn, state);
+  assert.equal(reclaimedOptIn.length, 1, "The per-peek opt-in reclaimed nothing");
+  assert.equal(reclaimedOptIn[0].foldId, foldId);
+  assert(bytesOf(context.projectActiveContext(optIn, state)) <
+    bytesOf(context.projectActiveContext(snapshotWith({}), state)),
+    "The opted-in read freed no bytes");
+
+  // The envelope tells the truth in both directions, and the schema carries the param.
+  const runtime = makeRuntime(built, { perPeekEphemeral: true });
+  await startRuntime(runtime);
+  await measure(runtime, 80_000, 100_000);
+  await project(runtime);
+  const liveFold = materialized(runtime).folds[0]?.id;
+  assert(liveFold, "The live fixture folded nothing to peek");
+  const properties = [...runtime.tools.values()][0].parameters.properties;
+  assert.equal(properties.ephemeral.type, "boolean");
+  assert.equal(Object.hasOwn(properties, "retain"), false, "retain appeared without ephemeralPeek");
+  const durable = await toolCall(runtime, { action: "peek", id: liveFold });
+  assert.match(durable.details.lifetime, /^durable:/);
+  const released = await toolCall(runtime, { action: "peek", id: liveFold, ephemeral: true });
+  assert.match(released.details.lifetime, /^one model call:/);
+  await assert.rejects(
+    () => toolCall(runtime, { action: "peek", id: liveFold, ephemeral: "yes" }),
+    /peek ephemeral must be a boolean/,
+  );
+
+  // Default runtime: the parameter does not exist and is refused.
+  const plain = makeRuntime(built, { ephemeralPeek: true });
+  await startRuntime(plain);
+  await measure(plain, 80_000, 100_000);
+  await project(plain);
+  const plainFold = materialized(plain).folds[0]?.id;
+  assert(plainFold, "The default fixture folded nothing to peek");
+  const plainProperties = [...plain.tools.values()][0].parameters.properties;
+  assert.equal(Object.hasOwn(plainProperties, "ephemeral"), false);
+  assert.equal(plainProperties.retain.type, "boolean");
+  await assert.rejects(
+    () => toolCall(plain, { action: "peek", id: plainFold, ephemeral: true }),
+    /peek ephemeral requires perPeekEphemeral/,
+  );
+  // retain is still the durable pin it always was.
+  const pinned = await toolCall(plain, { action: "peek", id: plainFold, retain: true });
+  assert.equal(pinned.details.retained, true);
+  assert.match(pinned.details.lifetime, /^pinned:/);
+  assert.deepEqual(materialized(plain).pinnedPeeks, [plainFold]);
+
+  return {
+    defaultReclaimed: context.reclaimedPeeks(plainOn, state).length,
+    optOutReclaimed: reclaimedOptOut.length,
+    optInReclaimed: reclaimedOptIn.length,
+    overridesIgnoredWithoutLever: true,
+    schemaKeysWithLever: Object.keys(properties).length,
+    schemaKeysWithout: Object.keys(plainProperties).length,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -4485,6 +4615,7 @@ const gates = [
   [51, "Stage-identified fold briefs", gateStageIdentifiedBriefs],
   [52, "Current-turn commit guard", gateCurrentTurnCommitGuard],
   [53, "Pinned mass backstop", gatePinnedMassBackstop],
+  [54, "Per-peek ephemeral override", gatePerPeekEphemeral],
 ];
 
 let failures = 0;

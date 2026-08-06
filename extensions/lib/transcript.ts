@@ -405,6 +405,7 @@ export function mapActiveContext(input: {
   contextWindow?: number;
   ephemeralPeek?: boolean;
   stageIdentifiedBriefs?: boolean;
+  perPeekEphemeral?: boolean;
 }): ActiveContextSnapshot {
   const policy = Object.freeze({ ...ACTIVE_CONTEXT_POLICY, ...(input.policy ?? {}) }) as typeof ACTIVE_CONTEXT_POLICY;
   const projectEntry = input.projectEntry ?? sessionEntryMessages;
@@ -502,5 +503,6 @@ export function mapActiveContext(input: {
     windowSource: reportedContextWindow === null ? "fallback" : "reported",
     ephemeralPeek: input.ephemeralPeek === true,
     stageIdentifiedBriefs: input.stageIdentifiedBriefs === true,
+    perPeekEphemeral: input.perPeekEphemeral === true,
   };
 }

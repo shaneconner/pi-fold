@@ -183,6 +183,15 @@ export const DEFAULT_CURRENT_TURN_COMMIT_GUARD = false;
  */
 export const DEFAULT_PINNED_MASS_BACKSTOP = false;
 
+/**
+ * Peek lifetime as a per-call decision. The config default answers "are peek results
+ * ephemeral in this deployment"; it cannot answer "is THIS read a glance or a fact I
+ * am about to work from". With this on, `peek` accepts an explicit `ephemeral`
+ * boolean that overrides the deployment default for that one read, in either
+ * direction, and the peek envelope reports the lifetime it actually has.
+ */
+export const DEFAULT_PER_PEEK_EPHEMERAL = false;
+
 /** The default status payload stops carrying the whole fold tree. */
 export const DEFAULT_STATUS_INDEX_DIET = false;
 export const STATUS_DIET_SUGGESTIONS = 5;
@@ -456,6 +465,8 @@ export interface ActiveContextSnapshot {
   ephemeralPeek: boolean;
   /** Automatic tool briefs carry bounded exact call arguments and result anchors. */
   stageIdentifiedBriefs: boolean;
+  /** A peek call may override the deployment's ephemeral default for itself. */
+  perPeekEphemeral: boolean;
 }
 
 export interface FoldCandidate {

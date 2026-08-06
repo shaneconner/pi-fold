@@ -15,6 +15,7 @@ export function buildActiveContextTool(input: {
   fullSurface: boolean;
   maxBriefChars: number;
   ephemeralPeek?: boolean;
+  perPeekEphemeral?: boolean;
   statusDetails: readonly string[];
   minPeekSliceBytes: number;
   handler: ToolHandler;
@@ -59,6 +60,14 @@ export function buildActiveContextTool(input: {
             retain: {
               type: "boolean",
               description: "Peek only: keep this result in the window instead of letting it be reclaimed after one model call.",
+            },
+          }
+          : {}),
+        ...(input.perPeekEphemeral
+          ? {
+            ephemeral: {
+              type: "boolean",
+              description: "Peek only: decide this read's lifetime yourself. True releases its duplicate bytes once a model call has read them; false keeps them for as long as any other tool result.",
             },
           }
           : {}),
