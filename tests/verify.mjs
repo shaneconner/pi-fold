@@ -207,6 +207,7 @@ function makeRuntime(built, {
   eligibleShareCommitThreshold,
   statusIndexDiet,
   advisoryDelivery,
+  projectionInstrumentation,
   setSuggestionSourceRegistrar,
   loadHostModule,
   packageRegistration = false,
@@ -306,6 +307,7 @@ function makeRuntime(built, {
     ...(eligibleShareCommitThreshold === undefined ? {} : { eligibleShareCommitThreshold }),
     ...(statusIndexDiet === undefined ? {} : { statusIndexDiet }),
     ...(advisoryDelivery === undefined ? {} : { advisoryDelivery }),
+    ...(projectionInstrumentation === undefined ? {} : { projectionInstrumentation }),
     ...(setSuggestionSourceRegistrar ? { setSuggestionSourceRegistrar } : {}),
   };
   runtime.registration = packageRegistration
@@ -3107,6 +3109,124 @@ async function runAdvisorySession(options) {
   return { runtime, advisories };
 }
 
+async function gateProjectionInstrumentation() {
+  // The comparison itself. A pure append leaves the whole previous prefix intact,
+  // which is exactly the condition under which a positional cache should hit.
+  const base = ["a", "b", "c"];
+  assert.deepEqual(context.compareProjections(base, ["a", "b", "c"]), {
+    change: "identical", previousCount: 3, nextCount: 3, appendedCount: 0, firstDivergentIndex: null,
+  });
+  assert.deepEqual(context.compareProjections(base, ["a", "b", "c", "d"]), {
+    change: "append", previousCount: 3, nextCount: 4, appendedCount: 1, firstDivergentIndex: null,
+  });
+  assert.deepEqual(context.compareProjections(base, ["a", "z", "c", "d"]), {
+    change: "rewrite", previousCount: 3, nextCount: 4, appendedCount: 1, firstDivergentIndex: 1,
+  });
+  // A shorter projection is a rewrite even with an intact prefix: a fold removed rows.
+  assert.equal(context.compareProjections(base, ["a", "b"]).change, "rewrite");
+  assert.equal(context.compareProjections(null, base).change, "append");
+
+  // The two dials are independent. A miss on a projection that only GREW is
+  // provider-side by construction: no byte we control moved.
+  const ledger = context.emptyLedger();
+  ledger.projections = 4;
+  assert.deepEqual(
+    context.observeCacheUsage(ledger, { usage: { input: 200_000, cacheRead: 0 }, change: "append" }),
+    { ordinal: 4, change: "append", inputTokens: 200_000, cacheReadTokens: 0, providerSideMiss: true },
+  );
+  assert.equal(
+    context.observeCacheUsage(ledger, { usage: { input: 200_000, cacheRead: 0 }, change: "rewrite" })
+      .providerSideMiss,
+    false,
+  );
+  assert.equal(
+    context.observeCacheUsage(ledger, { usage: { input: 200_000, cacheRead: 180_000 }, change: "append" })
+      .providerSideMiss,
+    false,
+  );
+  assert.equal(ledger.observedMisses, 2);
+  assert.equal(ledger.providerSideMisses, 1);
+  assert.equal(context.observeCacheUsage(ledger, { usage: null, change: "append" }), null);
+
+  // End to end. The same session reports rewrites it caused separately from misses it
+  // merely observed, and the per-message digests make the append case provable.
+  const runtime = makeRuntime(
+    makeFixture({ turns: 14, resultChars: 9_000, contextWindow: 100_000 }),
+    { projectionInstrumentation: true },
+  );
+  await startRuntime(runtime);
+  await project(runtime);
+  await project(runtime);
+  let ledgerNow = (await toolStatus(runtime)).details.automatic.instrumentation;
+  assert.equal(ledgerNow.enabled, true);
+  assert.equal(ledgerNow.projectionRewrites, 0, "An unchanged reprojection counted as a rewrite");
+  assert(ledgerNow.projectionsUnchanged >= 1);
+
+  for (const tokens of [78_000, 82_000, 86_000, 88_000]) {
+    await measure(runtime, tokens, 100_000);
+    await project(runtime);
+  }
+  ledgerNow = (await toolStatus(runtime)).details.automatic.instrumentation;
+  assert(materialized(runtime).folds.length >= 1, "The fixture never folded");
+  assert(ledgerNow.projectionRewrites >= 1, "A fold was not counted as a projection rewrite");
+  assert.equal(
+    ledgerNow.projections,
+    ledgerNow.projectionRewrites + ledgerNow.projectionAppends + ledgerNow.projectionsUnchanged,
+  );
+  // The measured harness reports every response with cacheRead 0, so the misses are
+  // all observed; the ones on projections we did not rewrite are the provider's.
+  assert(ledgerNow.observedCacheMisses >= 1);
+  assert(ledgerNow.providerSideCacheMisses <= ledgerNow.observedCacheMisses);
+  // The split is exhaustive and is exactly the rewrite/append classification.
+  const misses = ledgerNow.cacheObservations.filter((item) => item.cacheReadTokens === 0);
+  assert.equal(misses.length, ledgerNow.observedCacheMisses);
+  assert.equal(
+    misses.filter((item) => item.change !== "rewrite").length,
+    ledgerNow.providerSideCacheMisses,
+  );
+
+  const rewrite = ledgerNow.projectionRecords.find((record) => record.change === "rewrite");
+  assert.equal(typeof rewrite.firstDivergentIndex, "number",
+    "A rewrite recorded no divergence point");
+  const appended = ledgerNow.projectionRecords.filter((record) => record.change === "append");
+  assert(appended.every((record) => record.firstDivergentIndex === null),
+    "An append recorded a prefix divergence");
+  assert(ledgerNow.projectionRecords.every((record) => /^[a-f0-9]{64}$/.test(record.prefixSha256)));
+  assert(ledgerNow.projectionRecords.length <= 64, "The record ring is unbounded");
+  assert(ledgerNow.cacheObservations.every((item) =>
+    typeof item.inputTokens === "number" && typeof item.cacheReadTokens === "number"));
+
+  // It reaches the envelope the harness reads alongside the existing accounting.
+  const epoch = makeRuntime(
+    makeFixture({ turns: 14, resultChars: 9_000, contextWindow: 100_000 }),
+    { foldScheduling: "epoch", projectionInstrumentation: true },
+  );
+  await startRuntime(epoch);
+  await measure(epoch, 78_000, 100_000);
+  await project(epoch);
+  const committed = await toolCall(epoch, { action: "commit" });
+  assert.equal(typeof committed.details.estimatedFreedTokens, "number");
+  assert.equal(typeof committed.details.instrumentation.projectionRewrites, "number");
+  assert.equal(typeof committed.details.instrumentation.providerSideCacheMisses, "number");
+
+  // Default off: no ledger, no records.
+  const plain = makeRuntime(makeFixture({ turns: 6, contextWindow: 100_000 }));
+  await startRuntime(plain);
+  await project(plain);
+  const off = (await toolStatus(plain)).details.automatic.instrumentation;
+  assert.deepEqual(off, { enabled: false });
+
+  return {
+    projections: ledgerNow.projections,
+    projectionRewrites: ledgerNow.projectionRewrites,
+    projectionAppends: ledgerNow.projectionAppends,
+    projectionsUnchanged: ledgerNow.projectionsUnchanged,
+    observedCacheMisses: ledgerNow.observedCacheMisses,
+    providerSideCacheMisses: ledgerNow.providerSideCacheMisses,
+    envelopeCarriesLedger: true,
+  };
+}
+
 async function gateAdvisoryDelivery() {
   // The defect, isolated. Identical pressure schedule; the only difference is whether
   // the ladder has anything to fold, which is to say whether the session is real.
@@ -3999,6 +4119,7 @@ const gates = [
   [47, "Eligible-share commit trigger", gateEligibleShareCommitTrigger],
   [48, "Status index diet", gateStatusIndexDiet],
   [49, "Advisory delivery accounting", gateAdvisoryDelivery],
+  [50, "Projection instrumentation", gateProjectionInstrumentation],
 ];
 
 let failures = 0;

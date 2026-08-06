@@ -103,6 +103,7 @@ import {
   DEFAULT_ELIGIBLE_SHARE_COMMIT_THRESHOLD,
   DEFAULT_EPHEMERAL_PEEK,
   DEFAULT_FOLD_SCHEDULING,
+  DEFAULT_PROJECTION_INSTRUMENTATION,
   DEFAULT_PROVIDER_TOTAL_WINDOW,
   DEFAULT_RETAIN_PENDING_MARKS,
   DEFAULT_STATUS_INDEX_DIET,
@@ -167,6 +168,15 @@ import {
   surfacingOrdinal,
   updateSurfacing,
 } from "./lib/surfacing.ts";
+import {
+  compareProjections,
+  emptyLedger,
+  ledgerSummary,
+  messageDigests,
+  observeCacheUsage,
+  recordProjection,
+} from "./lib/instrumentation.ts";
+import type { ProjectionChange } from "./lib/instrumentation.ts";
 import { buildActiveContextCommands, buildActiveContextTool } from "./lib/tool-surface.ts";
 import { mapActiveContext } from "./lib/transcript.ts";
 
@@ -174,6 +184,7 @@ import { mapActiveContext } from "./lib/transcript.ts";
 export * from "./lib/advisory.ts";
 export * from "./lib/canonical.ts";
 export * from "./lib/folding.ts";
+export * from "./lib/instrumentation.ts";
 export * from "./lib/measurement.ts";
 export * from "./lib/persistence.ts";
 export * from "./lib/policy.ts";
@@ -216,6 +227,7 @@ export function registerActiveContext(pi: any, options: {
   eligibleShareCommitThreshold?: number;
   statusIndexDiet?: boolean;
   advisoryDelivery?: boolean;
+  projectionInstrumentation?: boolean;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
   registerSuggestionSource: SuggestionSourceRegistrar;
@@ -301,6 +313,12 @@ export function registerActiveContext(pi: any, options: {
   // Spend the milestone budget when the advisory REACHES the agent, and stop letting
   // an automatic fold discard an arm that has not spoken yet.
   const advisoryDelivery = options.advisoryDelivery ?? DEFAULT_ADVISORY_DELIVERY;
+  if (options.projectionInstrumentation !== undefined &&
+      typeof options.projectionInstrumentation !== "boolean") {
+    throw new Error("projectionInstrumentation must be a boolean");
+  }
+  const projectionInstrumentation = options.projectionInstrumentation ??
+    DEFAULT_PROJECTION_INSTRUMENTATION;
   const readOnlyContextActions = foldPeekResults
     ? PEEK_READ_ONLY_CONTEXT_ACTIONS
     : READ_ONLY_CONTEXT_ACTIONS_DEFAULT;
@@ -408,6 +426,14 @@ export function registerActiveContext(pi: any, options: {
     providerMeasurementRevisionByMessageSha: new Map<string, number>(),
     providerMeasurementByMessageSha: new Map<string, ProviderContextMeasurementReceipt>(),
     providerMeasurementAnchorByMessageSha: new Map<string, ProviderMeasurementAnchor>(),
+  };
+
+  // Owns the projection/cache ledger. Nothing here is durable: it is telemetry about
+  // this process's own projections, rebuilt from scratch on every load.
+  const instrumentation = {
+    ledger: emptyLedger(),
+    previousDigests: null as string[] | null,
+    lastChange: "append" as ProjectionChange,
   };
 
   // Owns advisory arming and hard-fence delivery; durable effects use persistenceQueue.
@@ -605,6 +631,9 @@ export function registerActiveContext(pi: any, options: {
     ladder.lastSelectionKind = null;
     ladder.lastSelectionSourceIds = [];
     ladder.pendingContextNote = null;
+    instrumentation.ledger = emptyLedger();
+    instrumentation.previousDigests = null;
+    instrumentation.lastChange = "append";
     advisory.historicalGuidanceEntries = 0;
     advisory.armedMilestone = null;
     advisory.advisoryScheduleKey = null;
@@ -1331,6 +1360,20 @@ export function registerActiveContext(pi: any, options: {
     // only useful next action is the fold that keeps the request transmissible.
     return armed.milestone === "urgent" ? projected : appendSurfacing(projected, snapshot);
   };
+  /**
+   * Classify the projection we are about to send against the one before it. A rewrite
+   * is ours; a pure append that the provider still re-reads is not, and conflating the
+   * two is what made a scheduling lever look responsible for 12 misses it never caused.
+   */
+  const noteProjection = (projected: unknown[]): void => {
+    if (!projectionInstrumentation) return;
+    const digests = messageDigests(projected);
+    const comparison = compareProjections(instrumentation.previousDigests, digests);
+    recordProjection(instrumentation.ledger, comparison, digests);
+    instrumentation.previousDigests = digests;
+    instrumentation.lastChange = comparison.change;
+  };
+
   const commitDeterministicCandidate = async (
     snapshot: ActiveContextSnapshot,
     candidate: FoldCandidate,
@@ -1454,6 +1497,7 @@ export function registerActiveContext(pi: any, options: {
         ? estimatedTokens(freedBytes) / snapshot.contextWindow
         : 0,
       targetWindowShare: EPOCH_COMMIT_TARGET_WINDOW_SHARE,
+      ...(projectionInstrumentation ? { instrumentation: ledgerSummary(instrumentation.ledger) } : {}),
     };
   };
 
@@ -1966,6 +2010,7 @@ export function registerActiveContext(pi: any, options: {
         updateStatus(ctx);
         return { messages: event.messages };
       }
+      noteProjection(projected);
       updateStatus(ctx);
       return { messages: projected };
     } catch (error) {
@@ -2042,6 +2087,12 @@ export function registerActiveContext(pi: any, options: {
     if (lifecycle.shuttingDown) return;
     try {
       const message = ownValue(event, "message");
+      if (projectionInstrumentation) {
+        observeCacheUsage(instrumentation.ledger, {
+          usage: ownValue(message, "usage"),
+          change: instrumentation.lastChange,
+        });
+      }
       const measurement = providerContextMeasurement(
         message,
         budgetWindowFor(ctx) ?? DEFAULT_CONTEXT_WINDOW,
@@ -2341,6 +2392,14 @@ export function registerActiveContext(pi: any, options: {
             eligibleShareThreshold,
           }),
           nativeSummaries: "disabled",
+          instrumentation: projectionInstrumentation
+            ? {
+              enabled: true,
+              ...ledgerSummary(instrumentation.ledger),
+              projectionRecords: clone(instrumentation.ledger.records),
+              cacheObservations: clone(instrumentation.ledger.observations),
+            }
+            : { enabled: false },
           foldPeekResults,
           peek: {
             ephemeral: ephemeralPeek,
@@ -2481,6 +2540,7 @@ export function registerActiveContext(pi: any, options: {
         estimatedEligibleFreedTokens: accounting.eligibleFreedTokens,
         freedWindowShare: accounting.freedWindowShare,
         durableRevision: persistence.state.revision,
+        ...(projectionInstrumentation ? { instrumentation: ledgerSummary(instrumentation.ledger) } : {}),
         activation: pending
           ? "one batched projection rewrite; durable immediately and projected on the next model call"
           : "no pending marks; nothing was rewritten",
