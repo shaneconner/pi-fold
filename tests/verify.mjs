@@ -33,7 +33,7 @@ const LEGACY_REPRODUCTION_FIXTURE = Object.freeze({
   entryTypes: Object.freeze([
     "quorum-active-context-fold-record",
     "quorum-active-context-state",
-    "quorum-context-instrumentation",
+    "quorum-context-event",
     "quorum-native-compaction-decision",
     "quorum-native-compaction-receipt",
     "quorum-provider-context-measurement",
@@ -371,6 +371,30 @@ function stateEntry(sessionId, state, id = "seed-state", parentId = null) {
   return customEntry(context.ACTIVE_CONTEXT_STATE_ENTRY, state, id, parentId);
 }
 
+/** Adjacent chapters small enough that merging several stays inside the bite-size cap. */
+async function smallChapterForest(count) {
+  const built = makeFixture({
+    turns: Math.max(16, count + 10),
+    tools: false,
+    chapterChars: 900,
+    policy: { freshTurns: 1, freshBytes: 0, minChapterChars: 1 },
+    contextWindow: 100_000,
+  });
+  let state = context.emptyActiveContextState(built.sessionId);
+  for (let turn = 0; turn < count; turn += 1) {
+    const candidate = context.manualFoldCandidate(
+      built.snapshot,
+      state,
+      [built.turnEntries[turn][0], built.turnEntries[turn].at(-1)],
+    );
+    state = (await commitCandidate(state, built.snapshot, candidate, {
+      brief: `Complete chapter ${turn} remains independently pageable and exactly recoverable.`,
+      now: turn + 1,
+    })).state;
+  }
+  return { ...built, state };
+}
+
 async function chapterForest(count) {
   const built = makeFixture({
     turns: Math.max(9, count + 4),
@@ -560,7 +584,7 @@ async function gateNeutralDefaultBranding() {
   assert.deepEqual(surface.entryTypes, [
     "pi-fold-active-context-fold-record",
     "pi-fold-active-context-state",
-    "pi-fold-context-instrumentation",
+    "pi-fold-context-event",
     "pi-fold-native-compaction-decision",
     "pi-fold-native-compaction-receipt",
     "pi-fold-provider-context-measurement",
@@ -1496,7 +1520,7 @@ async function gateFoldCandidatesDetail() {
     preparing: false,
   });
   const durableEntries = (entries) => entries.filter((entry) =>
-    !String(entry.customType ?? "").endsWith("-context-instrumentation"));
+    !String(entry.customType ?? "").endsWith("-context-event"));
   const branchBefore = json.stableStringify(durableEntries(runtime.branch));
   const appendedBefore = durableEntries(runtime.appended).length;
   const status = await toolStatus(runtime, "active_context", "fold_candidates");
@@ -1510,7 +1534,7 @@ async function gateFoldCandidatesDetail() {
   // record, no projection change.
   assert.equal(json.stableStringify(durableEntries(runtime.branch)), branchBefore);
   assert.equal(durableEntries(runtime.appended).length, appendedBefore);
-  assert(runtime.appended.some((entry) => entry.customType === "pi-fold-context-instrumentation"),
+  assert(runtime.appended.some((entry) => entry.customType === "pi-fold-context-event"),
     "A status call was not recorded in the context-event stream");
   return {
     selectorIdentical: true,
@@ -1987,8 +2011,9 @@ async function gateGuidanceProfiles() {
     "[active-context milestone tools; session active-context-t] The read-only tool-fold rung begins at 71%. " +
       "Eligible completed tool batches can be folded now; current endpoint ids are in the live advisory.",
     "[active-context milestone chapters; session active-context-t] The chapter preparation rung begins at 85%. " +
-      'Use eligibleChapter endpoints with active_context {"action":"fold","ids":["<start>","<end>"],' +
-      '"brief":"<factual brief>"}.',
+      'Closed chapters fold from the eligibleChapter endpoints in active_context {"action":"status"}; ' +
+      'active_context {"action":"fold","ids":["<start>","<end>"],"brief":"<factual brief>"} folds one with ' +
+      "your own brief instead of a generated one.",
     "[active-context milestone urgent; session active-context-t] The hard context fence is near. The next " +
       "automatic action is a committed chapter fold or the provider request is aborted before transmission.",
   ];
@@ -2039,17 +2064,27 @@ async function gateGuidanceProfiles() {
   assert(curationTexts.orientation.includes('Page it with active_context {"action":"status"}'));
   assert(curationTexts.orientation.includes(
     'expand what the current task needs with active_context {"action":"expand","id":"<fold-id>"}'));
-  assert(curationTexts.notice.includes("curate it against the task you are on now"));
+  // REACTIVE framing: every dosage reports what is happening and names the actions that
+  // change it. None of them asks the agent to fold proactively, because the runtime
+  // folds either way and advice it can only take by interrupting its own task is noise.
+  assert(curationTexts.notice.includes("the ladder is folding stale spans as it fills"));
   assert(curationTexts.notice.includes(
-    'Fold the spans that task no longer needs with active_context {"action":"fold"'));
-  assert(curationTexts.notice.includes(
-    'keep what must stay raw out of every fold with active_context {"action":"protect","ids":["<entry-id>"]}'));
-  assert(curationTexts.tools.includes("Fold the batches whose detail this task is finished with"));
-  assert(curationTexts.chapters.includes("Fold up: hand two or more adjacent folds of finished work"));
+    'active_context {"action":"fold","marks":[{"ids":["<start>","<end>"],"brief":"<factual brief>"}]}'));
+  assert(curationTexts.notice.includes("Continuing the task is the default"));
+  assert(curationTexts.tools.includes("what the ladder reclaims first"));
+  assert(curationTexts.tools.includes('{"action":"rebrief","id":"<fold-id>","brief":"<factual brief>"}'));
+  assert(curationTexts.chapters.includes("the next thing the ladder consolidates"));
   assert(curationTexts.chapters.includes(
     '{"action":"fold","ids":["<fold-id>","<fold-id>"],"brief":"<factual brief>"}'));
   assert(curationTexts.chapters.includes("leaving the oldest material deepest and still exactly recoverable"));
+  assert(curationTexts.chapters.includes('{"action":"reboundary","ids":["<start>","<end>"]}'));
   assert(Object.values(curationTexts).every((text) => !text.includes("\u2014")));
+  // Nothing in any dosage tells the agent to fold, and nothing asks it a question.
+  for (const [milestone, text] of Object.entries(curationTexts)) {
+    assert.equal(/\?/.test(text), false, `The ${milestone} dosage asks a question`);
+    assert.equal(/^\[[^\]]+\]\s+(?:Fold|Curate|Please)\b/.test(text), false,
+      `The ${milestone} dosage opens with an instruction rather than a report`);
+  }
   const curationRun = await advisoryRun("curation", [81_600, 27_200, 81_600]);
   assert.deepEqual(curationRun.texts, [curationTexts.orientation]);
   assert.deepEqual(curationRun.delivered, { orientation: 1 });
@@ -2099,7 +2134,7 @@ async function gatePeekAndFoldIndex() {
   const seeded = materialized(runtime);
   const projectionBefore = json.stableStringify(context.projectActiveContext(forest.snapshot, seeded));
   const durableEntries = (entries) => entries.filter((entry) =>
-    !String(entry.customType ?? "").endsWith("-context-instrumentation"));
+    !String(entry.customType ?? "").endsWith("-context-event"));
   const branchBefore = json.stableStringify(durableEntries(runtime.branch));
   const appendedBefore = durableEntries(runtime.appended).length;
   assert(projectionBefore.includes(consolidationId));
@@ -2452,11 +2487,13 @@ async function gateSurfacingCarrier() {
     ["-milestone", "-advisory", "-surfacing"].some((suffix) => message.customType.endsWith(suffix))), false);
 
   // Re-projecting the same ordinal neither duplicates the carrier nor rewrites state.
-  const appendedBefore = runtime.appended.length;
+  const appendedBefore = runtime.appended.filter((entry) =>
+    entry.customType !== "pi-fold-context-event").length;
   const again = await project(runtime);
   assert.equal(surfacingCarrier(again).length, 1);
   assert.equal(json.stableStringify(surfacingCarrier(again)), json.stableStringify(carrier));
-  assert.equal(runtime.appended.length, appendedBefore);
+  assert.equal(runtime.appended.filter((entry) =>
+    entry.customType !== "pi-fold-context-event").length, appendedBefore);
 
   // Urgent fence text never shares an advisory with suggestions.
   const fenced = await surfacingFixture({ consolidate: true });
@@ -2568,12 +2605,12 @@ async function gateSurfacingLogging() {
   // Peek is the accept signal and stays ephemeral: no durable STATE entry of its own.
   // The context-event stream still records the attempt, which is the whole point of it.
   const durableBefore = runtime.branch.filter((entry) =>
-    !String(entry.customType ?? "").endsWith("-context-instrumentation")).length;
+    !String(entry.customType ?? "").endsWith("-context-event")).length;
   await runtime.tools.get("active_context").execute(
     "peek-suggested", { action: "peek", id: target }, new AbortController().signal, undefined, runtime.ctx,
   );
   assert.equal(runtime.branch.filter((entry) =>
-    !String(entry.customType ?? "").endsWith("-context-instrumentation")).length, durableBefore);
+    !String(entry.customType ?? "").endsWith("-context-event")).length, durableBefore);
   const peeked = (await toolStatus(runtime)).details.automatic.surfacing.log;
   assert.equal(peeked.find((record) => record.id === target).outcome, "accept");
   await project(runtime);
@@ -2838,7 +2875,11 @@ async function gateEpochQuotaTopUp() {
   // legitimate exit; what must never happen silently is the mark CAP binding.
   assert(epoch.freedWindowShare > 0);
   assert(epoch.sourceBytesSaved > 0);
-  assert.equal(epoch.targetWindowShare, context.EPOCH_COMMIT_TARGET_WINDOW_SHARE);
+  // The freeing target is the thermostat's: at least the standing floor, and deeper
+  // when occupancy is above the lower line the commit is folding down to.
+  assert(epoch.targetWindowShare >= context.EPOCH_COMMIT_TARGET_WINDOW_SHARE);
+  assert.equal(epoch.targetWindowShare, Math.max(
+    context.EPOCH_COMMIT_TARGET_WINDOW_SHARE, epoch.hysteresisTargetShare));
   const committed = materialized(runtime);
   assert.equal(committed.pendingMarks, undefined);
   assert.equal(committed.folds.length, epoch.applied.length);
@@ -3245,14 +3286,14 @@ async function gateProjectionInstrumentation() {
   // an external adjudicator reads: an attempt record for every call, accepted or not.
   await toolCall(epoch, { action: "status" });
   await toolCall(epoch, { action: "peek", id: "no-such-fold" }).catch(() => undefined);
-  const events = (await toolStatus(epoch)).details.automatic.instrumentation.contextEvents;
-  const attempts = events.filter((event) => event.kind === "attempt");
+  const events = (await toolStatus(epoch)).details.automatic.instrumentation.events;
+  const attempts = events.filter((event) => event.kind === "context.attempt");
   assert(attempts.some((event) => event.ok === true && event.action === "status"));
   const refused = attempts.find((event) => event.ok === false);
   assert(refused, "A refused context call was not recorded");
   assert.equal(refused.action, "peek");
   assert.match(refused.error, /Unknown active-context fold/);
-  assert(epoch.appended.some((entry) => entry.customType === "pi-fold-context-instrumentation"),
+  assert(epoch.appended.some((entry) => entry.customType === "pi-fold-context-event"),
     "The context-event stream never reached a durable session entry");
 
   return {
@@ -4654,7 +4695,8 @@ async function gateEpochBatchingUnderFullLevers() {
 
   // The turn closes and its evidence ages past the fresh window. Now ONE commit
   // applies the whole accumulated batch in a single rewrite.
-  const pendingAtClose = materialized(runtime).pendingMarks.length;
+  const marksAtCloseIds = new Set(materialized(runtime).pendingMarks.map((mark) => mark.id));
+  const pendingAtClose = marksAtCloseIds.size;
   const foldsAtClose = materialized(runtime).folds.length;
   for (let turn = 0; turn < 3; turn += 1) {
     runtime.appendMessage({
@@ -4671,17 +4713,27 @@ async function gateEpochBatchingUnderFullLevers() {
   await measure(runtime, 87_000, 100_000);
   const closing = (await toolStatus(runtime)).details.automatic.lastAutomaticAction;
   assert(closing.epoch, "The closed turn did not open a commit epoch");
-  assert.equal(closing.epoch.retainedMarks, 0,
-    "The guard still held marks after the turn closed and its evidence aged");
-  assert.deepEqual(closing.epoch.refused, [], "The closing commit refused a mark");
-  assert.equal(closing.epoch.appliedMarks, closing.epoch.pendingMarks,
-    "The closing commit left pending marks behind");
+  assert(closing.epoch.retainedMarks <= 1,
+    `The guard still held ${closing.epoch.retainedMarks} marks after the turn closed`);
+  assert(closing.epoch.appliedMarks >= closing.epoch.pendingMarks - 1,
+    "The closing commit left more than the newest mark behind");
   assert(closing.epoch.appliedMarks >= 5,
     `The commit applied ${closing.epoch.appliedMarks} marks; the batch never formed`);
   const foldsAdded = materialized(runtime).folds.length - foldsAtClose;
   assert(foldsAdded >= closing.epoch.appliedMarks,
     `The batched commit added ${foldsAdded} folds; the accumulated marks did not land together`);
-  assert.equal(materialized(runtime).pendingMarks, undefined, "The batched commit left marks pending");
+  // The ACCUMULATED batch leaves nothing behind. What may still be pending afterwards is
+  // a mark this same pass created by topping the epoch up, over a span the fresh window
+  // still protects -- refused with a stated reason and retained, never silently dropped.
+  const stillPending = materialized(runtime).pendingMarks ?? [];
+  assert(stillPending.every((mark) => !marksAtCloseIds.has(mark.id)),
+    `The batched commit left ${stillPending.filter((mark) => marksAtCloseIds.has(mark.id)).length} ` +
+    "accumulated marks pending");
+  assert(stillPending.every((mark) => closing.epoch.refused.some((refusal) =>
+    refusal.id === mark.id && refusal.retained === true && typeof refusal.reason === "string")),
+  "A mark survived the batched commit without a stated retention reason");
+  assert(stillPending.length <= 1,
+    `The batched commit left ${stillPending.length} marks pending; only the newest read may survive it`);
 
   return {
     belowThresholdPasses: below.length,
@@ -4693,6 +4745,7 @@ async function gateEpochBatchingUnderFullLevers() {
     passesThatMovedBytes: foldingPasses.length,
     passesTotal: passes.length,
     marksAtClose: pendingAtClose,
+    marksStillPending: stillPending.length,
     committedInOneEpoch: true,
     appliedInOneCommit: closing.epoch.appliedMarks,
     foldsAddedByThatCommit: foldsAdded,
@@ -5184,7 +5237,8 @@ async function gateFenceMarginAndDepth() {
     projections.push(bytesOf((await project(deep)).messages));
   }
   assert(epochs.length >= 3, `Only ${epochs.length} commit epochs ran; the ratchet is not being measured`);
-  const shallow = epochs.filter((epoch) => epoch.preDeepenFreedShare < epoch.depthFloorShare);
+  const shallow = epochs.filter((epoch) =>
+    epoch.preDeepenFreedShare < Math.max(epoch.depthFloorShare, epoch.targetWindowShare));
   assert(shallow.length >= 1,
     "No commit was ever shallow, so the crumb-commit pattern is not being measured");
   for (const epoch of shallow) {
@@ -5217,6 +5271,1059 @@ async function gateFenceMarginAndDepth() {
     deepeningReachedMarks: reached.reduce((total, epoch) => total + epoch.deepenedMarks, 0),
     projectionFirst: projections[0],
     projectionLast: projections.at(-1),
+  };
+}
+
+/**
+ * The two-signal curation trigger.
+ *
+ * Occupancy alone announces a commit that has nothing to fold; stale tool mass alone
+ * announces one in a window with room to spare. Both, and the announcement is early
+ * enough that reacting to it is still cheap.
+ */
+async function gateCurationTrigger() {
+  const built = makeFixture({ turns: 12, resultChars: 10_000, contextWindow: 100_000 });
+  const snapshot = epochSnapshot(built);
+  const state = context.emptyActiveContextState(built.sessionId);
+
+  // Signal two, measured: tool-result mass outside the fresh tail and outside folds.
+  const mass = context.staleToolMass(snapshot, state);
+  assert(mass.results >= 1 && mass.bytes > 0, "The fixture carries no stale tool mass");
+  const folded = (await commitCandidate(
+    state, snapshot, context.selectAutomaticToolBatch(snapshot, state, 1)[0],
+    { brief: "The exact stale inspection result stays recoverable behind this fold." },
+  )).state;
+  const afterFold = context.staleToolMass(snapshot, folded);
+  assert(afterFold.results < mass.results, "A folded batch still counted as stale tool mass");
+  assert(afterFold.bytes < mass.bytes);
+
+  const signals = (occupancyTokens, staleBytes) => ({
+    occupancy: occupancyTokens === null ? null : occupancyTokens / 90_000,
+    occupancyTokens,
+    budgetTokens: 90_000,
+    window: 100_000,
+    staleToolShare: staleBytes / 4 / 100_000,
+    staleToolTokens: Math.ceil(staleBytes / 4),
+    staleToolResults: 4,
+    eligibleFolds: 4,
+  });
+  const occupancyAt = (share) => Math.ceil(share * 90_000);
+  const staleAt = (share) => share * 100_000 * 4;
+  const fires = (occupancyShare, staleShare) =>
+    context.curationTriggerFires(signals(occupancyAt(occupancyShare), staleAt(staleShare)));
+
+  // Each side of each threshold, and the AND between them.
+  assert.equal(context.CURATION_OCCUPANCY_SHARE, 0.50);
+  assert.equal(context.CURATION_STALE_TOOL_SHARE, 0.20);
+  assert.equal(fires(0.50, 0.20), true, "The trigger did not fire at both thresholds");
+  assert.equal(fires(0.49, 0.20), false, "The trigger fired below the occupancy threshold");
+  assert.equal(fires(0.50, 0.19), false, "The trigger fired below the stale-mass threshold");
+  assert.equal(fires(0.99, 0.19), false, "Occupancy alone fired the trigger");
+  assert.equal(fires(0.10, 0.99), false, "Stale mass alone fired the trigger");
+  assert.equal(fires(0.80, 0.60), true);
+  assert.equal(
+    context.curationTriggerFires(signals(null, staleAt(0.9))),
+    false,
+    "An unmeasured window fired the trigger",
+  );
+
+  // Live: the signals the runtime reports come from the same measurement the fence uses.
+  const runtime = makeRuntime(built, { ...SEALED_SPINE, guidedCuration: true });
+  await startRuntime(runtime);
+  await measure(runtime, 60_000, 100_000);
+  await project(runtime);
+  const live = (await toolStatus(runtime)).details.automatic.curation;
+  assert.equal(live.guided, true);
+  assert.equal(live.occupancyThreshold, 0.50);
+  assert.equal(live.staleToolThreshold, 0.20);
+  assert(live.signals, "The runtime reported no curation signals");
+  assert(live.signals.occupancy > 0.5, "The live fixture did not reach the occupancy threshold");
+  assert(live.signals.staleToolTokens > 0);
+
+  return {
+    staleResultsBefore: mass.results,
+    staleResultsAfterFold: afterFold.results,
+    occupancyThreshold: context.CURATION_OCCUPANCY_SHARE,
+    staleThreshold: context.CURATION_STALE_TOOL_SHARE,
+    liveOccupancy: Number(live.signals.occupancy.toFixed(3)),
+    liveStaleShare: Number(live.signals.staleToolShare.toFixed(3)),
+  };
+}
+
+/**
+ * The bounded last-call gate.
+ *
+ * A gate that can stall a run is worse than no gate, so the termination property is
+ * pinned first and directly: every evaluation either proceeds or spends a round, and
+ * the round cap proceeds unconditionally. Continuing the task is the DEFAULT path.
+ */
+async function gateCurationLastCall() {
+  const baseSignals = {
+    occupancy: 0.7,
+    occupancyTokens: 63_000,
+    budgetTokens: 90_000,
+    window: 100_000,
+    staleToolShare: 0.3,
+    staleToolTokens: 30_000,
+    staleToolResults: 12,
+    eligibleFolds: 6,
+  };
+  const advance = (gate, contextCalls) => context.advanceCurationGate({
+    gate, ordinal: 100, signals: baseSignals, contextCalls, pendingMarks: 3,
+  });
+
+  // Opening never commits, and a pass that was not a context call proceeds at once.
+  const opened = advance(null, 0);
+  assert.equal(opened.event, "opened");
+  assert.equal(opened.proceed, false);
+  const quiet = advance(opened.gate, 0);
+  assert.equal(quiet.event, "proceeded");
+  assert.equal(quiet.proceededBy, "non-context-response");
+
+  // Engaging holds the gate, and the cap proceeds regardless of further engagement.
+  assert.equal(context.CURATION_GATE_MAX_ROUNDS, 2);
+  const held = advance(opened.gate, 1);
+  assert.equal(held.event, "held");
+  assert.equal(held.roundsUsed, 1);
+  const capped = advance(held.gate, 2);
+  assert.equal(capped.event, "proceeded");
+  assert.equal(capped.proceededBy, "round-cap");
+  assert.equal(capped.gate, null);
+
+  // The never-deadlock property, proven exhaustively rather than asserted: an agent
+  // that calls context tools forever still reaches a commit within the cap.
+  let gate = null;
+  let calls = 0;
+  let rounds = 0;
+  for (let pass = 0; pass < 50; pass += 1) {
+    calls += 5;
+    const verdict = advance(gate, calls);
+    gate = verdict.gate;
+    rounds += 1;
+    if (verdict.proceed) break;
+  }
+  assert.equal(gate, null, "An always-engaging agent never closed the gate");
+  assert(rounds <= context.CURATION_GATE_MAX_ROUNDS + 1,
+    `The gate held for ${rounds} passes against a cap of ${context.CURATION_GATE_MAX_ROUNDS}`);
+
+  // End to end. The notice is delivered on the ephemeral carrier, not as a question,
+  // and the commit it announced does not happen on the announcing pass.
+  const runtime = makeRuntime(
+    makeFixture({ turns: 14, resultChars: 9_000, contextWindow: 100_000 }),
+    { ...SEALED_SPINE, guidedCuration: true },
+  );
+  await startRuntime(runtime);
+  await measure(runtime, 60_000, 100_000, undefined, "toolUse");
+  const announced = await project(runtime);
+  const notice = announced.messages.find((message) =>
+    message.customType === "pi-fold-active-context-curation");
+  assert(notice, "The curation trigger fired without delivering a notice");
+  assert.equal(notice.details.ephemeral, true);
+  assert.equal(notice.display, false);
+  assert.equal(notice.role, "custom");
+  const text = String(notice.content);
+  // The phase-token rule: operational status and available actions, never a question,
+  // with continuing the task stated as the default.
+  assert.equal(/\?/.test(text), false, "The last-call notice asks a question");
+  assert.match(text, /Continuing the task is the default/);
+  assert.match(text, /Occupancy \d+% of the \d+-token serving budget/);
+  assert.match(text, /"action":"fold","marks"/);
+  assert.match(text, /"action":"rebrief"/);
+  assert.match(text, /"action":"reboundary"/);
+  assert.match(text, /"action":"commit"/);
+  const gateState = (await toolStatus(runtime)).details.automatic.curation.gate;
+  assert(gateState, "The gate did not stay open after announcing");
+
+  // Marks made DURING the gate join the same commit event: one mutation, not two.
+  const foldsAtAnnounce = materialized(runtime).folds.length;
+  const spans = [0, 1].map((turn) => runtime.built.turnEntries[turn][2]);
+  const batched = await toolCall(runtime, {
+    action: "fold",
+    marks: spans.map((id, index) => ({
+      ids: [id],
+      brief: `Agent-curated span ${index}: the exact stale output stays recoverable behind this fold.`,
+    })),
+  });
+  assert.equal(batched.details.marks.filter((mark) => mark.marked).length, 2);
+
+  // The agent engaged, so it gets its grace round; then the cap proceeds regardless.
+  runtime.appendMessage({
+    role: "assistant",
+    content: [{ type: "text", text: "Continuing the task." }],
+    stopReason: "toolUse",
+    timestamp: 980,
+  }, "continuation");
+  for (const tokens of [61_000, 62_000, 63_000]) {
+    await measure(runtime, tokens, 100_000, undefined, "toolUse");
+    await project(runtime);
+  }
+  const status = (await toolStatus(runtime)).details.automatic;
+  const epoch = status.lastAutomaticAction?.epoch;
+  assert(epoch, "The gate never proceeded to a commit");
+  assert.match(String(epoch.trigger), /^guided-curation:/);
+  assert(epoch.appliedMarks >= 2, "The commit did not carry the marks made during the gate");
+  assert(materialized(runtime).folds.length > foldsAtAnnounce);
+  assert.equal(status.curation.gate, null, "The gate stayed open after proceeding");
+
+  // Every gate event is adjudicable from the durable stream.
+  const events = status.instrumentation.events.filter((event) => event.kind === "context.gate");
+  assert(events.some((event) => event.gate_event === "opened"));
+  const proceeded = events.find((event) => event.gate_event === "proceeded");
+  assert(proceeded, "No gate event recorded the commit proceeding");
+  assert(["go", "non-context-response", "round-cap"].includes(proceeded.proceeded_by));
+  assert(proceeded.marks_added >= 2, "The gate did not count the marks made inside it");
+  assert(runtime.appended.some((entry) =>
+    entry.customType === "pi-fold-context-event" && entry.data.kind === "context.gate"));
+
+  return {
+    maxRounds: context.CURATION_GATE_MAX_ROUNDS,
+    passesToClose: rounds,
+    noticeBytes: Buffer.byteLength(text, "utf8"),
+    marksDuringGate: proceeded.marks_added,
+    appliedInOneCommit: epoch.appliedMarks,
+    proceededBy: proceeded.proceeded_by,
+  };
+}
+
+/**
+ * Receipts: what the runtime did, reported as status rather than as advice.
+ *
+ * The tone rule is the point. The old guidance told the agent to fold proactively; a
+ * receipt says this happened, you can react, and here is why reacting pays.
+ */
+async function gateContextReceipts() {
+  const runtime = await sealedSpineExcursionRuntime();
+  for (const tokens of [76_000, 80_000, 86_000, 86_500, 87_000]) {
+    await measure(runtime, tokens, 100_000, undefined, "toolUse");
+  }
+  const projection = await project(runtime);
+  const block = projection.messages.find((message) =>
+    message.customType === "pi-fold-active-context-receipts");
+  assert(block, "No receipt reached the window after an automatic commit");
+  assert.equal(block.details.ephemeral, true);
+  const text = String(block.content);
+  assert(Buffer.byteLength(text, "utf8") <= context.CONTEXT_RECEIPT_BLOCK_BYTES,
+    "The receipt block is over its hard cap");
+  assert.match(text, /Recent automatic context actions/);
+  assert.match(text, /tokens freed/);
+  // Informatory, never exhortative: it names the correction verbs and asks nothing.
+  assert.match(text, /"action":"rebrief"/);
+  assert.match(text, /"action":"reboundary"/);
+  assert.equal(/\?/.test(text), false, "A receipt asks the agent a question");
+  assert.equal(/please|you should|make sure to|remember to/i.test(text), false,
+    "A receipt exhorts rather than reports");
+
+  // It PERSISTS: the next projection still carries it, and it stays bounded.
+  const again = await project(runtime);
+  const stillThere = again.messages.find((message) =>
+    message.customType === "pi-fold-active-context-receipts");
+  assert(stillThere, "The receipt vanished on the next projection");
+  assert(Buffer.byteLength(String(stillThere.content), "utf8") <= context.CONTEXT_RECEIPT_BLOCK_BYTES,
+    "The persisted receipt block grew past its cap");
+  assert(stillThere.details.receipts.length >= 1);
+  assert(stillThere.details.receipts.length <= context.MAX_CONTEXT_RECEIPTS,
+    "The receipt ring grew unbounded across projections");
+
+  // The ring evicts: a receipt ages out rather than growing the block forever.
+  assert.equal(context.MAX_CONTEXT_RECEIPTS, 3);
+  const many = Array.from({ length: 10 }, (_, index) =>
+    context.contextReceipt({ kind: "epoch-commit", ordinal: index, freedTokens: 1_000 }));
+  const ring = many.reduce((carry, receipt) => context.withReceipt(carry, receipt), []);
+  assert.equal(ring.length, context.MAX_CONTEXT_RECEIPTS);
+  assert.deepEqual(ring.map((receipt) => receipt.ordinal), [7, 8, 9]);
+  const live = (await toolStatus(runtime)).details.automatic.curation.receipts;
+  assert(live.length >= 1 && live.length <= context.MAX_CONTEXT_RECEIPTS);
+
+  // And it is adjudicable: every delivery lands in the durable event stream.
+  const events = (await toolStatus(runtime)).details.automatic.instrumentation.events
+    .filter((event) => event.kind === "context.receipt");
+  assert(events.length >= 1, "No receipt delivery reached the durable stream");
+  assert(typeof events.at(-1).receipt_kind === "string");
+  assert(runtime.appended.some((entry) =>
+    entry.customType === "pi-fold-context-event" && entry.data.kind === "context.receipt"));
+
+  // The carrier is ephemeral by construction: it is never a durable transcript entry.
+  assert.equal(runtime.appended.filter((entry) =>
+    /receipts|curation$/.test(entry.customType)).length, 0);
+
+  return {
+    receiptBlockBytes: Buffer.byteLength(text, "utf8"),
+    cap: context.CONTEXT_RECEIPT_BLOCK_BYTES,
+    liveReceipts: live.length,
+    ringCap: context.MAX_CONTEXT_RECEIPTS,
+    deliveriesRecorded: events.length,
+  };
+}
+
+/**
+ * Loud auto-snap, batched marks, and the correction verbs.
+ *
+ * A span the agent got slightly wrong is a span it MEANT. Refusing it teaches the
+ * agent that curating is a coin flip; correcting it silently teaches it that the fold
+ * index cannot be trusted. So it snaps, and the correction is in the result.
+ */
+async function gateAutoSnapAndCorrections() {
+  const runtime = await epochToolRuntime({ turns: 16, resultChars: 6_000 });
+  const built = runtime.built;
+
+  // One call, several spans, each with its own brief.
+  const batched = await toolCall(runtime, {
+    action: "fold",
+    marks: [0, 1, 2].map((turn) => ({
+      ids: [built.turnEntries[turn][2]],
+      brief: `Stale inspection ${turn}: the exact output stays recoverable behind this fold.`,
+    })),
+  });
+  assert.equal(batched.details.marks.length, 3);
+  assert(batched.details.marks.every((mark) => mark.marked === true));
+  assert.equal(new Set(batched.details.marks.map((mark) => mark.id)).size, 3);
+  assert.deepEqual(batched.details.corrections, []);
+  assert.equal(materialized(runtime).pendingMarks.length, 3);
+  const committed = await toolCall(runtime, { action: "commit" });
+  assert.equal(committed.details.applied.length, 3, "The batch did not commit together");
+
+  // A span that starts strictly INSIDE an existing fold snaps to that fold's boundary,
+  // and the correction is reported by name rather than silently reinterpreted.
+  await toolCall(runtime, {
+    action: "fold",
+    ids: [built.turnEntries[4][0], built.turnEntries[4].at(-1)],
+    brief: "A whole closed turn whose exact evidence stays recoverable behind this fold.",
+  });
+  await toolCall(runtime, { action: "commit" });
+  const existing = materialized(runtime).folds.find((fold) => fold.kind === "chapter");
+  assert(existing && existing.parts.length >= 2, "The fixture built no multi-entry fold to cut into");
+  const inside = existing.parts[1].kind === "raw"
+    ? existing.parts[1].ref.entryId
+    : existing.parts[1].foldId;
+  const later = built.turnEntries[6].at(-1);
+  const snapped = await toolCall(runtime, {
+    action: "fold",
+    ids: [inside, later],
+    brief: "A corrected span whose exact evidence stays recoverable behind this fold.",
+  });
+  assert(snapped.details.corrections.length >= 1, "A crossing span was accepted uncorrected");
+  const correction = snapped.details.corrections[0];
+  assert(correction.reason.includes(existing.id),
+    `The correction did not name the fold it crossed: ${correction.reason}`);
+  assert.match(correction.reason, /corrected to/);
+  assert.deepEqual(correction.from, [inside, later]);
+  assert.equal(correction.to.length, 2);
+  assert.notDeepEqual(correction.to, correction.from);
+
+  // The snap invariant, over every span this fixture can express: what comes back is a
+  // span this same validation accepts, and what does not come back is refused ONCE. A
+  // refusal may never answer with a "nearest valid span" the same check then rejects.
+  //
+  // Measured 2026-08-06: a span cutting into the fold on its LEFT and the fold on its
+  // RIGHT had no endpoint correction at all -- absorb, exclude and nearest each left a
+  // whole chapter inside the span, which a chapter may not swallow -- and the snap
+  // proposed one anyway, so the agent was handed a correction that could not be applied.
+  const invariantState = materialized(runtime);
+  const invariantSnapshot = context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: runtime.messages,
+    contextEntries: runtime.branch,
+    contextWindow: 100_000,
+  });
+  const spanIds = invariantSnapshot.mapped.filter((item) => item.ref).map((item) => item.ref.entryId);
+  let snapAccepted = 0;
+  let snapCorrected = 0;
+  let snapRefused = 0;
+  for (let left = 0; left < spanIds.length; left += 1) {
+    for (let right = left; right < spanIds.length; right += 1) {
+      let resolved;
+      try {
+        resolved = context.snapFoldCandidate(
+          invariantSnapshot, invariantState, [spanIds[left], spanIds[right]], { allowProtected: true });
+      } catch (error) {
+        snapRefused += 1;
+        assert(!/was also refused/.test(error.message) && !/nearest valid span/.test(error.message),
+          `A refusal proposed a span that failed the same validation: ${error.message}`);
+        continue;
+      }
+      snapAccepted += 1;
+      if (resolved.corrections.length) snapCorrected += 1;
+      // Validated by construction, and it must still say what it moved.
+      assert(resolved.candidate.sourceRefs.length >= 1, "A snapped candidate carries no evidence");
+      assert(resolved.corrections.every((entry) =>
+        typeof entry.reason === "string" && entry.reason.length > 0),
+      "A snapped candidate reported a correction with no reason");
+    }
+  }
+  assert(snapCorrected >= 1, "No span in the fixture exercised the snap");
+  assert(snapRefused >= 1, "No span in the fixture exercised the refusal");
+
+  // Rejection only where no valid interpretation exists, and it says what failed.
+  await assert.rejects(
+    () => toolCall(runtime, { action: "fold", ids: ["no-such-entry"] }),
+    /Unknown active-context source no-such-entry/,
+  );
+  await assert.rejects(
+    () => toolCall(runtime, { action: "fold", marks: [{ ids: [] }] }),
+    /ids must contain 1-64 values/,
+  );
+
+  // Re-brief: the fold record is content-addressed and immutable, so the correction is
+  // durable state beside it. The placeholder, the index and the suggestions follow it.
+  const target = materialized(runtime).folds[0];
+  const rebrief = await toolCall(runtime, {
+    action: "rebrief",
+    id: target.id,
+    brief: "Corrected: this fold holds the exact stage-3 chain key the task needs.",
+  });
+  assert.equal(rebrief.details.previousBrief, target.brief);
+  assert.deepEqual(materialized(runtime).briefs, {
+    [target.id]: "Corrected: this fold holds the exact stage-3 chain key the task needs.",
+  });
+  assert.equal(materialized(runtime).folds.find((fold) => fold.id === target.id).brief, target.brief,
+    "A re-brief mutated the immutable fold record");
+  assert.equal(runtime.notifications.filter((notice) => /Conflicting durable/.test(notice.message)).length, 0);
+  const snapshotNow = context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: runtime.messages,
+    contextEntries: runtime.branch,
+    contextWindow: 100_000,
+  });
+  assert(context.foldPlaceholder(target, materialized(runtime), snapshotNow).includes("Corrected:"),
+    "The placeholder did not carry the corrected brief");
+  const paged = (await toolStatus(runtime, "active_context", "folds")).details.folds;
+  assert(paged.find((row) => row.id === target.id).brief.startsWith("Corrected:"));
+  await assert.rejects(
+    () => toolCall(runtime, { action: "rebrief", id: target.id, brief: "  " }),
+    /rebrief requires a nonempty brief/,
+  );
+
+  return {
+    batchedMarks: batched.details.marks.length,
+    appliedTogether: committed.details.applied.length,
+    correctionsReported: snapped.details.corrections.length,
+    snapAccepted,
+    snapCorrected,
+    snapRefused,
+    correctionNamesFold: true,
+    rebriefed: 1,
+  };
+}
+
+/**
+ * Re-boundary, in both directions, through one verb.
+ *
+ * `ids` names the span you want to BE one fold. That single rule merges N adjacent
+ * folds when the span covers them and splits one fold when the span sits inside it,
+ * and `id` alone stays the plain dissolve.
+ */
+async function gateSymmetricReboundary() {
+  const forest = await smallChapterForest(4);
+  const runtime = makeRuntime(forest, {
+    initialEntries: [
+      ...forest.entries,
+      stateEntry(forest.sessionId, JSON.parse(json.stableStringify(forest.state)), "reboundary-state"),
+    ],
+  });
+  await startRuntime(runtime);
+  const seeded = materialized(runtime);
+  const roots = context.orderedRoots(seeded, forest.snapshot);
+  assert(roots.length >= 3, "The fixture did not seed enough adjacent folds to merge");
+
+  // MERGE: a span covering several adjacent folds becomes exactly one fold.
+  const first = roots[0];
+  const third = roots[2];
+  const startId = forest.snapshot.mapped[first.start].ref.entryId;
+  const endId = forest.snapshot.mapped[third.end].ref.entryId;
+  const merged = await toolCall(runtime, {
+    action: "reboundary",
+    ids: [startId, endId],
+    brief: "Three completed chapters merged into one exactly recoverable span.",
+  });
+  assert.equal(merged.details.mode, "merge");
+  assert.equal(merged.details.dissolved.length, 3);
+  assert.equal(merged.details.created.length, 1, "A merge produced more than one fold");
+  assert.equal(merged.details.created[0].brief,
+    "Three completed chapters merged into one exactly recoverable span.");
+  const afterMerge = materialized(runtime);
+  assert.equal(afterMerge.folds.length, 2, "The merge left the dissolved folds behind");
+  assert(!afterMerge.folds.some((fold) => merged.details.dissolved.includes(fold.id)));
+
+  // A merge span that only PARTIALLY covers a fold snaps outward to whole boundaries,
+  // loudly, because the re-boundary verb operates on folds.
+  const remaining = context.orderedRoots(materialized(runtime), forest.snapshot);
+  const partial = forest.snapshot.mapped[remaining[0].start + 1].ref.entryId;
+  const partialEnd = forest.snapshot.mapped[remaining[0].end].ref.entryId;
+  const corrected = await toolCall(runtime, {
+    action: "reboundary",
+    ids: [partial, partialEnd],
+    brief: "The partially named span, re-cut to the whole fold it meant.",
+  });
+  assert(corrected.details.corrections.length >= 1, "A partial span was accepted uncorrected");
+  assert.match(corrected.details.corrections[0].reason, /whole boundaries/);
+  assert.equal(corrected.details.startId, forest.snapshot.mapped[remaining[0].start].ref.entryId);
+
+  // DISSOLVE: `id` alone returns a mis-cut fold's span to raw so it can be re-folded.
+  const dissolveTarget = context.orderedRoots(materialized(runtime), forest.snapshot)[0].fold;
+  const before = bytesOf(context.projectActiveContext(forest.snapshot, materialized(runtime)));
+  const dissolved = await toolCall(runtime, { action: "reboundary", id: dissolveTarget.id });
+  assert.equal(dissolved.details.dissolved, true);
+  assert(typeof dissolved.details.startId === "string");
+  const afterDissolve = materialized(runtime);
+  assert(!afterDissolve.folds.some((fold) => fold.id === dissolveTarget.id));
+  assert(bytesOf(context.projectActiveContext(forest.snapshot, afterDissolve)) > before,
+    "Dissolving a fold did not return its span to raw");
+
+  return {
+    mergedFolds: merged.details.dissolved.length,
+    mergedInto: merged.details.created.length,
+    partialSnapCorrections: corrected.details.corrections.length,
+    dissolvedFolds: 1,
+  };
+}
+
+/**
+ * Bite-sized folds.
+ *
+ * Measured 2026-08-06 (rep 6): one 60,432-byte chapter fold hid the fact the run
+ * needed in its tail. A fold is only navigable if reading one back is cheap, so the
+ * ladder cannot build an oversized chapter and an oversized manual span is split.
+ */
+async function gateBiteSizedFolds() {
+  assert.equal(context.MAX_FOLD_SPAN_CHARS, 16_000);
+  assert.equal(context.PEEK_DEFAULT_MAX_BYTES, 16_000);
+
+  // The ladder: a session whose coherent chapters would run far past the cap.
+  const runtime = makeRuntime(
+    makeFixture({ turns: 24, tools: false, chapterChars: 2_000, contextWindow: 100_000 }),
+    { providerTotalWindow: 100_000 },
+  );
+  await startRuntime(runtime);
+  for (const tokens of [70_000, 78_000, 84_000, 88_000, 90_000]) {
+    await measure(runtime, tokens, 100_000);
+    await project(runtime);
+  }
+  const state = materialized(runtime);
+  const chapters = state.folds.filter((fold) => fold.kind === "chapter");
+  assert(chapters.length >= 2, "The fixture produced too few chapters to measure");
+  for (const fold of chapters) {
+    assert(fold.sourceChars <= context.MAX_FOLD_SPAN_CHARS,
+      `A ladder chapter is ${fold.sourceChars} chars, past the ${context.MAX_FOLD_SPAN_CHARS} cap`);
+  }
+
+  // A default peek of a bite-sized fold returns it WHOLE: the two constants cohere.
+  await measure(runtime, 30_000, 100_000);
+  const peeked = await toolCall(runtime, { action: "peek", id: chapters[0].id });
+  assert.equal(peeked.details.truncated, false, "A default peek of a bite-sized fold was truncated");
+  assert.equal(peeked.details.view, "complete");
+
+  // The manual path: an oversized supplied span becomes sequential bounded folds, and
+  // the split is reported rather than silent.
+  const wide = makeFixture({ turns: 12, tools: false, chapterChars: 3_000, contextWindow: 100_000 });
+  const empty = context.emptyActiveContextState(wide.sessionId);
+  const oversized = context.manualFoldCandidate(wide.snapshot, empty, [
+    wide.turnEntries[0][0], wide.turnEntries[3].at(-1),
+  ]);
+  const spanChars = context.candidateSpanChars(wide.snapshot, empty, oversized);
+  assert(spanChars > context.MAX_FOLD_SPAN_CHARS, "The oversized fixture is not oversized");
+  const parts = context.splitCandidateBySize(wide.snapshot, empty, oversized);
+  assert(parts.length >= 2, "An oversized span was not split");
+  for (const part of parts) {
+    assert(context.candidateSpanChars(wide.snapshot, empty, part) <= context.MAX_FOLD_SPAN_CHARS,
+      "A split part is still over the cap");
+  }
+  // Split only at closed unit boundaries: never mid-entry, so the parts tile the span.
+  const partRefs = parts.flatMap((part) => part.sourceRefs.map((ref) => ref.entryId));
+  assert.deepEqual(partRefs, oversized.sourceRefs.map((ref) => ref.entryId),
+    "The split lost or reordered evidence");
+
+  const manual = makeRuntime(wide, {});
+  await startRuntime(manual);
+  const folded = await toolCall(manual, {
+    action: "fold",
+    ids: [wide.turnEntries[0][0], wide.turnEntries[3].at(-1)],
+    brief: "Four completed tasks whose exact evidence stays recoverable behind these folds.",
+  });
+  assert.equal(folded.details.folds.length, parts.length, "The manual fold did not split");
+  assert(folded.details.corrections.some((item) => /split into \d+ sequential folds/.test(item.reason)),
+    "The split was not reported");
+  assert(materialized(manual).folds.every((fold) => fold.sourceChars <= context.MAX_FOLD_SPAN_CHARS));
+
+  // A single unit that alone exceeds the cap is folded whole: there is no interior
+  // boundary, and refusing would leave the biggest span as the one thing nothing takes.
+  const huge = makeFixture({ turns: 6, tools: false, chapterChars: 12_000, contextWindow: 100_000 });
+  const hugeEmpty = context.emptyActiveContextState(huge.sessionId);
+  const units = context.chapterUnits(huge.snapshot);
+  const oneUnit = units.find((unit) =>
+    context.spanBytes(huge.snapshot, unit.start, unit.end) > context.MAX_FOLD_SPAN_CHARS);
+  assert(oneUnit, "The huge fixture has no single unit past the cap");
+  const single = {
+    kind: "chapter",
+    parts: context.partsForRange(huge.snapshot, hugeEmpty, oneUnit.start, oneUnit.end - 1, new Set()),
+    sourceRefs: [],
+  };
+  single.sourceRefs = context.candidateSourceRefs(single.parts, hugeEmpty);
+  assert(context.candidateSpanChars(huge.snapshot, hugeEmpty, single) > context.MAX_FOLD_SPAN_CHARS);
+  assert.equal(context.splitCandidateBySize(huge.snapshot, hugeEmpty, single).length, 1);
+
+  return {
+    foldSpanCap: context.MAX_FOLD_SPAN_CHARS,
+    ladderChapters: chapters.length,
+    largestLadderChapter: Math.max(...chapters.map((fold) => fold.sourceChars)),
+    manualSplitParts: folded.details.folds.length,
+    unsplittableUnitFoldedWhole: true,
+  };
+}
+
+/**
+ * Wedge absorption, and the ANTI-LCM PIN.
+ *
+ * A sliver hugging a fold boundary is a crumb nothing will ever reclaim, so a commit
+ * that is already paying for its rewrite swallows it. What absorption must NEVER do is
+ * erode deliberate non-sequential curation: an agent holding folds with raw spans
+ * between them chose that shape, and a mechanism that ate those gaps would turn
+ * pi-fold into system-controlled compaction with the curation element deleted.
+ */
+async function gateWedgeAbsorption() {
+  assert.equal(context.MAX_WEDGE_ABSORB_TOKENS, 256);
+  const built = makeFixture({
+    turns: 20, tools: false, chapterChars: 40, contextWindow: 100_000,
+    policy: { freshTurns: 1, freshBytes: 0, minChapterChars: 1 },
+  });
+  const snapshot = built.snapshot;
+  const empty = context.emptyActiveContextState(built.sessionId);
+  const span = (turn) => [built.turnEntries[turn][0], built.turnEntries[turn].at(-1)];
+
+  // Two marks with exactly one short turn wedged between them.
+  const early = context.manualFoldCandidate(snapshot, empty, span(0));
+  const late = context.manualFoldCandidate(snapshot, empty, span(2));
+  let state = empty;
+  for (const [index, candidate] of [early, late].entries()) {
+    state = context.addPendingMark(state, context.foldMarkFor({
+      candidate,
+      brief: `Completed task ${index} stays exactly recoverable behind this fold.`,
+      briefProvenance: { kind: "deterministic" },
+      origin: "agent",
+      ordinal: 1,
+    })).state;
+  }
+  const absorbed = context.absorbWedgeMarks({ snapshot, state, charsPerToken: 4 });
+  assert.equal(absorbed.absorbed.length, 1, "The wedge between two folds was not absorbed");
+  assert(absorbed.absorbed[0].tokens <= context.MAX_WEDGE_ABSORB_TOKENS);
+  assert(absorbed.absorbed[0].entries >= 1);
+  // Later, not earlier: the LATER fold grew backward, which mutates at a shallower
+  // prefix position and preserves more cache.
+  const grown = context.pendingMarks(absorbed.state)
+    .find((mark) => mark.id === absorbed.absorbed[0].intoMarkId);
+  assert(grown, "The absorbing mark is not in the resulting state");
+  const grownRefs = context.candidateSourceRefs(grown.parts, absorbed.state).map((ref) => ref.entryId);
+  assert(grownRefs.includes(absorbed.absorbed[0].startId),
+    "The absorbed wedge is not inside the later mark");
+  assert(grownRefs.includes(built.turnEntries[2][0]), "The later fold's own span was dropped");
+  assert(!grownRefs.includes(built.turnEntries[0][0]), "Absorption swallowed the earlier fold");
+  assert(grown.brief.includes("absorbed at commit"), "The absorbing brief does not say so");
+
+  // THE ANTI-LCM PIN. A deliberate multi-thousand-token raw gap between two folds is
+  // the agent's curation and is structurally untouchable, at ANY occupancy and after
+  // any number of commits. Only a sub-threshold sliver is ever taken.
+  const wide = makeFixture({
+    turns: 20, tools: false, chapterChars: 900, contextWindow: 100_000,
+    policy: { freshTurns: 1, freshBytes: 0, minChapterChars: 1 },
+  });
+  const wideEmpty = context.emptyActiveContextState(wide.sessionId);
+  const wideSpan = (turn) => [wide.turnEntries[turn][0], wide.turnEntries[turn].at(-1)];
+  let wideState = wideEmpty;
+  for (const [index, turn] of [0, 4].entries()) {
+    wideState = context.addPendingMark(wideState, context.foldMarkFor({
+      candidate: context.manualFoldCandidate(wide.snapshot, wideEmpty, wideSpan(turn)),
+      brief: `Deliberately curated chapter ${index} stays exactly recoverable.`,
+      briefProvenance: { kind: "deterministic" },
+      origin: "agent",
+      ordinal: 1,
+    })).state;
+  }
+  const gapTokens = Math.ceil(
+    context.spanBytes(wide.snapshot, wide.snapshot.mapped.findIndex((item) =>
+      item.ref?.entryId === wide.turnEntries[1][0]),
+    wide.snapshot.mapped.findIndex((item) => item.ref?.entryId === wide.turnEntries[4][0])) / 4,
+  );
+  assert(gapTokens > context.MAX_WEDGE_ABSORB_TOKENS * 4,
+    `The deliberate gap is only ${gapTokens} tokens; it does not test the threshold`);
+  for (let commit = 0; commit < 5; commit += 1) {
+    const attempt = context.absorbWedgeMarks({
+      snapshot: wide.snapshot, state: wideState, charsPerToken: 4,
+    });
+    assert.deepEqual(attempt.absorbed, [],
+      `A deliberate ${gapTokens}-token gap was absorbed on commit ${commit}`);
+    wideState = attempt.state;
+  }
+
+  // Marked and protected content is exempt at any size.
+  const marked = context.addPendingMark(state, context.foldMarkFor({
+    candidate: context.manualFoldCandidate(snapshot, empty, span(1)),
+    brief: "The wedge itself is a standing decision the agent already made.",
+    briefProvenance: { kind: "deterministic" },
+    origin: "agent",
+    ordinal: 2,
+  })).state;
+  assert.deepEqual(
+    context.absorbWedgeMarks({ snapshot, state: marked, charsPerToken: 4 }).absorbed,
+    [],
+    "A marked wedge was absorbed",
+  );
+  const protectedRefs = [snapshot.mapped.find((item) =>
+    item.ref?.entryId === built.turnEntries[1][0]).ref];
+  const guardedState = { ...state, protected: protectedRefs };
+  assert.deepEqual(
+    context.absorbWedgeMarks({ snapshot, state: guardedState, charsPerToken: 4 }).absorbed,
+    [],
+    "A protected wedge was absorbed",
+  );
+  // The excluded set (the current excursion's own reads) is honoured too.
+  assert.deepEqual(
+    context.absorbWedgeMarks({
+      snapshot,
+      state,
+      charsPerToken: 4,
+      excludeRefKeys: new Set(protectedRefs.map((ref) => json.objectRefKey(ref))),
+    }).absorbed,
+    [],
+    "An excluded wedge was absorbed",
+  );
+
+  return {
+    thresholdTokens: context.MAX_WEDGE_ABSORB_TOKENS,
+    absorbedSlivers: absorbed.absorbed.length,
+    absorbedTokens: absorbed.absorbed[0].tokens,
+    deliberateGapTokens: gapTokens,
+    deliberateGapAbsorbed: 0,
+    markedWedgeAbsorbed: 0,
+  };
+}
+
+/**
+ * Overflow rollback and recovery.
+ *
+ * rep 13's death shape: 370,320 measured tokens against a 383,616 budget, one ordinary
+ * inflow step over the line, and the run ended. A provider rejection mutates nothing
+ * durable -- the assistant message never lands and the projection is rebuilt from the
+ * branch on the next request -- so the terminal path is a rollback, not a death.
+ */
+async function gateOverflowRecovery() {
+  assert.equal(context.OVERFLOW_RECOVERY_MAX_ATTEMPTS, 2);
+  const window = 200_000;
+  const runtime = makeRuntime(
+    makeFixture({ turns: 44, resultChars: 12_000, contextWindow: window }),
+    { ...SEALED_SPINE, providerTotalWindow: window },
+  );
+  await startRuntime(runtime);
+  const budgetTokens = (await toolStatus(runtime)).details.automatic.projectionBudgetTokens;
+  assert.equal(budgetTokens, window - 16_384);
+
+  // Calibrate against the fixture's own size, then climb to rep13's position: measured
+  // occupancy just under the budget with one ordinary inflow step still to come.
+  const baseline = bytesOf((await project(runtime)).messages);
+  const charsPerToken = 4;
+  await measure(runtime, Math.round(baseline / charsPerToken), window);
+  for (const tokens of [150_000, 165_000, 178_000, 181_000]) {
+    await measure(runtime, tokens, window);
+    await project(runtime);
+  }
+
+  // The provider rejects the request the runtime believed was sendable. Nothing
+  // durable was written for it: no assistant message, no state event of its own.
+  const durableBefore = runtime.branch.filter((entry) =>
+    !String(entry.customType ?? "").endsWith("-context-event")).length;
+  await runtime.handlers.get("after_provider_response")({ status: 400 }, runtime.ctx);
+  assert.equal(runtime.branch.filter((entry) =>
+    !String(entry.customType ?? "").endsWith("-context-event")).length, durableBefore,
+  "A rejected exchange wrote durable state");
+  const pending = (await toolStatus(runtime)).details.automatic.recovery.pendingRejection;
+  assert(pending, "The provider rejection was not observed");
+  assert.equal(pending.status, 400);
+
+  // The next request is REBUILT rather than dropped, and it is a sealed continuation.
+  const recoveredProjection = await project(runtime);
+  const recovery = (await toolStatus(runtime)).details.automatic.recovery;
+  assert(recovery.last, "The recovery lane never ran");
+  assert.equal(recovery.last.status, 400);
+  assert(recovery.last.attempts >= 1 && recovery.last.attempts <= context.OVERFLOW_RECOVERY_MAX_ATTEMPTS);
+  assert.equal(recovery.pendingRejection, null, "The rejection was not cleared by recovery");
+  const rebuiltTokens = Math.ceil(bytesOf(recoveredProjection.messages) /
+    (await toolStatus(runtime)).details.automatic.projectionCharsPerToken);
+  assert(rebuiltTokens <= budgetTokens || runtime.aborts >= 1,
+    `A ${rebuiltTokens}-token request was rebuilt over a ${budgetTokens}-token budget`);
+  assert.equal(recovery.last.recovered, true, "The rebuilt request still does not fit");
+
+  // The agent is told, through the receipt mechanism, what was folded to make room.
+  const receipts = (await toolStatus(runtime)).details.automatic.curation.receipts;
+  const rollback = receipts.find((receipt) => receipt.kind === "overflow-recovery");
+  assert(rollback, "The rollback was not receipted");
+  assert.equal(rollback.recovered, true);
+  assert.match(String(rollback.note), /rollback was required/);
+  assert.match(String(rollback.trigger), /^provider-rejection:400$/);
+  const block = recoveredProjection.messages.find((message) =>
+    message.customType === "pi-fold-active-context-receipts");
+  assert(block, "The rollback receipt never reached the window");
+
+  // The cap terminates PROVABLY: an accepted request resets it, and further rejections
+  // beyond the cap are not recovered from, so the loop cannot run forever.
+  const capped = makeRuntime(
+    makeFixture({ turns: 8, tools: false, contextWindow: window }),
+    { ...SEALED_SPINE, providerTotalWindow: window },
+  );
+  await startRuntime(capped);
+  await measure(capped, 100_000, window);
+  await project(capped);
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    await capped.handlers.get("after_provider_response")({ status: 400 }, capped.ctx);
+    await project(capped);
+  }
+  const cappedRecovery = (await toolStatus(capped)).details.automatic.recovery;
+  assert(cappedRecovery.attempts <= context.OVERFLOW_RECOVERY_MAX_ATTEMPTS,
+    `Recovery spent ${cappedRecovery.attempts} attempts against a cap of ` +
+    `${context.OVERFLOW_RECOVERY_MAX_ATTEMPTS}`);
+  assert.equal(cappedRecovery.pendingRejection, null,
+    "A rejection past the cap was queued for another recovery");
+
+  // A 429 is a rate limit, not an overflow, and is deliberately not recovered from.
+  await capped.handlers.get("after_provider_response")({ status: 429 }, capped.ctx);
+  assert.equal((await toolStatus(capped)).details.automatic.recovery.pendingRejection, null);
+
+  return {
+    budgetTokens,
+    maxAttempts: context.OVERFLOW_RECOVERY_MAX_ATTEMPTS,
+    recoveryAttempts: recovery.last.attempts,
+    recovered: recovery.last.recovered,
+    rebuiltTokens,
+    cappedAttempts: cappedRecovery.attempts,
+  };
+}
+
+/**
+ * Attempt and error instrumentation, unconditional.
+ *
+ * The external adjudicator reads session artifacts. An agent whose spans keep being
+ * refused looks identical, from fold records alone, to an agent that never tried to
+ * curate at all, so a rejected call is recorded as loudly as an accepted one and the
+ * exact validation text is kept verbatim.
+ */
+async function gateContextEventStream() {
+  const runtime = await epochToolRuntime({ turns: 14, resultChars: 6_000 });
+  const built = runtime.built;
+  const stream = () => runtime.appended
+    .filter((entry) => entry.customType === "pi-fold-context-event")
+    .map((entry) => entry.data);
+
+  await toolCall(runtime, { action: "status" });
+  await toolCall(runtime, { action: "fold", ids: ["no-such-entry"] }).catch(() => undefined);
+  await toolCall(runtime, { action: "fold", marks: [{ ids: ["also-missing"] }] }).catch(() => undefined);
+  await toolCall(runtime, {
+    action: "fold",
+    marks: [0, 1].map((turn) => ({
+      ids: [built.turnEntries[turn][2]],
+      brief: `Stale inspection ${turn}: the exact output stays recoverable behind this fold.`,
+    })),
+  });
+  await toolCall(runtime, { action: "commit" });
+  for (const tokens of [78_000, 84_000, 88_000, 92_000]) {
+    await measure(runtime, tokens, 100_000);
+    await project(runtime);
+  }
+  await settle();
+
+  // ONE stream, ONE envelope. Every record, whatever its kind, carries the same
+  // self-describing header, so a reader dispatches on `kind` and nothing else.
+  const records = stream();
+  assert(records.length >= 8, "The stream is too sparse to be a timeline");
+  for (const record of records) {
+    assert.equal(record.v, context.CONTEXT_EVENT_SCHEMA_VERSION);
+    assert.equal(typeof record.kind, "string");
+    assert(record.kind.startsWith("context."), `A record kind is not namespaced: ${record.kind}`);
+    assert.equal(record.session_id, built.sessionId);
+    assert(Number.isSafeInteger(record.seq) && record.seq >= 1);
+    assert(Number.isSafeInteger(record.ordinal) && record.ordinal >= 0);
+    assert(Number.isSafeInteger(record.at) && record.at > 0);
+    assert(Number.isSafeInteger(record.revision) && record.revision >= 0);
+    // Flat: the payload is scalars, so a query never has to unpack anything.
+    for (const [field, value] of Object.entries(record)) {
+      assert.equal(/^[a-z][a-z0-9_]*$/.test(field), true, `Field ${field} is not snake_case`);
+      assert(value === null || typeof value !== "object",
+        `Field ${field} of ${record.kind} nests; the stream must stay flat`);
+    }
+  }
+  // The sequence is monotonic and gapless, so records order without a clock.
+  assert.deepEqual(records.map((record) => record.seq),
+    records.map((_, index) => index + 1), "The sequence is not monotonic and gapless");
+
+  // Attempts, including refusals, with the exact validation text kept verbatim.
+  const attempts = records.filter((record) => record.kind === "context.attempt");
+  assert(attempts.length >= 5, "Not every context-management call was recorded");
+  const failures = attempts.filter((record) => record.ok === false);
+  assert.equal(failures.length, 2, "A rejected call was not recorded as rejected");
+  assert(failures.every((record) => typeof record.error === "string" && record.error.length > 0));
+  assert(failures.some((record) => /Unknown active-context source no-such-entry/.test(record.error)),
+    "The exact validation text was not kept verbatim");
+  assert(attempts.some((record) => record.ok === true && record.error === null));
+  assert(attempts.every((record) => /^[a-f0-9]{64}$/.test(record.arguments_sha256)));
+  assert.equal(attempts.find((record) => record.marks_requested === 2) !== undefined, true,
+    "A batched call did not record how many spans it carried");
+
+  // Corrections are their own records, joined to their attempt by seq.
+  const existing = materialized(runtime).folds[0];
+  await toolCall(runtime, {
+    action: "fold",
+    ids: [built.turnEntries[4][0], built.turnEntries[4].at(-1)],
+    brief: "A whole closed turn whose exact evidence stays recoverable behind this fold.",
+  });
+  await toolCall(runtime, { action: "commit" });
+  const chapter = materialized(runtime).folds.find((fold) => fold.kind === "chapter");
+  const insideId = chapter.parts[1].kind === "raw" ? chapter.parts[1].ref.entryId : chapter.parts[1].foldId;
+  await toolCall(runtime, {
+    action: "fold",
+    ids: [insideId, built.turnEntries[4].at(-1)],
+    brief: "A corrected span whose exact evidence stays recoverable behind this fold.",
+  }).catch(() => undefined);
+  await settle();
+  const corrections = stream().filter((record) => record.kind === "context.correction");
+  assert(corrections.length >= 1, "An auto-snap did not reach the stream as its own record");
+  const correction = corrections.at(-1);
+  assert(stream().some((record) =>
+    record.kind === "context.attempt" && record.seq === correction.attempt_seq),
+  "A correction references no attempt");
+  assert.equal(typeof correction.reason, "string");
+  assert.equal(typeof correction.corrected_start_id, "string");
+  assert(correction.reason.includes(chapter.id) ||
+    correction.reason.includes(existing.id) ||
+    /corrected to/.test(correction.reason));
+
+  // The timeline is reconstructable: commits, the folds they created, projections, the
+  // per-handoff prefix comparison, and the provider usage the analyst joins against.
+  const kinds = new Set(stream().map((record) => record.kind));
+  for (const kind of [
+    "context.attempt", "context.correction", "context.commit", "context.fold",
+    "context.projection", "context.prefix", "context.usage",
+  ]) {
+    assert(kinds.has(kind), `The stream carries no ${kind} record`);
+  }
+  const commits = stream().filter((record) => record.kind === "context.commit");
+  const folds = stream().filter((record) => record.kind === "context.fold");
+  assert(folds.every((record) =>
+    commits.some((commit) => commit.seq === record.commit_seq)),
+  "A fold record references no commit");
+  assert(commits.every((record) => Number.isSafeInteger(record.applied_marks)));
+
+  // The rewrite-vs-miss discriminator: every transmitted projection carries the byte
+  // position the prefix diverged at, the identical share, and OUR attribution for it.
+  const prefixes = stream().filter((record) => record.kind === "context.prefix");
+  assert(prefixes.length >= 2, "Too few handoffs to compare prefixes");
+  for (const record of prefixes) {
+    assert(record.divergent_char === null || Number.isSafeInteger(record.divergent_char));
+    assert(record.divergent_tokens === null || Number.isSafeInteger(record.divergent_tokens));
+    assert(Number.isSafeInteger(record.identical_chars));
+    assert(record.identical_share >= 0 && record.identical_share <= 1);
+    assert.equal(typeof record.cause, "string");
+    assert.equal(typeof record.cause_event_seqs, "string");
+  }
+  assert(prefixes.some((record) => record.cause === "pure-append"),
+    "No handoff was attributed as a pure append");
+  const mutated = prefixes.find((record) => record.divergent_char !== null && record.cause !== "pure-append");
+  assert(mutated, "No handoff recorded a prefix divergence to attribute");
+  assert(mutated.cause === "unattributed" || mutated.cause.includes("context."),
+    `A divergence cause is neither an event kind nor unattributed: ${mutated.cause}`);
+
+  // Usage is the join key against provider-side telemetry.
+  const usage = stream().filter((record) => record.kind === "context.usage");
+  assert(usage.every((record) =>
+    Number.isSafeInteger(record.input_tokens) && Number.isSafeInteger(record.cache_read_tokens) &&
+    typeof record.provider === "string" && typeof record.message_sha256 === "string"));
+
+  // The in-memory view and the durable stream are the same records, not two conventions.
+  const summary = (await toolStatus(runtime)).details.automatic.instrumentation;
+  await settle();
+  assert.equal(stream().length, summary.contextEvents + 1,
+    "The durable stream and the ledger disagree about how many events were emitted");
+  const attemptsNow = stream().filter((record) => record.kind === "context.attempt").length;
+  assert.equal(summary.contextEventsByKind["context.attempt"] + 1, attemptsNow,
+    "The attempt ledger and the durable stream disagree about how many calls were made");
+  assert(summary.events.every((event) => event.v === context.CONTEXT_EVENT_SCHEMA_VERSION));
+
+  return {
+    kinds: [...kinds].sort(),
+    records: stream().length,
+    attempts: attemptsNow,
+    refusals: failures.length,
+    corrections: corrections.length,
+    handoffs: prefixes.length,
+    pureAppends: prefixes.filter((record) => record.cause === "pure-append").length,
+  };
+}
+
+/**
+ * The lever collapse, pinned from the outside.
+ *
+ * A deleted option that is silently ignored is worse than one that never existed: a
+ * deployment carrying it would believe it had asked for something. Every collapsed
+ * lever is refused by name, and the behaviour it used to gate is simply on.
+ */
+async function gateLeverCollapse() {
+  const built = makeFixture({ turns: 8, resultChars: 6_000, contextWindow: 100_000 });
+  const collapsed = [
+    "ephemeralPeek", "perPeekEphemeral", "truthfulCapacity", "admissionControl",
+    "retainPendingMarks", "eligibleShareCommit", "eligibleShareCommitThreshold",
+    "statusIndexDiet", "advisoryDelivery", "projectionInstrumentation",
+    "stageIdentifiedBriefs", "currentTurnCommitGuard", "pinnedMassBackstop",
+  ];
+  const surfaced = new Set(Object.keys(SEALED_SPINE));
+  for (const option of collapsed) {
+    assert.equal(surfaced.has(option), false, `${option} is still configured by the spine fixture`);
+  }
+  // The constants are gone from the module surface, so nothing can read one back.
+  for (const name of [
+    "DEFAULT_EPHEMERAL_PEEK", "DEFAULT_TRUTHFUL_CAPACITY", "DEFAULT_ADMISSION_CONTROL",
+    "DEFAULT_RETAIN_PENDING_MARKS", "DEFAULT_ELIGIBLE_SHARE_COMMIT", "DEFAULT_STAGE_IDENTIFIED_BRIEFS",
+    "DEFAULT_CURRENT_TURN_COMMIT_GUARD", "DEFAULT_PINNED_MASS_BACKSTOP", "DEFAULT_PER_PEEK_EPHEMERAL",
+    "DEFAULT_STATUS_INDEX_DIET", "DEFAULT_ADVISORY_DELIVERY", "DEFAULT_PROJECTION_INSTRUMENTATION",
+    "DEFAULT_PROVIDER_TOTAL_WINDOW", "RETAINED_MARK_ACTIVE_CONTEXT_TOOL_ACTIONS",
+    "EPOCH_TAIL_ADJACENT_MESSAGES", "tailAdjacent",
+  ]) {
+    assert.equal(context[name], undefined, `${name} survived the collapse`);
+  }
+
+  // And the behaviour is on, in a runtime that configures nothing at all.
+  const plain = makeRuntime(built, {});
+  await startRuntime(plain);
+  await measure(plain, 80_000, 100_000);
+  await project(plain);
+  const status = (await toolStatus(plain)).details.automatic;
+  assert.equal(status.instrumentation.enabled, true, "Projection instrumentation is not unconditional");
+  assert.equal((await toolStatus(plain)).details.index, "diet", "The status index diet is not unconditional");
+  const properties = [...plain.tools.values()][0].parameters.properties;
+  assert.equal(properties.retain.type, "boolean", "Ephemeral peek is not unconditional");
+  assert.equal(properties.ephemeral.type, "boolean", "The per-peek override is not unconditional");
+  assert.equal(properties.marks.type, "array", "Batched marks are not on the surface");
+  const actions = [...properties.action.enum];
+  assert(actions.includes("rebrief") && actions.includes("reboundary"),
+    "The correction verbs are not on the immediate surface");
+  const folds = materialized(plain).folds.filter((fold) => fold.kind === "tool-result");
+  assert(folds.length >= 1, "The collapse fixture folded nothing");
+  assert(/path=/.test(folds[0].brief), "Stage-identified briefs are not unconditional");
+  // Capacity is truthful once the deployment declares its window, and says which mode.
+  assert.equal(status.capacity.mode, "descriptor");
+  const declared = makeRuntime(built, { providerTotalWindow: 400_000 });
+  await startRuntime(declared);
+  assert.equal((await toolStatus(declared)).details.automatic.capacity.mode, "truthful");
+
+  // What stays configurable is exactly the experiment conditions plus the one fact.
+  assert.throws(() => makeRuntime(built, { guidedCuration: "yes" }).tools,
+    /guidedCuration must be a boolean/);
+  assert.throws(() => makeRuntime(built, { providerTotalWindow: -1 }).tools,
+    /providerTotalWindow must be a positive integer/);
+  assert.throws(() => makeRuntime(built, { foldScheduling: "later" }).tools,
+    /foldScheduling must be one of/);
+  assert.equal(context.DEFAULT_GUIDED_CURATION, false);
+
+  return {
+    collapsedOptions: collapsed.length,
+    survivingConstants: 0,
+    unconditionalInstrumentation: true,
+    unconditionalDiet: true,
+    unconditionalPeekLifetime: true,
   };
 }
 
@@ -5279,6 +6386,16 @@ const gates = [
   [56, "Projection budget fence & guard waiver", gateProjectionBudgetFence],
   [57, "Projection estimator calibration & post-fence integrity", gateProjectionCalibration],
   [58, "Fence margin, calibration recency & commit depth", gateFenceMarginAndDepth],
+  [59, "Two-signal curation trigger", gateCurationTrigger],
+  [60, "Bounded last-call gate", gateCurationLastCall],
+  [61, "Context action receipts", gateContextReceipts],
+  [62, "Batched marks & loud auto-snap", gateAutoSnapAndCorrections],
+  [63, "Symmetric re-boundary", gateSymmetricReboundary],
+  [64, "Bite-sized folds & auto-split", gateBiteSizedFolds],
+  [65, "Wedge absorption & the anti-LCM pin", gateWedgeAbsorption],
+  [66, "Overflow rollback & recovery", gateOverflowRecovery],
+  [67, "Context event stream", gateContextEventStream],
+  [68, "Lever collapse", gateLeverCollapse],
 ];
 
 let failures = 0;

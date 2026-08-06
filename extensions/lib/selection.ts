@@ -598,20 +598,90 @@ export function snapFoldCandidate(
   } catch (error) {
     directError = error instanceof Error ? error : new Error(String(error));
   }
-  const snapped = snapSpanIds(snapshot, state, ids);
-  if (!snapped) throw directError;
-  try {
-    return {
-      candidate: manualFoldCandidate(snapshot, state, snapped.ids, options),
-      corrections: snapped.corrections,
-    };
-  } catch (error) {
-    throw new Error(
-      `${directError.message}. The nearest valid span [${snapped.ids.join(", ")}] was also refused: ` +
-      `${error instanceof Error ? error.message : String(error)}`,
-      { cause: error },
-    );
+  // Nearest first, then the other readings of the same intent. A span that cuts into one
+  // fold has exactly two endpoint corrections -- absorb it, or step past it -- and which
+  // one survives depends on structure the caller cannot see. A span that cuts into folds
+  // on BOTH sides has neither: every endpoint correction still leaves a whole chapter
+  // inside the span, and a chapter may not swallow one.
+  const alternatives = snapSpanAlternatives(snapshot, state, ids);
+  let lastError: Error = directError;
+  for (const snapped of alternatives) {
+    try {
+      return {
+        candidate: manualFoldCandidate(snapshot, state, snapped.ids, options),
+        corrections: snapped.corrections,
+      };
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
   }
+  // A suggestion the caller cannot act on is worse than no suggestion: never name a
+  // "nearest valid span" this same validation just refused. Nothing snapped, so the
+  // refusal is the direct one, stated once.
+  throw new Error(
+    `${directError.message}. No corrected reading of that span is constructible`,
+    { cause: lastError },
+  );
+}
+
+/**
+ * Every constructible reading of a requested span, nearest intent first.
+ *
+ * The three endpoint modes move the EDGES; the fourth reading moves the FRAME. A span
+ * cutting into folds at both ends has no endpoint correction that yields a foldable
+ * chapter -- each one still contains a whole chapter, which `partsForRange` refuses --
+ * so the only faithful reading left is the whole folds themselves: a consolidation.
+ */
+export function snapSpanAlternatives(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+  ids: string[],
+): Array<{ ids: string[]; corrections: SpanCorrection[] }> {
+  const seen = new Set<string>();
+  const readings = [
+    ...(["nearest", "exclude", "absorb"] as const)
+      .map((mode) => snapSpanIds(snapshot, state, ids, mode)),
+    snapSpanToWholeFolds(snapshot, state, ids),
+  ];
+  return readings.flatMap((snapped) => {
+    if (!snapped) return [];
+    const key = snapped.ids.join("\u0000");
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [snapped];
+  });
+}
+
+/**
+ * The requested span read as the whole folds it cuts into.
+ *
+ * Constructible only when the outward snap lands on a contiguous tiling of two or more
+ * foldable roots: then the span the agent named IS those folds, and consolidating them
+ * is the one reading that both covers what was asked for and validates.
+ */
+export function snapSpanToWholeFolds(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+  ids: string[],
+): { ids: string[]; corrections: SpanCorrection[] } | null {
+  let outward: ReturnType<typeof snapToFoldBoundaries>;
+  try { outward = snapToFoldBoundaries(snapshot, state, ids); }
+  catch { return null; }
+  if (!outward.corrections.length) return null;
+  const tiling = orderedRoots(state, snapshot)
+    .filter((root) => root.start >= outward.start && root.end <= outward.end);
+  if (tiling.length < 2) return null;
+  if (tiling[0].start !== outward.start || tiling.at(-1)!.end !== outward.end) return null;
+  if (tiling.some((root, index) => index > 0 && root.start !== tiling[index - 1].end + 1)) return null;
+  if (tiling.some((root) => root.fold.kind === "tool-result")) return null;
+  return {
+    ids: tiling.map((root) => root.fold.id),
+    corrections: [{
+      ...outward.corrections[0],
+      reason: `span cut into ${tiling.length} folds it may not re-fold; corrected outward to their whole ` +
+        `boundaries and read as a consolidation of ${tiling.map((root) => root.fold.id).join(", ")}`,
+    }],
+  };
 }
 
 /**
@@ -622,6 +692,8 @@ export function snapSpanIds(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
   ids: string[],
+  /** How an endpoint inside a fold is read: by distance, or always one way. */
+  mode: "nearest" | "absorb" | "exclude" = "nearest",
 ): { ids: string[]; corrections: SpanCorrection[] } | null {
   let resolved: Array<{ start: number; end: number; fold?: ActiveFold }>;
   // An unknown id has no nearest valid edge: there is nothing to snap TO.
@@ -639,13 +711,18 @@ export function snapSpanIds(
   };
   for (const root of orderedRoots(state, snapshot)) {
     if (start > root.start && start <= root.end) {
-      // Nearest edge: absorb the fold whole, or step past it, whichever moves less.
-      start = start - root.start <= root.end + 1 - start ? root.start : root.end + 1;
-      note(`span started inside ${root.fold.id}; corrected to its nearest boundary`);
+      const absorb = mode === "absorb" ||
+        (mode === "nearest" && start - root.start <= root.end + 1 - start);
+      start = absorb ? root.start : root.end + 1;
+      note(`span started inside ${root.fold.id}; corrected to its ` +
+        `${absorb ? "start" : "far"} boundary`);
     }
     if (end >= root.start && end < root.end) {
-      end = root.end - end <= end - (root.start - 1) ? root.end : root.start - 1;
-      note(`span ended inside ${root.fold.id}; corrected to its nearest boundary`);
+      const absorb = mode === "absorb" ||
+        (mode === "nearest" && root.end - end <= end - (root.start - 1));
+      end = absorb ? root.end : root.start - 1;
+      note(`span ended inside ${root.fold.id}; corrected to its ` +
+        `${absorb ? "end" : "near"} boundary`);
     }
   }
   const boundary = currentTurnBoundary(snapshot);
@@ -663,6 +740,26 @@ export function snapSpanIds(
   if (endUnit && endUnit.end - 1 !== end) {
     end = endUnit.end - 1;
     note("span ended mid-unit; corrected to the end of its closed user/assistant/tool unit");
+  }
+  // A chapter spans at most a few closed turns. A longer request is a span the agent
+  // meant, so it is CLAMPED to what one fold may hold rather than refused; the
+  // remainder stays raw and is the agent's to fold next.
+  const covered = units.filter((unit) => unit.start >= start && unit.end <= end + 1);
+  if (covered.length) {
+    const turns: number[] = [];
+    let clamped = end;
+    for (const unit of covered) {
+      if (!turns.includes(unit.turnStart)) {
+        if (turns.length >= snapshot.policy.maxChapterTurns) break;
+        turns.push(unit.turnStart);
+      }
+      clamped = unit.end - 1;
+    }
+    if (clamped < end) {
+      end = clamped;
+      note(`span covered more than the ${snapshot.policy.maxChapterTurns}-turn chapter limit; ` +
+        "corrected to the last turn that fits");
+    }
   }
   if (!corrections.length || end < start ||
       !snapshot.mapped[start]?.ref || !snapshot.mapped[end]?.ref) return null;
