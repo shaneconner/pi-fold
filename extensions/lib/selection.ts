@@ -150,6 +150,85 @@ export function toolCallArguments(snapshot: ActiveContextSnapshot, assistantInde
   return calls.get(id);
 }
 
+/**
+ * Anchor budgets for a stage-identified brief. They exist to keep the composed brief
+ * inside the hard 1200-character brief cap with the generic prose trimmed away: an
+ * argument list, a leading label from the result head, and the result TAIL, which is
+ * where a staged chain puts its keys and a report puts its conclusion.
+ */
+export const IDENTIFIED_BRIEF_ARGUMENT_CHARS = 240;
+export const IDENTIFIED_BRIEF_VALUE_CHARS = 96;
+export const IDENTIFIED_BRIEF_HEAD_CHARS = 160;
+export const IDENTIFIED_BRIEF_TAIL_CHARS = 120;
+export const IDENTIFIED_BRIEF_CALLS_CHARS = 400;
+
+/** Every scalar argument of a call, in stable key order, bounded per value and in total. */
+export function identifiedCallArguments(
+  args: unknown,
+  factual: (value: string, maximum: number) => string,
+): string {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return "";
+  const pairs: string[] = [];
+  for (const key of Object.keys(args as Record<string, unknown>).sort()) {
+    const value = ownValue(args, key);
+    const text = typeof value === "string"
+      ? value
+      : (typeof value === "number" || typeof value === "boolean" ? String(value) : "");
+    if (!text.trim()) continue;
+    pairs.push(`${factual(key, 40)}=${factual(text, IDENTIFIED_BRIEF_VALUE_CHARS)}`);
+  }
+  return oneLine(pairs.join(", "), IDENTIFIED_BRIEF_ARGUMENT_CHARS);
+}
+
+/** The last characters of a result, which is the region a truncated read never shows. */
+export function identifiedResultTail(
+  message: unknown,
+  factual: (value: string, maximum: number) => string,
+): string {
+  const text = String(contentText(message) ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return factual(text.slice(Math.max(0, text.length - IDENTIFIED_BRIEF_TAIL_CHARS)), IDENTIFIED_BRIEF_TAIL_CHARS);
+}
+
+/**
+ * The stage-identified brief. The generic prose is trimmed to a few words so the
+ * character budget buys ANCHORS instead: which call this was, with which arguments,
+ * what the result opened with, and what it ENDED with. The tail anchor is the point
+ * of the whole change: a reader deciding which fold holds a chain key can only tell
+ * from the tail, and a generic sentence never carried one.
+ */
+export function stageIdentifiedToolBrief(input: {
+  snapshot: ActiveContextSnapshot;
+  refs: EvidenceRef[];
+  calls: ResultCall[];
+  factualValue: (value: string, maximum: number) => string;
+  factualToolName: (name: string) => string;
+}): string | null {
+  const { snapshot, refs, calls, factualValue, factualToolName } = input;
+  const messages = refs.map((ref) => exactMapped(snapshot, ref)?.message ?? null);
+  if (messages.some((message) => message === null)) return null;
+  const signatures = calls.map((call) => {
+    const args = identifiedCallArguments(
+      toolCallArguments(snapshot, call.assistantIndex, call.id),
+      factualValue,
+    );
+    return args ? `${factualToolName(call.name)}(${args})` : factualToolName(call.name);
+  });
+  const label = factualValue(
+    String(contentText(messages[0]) ?? "").split(/\r?\n/).find((line) => line.trim()) ?? "",
+    IDENTIFIED_BRIEF_HEAD_CHARS,
+  );
+  const tail = identifiedResultTail(messages.at(-1), factualValue);
+  const composed = [
+    `Read ${oneLine(signatures.join("; "), IDENTIFIED_BRIEF_CALLS_CHARS)}`,
+    label ? `opens "${label}"` : "",
+    tail ? `ends "${tail}"` : "",
+    calls.length > 1 ? `${calls.length} exact results here` : "exact source here",
+  ].filter(Boolean).join(" · ");
+  const bounded = oneLine(composed, ACTIVE_CONTEXT_POLICY.maxBriefChars);
+  return usefulBrief(bounded, ACTIVE_CONTEXT_POLICY.maxBriefChars, snapshot.toolName) ? bounded : null;
+}
+
 export function automaticToolBrief(snapshot: ActiveContextSnapshot, candidate: FoldCandidate): string {
   const refs = candidate.kind === "tool-result" && candidate.parts.every((part) => part.kind === "raw")
     ? candidate.parts.map((part) => (part as Extract<FoldPart, { kind: "raw" }>).ref)
@@ -164,16 +243,21 @@ export function automaticToolBrief(snapshot: ActiveContextSnapshot, candidate: F
     throw new Error("Automatic tool brief crossed a validated assistant batch");
   }
   const first = calls[0];
-  const factualBriefValue = (value: string): string => value
+  const factualValue = (value: string, maximum: number): string => value
     .replace(new RegExp(snapshot.toolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "active-context service")
     .replace(/[\u0000-\u001f\u007f]+/g, " ")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 120);
+    .slice(0, maximum);
+  const factualBriefValue = (value: string): string => factualValue(value, 120);
   const factualToolName = (name: string): string => name.toLowerCase() === snapshot.toolName.toLowerCase()
     ? "active-context status inspection"
     : factualBriefValue(name);
   const args = toolCallArguments(snapshot, first.assistantIndex, first.id);
+  if (snapshot.stageIdentifiedBriefs) {
+    const identified = stageIdentifiedToolBrief({ snapshot, refs, calls, factualValue, factualToolName });
+    if (identified) return identified;
+  }
   const targets: string[] = [];
   for (const key of ["path", "address", "query", "url", "action", "id"]) {
     const value = ownValue(args, key);

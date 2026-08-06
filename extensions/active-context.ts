@@ -106,6 +106,7 @@ import {
   DEFAULT_PROJECTION_INSTRUMENTATION,
   DEFAULT_PROVIDER_TOTAL_WINDOW,
   DEFAULT_RETAIN_PENDING_MARKS,
+  DEFAULT_STAGE_IDENTIFIED_BRIEFS,
   DEFAULT_STATUS_INDEX_DIET,
   DEFAULT_TRUTHFUL_CAPACITY,
   ESTIMATED_BYTES_PER_TOKEN,
@@ -225,6 +226,7 @@ export function registerActiveContext(pi: any, options: {
   retainPendingMarks?: boolean;
   eligibleShareCommit?: boolean;
   eligibleShareCommitThreshold?: number;
+  stageIdentifiedBriefs?: boolean;
   statusIndexDiet?: boolean;
   advisoryDelivery?: boolean;
   projectionInstrumentation?: boolean;
@@ -303,6 +305,13 @@ export function registerActiveContext(pi: any, options: {
   const eligibleShareThreshold = (options.eligibleShareCommit ?? DEFAULT_ELIGIBLE_SHARE_COMMIT)
     ? options.eligibleShareCommitThreshold ?? DEFAULT_ELIGIBLE_SHARE_COMMIT_THRESHOLD
     : null;
+  if (options.stageIdentifiedBriefs !== undefined && typeof options.stageIdentifiedBriefs !== "boolean") {
+    throw new Error("stageIdentifiedBriefs must be a boolean");
+  }
+  // One generic sentence per tool made every fold of that tool look identical, so no
+  // index could answer which fold holds a given stage. Off by default: the brief is
+  // part of the durable fold record the immediate-mode digest pins.
+  const stageIdentifiedBriefs = options.stageIdentifiedBriefs ?? DEFAULT_STAGE_IDENTIFIED_BRIEFS;
   if (options.statusIndexDiet !== undefined && typeof options.statusIndexDiet !== "boolean") {
     throw new Error("statusIndexDiet must be a boolean");
   }
@@ -555,6 +564,7 @@ export function registerActiveContext(pi: any, options: {
     readOnlyContextActions,
     contextWindow: budgetWindowFor(ctx) ?? undefined,
     ephemeralPeek,
+    stageIdentifiedBriefs,
   });
 
   const authoritativeSnapshotFor = (ctx: any): ActiveContextSnapshot => {
@@ -574,6 +584,7 @@ export function registerActiveContext(pi: any, options: {
       readOnlyContextActions,
       contextWindow: budgetWindowFor(ctx) ?? undefined,
       ephemeralPeek,
+      stageIdentifiedBriefs,
     });
   };
 

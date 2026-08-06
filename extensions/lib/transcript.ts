@@ -404,6 +404,7 @@ export function mapActiveContext(input: {
   readOnlyContextActions?: ReadonlySet<string>;
   contextWindow?: number;
   ephemeralPeek?: boolean;
+  stageIdentifiedBriefs?: boolean;
 }): ActiveContextSnapshot {
   const policy = Object.freeze({ ...ACTIVE_CONTEXT_POLICY, ...(input.policy ?? {}) }) as typeof ACTIVE_CONTEXT_POLICY;
   const projectEntry = input.projectEntry ?? sessionEntryMessages;
@@ -500,5 +501,6 @@ export function mapActiveContext(input: {
     contextWindow: reportedContextWindow ?? DEFAULT_CONTEXT_WINDOW,
     windowSource: reportedContextWindow === null ? "fallback" : "reported",
     ephemeralPeek: input.ephemeralPeek === true,
+    stageIdentifiedBriefs: input.stageIdentifiedBriefs === true,
   };
 }

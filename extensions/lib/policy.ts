@@ -153,6 +153,17 @@ export const DEFAULT_RETAIN_PENDING_MARKS = false;
 export const DEFAULT_ELIGIBLE_SHARE_COMMIT = false;
 export const DEFAULT_ELIGIBLE_SHARE_COMMIT_THRESHOLD = 0.30;
 
+/**
+ * A deterministic read-only tool fold used to describe itself with one generic
+ * sentence per tool, so every fold of the same tool carried the SAME brief and no
+ * index could answer "which fold holds X". Measured 2026-08-06: three probe answers
+ * lived in two stage folds and no run, control included, ever peeked the right one.
+ * With this on the automatic brief carries bounded exact anchors instead: the call
+ * arguments, a leading label from the result head, and a TRAILING anchor from the
+ * result tail, where chain keys and conclusions live.
+ */
+export const DEFAULT_STAGE_IDENTIFIED_BRIEFS = false;
+
 /** The default status payload stops carrying the whole fold tree. */
 export const DEFAULT_STATUS_INDEX_DIET = false;
 export const STATUS_DIET_SUGGESTIONS = 5;
@@ -424,6 +435,8 @@ export interface ActiveContextSnapshot {
   windowSource: "reported" | "fallback";
   /** Consumed peek results render as recall stubs instead of duplicate source bytes. */
   ephemeralPeek: boolean;
+  /** Automatic tool briefs carry bounded exact call arguments and result anchors. */
+  stageIdentifiedBriefs: boolean;
 }
 
 export interface FoldCandidate {

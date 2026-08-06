@@ -93,6 +93,8 @@ function makeFixture({
   mentionToolName = false,
   peekTurns = [],
   peekTargetId = "fold_probe",
+  resultTail = null,
+  readArguments = null,
   policy = {},
   contextWindow = 272_000,
 } = {}) {
@@ -128,7 +130,9 @@ function makeFixture({
           type: "toolCall",
           id: `call-${turn}`,
           name: peek ? "active_context" : "read",
-          arguments: peek ? { action: "peek", id: peekTargetId } : { path: `file-${turn}.txt` },
+          arguments: peek
+            ? { action: "peek", id: peekTargetId }
+            : (readArguments ? readArguments(turn) : { path: `file-${turn}.txt` }),
         }],
         stopReason: "toolUse",
         timestamp: sequence,
@@ -137,7 +141,10 @@ function makeFixture({
         role: "toolResult",
         toolCallId: `call-${turn}`,
         toolName: peek ? "active_context" : "read",
-        content: [{ type: "text", text: `Result ${turn}: ${"r".repeat(resultChars)}` }],
+        content: [{
+          type: "text",
+          text: `Result ${turn}: ${"r".repeat(resultChars)}${resultTail ? ` ${resultTail(turn)}` : ""}`,
+        }],
         isError: false,
         timestamp: sequence,
       }));
@@ -198,6 +205,7 @@ function makeRuntime(built, {
   surfacing,
   foldScheduling,
   foldPeekResults,
+  stageIdentifiedBriefs,
   ephemeralPeek,
   truthfulCapacity,
   providerTotalWindow,
@@ -298,6 +306,7 @@ function makeRuntime(built, {
     ...(surfacing === undefined ? {} : { surfacing }),
     ...(foldScheduling === undefined ? {} : { foldScheduling }),
     ...(foldPeekResults === undefined ? {} : { foldPeekResults }),
+    ...(stageIdentifiedBriefs === undefined ? {} : { stageIdentifiedBriefs }),
     ...(ephemeralPeek === undefined ? {} : { ephemeralPeek }),
     ...(truthfulCapacity === undefined ? {} : { truthfulCapacity }),
     ...(providerTotalWindow === undefined ? {} : { providerTotalWindow }),
@@ -4086,6 +4095,79 @@ async function gateSurfacingKeyOrder() {
   };
 }
 
+/**
+ * The index defect the iteration-2 forensics found: every fold of the same read-only
+ * tool carried the SAME generic sentence, so no agent could tell which fold held the
+ * stage it needed and no run, control included, ever peeked the right one. A
+ * stage-identified brief carries the call arguments and the result TAIL, which is
+ * where a staged chain keeps its key.
+ */
+async function gateStageIdentifiedBriefs() {
+  const fixture = {
+    turns: 8,
+    resultChars: 10_000,
+    contextWindow: 100_000,
+    resultTail: (turn) => `NEXT_KEY=stage-${turn}-7f3a`,
+    // Arguments no whitelist ever named: this is the shape that collapsed every
+    // repo_stage fold onto one sentence in the measured runs.
+    readArguments: (turn) => ({ stage: turn }),
+  };
+  const identifiedRuntime = makeRuntime(makeFixture(fixture), { stageIdentifiedBriefs: true });
+  await startRuntime(identifiedRuntime);
+  await measure(identifiedRuntime, 80_000, 100_000);
+  await project(identifiedRuntime);
+  await measure(identifiedRuntime, 88_000, 100_000);
+  await project(identifiedRuntime);
+  const identified = materialized(identifiedRuntime).folds
+    .filter((fold) => fold.kind === "tool-result");
+  assert(identified.length >= 2, "The identified fixture folded fewer than two tool results");
+
+  const generic = makeRuntime(makeFixture(fixture));
+  await startRuntime(generic);
+  await measure(generic, 80_000, 100_000);
+  await project(generic);
+  await measure(generic, 88_000, 100_000);
+  await project(generic);
+  const genericFolds = materialized(generic).folds.filter((fold) => fold.kind === "tool-result");
+  const genericBriefs = new Set(genericFolds.map((fold) => fold.brief));
+
+  // The defect, reproduced: one sentence for every fold, no argument and no tail.
+  assert.equal(genericBriefs.size, 1, "The generic fixture no longer reproduces the index defect");
+  assert(!/NEXT_KEY/.test([...genericBriefs][0]));
+
+  const identifiedBriefs = identified.map((fold) => fold.brief);
+  assert.equal(new Set(identifiedBriefs).size, identified.length,
+    "Two stage-identified briefs are identical");
+  for (const brief of identifiedBriefs) {
+    assert(brief.length <= 1_200, `A stage-identified brief exceeded the hard cap: ${brief.length}`);
+    assert(context.usefulBrief(brief, 1_200, "active_context"), "A stage-identified brief is not factual");
+    assert(/stage=\d+/.test(brief), `A stage-identified brief lost its arguments: ${brief}`);
+    assert(/NEXT_KEY=stage-\d+-7f3a/.test(brief), `A stage-identified brief lost its tail anchor: ${brief}`);
+  }
+
+  // The goal itself: pick a stage by its distinctive tail token and land on the fold
+  // that holds exactly that stage's result, with no peek and no expand.
+  const target = identifiedBriefs
+    .map((brief, index) => ({ brief, fold: identified[index] }))
+    .find(({ brief }) => brief.includes("NEXT_KEY=stage-1-7f3a"));
+  assert(target, "No fold brief identified stage 1 by its tail token");
+  const sourceIds = target.fold.parts
+    .filter((part) => part.kind === "raw")
+    .map((part) => part.ref.entryId);
+  const stageOneResult = identifiedRuntime.built.turnEntries[1][2];
+  assert.deepEqual(sourceIds, [stageOneResult],
+    "The brief that named stage 1 does not hold stage 1's result");
+
+  return {
+    identifiedFolds: identified.length,
+    distinctIdentifiedBriefs: new Set(identifiedBriefs).size,
+    distinctGenericBriefs: genericBriefs.size,
+    maximumBriefChars: Math.max(...identifiedBriefs.map((brief) => brief.length)),
+    genericBriefChars: [...genericBriefs][0].length,
+    tailAnchored: true,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -4137,6 +4219,7 @@ const gates = [
   [48, "Status index diet", gateStatusIndexDiet],
   [49, "Advisory delivery accounting", gateAdvisoryDelivery],
   [50, "Projection instrumentation", gateProjectionInstrumentation],
+  [51, "Stage-identified fold briefs", gateStageIdentifiedBriefs],
 ];
 
 let failures = 0;
