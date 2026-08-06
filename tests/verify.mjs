@@ -3384,6 +3384,16 @@ async function gateStatusIndexDiet() {
     pagedFolds.folds.map((row) => row.id),
     fatStatus.folds.map((row) => row.id),
   );
+  // A paged row must carry the brief, or paging the tree returns opaque ids and the
+  // agent is pushed straight back into the whole-fold peek the diet exists to avoid.
+  const tree = (await toolStatus(lean, "active_context", "tree")).details.tree;
+  const treeBriefs = new Map(tree.map((row) => [row.id, row.brief]));
+  assert(pagedFolds.folds.every((row) => typeof row.brief === "string" && row.brief.length >= 1),
+    "A paged fold row carries no brief");
+  assert(pagedFolds.folds.every((row) => row.brief === treeBriefs.get(row.id)),
+    "A paged fold row disagrees with the tree row about the brief");
+  assert(pagedFolds.folds.every((row) => Number.isSafeInteger(row.sourceChars) && row.sourceChars > 0),
+    "A paged fold row carries no sourceChars");
   const pagedObjects = (await toolStatus(lean, "active_context", "objects")).details;
   assert(Array.isArray(pagedObjects.objects) && pagedObjects.objects.length >= 1);
   assert(Array.isArray((await toolStatus(lean, "active_context", "tree")).details.tree));
@@ -3403,6 +3413,7 @@ async function gateStatusIndexDiet() {
     fatStatusBytes: bytesOf(fatStatus),
     dietStatusBytes: bytesOf(leanStatus),
     savedBytes: bytesOf(fatStatus) - bytesOf(leanStatus),
+    pagedBriefs: pagedFolds.folds.length,
     topFolds: leanStatus.topFolds.length,
     sourceMapEntries: leanStatus.sourceMap.length,
     pagedFoldsMatchDefault: true,

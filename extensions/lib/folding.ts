@@ -995,6 +995,11 @@ export function foldStatusRow(fold: ActiveFold, state: ActiveContextState, snaps
     sourceCount: allSourceIds.length,
     sourceIdsTruncated: sourceIds.length < allSourceIds.length,
     sourceSha256: fold.sourceSha256,
+    // A paged row without the brief is a chronological id and nothing else: the
+    // agent that paged the tree to find WHICH fold holds something got the one
+    // field that answers it withheld, while the tree detail carried it all along.
+    brief: fold.brief,
+    sourceChars: fold.sourceChars,
     actions: {
       primary: projection === "folded"
         ? { action: "expand", id: fold.id }
