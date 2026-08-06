@@ -279,12 +279,38 @@ export function markAccounting(
   };
 }
 
+export interface CommitTriggerOptions {
+  /**
+   * Eligible marked mass, as a share of the truthful window, at which a commit is
+   * worth its one rewrite. Null keeps the pressure trigger as the only trigger.
+   */
+  eligibleShareThreshold?: number | null;
+  eligibleShare?: number | null;
+}
+
 /**
- * The commit trigger. It deliberately reuses the ladder's own refold/consolidation
- * threshold instead of inventing one: below it the ladder only marks, at it the
- * accumulated marks become a single rewrite, and the hard provider fence is above it.
+ * The commit trigger.
+ *
+ * The pressure trigger reuses the ladder's own refold threshold: below it the ladder
+ * only marks, at it the accumulated marks become a single rewrite. That is a SAFETY
+ * property, not an economic one -- it fires when the window is nearly full, which is
+ * the worst moment to discover the marks are worth nothing. The rep4 abort fired at
+ * that threshold with pending marks at zero and nothing to free.
+ *
+ * The ROI trigger asks the economic question instead: commit when the marks that
+ * could apply RIGHT NOW would free enough to pay for the rewrite. Pressure stays as
+ * the backstop underneath it, and the agent's own commit is always authoritative and
+ * immediate regardless of either.
  */
-export function epochCommitDue(snapshot: ActiveContextSnapshot, ratio: number | null): boolean {
+export function epochCommitDue(
+  snapshot: ActiveContextSnapshot,
+  ratio: number | null,
+  options: CommitTriggerOptions = {},
+): boolean {
+  const { eligibleShareThreshold, eligibleShare } = options;
+  if (typeof eligibleShareThreshold === "number" && Number.isFinite(eligibleShareThreshold) &&
+      typeof eligibleShare === "number" && Number.isFinite(eligibleShare) &&
+      eligibleShare >= eligibleShareThreshold) return true;
   return typeof ratio === "number" && Number.isFinite(ratio) && ratio >= snapshot.policy.refoldRatio;
 }
 
@@ -607,14 +633,27 @@ export function schedulingStatus(input: {
   state: ActiveContextState;
   mode: string;
   ratio: number | null;
+  eligibleShareThreshold?: number | null;
 }): Record<string, unknown> {
   const accounting = markAccounting(input.snapshot, input.state);
+  const threshold = input.eligibleShareThreshold ?? null;
   return {
     mode: input.mode,
     ...accounting,
     targetWindowShare: EPOCH_COMMIT_TARGET_WINDOW_SHARE,
     tailAdjacentMessages: EPOCH_TAIL_ADJACENT_MESSAGES,
-    commitDue: epochCommitDue(input.snapshot, input.ratio),
+    commitDue: epochCommitDue(input.snapshot, input.ratio, {
+      eligibleShareThreshold: threshold,
+      eligibleShare: accounting.eligibleFreedWindowShare,
+    }),
+    commitTrigger: {
+      mode: threshold === null ? "pressure" : "eligible-share",
+      eligibleShareThreshold: threshold,
+      eligibleShare: accounting.eligibleFreedWindowShare,
+      backstopRatio: input.snapshot.policy.refoldRatio,
+      pressureDue: epochCommitDue(input.snapshot, input.ratio),
+      roiDue: threshold !== null && accounting.eligibleFreedWindowShare >= threshold,
+    },
     commitRatio: input.snapshot.policy.refoldRatio,
     marks: pendingMarks(input.state).map((mark) => ({
       mark: mark.mark,

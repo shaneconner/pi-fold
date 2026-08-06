@@ -203,6 +203,8 @@ function makeRuntime(built, {
   providerTotalWindow,
   admissionControl,
   retainPendingMarks,
+  eligibleShareCommit,
+  eligibleShareCommitThreshold,
   setSuggestionSourceRegistrar,
   loadHostModule,
   packageRegistration = false,
@@ -298,6 +300,8 @@ function makeRuntime(built, {
     ...(providerTotalWindow === undefined ? {} : { providerTotalWindow }),
     ...(admissionControl === undefined ? {} : { admissionControl }),
     ...(retainPendingMarks === undefined ? {} : { retainPendingMarks }),
+    ...(eligibleShareCommit === undefined ? {} : { eligibleShareCommit }),
+    ...(eligibleShareCommitThreshold === undefined ? {} : { eligibleShareCommitThreshold }),
     ...(setSuggestionSourceRegistrar ? { setSuggestionSourceRegistrar } : {}),
   };
   runtime.registration = packageRegistration
@@ -3080,6 +3084,93 @@ function peekSnapshot(built, { ephemeralPeek = false, messages = built.messages 
   });
 }
 
+async function gateEligibleShareCommitTrigger() {
+  // The trigger itself, in isolation. Pressure is a safety property; the ROI question
+  // is whether the marks that could apply NOW are worth one rewrite.
+  const built = makeFixture({ turns: 12, resultChars: 10_000, contextWindow: 100_000 });
+  const snapshot = epochSnapshot(built);
+  assert.equal(context.epochCommitDue(snapshot, 0.50), false);
+  assert.equal(context.epochCommitDue(snapshot, 0.90), true, "The pressure backstop stopped firing");
+  assert.equal(
+    context.epochCommitDue(snapshot, 0.50, { eligibleShareThreshold: 0.30, eligibleShare: 0.31 }),
+    true,
+  );
+  assert.equal(
+    context.epochCommitDue(snapshot, 0.50, { eligibleShareThreshold: 0.30, eligibleShare: 0.29 }),
+    false,
+  );
+  // Retained marks are not eligible mass, so they never trip the ROI trigger.
+  assert.equal(
+    context.epochCommitDue(snapshot, 0.50, { eligibleShareThreshold: 0.30, eligibleShare: 0 }),
+    false,
+  );
+
+  // End to end: the same session commits far below the 0.85 pressure threshold once
+  // the eligible marked mass is worth it, and the anchor does not.
+  const roi = makeRuntime(built, {
+    foldScheduling: "epoch", eligibleShareCommit: true, eligibleShareCommitThreshold: 0.10,
+  });
+  await startRuntime(roi);
+  const anchor = makeRuntime(makeFixture({ turns: 12, resultChars: 10_000, contextWindow: 100_000 }), {
+    foldScheduling: "epoch",
+  });
+  await startRuntime(anchor);
+  for (const tokens of [76_000, 77_000, 78_000, 79_000, 80_000]) {
+    await measure(roi, tokens, 100_000);
+    await project(roi);
+    await measure(anchor, tokens, 100_000);
+    await project(anchor);
+  }
+  const roiStatus = (await toolStatus(roi)).details.automatic.scheduling;
+  const anchorStatus = (await toolStatus(anchor)).details.automatic.scheduling;
+  assert.equal(roiStatus.commitTrigger.mode, "eligible-share");
+  assert.equal(anchorStatus.commitTrigger.mode, "pressure");
+  assert.equal(anchorStatus.commitTrigger.eligibleShareThreshold, null);
+  assert.equal(roiStatus.commitTrigger.pressureDue, false, "The fixture reached the pressure backstop");
+  assert(materialized(roi).folds.length >= 1,
+    `The ROI trigger never fired: ${json.stableStringify(roiStatus.commitTrigger)}`);
+  assert.equal(materialized(anchor).folds.length, 0,
+    "The pressure anchor committed below its threshold");
+  assert(anchorStatus.pending >= 1, "The anchor accumulated no marks to compare against");
+
+  // Pressure remains the backstop above it, and the manual commit stays immediate.
+  await measure(anchor, 88_000, 100_000);
+  await project(anchor);
+  assert(materialized(anchor).folds.length >= 1, "The pressure backstop stopped committing");
+
+  const manual = makeRuntime(makeFixture({ turns: 12, resultChars: 10_000, contextWindow: 100_000 }), {
+    foldScheduling: "epoch", eligibleShareCommit: true,
+  });
+  await startRuntime(manual);
+  await measure(manual, 76_000, 100_000);
+  await project(manual);
+  const manualStatus = (await toolStatus(manual)).details.automatic.scheduling;
+  assert.equal(manualStatus.commitTrigger.eligibleShareThreshold, 0.30);
+  assert.equal(manualStatus.commitTrigger.roiDue, false);
+  const committed = await toolCall(manual, { action: "commit" });
+  assert(committed.details.applied.length >= 1,
+    "The agent's own commit was not authoritative below the ROI threshold");
+
+  assert.throws(
+    () => makeRuntime(built, { eligibleShareCommit: true }).tools,
+    /eligibleShareCommit requires epoch fold scheduling/,
+  );
+  assert.throws(
+    () => makeRuntime(built, { foldScheduling: "epoch", eligibleShareCommitThreshold: 1.5 }).tools,
+    /eligibleShareCommitThreshold must be a number in \(0, 1\)/,
+  );
+
+  return {
+    roiThreshold: manualStatus.commitTrigger.eligibleShareThreshold,
+    roiEligibleShare: roiStatus.commitTrigger.eligibleShare,
+    roiFolds: materialized(roi).folds.length,
+    anchorFoldsAtSamePressure: 0,
+    anchorPendingMarks: anchorStatus.pending,
+    pressureBackstopIntact: true,
+    manualCommitApplied: committed.details.applied.length,
+  };
+}
+
 async function gateRetainedPendingMarks() {
   const fixture = { turns: 10, resultChars: 8_000, contextWindow: 100_000 };
   const built = makeFixture(fixture);
@@ -3726,6 +3817,7 @@ const gates = [
   [44, "Ephemeral peek reclamation", gateEphemeralPeekReclamation],
   [45, "Truthful capacity & admission control", gateTruthfulCapacityAdmission],
   [46, "Retained pending marks", gateRetainedPendingMarks],
+  [47, "Eligible-share commit trigger", gateEligibleShareCommitTrigger],
 ];
 
 let failures = 0;

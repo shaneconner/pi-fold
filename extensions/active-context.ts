@@ -97,6 +97,8 @@ import {
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   DEFAULT_ADMISSION_CONTROL,
   DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_ELIGIBLE_SHARE_COMMIT,
+  DEFAULT_ELIGIBLE_SHARE_COMMIT_THRESHOLD,
   DEFAULT_EPHEMERAL_PEEK,
   DEFAULT_FOLD_SCHEDULING,
   DEFAULT_PROVIDER_TOTAL_WINDOW,
@@ -207,6 +209,8 @@ export function registerActiveContext(pi: any, options: {
   providerTotalWindow?: number;
   admissionControl?: boolean;
   retainPendingMarks?: boolean;
+  eligibleShareCommit?: boolean;
+  eligibleShareCommitThreshold?: number;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
   registerSuggestionSource: SuggestionSourceRegistrar;
@@ -265,6 +269,23 @@ export function registerActiveContext(pi: any, options: {
   // eligible ones and KEEPS the rest. The tail-adjacent inline special case dissolves
   // with it, because "mark" no longer sometimes means "fold now".
   const retainPendingMarks = options.retainPendingMarks ?? DEFAULT_RETAIN_PENDING_MARKS;
+  if (options.eligibleShareCommit !== undefined && typeof options.eligibleShareCommit !== "boolean") {
+    throw new Error("eligibleShareCommit must be a boolean");
+  }
+  if (options.eligibleShareCommitThreshold !== undefined &&
+      (typeof options.eligibleShareCommitThreshold !== "number" ||
+        !Number.isFinite(options.eligibleShareCommitThreshold) ||
+        options.eligibleShareCommitThreshold <= 0 || options.eligibleShareCommitThreshold >= 1)) {
+    throw new Error("eligibleShareCommitThreshold must be a number in (0, 1)");
+  }
+  if (options.eligibleShareCommit && !epochScheduling) {
+    throw new Error("eligibleShareCommit requires epoch fold scheduling; immediate mode has no marks");
+  }
+  // Commit on what the marks are WORTH, not on how full the window is. Pressure stays
+  // underneath as the safety backstop.
+  const eligibleShareThreshold = (options.eligibleShareCommit ?? DEFAULT_ELIGIBLE_SHARE_COMMIT)
+    ? options.eligibleShareCommitThreshold ?? DEFAULT_ELIGIBLE_SHARE_COMMIT_THRESHOLD
+    : null;
   const readOnlyContextActions = foldPeekResults
     ? PEEK_READ_ONLY_CONTEXT_ACTIONS
     : READ_ONLY_CONTEXT_ACTIONS_DEFAULT;
@@ -1401,7 +1422,11 @@ export function registerActiveContext(pi: any, options: {
     };
     let epoch: Record<string, unknown> | null = null;
     if (epochScheduling) {
-      if (!epochCommitDue(snapshot, ratio)) {
+      const commitDue = epochCommitDue(snapshot, ratio, {
+        eligibleShareThreshold,
+        eligibleShare: markAccounting(snapshot, persistence.state).eligibleFreedWindowShare,
+      });
+      if (!commitDue) {
         // Below the commit threshold the ladder decides but does not move bytes.
         // Marks already pending are decisions already made: excluding the evidence
         // they cover makes every eligible turn choose NEW stale content, so marks
@@ -1434,7 +1459,14 @@ export function registerActiveContext(pi: any, options: {
         };
         return ladder.lastAutomaticAction;
       }
-      epoch = await runCommitEpoch(snapshot, "window-pressure", true);
+      epoch = await runCommitEpoch(
+        snapshot,
+        eligibleShareThreshold !== null &&
+          markAccounting(snapshot, persistence.state).eligibleFreedWindowShare >= eligibleShareThreshold
+          ? "eligible-share"
+          : "window-pressure",
+        true,
+      );
     }
     const selection = selectAutomaticRung(snapshot, persistence.state, ratio, rungSelectionOptions);
     // Above the commit threshold we are already inside the epoch's rewrite turn, so
@@ -2228,6 +2260,7 @@ export function registerActiveContext(pi: any, options: {
             state: persistence.state,
             mode: foldScheduling,
             ratio: measurements.latestRatio,
+            eligibleShareThreshold,
           }),
           nativeSummaries: "disabled",
           foldPeekResults,
