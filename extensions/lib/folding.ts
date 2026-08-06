@@ -1346,7 +1346,7 @@ export function recoverFoldMessages(input: {
 
 /**
  * Ephemeral point read of one fold's exact source at any depth. It recovers the same
- * SHA-256-verified messages expansion restores, bounded for the reply, and changes no
+ * SHA-256-verified messages expansion restores, bounded for one model call, and changes no
  * projection: the fold stays collapsed and the durable state is untouched.
  */
 export function peekFoldSource(input: {
@@ -1417,7 +1417,7 @@ export function peekFoldSource(input: {
         lifetime: input.retained === true
           ? "pinned: these bytes stay in the window until you refold or unpin the fold."
           : (input.ephemeral
-            ? "one model call: after the reply that reads this result, these duplicate bytes are dropped " +
+            ? "one model call: once the next model call that reads this result has run, these duplicate bytes are dropped " +
               `from the projection and the fold keeps the exact source. Pin it with ${toolName} ` +
               `{"action":"peek","id":"${fold.id}","retain":true}.`
             : "durable: these bytes stay in the window like any other tool result until the ladder " +
@@ -1431,7 +1431,7 @@ export function peekFoldSource(input: {
       : "Complete exact source; the fold stayed collapsed and no projection changed.",
     source: returned,
     // Serialized AFTER the source on purpose: a reader that just consumed a bounded slice
-    // decides its next action at the end of the reply, and a notice buried before ten
+    // decides its next action at the end of the payload, and a notice buried before ten
     // thousand source bytes is a notice unread (measured: a run concluded a staged chain
     // was finished because the chain key lived in the unshown tail of a truncated peek).
     ...(truncated

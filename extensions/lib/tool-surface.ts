@@ -1,3 +1,12 @@
+/**
+ * Wording rule for everything in this file: describe units of WORK, never units of
+ * conversation. Text that presupposes turn-ending replies ("after the reply",
+ * "between tasks") tells a single-turn staged agent that a reply is the natural next
+ * move, and it rides in the tool surface of every request. It is the top unproven
+ * suspect for the iteration-2 phase flips, and saying the true thing instead costs
+ * nothing: the next model call that reads a result, a natural boundary in the work.
+ */
+
 type ToolHandler = (
   toolCallId: string,
   params: Record<string, unknown>,
@@ -24,10 +33,10 @@ export function buildActiveContextTool(input: {
     ? " Peek is the ephemeral point read: it returns one fold's exact source at any depth, ancestors still collapsed, and changes nothing, so the content arrives as a tool result that can later fold away as a completed read batch; expand is the durable in-place restoration. Narrow a large read with offset and bytes, or peek a child fold id."
     : "";
   const reclaimGuidance = input.ephemeralPeek && input.allowedActions.includes("peek")
-    ? " Peek results live for one model call: after the reply that reads one, its duplicate bytes leave the projection and the fold keeps the exact source. Pass retain true to keep a result in the window, and retain false to release it again."
+    ? " Peek results live for one model call: once the next model call that reads one has run, its duplicate bytes leave the projection and the fold keeps the exact source. Pass retain true to keep a result in the window, and retain false to release it again."
     : "";
   const commitGuidance = input.allowedActions.includes("commit")
-    ? " Fold scheduling is epoch mode: fold records a pending mark and moves no context bytes, and commit applies every pending mark in one rewrite. Mark freely as you work; commit when you are between tasks, or let window pressure commit for you."
+    ? " Fold scheduling is epoch mode: fold records a pending mark and moves no context bytes, and commit applies every pending mark in one rewrite. Mark freely as you work; commit at a natural boundary in the work, or let window pressure commit for you."
     : "";
   return {
     name: input.name,

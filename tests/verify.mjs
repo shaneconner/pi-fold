@@ -3862,7 +3862,31 @@ async function gateEphemeralPeekReclamation() {
   );
   assert.equal(materialized(plain).pinnedPeeks, undefined);
 
+  // The lever-era ADDITIONS to the tool surface must describe units of work, not units
+  // of conversation. Text presupposing a turn-ending reply rides in the tool surface of
+  // every request, and a single-turn staged agent reads it as permission to reply.
+  // Scoped to the additions on purpose: the pre-existing base text is not this gate's
+  // business, and asserting over the whole description would silently pin it.
+  const levered = makeRuntime(built, { foldScheduling: "epoch", ephemeralPeek: true });
+  await startRuntime(levered);
+  const sentences = (text) => text.split(/(?<=\.)\s+/).filter(Boolean);
+  const baseSentences = new Set(sentences([...plain.tools.values()][0].description));
+  const additions = sentences([...levered.tools.values()][0].description)
+    .filter((sentence) => !baseSentences.has(sentence));
+  assert(additions.length >= 2, "The lever-era surface added nothing to assert over");
+  assert(additions.some((sentence) => /Peek results live for one model call/.test(sentence)));
+  assert(additions.some((sentence) => /epoch mode/.test(sentence)));
+  for (const phrase of ["the reply", "between tasks"]) {
+    assert(!additions.some((sentence) => sentence.includes(phrase)),
+      `A lever-era tool-surface addition still says "${phrase}"`);
+    // Honest scoping: the phrase was never in the base text, so excluding the base
+    // cannot be what makes this pass.
+    assert(![...baseSentences].some((sentence) => sentence.includes(phrase)),
+      `The base tool surface says "${phrase}"; the scope of this assertion is wrong`);
+  }
+
   return {
+    leverEraAdditions: additions.length,
     reclaimedPeeks: consumed.length,
     reclaimedBytes: bytesOf(baseline) - bytesOf(reclaimed),
     unreadPeekKeptRaw: stillFresh.length,
