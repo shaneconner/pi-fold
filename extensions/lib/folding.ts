@@ -976,7 +976,7 @@ export function reclaimedPeeks(
       const foldId = ownValue(args, "id");
       if (typeof callId !== "string" || !callId || ownValue(args, "action") !== "peek" ||
           typeof foldId !== "string" || !foldId) continue;
-      peekCalls.set(callId, { foldId, ephemeral: peekLifetimeIsEphemeral(snapshot, ownValue(args, "ephemeral")) });
+      peekCalls.set(callId, { foldId, ephemeral: peekLifetimeIsEphemeral(ownValue(args, "ephemeral")) });
     }
   }
   const reclaimed: ReclaimedPeek[] = [];
