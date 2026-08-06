@@ -103,6 +103,7 @@ import {
   DEFAULT_FOLD_SCHEDULING,
   DEFAULT_PROVIDER_TOTAL_WINDOW,
   DEFAULT_RETAIN_PENDING_MARKS,
+  DEFAULT_STATUS_INDEX_DIET,
   DEFAULT_TRUTHFUL_CAPACITY,
   ESTIMATED_BYTES_PER_TOKEN,
   DEFAULT_SURFACING_ENABLED,
@@ -211,6 +212,7 @@ export function registerActiveContext(pi: any, options: {
   retainPendingMarks?: boolean;
   eligibleShareCommit?: boolean;
   eligibleShareCommitThreshold?: number;
+  statusIndexDiet?: boolean;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
   registerSuggestionSource: SuggestionSourceRegistrar;
@@ -286,6 +288,10 @@ export function registerActiveContext(pi: any, options: {
   const eligibleShareThreshold = (options.eligibleShareCommit ?? DEFAULT_ELIGIBLE_SHARE_COMMIT)
     ? options.eligibleShareCommitThreshold ?? DEFAULT_ELIGIBLE_SHARE_COMMIT_THRESHOLD
     : null;
+  if (options.statusIndexDiet !== undefined && typeof options.statusIndexDiet !== "boolean") {
+    throw new Error("statusIndexDiet must be a boolean");
+  }
+  const statusIndexDiet = options.statusIndexDiet ?? DEFAULT_STATUS_INDEX_DIET;
   const readOnlyContextActions = foldPeekResults
     ? PEEK_READ_ONLY_CONTEXT_ACTIONS
     : READ_ONLY_CONTEXT_ACTIONS_DEFAULT;
@@ -2185,18 +2191,39 @@ export function registerActiveContext(pi: any, options: {
     const snapshot = authoritativeSnapshotFor(ctx);
     if (action === "status") {
       const detail = ownValue(params, "detail");
-      if (detail !== undefined && detail !== "fold_candidates" && detail !== "tree") {
-        throw new Error("status detail must be 'fold_candidates' or 'tree'");
+      const details = statusIndexDiet
+        ? ["fold_candidates", "tree", "folds", "objects"]
+        : ["fold_candidates", "tree"];
+      if (detail !== undefined && !details.includes(String(detail))) {
+        throw new Error(`status detail must be one of ${details.map((name) => `'${name}'`).join(", ")}`);
       }
       const schedule = advisorySchedule(snapshot, guidance);
+      const statusOffset = boundedInteger(params.offset, 0, 0, 1_000_000, "offset");
+      const statusLimit = boundedInteger(params.limit, 40, 1, 100, "limit");
+      // Paging is explicit and agent-driven: the full tree is reachable, it just
+      // stops riding along on every request that wanted a count.
+      const paged = detail === "folds" || detail === "objects";
+      const accounting = markAccounting(snapshot, persistence.state);
       return toolPayload({
         ...activeContextStatus(
           snapshot,
           persistence.state,
-          boundedInteger(params.offset, 0, 0, 1_000_000, "offset"),
-          boundedInteger(params.limit, 40, 1, 100, "limit"),
+          statusOffset,
+          statusLimit,
           snapshot.policy.maxFoldSourceRefs,
+          { diet: statusIndexDiet && !paged },
         ),
+        ...(statusIndexDiet
+          ? {
+            headroomTokens: currentCapacity(ctx).headroomTokens,
+            budgetTokens: currentCapacity(ctx).budgetTokens,
+            pendingMarks: accounting.pending,
+            eligibleMarks: accounting.eligibleMarks,
+            retainedMarks: accounting.retainedMarks,
+            eligibleMarkedShare: accounting.eligibleFreedWindowShare,
+            markedShare: accounting.freedWindowShare,
+          }
+          : {}),
         available: true,
         automatic: {
           pressureRatio: measurements.latestRatio,
@@ -2676,6 +2703,9 @@ export function registerActiveContext(pi: any, options: {
     fullSurface: allowedToolActions.length === defaultToolActions.length,
     maxBriefChars: ACTIVE_CONTEXT_POLICY.maxBriefChars,
     ephemeralPeek,
+    statusDetails: statusIndexDiet
+      ? ["fold_candidates", "tree", "folds", "objects"]
+      : ["fold_candidates", "tree"],
     minPeekSliceBytes: PEEK_MIN_SLICE_BYTES,
     handler: toolHandler,
   }));

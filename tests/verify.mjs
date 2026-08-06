@@ -205,6 +205,7 @@ function makeRuntime(built, {
   retainPendingMarks,
   eligibleShareCommit,
   eligibleShareCommitThreshold,
+  statusIndexDiet,
   setSuggestionSourceRegistrar,
   loadHostModule,
   packageRegistration = false,
@@ -302,6 +303,7 @@ function makeRuntime(built, {
     ...(retainPendingMarks === undefined ? {} : { retainPendingMarks }),
     ...(eligibleShareCommit === undefined ? {} : { eligibleShareCommit }),
     ...(eligibleShareCommitThreshold === undefined ? {} : { eligibleShareCommitThreshold }),
+    ...(statusIndexDiet === undefined ? {} : { statusIndexDiet }),
     ...(setSuggestionSourceRegistrar ? { setSuggestionSourceRegistrar } : {}),
   };
   runtime.registration = packageRegistration
@@ -3084,6 +3086,84 @@ function peekSnapshot(built, { ephemeralPeek = false, messages = built.messages 
   });
 }
 
+async function gateStatusIndexDiet() {
+  const built = makeFixture({ turns: 16, resultChars: 9_000, contextWindow: 100_000 });
+  const fat = makeRuntime(built, { foldScheduling: "epoch" });
+  await startRuntime(fat);
+  const lean = makeRuntime(makeFixture({ turns: 16, resultChars: 9_000, contextWindow: 100_000 }), {
+    foldScheduling: "epoch", statusIndexDiet: true,
+  });
+  await startRuntime(lean);
+  for (const tokens of [78_000, 84_000, 88_000]) {
+    await measure(fat, tokens, 100_000);
+    await project(fat);
+    await measure(lean, tokens, 100_000);
+    await project(lean);
+  }
+  const fatStatus = (await toolStatus(fat)).details;
+  const leanStatus = (await toolStatus(lean)).details;
+  assert(fatStatus.totalFolds >= 3, "The fixture built too small an index to measure");
+  assert.equal(leanStatus.totalFolds, fatStatus.totalFolds);
+
+  // The tree and the object list stop riding along; the counts stay.
+  assert.equal(leanStatus.index, "diet");
+  assert.equal(Object.hasOwn(leanStatus, "folds"), false);
+  assert.equal(Object.hasOwn(leanStatus, "objects"), false);
+  assert(Array.isArray(fatStatus.folds) && Array.isArray(fatStatus.objects));
+  assert(bytesOf(leanStatus) < bytesOf(fatStatus), "The diet payload was not smaller");
+
+  // What replaces them answers the question the peeks were asking: which fold has X.
+  assert(leanStatus.topFolds.length >= 1 && leanStatus.topFolds.length <= 5);
+  assert(leanStatus.topFolds.every((row) => row.startId && row.endId && row.brief && row.peek));
+  const reclaimable = leanStatus.topFolds.map((row) => row.reclaimableBytes);
+  assert.deepEqual(reclaimable, [...reclaimable].sort((left, right) => right - left));
+  const someSource = fatStatus.folds[0].sourceIds[0];
+  const mapped = leanStatus.sourceMap.find(([entryId]) => entryId === someSource);
+  assert(mapped, "The source map cannot answer which fold holds a known source id");
+  assert.equal(mapped[1], fatStatus.folds[0].id);
+  assert.equal(leanStatus.sourceMapTotal >= leanStatus.sourceMap.length, true);
+
+  // Truthful headroom and the mark shares are on the payload the agent already reads.
+  assert.equal(typeof leanStatus.headroomTokens, "number");
+  assert.equal(leanStatus.budgetTokens, 90_000);
+  assert.equal(typeof leanStatus.eligibleMarkedShare, "number");
+  assert.equal(leanStatus.pendingMarks, leanStatus.eligibleMarks + leanStatus.retainedMarks);
+
+  // The full tree stays reachable, explicitly and paged, and never auto-injected.
+  const schema = [...lean.tools.values()][0].parameters.properties.detail.enum;
+  assert.deepEqual([...schema], ["fold_candidates", "tree", "folds", "objects"]);
+  const pagedFolds = (await toolStatus(lean, "active_context", "folds")).details;
+  assert(Array.isArray(pagedFolds.folds) && pagedFolds.folds.length >= 1);
+  assert.equal(pagedFolds.index, undefined);
+  assert.deepEqual(
+    pagedFolds.folds.map((row) => row.id),
+    fatStatus.folds.map((row) => row.id),
+  );
+  const pagedObjects = (await toolStatus(lean, "active_context", "objects")).details;
+  assert(Array.isArray(pagedObjects.objects) && pagedObjects.objects.length >= 1);
+  assert(Array.isArray((await toolStatus(lean, "active_context", "tree")).details.tree));
+
+  // Default off: the payload is exactly what it was, and the new details are refused.
+  assert.deepEqual(
+    [...[...fat.tools.values()][0].parameters.properties.detail.enum],
+    ["fold_candidates", "tree"],
+  );
+  await assert.rejects(
+    () => toolCall(fat, { action: "status", detail: "folds" }),
+    /status detail must be one of 'fold_candidates', 'tree'/,
+  );
+
+  return {
+    folds: leanStatus.totalFolds,
+    fatStatusBytes: bytesOf(fatStatus),
+    dietStatusBytes: bytesOf(leanStatus),
+    savedBytes: bytesOf(fatStatus) - bytesOf(leanStatus),
+    topFolds: leanStatus.topFolds.length,
+    sourceMapEntries: leanStatus.sourceMap.length,
+    pagedFoldsMatchDefault: true,
+  };
+}
+
 async function gateEligibleShareCommitTrigger() {
   // The trigger itself, in isolation. Pressure is a safety property; the ROI question
   // is whether the marks that could apply NOW are worth one rewrite.
@@ -3818,6 +3898,7 @@ const gates = [
   [45, "Truthful capacity & admission control", gateTruthfulCapacityAdmission],
   [46, "Retained pending marks", gateRetainedPendingMarks],
   [47, "Eligible-share commit trigger", gateEligibleShareCommitTrigger],
+  [48, "Status index diet", gateStatusIndexDiet],
 ];
 
 let failures = 0;

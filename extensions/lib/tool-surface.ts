@@ -15,6 +15,7 @@ export function buildActiveContextTool(input: {
   fullSurface: boolean;
   maxBriefChars: number;
   ephemeralPeek?: boolean;
+  statusDetails: readonly string[];
   minPeekSliceBytes: number;
   handler: ToolHandler;
 }) {
@@ -62,7 +63,7 @@ export function buildActiveContextTool(input: {
           }
           : {}),
         limit: { type: "integer", minimum: 1, maximum: 100 },
-        detail: { type: "string", enum: ["fold_candidates", "tree"] },
+        detail: { type: "string", enum: [...input.statusDetails] },
       },
     },
     execute: input.handler,

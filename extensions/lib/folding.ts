@@ -50,6 +50,7 @@ import {
   EXPAND_LEASE_GENERATIONS,
   MAX_EXPAND_LEASES,
   MAX_PINNED_PEEKS,
+  STATUS_DIET_SUGGESTIONS,
 } from "./policy.ts";
 import type {
   ActiveContextSnapshot,
@@ -1044,12 +1045,63 @@ export function foldTreeDetail(
   }));
 }
 
+/**
+ * One compact row per collapsed fold: what is behind it, where its span starts and
+ * ends, and the brief that carries whatever key material the fold captured. This is
+ * the answer to "which fold has X" that agents were paying 56-83k chars per peek to
+ * reconstruct, and it costs a line.
+ */
+export function foldIndexRow(
+  fold: ActiveFold,
+  state: ActiveContextState,
+  snapshot: ActiveContextSnapshot,
+): Record<string, unknown> {
+  const refs = flattenFoldRefs(fold, state);
+  const interval = foldInterval(fold, state, snapshot);
+  const replacement = renderFold(fold, state, snapshot);
+  const source = renderFold(fold, { ...state, expanded: [...state.expanded, fold.id] }, snapshot);
+  const reclaimableBytes = replacement && source ? Math.max(0, bytes(source) - bytes(replacement)) : 0;
+  return {
+    id: fold.id,
+    kind: fold.kind,
+    depth: foldDepth(state, fold),
+    state: state.expanded.includes(fold.id) ? "expanded" : "folded",
+    startId: refs[0]?.entryId ?? null,
+    endId: refs.at(-1)?.entryId ?? null,
+    startPosition: interval?.start ?? null,
+    endPosition: interval?.end ?? null,
+    sourceCount: refs.length,
+    sourceBytes: fold.sourceChars,
+    reclaimableBytes,
+    brief: fold.brief,
+    peek: { action: "peek", id: fold.id },
+    expand: { action: "expand", id: fold.id },
+  };
+}
+
+/** Every mapped source id to the fold that now holds it, so a lookup never needs a read. */
+export function foldSourceMap(
+  state: ActiveContextState,
+  snapshot: ActiveContextSnapshot,
+  limit = 512,
+): { entries: Array<[string, string]>; total: number; truncated: boolean } {
+  const entries: Array<[string, string]> = [];
+  for (const fold of orderedFoldTree(state, snapshot)) {
+    for (const ref of flattenFoldRefs(fold, state)) entries.push([ref.entryId, fold.id]);
+  }
+  // Deepest wins: the innermost fold is the one that actually holds the source.
+  const byEntry = new Map(entries);
+  const all = [...byEntry.entries()];
+  return { entries: all.slice(0, limit), total: all.length, truncated: all.length > limit };
+}
+
 export function activeContextStatus(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
   offset = 0,
   limit = 40,
   maximumChapterSourceRefs = Number.MAX_SAFE_INTEGER,
+  statusOptions: { diet?: boolean; suggestions?: number } = {},
 ): Record<string, unknown> {
   const roots = orderedRoots(state, snapshot).map((item) => item.fold.id);
   const ordered = orderedFoldTree(state, snapshot);
@@ -1072,18 +1124,48 @@ export function activeContextStatus(
   const eligibleEndpoints = eligibleSourceIds.length
     ? [...new Set([eligibleSourceIds[0], eligibleSourceIds.at(-1)!])]
     : [];
+  // The index that used to ride every status call grew from 12.6k to 86.5k chars in
+  // one measured session, injected on every request that asked for state. On the diet
+  // the default payload carries counts, the source map and the folds worth acting on;
+  // the full tree and the object list move behind an explicit paged query.
+  const index = statusOptions.diet
+    ? visibleCollapsedFolds(state, snapshot)
+      .map((fold) => foldIndexRow(fold, state, snapshot))
+      .sort((left, right) =>
+        Number(right.reclaimableBytes) - Number(left.reclaimableBytes) ||
+        String(left.id).localeCompare(String(right.id)))
+      .slice(0, statusOptions.suggestions ?? STATUS_DIET_SUGGESTIONS)
+    : null;
+  const sourceMap = statusOptions.diet ? foldSourceMap(state, snapshot) : null;
   return {
     version: 1,
     service: "active-context-folding",
     roots,
-    folds: selected.map((fold) => foldStatusRow(fold, state, snapshot)),
+    ...(statusOptions.diet
+      ? {
+        index: "diet",
+        topFolds: index,
+        sourceMap: sourceMap!.entries,
+        sourceMapTotal: sourceMap!.total,
+        sourceMapTruncated: sourceMap!.truncated,
+        paging: {
+          folds: { action: "status", detail: "folds", offset: 0, limit: 40 },
+          objects: { action: "status", detail: "objects", offset: 0, limit: 40 },
+          tree: { action: "status", detail: "tree" },
+        },
+      }
+      : {
+        folds: selected.map((fold) => foldStatusRow(fold, state, snapshot)),
+        objects: selectedObjects,
+        nextObjectOffset: offset + selectedObjects.length < objects.length
+          ? offset + selectedObjects.length
+          : null,
+      }),
     offset,
     nextOffset: offset + selected.length < ordered.length ? offset + selected.length : null,
     totalFolds: ordered.length,
     protectedSourceIds: state.protected.flatMap((ref) => exactMapped(snapshot, ref) ? [ref.entryId] : []),
-    objects: selectedObjects,
     totalObjects: objects.length,
-    nextObjectOffset: offset + selectedObjects.length < objects.length ? offset + selectedObjects.length : null,
     eligibleChapter: eligibleChapter ? {
       kind: "chapter",
       sourceCount: eligibleSourceIds.length,
