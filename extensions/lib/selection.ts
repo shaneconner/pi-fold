@@ -598,11 +598,12 @@ export function snapFoldCandidate(
   } catch (error) {
     directError = error instanceof Error ? error : new Error(String(error));
   }
-  // Nearest first, then the other reading of the same intent. A span that cuts into a
-  // fold has exactly two constructible corrections -- absorb it, or step past it -- and
-  // which one survives depends on structure the caller cannot see.
+  // Nearest first, then the other readings of the same intent. A span that cuts into one
+  // fold has exactly two endpoint corrections -- absorb it, or step past it -- and which
+  // one survives depends on structure the caller cannot see. A span that cuts into folds
+  // on BOTH sides has neither: every endpoint correction still leaves a whole chapter
+  // inside the span, and a chapter may not swallow one.
   const alternatives = snapSpanAlternatives(snapshot, state, ids);
-  if (!alternatives.length) throw directError;
   let lastError: Error = directError;
   for (const snapped of alternatives) {
     try {
@@ -614,29 +615,73 @@ export function snapFoldCandidate(
       lastError = error instanceof Error ? error : new Error(String(error));
     }
   }
+  // A suggestion the caller cannot act on is worse than no suggestion: never name a
+  // "nearest valid span" this same validation just refused. Nothing snapped, so the
+  // refusal is the direct one, stated once.
   throw new Error(
-    `${directError.message}. The nearest valid span [${alternatives[0].ids.join(", ")}] was also ` +
-    `refused: ${lastError.message}`,
+    `${directError.message}. No corrected reading of that span is constructible`,
     { cause: lastError },
   );
 }
 
-/** Every constructible reading of a requested span, nearest intent first. */
+/**
+ * Every constructible reading of a requested span, nearest intent first.
+ *
+ * The three endpoint modes move the EDGES; the fourth reading moves the FRAME. A span
+ * cutting into folds at both ends has no endpoint correction that yields a foldable
+ * chapter -- each one still contains a whole chapter, which `partsForRange` refuses --
+ * so the only faithful reading left is the whole folds themselves: a consolidation.
+ */
 export function snapSpanAlternatives(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
   ids: string[],
 ): Array<{ ids: string[]; corrections: SpanCorrection[] }> {
   const seen = new Set<string>();
-  return (["nearest", "exclude", "absorb"] as const)
-    .flatMap((mode) => {
-      const snapped = snapSpanIds(snapshot, state, ids, mode);
-      if (!snapped) return [];
-      const key = snapped.ids.join("\u0000");
-      if (seen.has(key)) return [];
-      seen.add(key);
-      return [snapped];
-    });
+  const readings = [
+    ...(["nearest", "exclude", "absorb"] as const)
+      .map((mode) => snapSpanIds(snapshot, state, ids, mode)),
+    snapSpanToWholeFolds(snapshot, state, ids),
+  ];
+  return readings.flatMap((snapped) => {
+    if (!snapped) return [];
+    const key = snapped.ids.join("\u0000");
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [snapped];
+  });
+}
+
+/**
+ * The requested span read as the whole folds it cuts into.
+ *
+ * Constructible only when the outward snap lands on a contiguous tiling of two or more
+ * foldable roots: then the span the agent named IS those folds, and consolidating them
+ * is the one reading that both covers what was asked for and validates.
+ */
+export function snapSpanToWholeFolds(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+  ids: string[],
+): { ids: string[]; corrections: SpanCorrection[] } | null {
+  let outward: ReturnType<typeof snapToFoldBoundaries>;
+  try { outward = snapToFoldBoundaries(snapshot, state, ids); }
+  catch { return null; }
+  if (!outward.corrections.length) return null;
+  const tiling = orderedRoots(state, snapshot)
+    .filter((root) => root.start >= outward.start && root.end <= outward.end);
+  if (tiling.length < 2) return null;
+  if (tiling[0].start !== outward.start || tiling.at(-1)!.end !== outward.end) return null;
+  if (tiling.some((root, index) => index > 0 && root.start !== tiling[index - 1].end + 1)) return null;
+  if (tiling.some((root) => root.fold.kind === "tool-result")) return null;
+  return {
+    ids: tiling.map((root) => root.fold.id),
+    corrections: [{
+      ...outward.corrections[0],
+      reason: `span cut into ${tiling.length} folds it may not re-fold; corrected outward to their whole ` +
+        `boundaries and read as a consolidation of ${tiling.map((root) => root.fold.id).join(", ")}`,
+    }],
+  };
 }
 
 /**

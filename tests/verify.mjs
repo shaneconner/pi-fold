@@ -5610,6 +5610,49 @@ async function gateAutoSnapAndCorrections() {
   assert.equal(correction.to.length, 2);
   assert.notDeepEqual(correction.to, correction.from);
 
+  // The snap invariant, over every span this fixture can express: what comes back is a
+  // span this same validation accepts, and what does not come back is refused ONCE. A
+  // refusal may never answer with a "nearest valid span" the same check then rejects.
+  //
+  // Measured 2026-08-06: a span cutting into the fold on its LEFT and the fold on its
+  // RIGHT had no endpoint correction at all -- absorb, exclude and nearest each left a
+  // whole chapter inside the span, which a chapter may not swallow -- and the snap
+  // proposed one anyway, so the agent was handed a correction that could not be applied.
+  const invariantState = materialized(runtime);
+  const invariantSnapshot = context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: runtime.messages,
+    contextEntries: runtime.branch,
+    contextWindow: 100_000,
+  });
+  const spanIds = invariantSnapshot.mapped.filter((item) => item.ref).map((item) => item.ref.entryId);
+  let snapAccepted = 0;
+  let snapCorrected = 0;
+  let snapRefused = 0;
+  for (let left = 0; left < spanIds.length; left += 1) {
+    for (let right = left; right < spanIds.length; right += 1) {
+      let resolved;
+      try {
+        resolved = context.snapFoldCandidate(
+          invariantSnapshot, invariantState, [spanIds[left], spanIds[right]], { allowProtected: true });
+      } catch (error) {
+        snapRefused += 1;
+        assert(!/was also refused/.test(error.message) && !/nearest valid span/.test(error.message),
+          `A refusal proposed a span that failed the same validation: ${error.message}`);
+        continue;
+      }
+      snapAccepted += 1;
+      if (resolved.corrections.length) snapCorrected += 1;
+      // Validated by construction, and it must still say what it moved.
+      assert(resolved.candidate.sourceRefs.length >= 1, "A snapped candidate carries no evidence");
+      assert(resolved.corrections.every((entry) =>
+        typeof entry.reason === "string" && entry.reason.length > 0),
+      "A snapped candidate reported a correction with no reason");
+    }
+  }
+  assert(snapCorrected >= 1, "No span in the fixture exercised the snap");
+  assert(snapRefused >= 1, "No span in the fixture exercised the refusal");
+
   // Rejection only where no valid interpretation exists, and it says what failed.
   await assert.rejects(
     () => toolCall(runtime, { action: "fold", ids: ["no-such-entry"] }),
@@ -5654,6 +5697,9 @@ async function gateAutoSnapAndCorrections() {
     batchedMarks: batched.details.marks.length,
     appliedTogether: committed.details.applied.length,
     correctionsReported: snapped.details.corrections.length,
+    snapAccepted,
+    snapCorrected,
+    snapRefused,
     correctionNamesFold: true,
     rebriefed: 1,
   };
@@ -6192,13 +6238,15 @@ async function gateContextEventStream() {
   await settle();
   assert.equal(stream().length, summary.contextEvents + 1,
     "The durable stream and the ledger disagree about how many events were emitted");
-  assert.equal(summary.contextEventsByKind["context.attempt"], attempts.length + 1);
+  const attemptsNow = stream().filter((record) => record.kind === "context.attempt").length;
+  assert.equal(summary.contextEventsByKind["context.attempt"] + 1, attemptsNow,
+    "The attempt ledger and the durable stream disagree about how many calls were made");
   assert(summary.events.every((event) => event.v === context.CONTEXT_EVENT_SCHEMA_VERSION));
 
   return {
     kinds: [...kinds].sort(),
     records: stream().length,
-    attempts: attempts.length,
+    attempts: attemptsNow,
     refusals: failures.length,
     corrections: corrections.length,
     handoffs: prefixes.length,
