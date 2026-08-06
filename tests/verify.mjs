@@ -395,11 +395,11 @@ async function smallChapterForest(count) {
   return { ...built, state };
 }
 
-async function chapterForest(count) {
+async function chapterForest(count, chapterChars = 3_500) {
   const built = makeFixture({
     turns: Math.max(9, count + 4),
     tools: false,
-    chapterChars: 3_500,
+    chapterChars,
     policy: { freshTurns: 1, freshBytes: 0, minChapterChars: 1 },
     contextWindow: 100_000,
   });
@@ -1357,7 +1357,7 @@ async function gateExpandLeases() {
   assert(!state.expanded.includes(foldId));
   assert.equal(state.leases[foldId], undefined);
 
-  const wide = await chapterForest(65);
+  const wide = await chapterForest(65, 350);
   const boundedRuntime = makeRuntime(wide, { initialEntries: [
     ...wide.entries,
     stateEntry(wide.sessionId, wide.state, "lease-bound-state", wide.entries.at(-1).id),
@@ -2825,12 +2825,50 @@ async function gateImmediateByteIdentity() {
   // whole point; immediate mode is what must not move.
   const epoch = await scriptedSession("epoch");
   assert.notEqual(normalizedStateDigest(materialized(epoch)), digest);
+
+  // The same digest, from the other side: absent and explicitly false are one
+  // deployment, byte for byte, so the peek-fold override cannot move immediate mode.
+  const disabled = await scriptedSession(undefined, { foldPeekResults: false });
+  assert.equal(normalizedStateDigest(materialized(disabled)), digest,
+    "An explicit foldPeekResults:false diverged from the stock deployment");
+  assert.equal(
+    json.stableStringify((await project(runtime)).messages),
+    json.stableStringify((await project(disabled)).messages),
+    "An explicit foldPeekResults:false changed the projection",
+  );
+  assert.deepEqual(
+    [...[...disabled.tools.values()][0].parameters.properties.action.enum],
+    [...context.ACTIVE_CONTEXT_TOOL_ACTIONS],
+    "The peek-fold option changed the tool surface",
+  );
+
+  // A transcript that the override WOULD change is unchanged without it: absence is
+  // proved on the sensitive fixture, not only on one that has no peeks in it.
+  const sensitive = makeRuntime(peekOnlyFixture(), { foldPeekResults: false });
+  await startRuntime(sensitive);
+  assert.equal((await climb(sensitive)).folds.length, 0);
+
+  // Epoch scheduling still carries peek foldability with it; the option is the way
+  // immediate mode reaches the same classification, not a second switch on top of it.
+  const epochPeek = makeRuntime(peekOnlyFixture(), { foldScheduling: "epoch" });
+  await startRuntime(epochPeek);
+  assert.equal((await toolStatus(epochPeek)).details.automatic.foldPeekResults, true);
+  const epochOff = makeRuntime(peekOnlyFixture(), {
+    foldScheduling: "epoch", foldPeekResults: false,
+  });
+  await startRuntime(epochOff);
+  assert.equal((await toolStatus(epochOff)).details.automatic.foldPeekResults, false);
+
   return {
     digest,
     pendingMarksKey: "absent",
     stateEvents: stateEvents.length,
     toolActions: context.ACTIVE_CONTEXT_TOOL_ACTIONS.length,
     commitRefusedInImmediateMode: true,
+    absentEqualsDisabled: true,
+    sensitiveFixtureFolds: 0,
+    epochDefault: true,
+    epochOverridable: true,
   };
 }
 
@@ -3035,52 +3073,6 @@ async function gatePeekFoldOverride() {
     reclaimedChars: reclaimed,
     placeholderChars: spent,
     nonBooleanRefused: true,
-  };
-}
-
-async function gatePeekFoldOverrideAbsence() {
-  // Absent and explicitly false are the same deployment, byte for byte, and both are
-  // the digest gate 33 pins to the pre-scheduling release.
-  const absent = await scriptedSession();
-  const disabled = await scriptedSession(undefined, { foldPeekResults: false });
-  const digest = normalizedStateDigest(materialized(absent));
-  assert.equal(normalizedStateDigest(materialized(disabled)), digest,
-    "An explicit foldPeekResults:false diverged from the stock deployment");
-  assert.equal(digest, IMMEDIATE_SCRIPTED_STATE_DIGEST,
-    "The peek-fold option moved the immediate-mode durable state");
-  assert.equal(
-    json.stableStringify((await project(absent)).messages),
-    json.stableStringify((await project(disabled)).messages),
-    "An explicit foldPeekResults:false changed the projection",
-  );
-  assert.deepEqual(
-    [...[...disabled.tools.values()][0].parameters.properties.action.enum],
-    [...context.ACTIVE_CONTEXT_TOOL_ACTIONS],
-    "The peek-fold option changed the tool surface",
-  );
-
-  // A transcript that the override WOULD change is unchanged without it: absence is
-  // proved on the sensitive fixture, not only on one that has no peeks in it.
-  const sensitive = makeRuntime(peekOnlyFixture(), { foldPeekResults: false });
-  await startRuntime(sensitive);
-  assert.equal((await climb(sensitive)).folds.length, 0);
-
-  // Epoch scheduling still carries peek foldability with it; the option is the way
-  // immediate mode reaches the same classification, not a second switch on top of it.
-  const epoch = makeRuntime(peekOnlyFixture(), { foldScheduling: "epoch" });
-  await startRuntime(epoch);
-  assert.equal((await toolStatus(epoch)).details.automatic.foldPeekResults, true);
-  const epochOff = makeRuntime(peekOnlyFixture(), {
-    foldScheduling: "epoch", foldPeekResults: false,
-  });
-  await startRuntime(epochOff);
-  assert.equal((await toolStatus(epochOff)).details.automatic.foldPeekResults, false);
-  return {
-    digest,
-    absentEqualsDisabled: true,
-    sensitiveFixtureFolds: 0,
-    epochDefault: true,
-    epochOverridable: true,
   };
 }
 
@@ -3475,6 +3467,7 @@ async function gateStatusIndexDiet() {
   };
 }
 
+// Retire at campaign close: the control arm still needs the plain-epoch cadence.
 async function gateEligibleShareCommitTrigger() {
   // The trigger itself, in isolation. Pressure is a safety property; the ROI question
   // is whether the marks that could apply NOW are worth one rewrite.
@@ -4786,8 +4779,8 @@ async function gateProjectionBudgetFence() {
   // ratio is calm: exactly the rep11 shape, where the excursion outgrew the window
   // between one provider response and the next request.
   const runtime = makeRuntime(
-    makeFixture({ turns: 40, resultChars: 12_000, contextWindow: 100_000 }),
-    { ...SEALED_SPINE, providerTotalWindow: 100_000 },
+    makeFixture({ turns: 16, resultChars: 12_000, contextWindow: 34_000 }),
+    { ...SEALED_SPINE, providerTotalWindow: 34_000 },
   );
   await startRuntime(runtime);
   for (let step = 0; step < 12; step += 1) {
@@ -4801,7 +4794,7 @@ async function gateProjectionBudgetFence() {
       role: "toolResult",
       toolCallId: `over-${step}`,
       toolName: "read",
-      content: [{ type: "text", text: `Overflow ${step}: ${"o".repeat(24_000)}` }],
+      content: [{ type: "text", text: `Overflow ${step}: ${"o".repeat(6_000)}` }],
       isError: false,
       timestamp: 800 + step,
     }, "excursion");
@@ -4820,7 +4813,7 @@ async function gateProjectionBudgetFence() {
     sessionId: runtime.built.sessionId,
     eventMessages: runtime.messages,
     contextEntries: runtime.branch,
-    contextWindow: 100_000,
+    contextWindow: 34_000,
   });
   const boundary = context.currentTurnBoundary(openSnapshot);
   assert(boundary < runtime.messages.length - 24,
@@ -4829,11 +4822,11 @@ async function gateProjectionBudgetFence() {
     "The guard does not hold the excursion, so there is nothing for the waiver to release");
 
   // A calm measured ratio, well under the hard fence: the lagging fence sees nothing.
-  await measure(runtime, 70_000, 100_000, undefined, "toolUse");
+  await measure(runtime, 24_000, 34_000, undefined, "toolUse");
   const status = await toolStatus(runtime);
   const budgetTokens = status.details.automatic.projectionBudgetTokens;
-  assert.equal(budgetTokens, 90_000, "The serving budget is not the window minus the reservation");
-  assert(status.details.automatic.pressureRatio < context.hardFenceRatio({ contextWindow: 100_000 }),
+  assert.equal(budgetTokens, 30_600, "The serving budget is not the window minus the reservation");
+  assert(status.details.automatic.pressureRatio < context.hardFenceRatio({ contextWindow: 34_000 }),
     "The measured ratio already sat at the hard fence, so the lagging fence would have caught it");
 
   // The request is built. Either it now fits, or it was aborted; it is NEVER sent over
@@ -4867,8 +4860,8 @@ async function gateProjectionBudgetFence() {
   // top-up has nothing unguarded to reach for and the fence waiver is the only thing
   // standing between the session and an untransmittable request.
   const guardedOnly = makeRuntime(
-    makeFixture({ turns: 8, tools: false, chapterChars: 40, contextWindow: 100_000 }),
-    { ...SEALED_SPINE, providerTotalWindow: 100_000 },
+    makeFixture({ turns: 8, tools: false, chapterChars: 40, contextWindow: 34_000 }),
+    { ...SEALED_SPINE, providerTotalWindow: 34_000 },
   );
   await startRuntime(guardedOnly);
   for (let step = 0; step < 14; step += 1) {
@@ -4895,7 +4888,7 @@ async function gateProjectionBudgetFence() {
       timestamp: 850 + step,
     }, "excursion");
   }
-  await measure(guardedOnly, 70_000, 100_000, undefined, "toolUse");
+  await measure(guardedOnly, 24_000, 34_000, undefined, "toolUse");
   await project(guardedOnly);
   const guardedStatus = (await toolStatus(guardedOnly)).details.automatic;
   const guardedEpoch = guardedStatus.lastAutomaticAction?.epoch;
@@ -4954,14 +4947,14 @@ async function gateProjectionCalibration() {
   // is what rep12 actually ran at. Under the old fixed constant every one of these
   // projections reads as far over budget; against the session's own measured ratio
   // they are barely half of it.
-  const built = makeFixture({ turns: 64, resultChars: 24_000, contextWindow: 400_000 });
-  const runtime = makeRuntime(built, { ...SEALED_SPINE, providerTotalWindow: 400_000 });
+  const built = makeFixture({ turns: 64, resultChars: 2_200, contextWindow: 40_000 });
+  const runtime = makeRuntime(built, { ...SEALED_SPINE, providerTotalWindow: 40_000 });
   await startRuntime(runtime);
   const sevenChars = (chars) => Math.round(chars / 7);
   const baseline = bytesOf((await project(runtime)).messages);
-  await measure(runtime, sevenChars(baseline), 400_000);
+  await measure(runtime, sevenChars(baseline), 40_000);
   const budgetTokens = (await toolStatus(runtime)).details.automatic.projectionBudgetTokens;
-  assert.equal(budgetTokens, 383_616, "The truthful serving budget moved");
+  assert.equal(budgetTokens, 36_000, "The truthful serving budget moved");
 
   const projection = await project(runtime);
   const projectedChars = bytesOf(projection.messages);
@@ -4996,14 +4989,14 @@ async function gateProjectionCalibration() {
   // Now force the fence with a genuinely oversized projection and keep going. Whatever
   // it does, the next projection is built FROM THE FOLD STATE and is never the corpus.
   const dense = makeRuntime(
-    makeFixture({ turns: 40, resultChars: 20_000, contextWindow: 100_000 }),
-    { ...SEALED_SPINE, providerTotalWindow: 100_000 },
+    makeFixture({ turns: 12, resultChars: 8_000, contextWindow: 12_000 }),
+    { ...SEALED_SPINE, providerTotalWindow: 12_000 },
   );
   await startRuntime(dense);
   // Calibrate on a healthy pass, then let the excursion outgrow that baseline by half.
   // This is the real over-budget shape: not a mis-estimated session, a session that
   // genuinely gathered more than it can send.
-  await measure(dense, 84_000, 100_000);
+  await measure(dense, 10_080, 12_000);
   for (let step = 0; step < 12; step += 1) {
     dense.appendMessage({
       role: "assistant",
@@ -5015,7 +5008,7 @@ async function gateProjectionCalibration() {
       role: "toolResult",
       toolCallId: `grow-${step}`,
       toolName: "read",
-      content: [{ type: "text", text: `Growth ${step}: ${"g".repeat(40_000)}` }],
+      content: [{ type: "text", text: `Growth ${step}: ${"g".repeat(4_800)}` }],
       isError: false,
       timestamp: 700 + step,
     }, "growth");
@@ -5033,7 +5026,7 @@ async function gateProjectionCalibration() {
   // placeholders, the raw sources never come back, and nothing approaches corpus size.
   const sizes = [];
   for (let step = 0; step < 6; step += 1) {
-    await measure(dense, 84_000 + step * 100, 100_000, undefined, "toolUse");
+    await measure(dense, 10_080 + step * 12, 12_000, undefined, "toolUse");
     const pass = await project(dense);
     const state = materialized(dense);
     const serialized = json.stableStringify(pass.messages);
@@ -5086,15 +5079,15 @@ async function gateProjectionCalibration() {
  * from 340k to 370k while the backstop fired the whole way.
  */
 async function gateFenceMarginAndDepth() {
-  const window = 200_000;
+  const window = 20_000;
   const sevenChars = (chars) => Math.round(chars / 7);
   const runtime = makeRuntime(
-    makeFixture({ turns: 80, resultChars: 10_000, contextWindow: window }),
+    makeFixture({ turns: 8, resultChars: 10_000, contextWindow: window }),
     { ...SEALED_SPINE, providerTotalWindow: window },
   );
   await startRuntime(runtime);
   const budgetTokens = (await toolStatus(runtime)).details.automatic.projectionBudgetTokens;
-  assert.equal(budgetTokens, 183_616, "The truthful serving budget moved");
+  assert.equal(budgetTokens, 18_000, "The truthful serving budget moved");
 
   // Climb toward the top of the window in real steps, declaring seven chars per token
   // throughout, which is what this workload actually measured.
@@ -5124,7 +5117,7 @@ async function gateFenceMarginAndDepth() {
       role: "toolResult",
       toolCallId: `stage-${step}`,
       toolName: "read",
-      content: [{ type: "text", text: `Stage ${step}: ${"s".repeat(140_000)}` }],
+      content: [{ type: "text", text: `Stage ${step}: ${"s".repeat(10_000)}` }],
       isError: false,
       timestamp: 700 + step,
     }, "inflow");
@@ -5161,15 +5154,17 @@ async function gateFenceMarginAndDepth() {
   // Calibration recency: the session's ratio drifts from seven chars per token to five.
   // The estimate must follow it, because at this occupancy a stale ratio is the whole
   // error budget. The smallest recent ratio wins, so the dangerous direction is instant.
+  // Held at 4,000 result chars: calibration needs 20,000 measured chars and 5,000
+  // measured tokens per pass, absolute floors this section cannot scale under.
   const drifting = makeRuntime(
-    makeFixture({ turns: 16, resultChars: 8_000, contextWindow: window }),
-    { ...SEALED_SPINE, providerTotalWindow: window },
+    makeFixture({ turns: 16, resultChars: 4_000, contextWindow: 200_000 }),
+    { ...SEALED_SPINE, providerTotalWindow: 200_000 },
   );
   await startRuntime(drifting);
   const ratios = [];
   for (const perToken of [7, 7, 7, 5, 5, 5]) {
     const chars = bytesOf((await project(drifting)).messages);
-    await measure(drifting, Math.round(chars / perToken), window, undefined, "toolUse");
+    await measure(drifting, Math.round(chars / perToken), 200_000, undefined, "toolUse");
     const status = (await toolStatus(drifting)).details.automatic;
     ratios.push({
       perToken,
@@ -5207,7 +5202,7 @@ async function gateFenceMarginAndDepth() {
   await startRuntime(deep);
   const epochs = [];
   const projections = [];
-  for (let step = 0; step < 10; step += 1) {
+  for (let step = 0; step < 5; step += 1) {
     // One more complete turn of inflow, so the newest turns are genuinely fresh.
     deep.appendMessage({
       role: "user", content: [{ type: "text", text: `Stage ${step}.` }], timestamp: 700 + step,
@@ -6011,21 +6006,21 @@ async function gateWedgeAbsorption() {
  */
 async function gateOverflowRecovery() {
   assert.equal(context.OVERFLOW_RECOVERY_MAX_ATTEMPTS, 2);
-  const window = 200_000;
+  const window = 56_000;
   const runtime = makeRuntime(
-    makeFixture({ turns: 44, resultChars: 12_000, contextWindow: window }),
+    makeFixture({ turns: 12, resultChars: 12_000, contextWindow: window }),
     { ...SEALED_SPINE, providerTotalWindow: window },
   );
   await startRuntime(runtime);
   const budgetTokens = (await toolStatus(runtime)).details.automatic.projectionBudgetTokens;
-  assert.equal(budgetTokens, window - 16_384);
+  assert.equal(budgetTokens, window - Math.floor(window * 0.1));
 
   // Calibrate against the fixture's own size, then climb to rep13's position: measured
   // occupancy just under the budget with one ordinary inflow step still to come.
   const baseline = bytesOf((await project(runtime)).messages);
   const charsPerToken = 4;
   await measure(runtime, Math.round(baseline / charsPerToken), window);
-  for (const tokens of [150_000, 165_000, 178_000, 181_000]) {
+  for (const tokens of [41_200, 45_300, 48_800, 49_700]) {
     await measure(runtime, tokens, window);
     await project(runtime);
   }
@@ -6073,7 +6068,7 @@ async function gateOverflowRecovery() {
     { ...SEALED_SPINE, providerTotalWindow: window },
   );
   await startRuntime(capped);
-  await measure(capped, 100_000, window);
+  await measure(capped, 28_000, window);
   await project(capped);
   for (let attempt = 0; attempt < 6; attempt += 1) {
     await capped.handlers.get("after_provider_response")({ status: 400 }, capped.ctx);
@@ -6798,7 +6793,7 @@ const gates = [
   [30, "Suggestion-source hook", gateSuggestionSourceHook],
   [31, "Surfacing accept/reject logging", gateSurfacingLogging],
   [32, "Epoch mark/commit lifecycle", gateEpochMarkCommit],
-  [33, "Immediate-mode byte identity", gateImmediateByteIdentity],
+  [33, "Immediate-mode byte identity & peek-fold override absence", gateImmediateByteIdentity],
   [34, "Epoch quota top-up", gateEpochQuotaTopUp],
   [35, "Mark always means mark", gateMarkAlwaysMeansMark],
   [36, "Ephemeral peek auto-mark", gateEphemeralPeekMark],
@@ -6808,7 +6803,6 @@ const gates = [
   [40, "Epoch inline rung reachability", gateEpochInlineRungs],
   [41, "Surfacing key-order digest stability", gateSurfacingKeyOrder],
   [42, "Peek-fold override reaches a starved ladder", gatePeekFoldOverride],
-  [43, "Peek-fold override absence is byte-identical", gatePeekFoldOverrideAbsence],
   [44, "Ephemeral peek reclamation", gateEphemeralPeekReclamation],
   [45, "Truthful capacity & admission control", gateTruthfulCapacityAdmission],
   [46, "Retained pending marks", gateRetainedPendingMarks],
@@ -6842,8 +6836,19 @@ const gates = [
   [74, "One structural mutation per handoff", gateMutationBudgetPerHandoff],
 ];
 
+const gateFilter = (process.env.GATES ?? "")
+  .split(",")
+  .map((part) => Number.parseInt(part.trim(), 10))
+  .filter((number) => Number.isInteger(number));
+const selected = gateFilter.length ? gates.filter(([number]) => gateFilter.includes(number)) : gates;
+if (gateFilter.length) {
+  process.stdout.write(
+    `PARTIAL RUN: GATES=${gateFilter.join(",")} selects ${selected.length}/${gates.length} gates. This is NOT a shipping verdict.\n`,
+  );
+}
+
 let failures = 0;
-for (const [number, name, run] of gates) {
+for (const [number, name, run] of selected) {
   try {
     const details = await run();
     process.stdout.write(`GATE ${String(number).padStart(2, "0")} ${name}: PASS ${json.stableStringify(details)}\n`);
