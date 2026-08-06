@@ -104,6 +104,57 @@ export function hardFenceRatio(value?: unknown, ctx?: any): number {
   return (contextWindow - reserve) / contextWindow;
 }
 
+/**
+ * What the runtime is actually allowed to send, in tokens.
+ *
+ * The per-request max-input DESCRIPTOR a provider advertises assumes a full output
+ * reservation, so it understates the real ceiling by whatever the deployment did not
+ * reserve. Measured 2026-08-06 on openai-codex gpt-5.x: a run aborted at ~297k
+ * projected tokens against a 272k descriptor, in the same session where the provider
+ * had just accepted 339,689 tokens. Serving admits roughly the TOTAL window minus the
+ * output reservation actually in force, which at a 16,384 reservation is ~384k.
+ *
+ * Every number here is introspectable in status on purpose: a fence nobody can audit
+ * is how a 25 percent error survived four instrumented runs.
+ */
+export interface CapacityAccounting {
+  mode: "descriptor" | "truthful";
+  /** The denominator every pressure ratio and fence is computed against. */
+  window: number;
+  outputReservation: number;
+  /** The token ceiling: window minus the output reservation. */
+  budgetTokens: number;
+  usedTokens: number | null;
+  headroomTokens: number | null;
+  /** What the provider descriptor claimed, kept so the gap stays visible. */
+  descriptorWindow: number | null;
+}
+
+export function capacityAccounting(input: {
+  window: number;
+  truthful: boolean;
+  descriptorWindow: number | null;
+  usedTokens: number | null;
+}): CapacityAccounting {
+  const window = Number.isFinite(input.window) && input.window > 0 ? input.window : DEFAULT_CONTEXT_WINDOW;
+  const outputReservation = Math.min(
+    ACTIVE_CONTEXT_POLICY.responseReserve,
+    Math.floor(window * 0.1),
+  );
+  const budgetTokens = window - outputReservation;
+  const usedTokens = typeof input.usedTokens === "number" && Number.isFinite(input.usedTokens) &&
+    input.usedTokens >= 0 ? input.usedTokens : null;
+  return {
+    mode: input.truthful ? "truthful" : "descriptor",
+    window,
+    outputReservation,
+    budgetTokens,
+    usedTokens,
+    headroomTokens: usedTokens === null ? null : budgetTokens - usedTokens,
+    descriptorWindow: input.descriptorWindow,
+  };
+}
+
 export interface ProviderContextMeasurement {
   tokens: number;
   contextWindow: number;
@@ -315,6 +366,50 @@ export function toolRefsProtected(
     const item = exactMapped(snapshot, ref);
     return !item || explicit.has(objectRefKey(ref)) || snapshot.toolProtectedIndices.has(item.index);
   });
+}
+
+export interface AdmissionVerdict {
+  admitted: boolean;
+  reason: "admitted" | "unmeasured" | "would-cross-fence";
+  requestedTokens: number;
+  headroomTokens: number | null;
+  budgetTokens: number;
+  /** Bytes of the target that WOULD fit; 0 when even the minimum slice will not. */
+  affordableBytes: number;
+}
+
+/**
+ * Preflight one read against the exact stored size of its target and the truthful
+ * headroom. A read that has not been measured yet is ADMITTED and says so: refusing
+ * on absent data would stall a session for a number we never had, and the absence is
+ * reported rather than papered over.
+ */
+export function admissionVerdict(input: {
+  requestedBytes: number;
+  capacity: CapacityAccounting;
+  bytesPerToken: number;
+}): AdmissionVerdict {
+  const requestedTokens = Math.max(0, Math.ceil(input.requestedBytes / input.bytesPerToken));
+  const { headroomTokens, budgetTokens } = input.capacity;
+  if (headroomTokens === null) {
+    return {
+      admitted: true,
+      reason: "unmeasured",
+      requestedTokens,
+      headroomTokens,
+      budgetTokens,
+      affordableBytes: input.requestedBytes,
+    };
+  }
+  const affordableBytes = Math.max(0, headroomTokens) * input.bytesPerToken;
+  return {
+    admitted: requestedTokens <= headroomTokens,
+    reason: requestedTokens <= headroomTokens ? "admitted" : "would-cross-fence",
+    requestedTokens,
+    headroomTokens,
+    budgetTokens,
+    affordableBytes,
+  };
 }
 
 export function toolPayload(value: unknown): { content: Array<{ type: "text"; text: string }>; details: unknown } {

@@ -199,6 +199,9 @@ function makeRuntime(built, {
   foldScheduling,
   foldPeekResults,
   ephemeralPeek,
+  truthfulCapacity,
+  providerTotalWindow,
+  admissionControl,
   setSuggestionSourceRegistrar,
   loadHostModule,
   packageRegistration = false,
@@ -290,6 +293,9 @@ function makeRuntime(built, {
     ...(foldScheduling === undefined ? {} : { foldScheduling }),
     ...(foldPeekResults === undefined ? {} : { foldPeekResults }),
     ...(ephemeralPeek === undefined ? {} : { ephemeralPeek }),
+    ...(truthfulCapacity === undefined ? {} : { truthfulCapacity }),
+    ...(providerTotalWindow === undefined ? {} : { providerTotalWindow }),
+    ...(admissionControl === undefined ? {} : { admissionControl }),
     ...(setSuggestionSourceRegistrar ? { setSuggestionSourceRegistrar } : {}),
   };
   runtime.registration = packageRegistration
@@ -3072,6 +3078,124 @@ function peekSnapshot(built, { ephemeralPeek = false, messages = built.messages 
   });
 }
 
+async function gateTruthfulCapacityAdmission() {
+  // The arithmetic first. A 272k per-request descriptor assumes a full output
+  // reservation; the truthful budget is the 400k serving window minus the reservation
+  // actually in force, which is ~128k of headroom the descriptor hides.
+  const descriptor = context.capacityAccounting({
+    window: 272_000, truthful: false, descriptorWindow: 272_000, usedTokens: 297_000,
+  });
+  const truthful = context.capacityAccounting({
+    window: 400_000, truthful: true, descriptorWindow: 272_000, usedTokens: 297_000,
+  });
+  assert.equal(descriptor.budgetTokens, 255_616);
+  assert.equal(truthful.budgetTokens, 383_616);
+  assert.equal(descriptor.headroomTokens, 255_616 - 297_000);
+  assert.equal(truthful.headroomTokens, 383_616 - 297_000);
+  assert(descriptor.headroomTokens < 0 && truthful.headroomTokens > 0);
+  assert.equal(truthful.descriptorWindow, 272_000);
+  assert.equal(context.capacityAccounting({
+    window: 400_000, truthful: true, descriptorWindow: null, usedTokens: null,
+  }).headroomTokens, null);
+
+  // The rep4 abort, replayed. The same measured load aborts against the descriptor
+  // and is admitted against the truthful budget, and the provider had in fact accepted
+  // 339,689 tokens in that very session.
+  const fixture = () => makeFixture({ turns: 3, tools: false, contextWindow: 272_000 });
+  const stale = makeRuntime(fixture());
+  await startRuntime(stale);
+  await measure(stale, 297_000, 272_000);
+  await project(stale);
+  assert(stale.aborts >= 1, "The descriptor fence did not abort at 297k against 272k");
+
+  const honest = makeRuntime(fixture(), { truthfulCapacity: true });
+  await startRuntime(honest);
+  await measure(honest, 297_000, 272_000);
+  await project(honest);
+  assert.equal(honest.aborts, 0, "The truthful budget aborted inside real headroom");
+  const capacity = (await toolStatus(honest)).details.automatic.capacity;
+  assert.equal(capacity.mode, "truthful");
+  assert.equal(capacity.window, 400_000);
+  assert.equal(capacity.descriptorWindow, 272_000);
+  assert.equal(capacity.budgetTokens, 383_616);
+  assert.equal(capacity.usedTokens, 297_000);
+  assert.equal(capacity.headroomTokens, 86_616);
+  assert.equal((await toolStatus(stale)).details.automatic.capacity.mode, "descriptor");
+  // The measured proof the descriptor was wrong: the provider accepted 339,689
+  // tokens in the same session whose 297k projection the descriptor fence rejected.
+  assert(339_689 > descriptor.budgetTokens, "The descriptor budget already covered the accepted request");
+  assert(339_689 < truthful.budgetTokens, "The truthful budget does not cover the accepted request");
+
+  // Admission control: a read whose exact stored size will not fit is refused BEFORE
+  // it executes, and the refusal is constructible.
+  const built = makeFixture({ turns: 10, resultChars: 20_000, contextWindow: 400_000 });
+  const runtime = makeRuntime(built, {
+    truthfulCapacity: true, admissionControl: true, ephemeralPeek: true,
+  });
+  await startRuntime(runtime);
+  await measure(runtime, 320_000, 400_000);
+  await project(runtime);
+  const folds = materialized(runtime).folds;
+  assert(folds.length >= 1, "The admission fixture produced no fold to read");
+  const big = folds[0];
+  const status = (await toolStatus(runtime)).details.automatic.capacity;
+  assert.equal(status.admissionControl, true);
+  assert(status.headroomTokens > 0);
+
+  // Squeeze the headroom below the fold's stored size, then read it.
+  await measure(runtime, 383_000, 400_000);
+  const headroom = (await toolStatus(runtime)).details.automatic.capacity.headroomTokens;
+  assert.equal(headroom, 616);
+  assert(big.sourceChars / 4 > headroom, "The fixture fold already fits the headroom");
+  const refusal = await toolCall(runtime, { action: "peek", id: big.id }).catch((error) => String(error));
+  assert.match(refusal, /was refused before it could cross the fence/);
+  assert.match(refusal, /Free room or read less/);
+  const alternatives = JSON.parse(refusal.slice(refusal.indexOf("[")));
+  assert(alternatives.length >= 1, "A refusal named no constructible next action");
+  assert(alternatives.some((item) => item.action === "peek" || item.action === "status"));
+  const expandRefusal = await toolCall(runtime, { action: "expand", id: big.id })
+    .catch((error) => String(error));
+  assert.match(expandRefusal, /expand of .* was refused/);
+
+  // The narrowing the refusal offered is real: it executes and it fits.
+  const slice = alternatives.find((item) => item.action === "peek" && item.bytes);
+  assert(slice, "The refusal offered no bounded slice");
+  assert(slice.bytes / 4 <= headroom);
+  const narrowed = await toolCall(runtime, slice);
+  assert.equal(narrowed.details.returnedBytes, slice.bytes);
+  assert.equal(narrowed.details.truncated, true);
+
+  // Off by default, the identical read executes.
+  const open = makeRuntime(built, { truthfulCapacity: true });
+  await startRuntime(open);
+  await measure(open, 383_000, 400_000);
+  await project(open);
+  const whole = await toolCall(open, { action: "peek", id: big.id });
+  assert.equal(whole.details.truncated, false);
+  assert.equal((await toolStatus(open)).details.automatic.capacity.admissionControl, false);
+
+  // An unmeasured read is admitted and says so rather than stalling on absent data.
+  assert.equal(context.admissionVerdict({
+    requestedBytes: 10_000_000,
+    capacity: context.capacityAccounting({
+      window: 400_000, truthful: true, descriptorWindow: null, usedTokens: null,
+    }),
+    bytesPerToken: 4,
+  }).reason, "unmeasured");
+
+  return {
+    descriptorBudget: descriptor.budgetTokens,
+    truthfulBudget: truthful.budgetTokens,
+    hiddenHeadroomTokens: truthful.budgetTokens - descriptor.budgetTokens,
+    descriptorAborts: stale.aborts,
+    truthfulAborts: honest.aborts,
+    refusedTokens: Math.ceil(big.sourceChars / 4),
+    headroomTokens: headroom,
+    alternativesOffered: alternatives.length,
+    narrowedBytes: narrowed.details.returnedBytes,
+  };
+}
+
 async function gateEphemeralPeekReclamation() {
   // A fold the agent can actually peek. Entry ids are positional and the fold's refs
   // come from a later turn, so the id does not depend on what the earlier peek names.
@@ -3496,6 +3620,7 @@ const gates = [
   [42, "Peek-fold override reaches a starved ladder", gatePeekFoldOverride],
   [43, "Peek-fold override absence is byte-identical", gatePeekFoldOverrideAbsence],
   [44, "Ephemeral peek reclamation", gateEphemeralPeekReclamation],
+  [45, "Truthful capacity & admission control", gateTruthfulCapacityAdmission],
 ];
 
 let failures = 0;

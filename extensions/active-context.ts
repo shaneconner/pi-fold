@@ -43,8 +43,10 @@ import {
   withPinnedPeek,
 } from "./lib/folding.ts";
 import {
+  admissionVerdict,
   boundReceiptText,
   boundedInteger,
+  capacityAccounting,
   contextUsageRatio,
   contextWindowFor,
   hardFenceRatio,
@@ -65,6 +67,7 @@ import type {
   ProviderMeasurementAnchor,
 } from "./lib/measurement.ts";
 import {
+  childFoldIds,
   clearPrepared,
   makeFoldRecordEntry,
   makeStateCheckpoint,
@@ -90,9 +93,13 @@ import {
   DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX,
   DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
+  DEFAULT_ADMISSION_CONTROL,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_EPHEMERAL_PEEK,
   DEFAULT_FOLD_SCHEDULING,
+  DEFAULT_PROVIDER_TOTAL_WINDOW,
+  DEFAULT_TRUTHFUL_CAPACITY,
+  ESTIMATED_BYTES_PER_TOKEN,
   DEFAULT_SURFACING_ENABLED,
   entryTypeNamespace,
   EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS,
@@ -190,6 +197,9 @@ export function registerActiveContext(pi: any, options: {
   foldScheduling?: FoldSchedulingMode;
   foldPeekResults?: boolean;
   ephemeralPeek?: boolean;
+  truthfulCapacity?: boolean;
+  providerTotalWindow?: number;
+  admissionControl?: boolean;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
   registerSuggestionSource: SuggestionSourceRegistrar;
@@ -225,6 +235,19 @@ export function registerActiveContext(pi: any, options: {
   // leave the projection while the fold store keeps the source. Off by default so the
   // pinned immediate-mode projection and durable state do not move.
   const ephemeralPeek = options.ephemeralPeek ?? DEFAULT_EPHEMERAL_PEEK;
+  if (options.truthfulCapacity !== undefined && typeof options.truthfulCapacity !== "boolean") {
+    throw new Error("truthfulCapacity must be a boolean");
+  }
+  if (options.admissionControl !== undefined && typeof options.admissionControl !== "boolean") {
+    throw new Error("admissionControl must be a boolean");
+  }
+  const truthfulCapacity = options.truthfulCapacity ?? DEFAULT_TRUTHFUL_CAPACITY;
+  if (options.providerTotalWindow !== undefined &&
+      (!Number.isSafeInteger(options.providerTotalWindow) || options.providerTotalWindow <= 0)) {
+    throw new Error("providerTotalWindow must be a positive integer");
+  }
+  const providerTotalWindow = options.providerTotalWindow ?? DEFAULT_PROVIDER_TOTAL_WINDOW;
+  const admissionControl = options.admissionControl ?? DEFAULT_ADMISSION_CONTROL;
   const readOnlyContextActions = foldPeekResults
     ? PEEK_READ_ONLY_CONTEXT_ACTIONS
     : READ_ONLY_CONTEXT_ACTIONS_DEFAULT;
@@ -422,6 +445,24 @@ export function registerActiveContext(pi: any, options: {
     } catch { /* Status presentation is request-ephemeral and never a lifecycle boundary. */ }
   };
 
+  /**
+   * The window every ratio, fence and budget is computed against. With truthful
+   * capacity on this is the provider's TOTAL admission window, not the per-request
+   * max-input descriptor: the descriptor bakes in a full output reservation the
+   * deployment never asked for, and treating it as the ceiling aborts requests inside
+   * real headroom. The descriptor is still read, and still reported, so the gap stays
+   * auditable rather than assumed.
+   */
+  const budgetWindowFor = (ctx: any): number | null =>
+    truthfulCapacity ? providerTotalWindow : contextWindowFor(ctx);
+
+  const currentCapacity = (ctx: any): ReturnType<typeof capacityAccounting> => capacityAccounting({
+    window: budgetWindowFor(ctx) ?? lifecycle.latestSnapshot?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    truthful: truthfulCapacity,
+    descriptorWindow: contextWindowFor(ctx),
+    usedTokens: measurements.lastProviderMeasurement?.tokens ?? null,
+  });
+
   const snapshotForEvent = (ctx: any, messages: unknown[]): ActiveContextSnapshot => mapActiveContext({
     sessionId: ctx.sessionManager.getSessionId(),
     eventMessages: messages,
@@ -431,7 +472,7 @@ export function registerActiveContext(pi: any, options: {
     entryTypePrefix,
     readOnlyTools,
     readOnlyContextActions,
-    contextWindow: contextWindowFor(ctx) ?? undefined,
+    contextWindow: budgetWindowFor(ctx) ?? undefined,
     ephemeralPeek,
   });
 
@@ -450,7 +491,7 @@ export function registerActiveContext(pi: any, options: {
       entryTypePrefix,
       readOnlyTools,
       readOnlyContextActions,
-      contextWindow: contextWindowFor(ctx) ?? undefined,
+      contextWindow: budgetWindowFor(ctx) ?? undefined,
       ephemeralPeek,
     });
   };
@@ -589,7 +630,7 @@ export function registerActiveContext(pi: any, options: {
     const restoredMessages = ctx.sessionManager.buildSessionContext?.()?.messages;
     measurements.lastProviderMeasurement = latestProviderContextMeasurement(
       Array.isArray(restoredMessages) ? restoredMessages : [],
-      contextWindowFor(ctx),
+      budgetWindowFor(ctx),
       ctx.model,
     );
     measurements.latestRatio = contextUsageRatio(measurements.lastProviderMeasurement);
@@ -1755,7 +1796,7 @@ export function registerActiveContext(pi: any, options: {
       }
       let observedMeasurement = latestProviderContextMeasurement(
         snapshot.messages,
-        contextWindowFor(ctx) ?? DEFAULT_CONTEXT_WINDOW,
+        budgetWindowFor(ctx) ?? DEFAULT_CONTEXT_WINDOW,
         ctx.model,
       );
       if (observedMeasurement && providerMeasurementBranchIndex(ctx, observedMeasurement) < 0) {
@@ -1892,7 +1933,7 @@ export function registerActiveContext(pi: any, options: {
       const message = ownValue(event, "message");
       const measurement = providerContextMeasurement(
         message,
-        contextWindowFor(ctx) ?? DEFAULT_CONTEXT_WINDOW,
+        budgetWindowFor(ctx) ?? DEFAULT_CONTEXT_WINDOW,
         ctx.model,
       );
       if (!measurement || !persistence.state) return;
@@ -2019,6 +2060,54 @@ export function registerActiveContext(pi: any, options: {
     updateStatus(ctx);
   });
 
+  /**
+   * Admission control. A refusal that names no next action is denial, not governance,
+   * so every refusal carries at least one CONSTRUCTIBLE alternative: a bounded slice
+   * sized to the headroom we actually have, a child fold that is smaller by
+   * construction, and the commit that frees the room. The exact stored size of the
+   * target is known, so this is arithmetic, not a guess.
+   */
+  const admit = (input: {
+    action: "peek" | "expand";
+    ctx: any;
+    foldId: string;
+    requestedBytes: number;
+    children: string[];
+  }): void => {
+    if (!admissionControl) return;
+    const capacity = currentCapacity(input.ctx);
+    const verdict = admissionVerdict({
+      requestedBytes: input.requestedBytes,
+      capacity,
+      bytesPerToken: ESTIMATED_BYTES_PER_TOKEN,
+    });
+    if (verdict.admitted) return;
+    const pending = pendingMarks(persistence.state!).length;
+    const sliceBytes = Math.max(
+      PEEK_MIN_SLICE_BYTES,
+      Math.floor(verdict.affordableBytes * 0.9),
+    );
+    const alternatives: Array<Record<string, unknown>> = [];
+    if (verdict.affordableBytes >= PEEK_MIN_SLICE_BYTES) {
+      alternatives.push({ action: "peek", id: input.foldId, offset: 0, bytes: sliceBytes });
+    }
+    for (const child of input.children.slice(0, 3)) {
+      alternatives.push({ action: "peek", id: child });
+    }
+    if (epochScheduling && pending) alternatives.push({ action: "commit" });
+    if (!alternatives.length) {
+      // The floor: folding is always available, and it is the action that creates
+      // the room this read needs.
+      alternatives.push({ action: "status", detail: "fold_candidates" });
+    }
+    throw new Error(
+      `${input.action} of ${input.foldId} needs ~${verdict.requestedTokens} tokens and only ` +
+      `${verdict.headroomTokens} remain of the ${verdict.budgetTokens}-token budget; it was refused ` +
+      "before it could cross the fence. Free room or read less: " +
+      JSON.stringify(alternatives),
+    );
+  };
+
   const executeAction = async (
     params: Record<string, unknown>,
     signal: AbortSignal | undefined,
@@ -2084,6 +2173,11 @@ export function registerActiveContext(pi: any, options: {
             Math.floor(snapshot.contextWindow * 0.1),
           ),
           windowSource: snapshot.windowSource,
+          capacity: {
+            ...currentCapacity(ctx),
+            admissionControl,
+            bytesPerToken: ESTIMATED_BYTES_PER_TOKEN,
+          },
           consolidationRatio: snapshot.policy.consolidationRatio,
           providerMeasurement: measurements.lastProviderMeasurement ? {
             tokens: measurements.lastProviderMeasurement.tokens,
@@ -2171,6 +2265,15 @@ export function registerActiveContext(pi: any, options: {
         "bytes",
       );
       const retain = params.retain === true;
+      const target = persistence.state.folds.find((item) => item.id === id);
+      if (!target) throw new Error(`Unknown active-context fold ${id}`);
+      admit({
+        action: "peek",
+        ctx,
+        foldId: id,
+        requestedBytes: Math.max(0, Math.min(sliceBytes, target.sourceChars - offset)),
+        children: childFoldIds(target),
+      });
       const payload = toolPayload(peekFoldSource({
         foldId: id,
         state: persistence.state,
@@ -2261,8 +2364,17 @@ export function registerActiveContext(pi: any, options: {
         persistence.state = result.state;
         epochApplied = result.applied;
       }
-      requireActiveFold(snapshot, persistence.state, id);
-      if (action === "expand") noteSurfacingAccept(id);
+      const expanding = requireActiveFold(snapshot, persistence.state, id);
+      if (action === "expand") {
+        admit({
+          action: "expand",
+          ctx,
+          foldId: id,
+          requestedBytes: Math.max(0, expanding.sourceChars - expanding.placeholderChars),
+          children: childFoldIds(expanding),
+        });
+        noteSurfacingAccept(id);
+      }
       let next = setFoldProjectionState(persistence.state, id, action === "expand" ? "expanded" : "folded");
       if (action === "expand") next = withExpandLease(next, id);
       else {
