@@ -187,7 +187,7 @@ import {
 } from "./lib/instrumentation.ts";
 import type { ProjectionChange } from "./lib/instrumentation.ts";
 import { buildActiveContextCommands, buildActiveContextTool } from "./lib/tool-surface.ts";
-import { mapActiveContext } from "./lib/transcript.ts";
+import { mapActiveContext, toolFreshIndices } from "./lib/transcript.ts";
 
 // Test seam only; the package API is registerPiFold because package.json exports block deep imports.
 export * from "./lib/advisory.ts";
@@ -468,13 +468,23 @@ export function registerActiveContext(pi: any, options: {
     /** Serialized size of the projection this process last handed the host. */
     lastProjectedChars: null as number | null,
     /**
-     * Ground truth for the transmission fence: the size of a projection we sent and the
-     * token count the provider reported for it. A fixed bytes-per-token constant is a
-     * guess about a tokenizer, and it is wrong by different amounts in different
-     * sessions -- measured 2026-08-06, 4.7 chars/token in rep11 and 7.0 in rep12 for
-     * the SAME workload. The fence uses the session's own measured ratio instead.
+     * Ground truth for the transmission fence: recent pairings of a projection's size
+     * with the token count the provider reported for it. A fixed bytes-per-token
+     * constant is a guess about a tokenizer, and it is wrong by different amounts in
+     * different sessions -- measured 2026-08-06, 4.7 chars/token in rep11 and 7.0 in
+     * rep12 for the SAME workload. It also DRIFTS within one session: rep13 moved
+     * between 5.34 and 6.01 over its last twenty requests. Only the recent window
+     * counts, and the fence reads it pessimistically.
      */
-    projectionCalibration: null as { chars: number; tokens: number } | null,
+    projectionCalibrations: [] as Array<{ chars: number; tokens: number }>,
+    /** What the fence estimated for the projection it last handed the host. */
+    lastProjectedEstimate: null as number | null,
+    /** Whether that estimate used a measured ratio rather than the bootstrap constant. */
+    lastProjectedEstimateCalibrated: false,
+    /** Signed estimator error against recent measurements, as a share of measured tokens. */
+    estimatorErrors: [] as number[],
+    /** Growth in measured tokens between consecutive requests. */
+    inflowSteps: [] as number[],
     providerMeasurementQueue: Promise.resolve<void>(undefined),
     providerMeasurementReceipts: new Set<string>(),
     providerMeasurementRevisionByMessageSha: new Map<string, number>(),
@@ -1265,19 +1275,60 @@ export function registerActiveContext(pi: any, options: {
   const PROJECTION_CALIBRATION_MIN_TOKENS = 5_000;
   const PROJECTION_CHARS_PER_TOKEN_FLOOR = 2;
   const PROJECTION_CHARS_PER_TOKEN_CEILING = 12;
+  /** How many recent pairings the ratio, the error window and the inflow window keep. */
+  const PROJECTION_CALIBRATION_WINDOW = 6;
+  const PROJECTION_ERROR_WINDOW = 8;
+  /** Margin floor, as a share of the window, before any error or inflow is measured. */
+  const PROJECTION_MARGIN_FLOOR_SHARE = 0.05;
 
   const noteProjectionCalibration = (measurement: ProviderContextMeasurement): void => {
+    const previous = measurements.lastProviderMeasurement;
+    if (Number.isFinite(measurement.tokens) && previous && Number.isFinite(previous.tokens)) {
+      const step = measurement.tokens - previous.tokens;
+      // Only GROWTH is an inflow step. A commit shrinks the window; that is the thing
+      // the margin has to survive, not a size the next request can be predicted from.
+      if (step > 0) {
+        measurements.inflowSteps.push(step);
+        if (measurements.inflowSteps.length > PROJECTION_ERROR_WINDOW) measurements.inflowSteps.shift();
+      }
+    }
     const chars = measurements.lastProjectedChars;
     if (chars === null || chars < PROJECTION_CALIBRATION_MIN_CHARS) return;
     if (!Number.isFinite(measurement.tokens) || measurement.tokens < PROJECTION_CALIBRATION_MIN_TOKENS) return;
-    measurements.projectionCalibration = { chars, tokens: measurement.tokens };
+    // The signed error of the estimate we made for the projection this measurement
+    // describes. This is the only honest measure of how wrong the fence can be.
+    // Only a CALIBRATED estimate's error belongs in the window. The bootstrap constant
+    // is wrong by design -- 76% high in rep12 -- and letting that one reading set the
+    // margin would keep every later request permanently inside it.
+    if (measurements.lastProjectedEstimate !== null && measurements.lastProjectedEstimateCalibrated &&
+        measurement.tokens > 0) {
+      measurements.estimatorErrors.push(
+        (measurements.lastProjectedEstimate - measurement.tokens) / measurement.tokens,
+      );
+      if (measurements.estimatorErrors.length > PROJECTION_ERROR_WINDOW) measurements.estimatorErrors.shift();
+    }
+    measurements.projectionCalibrations.push({ chars, tokens: measurement.tokens });
+    if (measurements.projectionCalibrations.length > PROJECTION_CALIBRATION_WINDOW) {
+      measurements.projectionCalibrations.shift();
+    }
   };
 
+  /**
+   * Recent, and pessimistic.
+   *
+   * A single latest pairing tracks drift but carries its noise; an average lags it.
+   * Near the top of the window neither is acceptable, because the error that matters is
+   * one-sided: a ratio that is too HIGH under-counts tokens and transmits a request the
+   * provider will reject. So the fence takes the smallest ratio in the recent window,
+   * which converges instantly in the dangerous direction and within a window in the
+   * cheap one. Measured 2026-08-06 (rep13): the ratio moved 5.34 to 6.01 and back
+   * across twenty requests while the window sat above 90% full.
+   */
   const projectionCharsPerToken = (): number => {
-    const calibration = measurements.projectionCalibration;
-    if (!calibration || calibration.tokens <= 0) return ESTIMATED_BYTES_PER_TOKEN;
-    const measured = calibration.chars / calibration.tokens;
-    if (!Number.isFinite(measured) || measured <= 0) return ESTIMATED_BYTES_PER_TOKEN;
+    const usable = measurements.projectionCalibrations.filter((entry) =>
+      entry.tokens > 0 && Number.isFinite(entry.chars / entry.tokens) && entry.chars / entry.tokens > 0);
+    if (!usable.length) return ESTIMATED_BYTES_PER_TOKEN;
+    const measured = Math.min(...usable.map((entry) => entry.chars / entry.tokens));
     return Math.min(
       PROJECTION_CHARS_PER_TOKEN_CEILING,
       Math.max(PROJECTION_CHARS_PER_TOKEN_FLOOR, measured),
@@ -1286,6 +1337,36 @@ export function registerActiveContext(pi: any, options: {
 
   const projectedTokenEstimate = (projected: unknown[]): number =>
     Math.ceil(bytes(projected) / projectionCharsPerToken());
+
+  /** The largest recent estimator error, as a share. Unmeasured sessions assume none. */
+  const estimatorErrorShare = (): number => measurements.estimatorErrors.length
+    ? Math.max(...measurements.estimatorErrors.map((error) => Math.abs(error)))
+    : 0;
+
+  /** The largest recent growth step, which is what one more turn can add. */
+  const expectedInflowTokens = (): number => measurements.inflowSteps.length
+    ? Math.max(...measurements.inflowSteps)
+    : 0;
+
+  /**
+   * The safety margin.
+   *
+   * A fence that fires AT the budget is a fence that fires after the wire: the request
+   * that kills the session is the one built after the last measurement, and it is never
+   * the one being weighed. Measured 2026-08-06 (rep13): the last measurement read
+   * 370,320 tokens against a 383,616 budget -- 13,296 of headroom against a median
+   * inflow of 13,865 and a maximum of 27,815 -- while the estimate for that request was
+   * 366,934, comfortably "under budget". The next request crossed the real limit and
+   * the provider rejected it. Every number in that sentence was known to the runtime.
+   *
+   * So the reduction threshold carries what the runtime knows it does not know: the
+   * worst recent estimator error applied to this estimate, plus one worst recent inflow
+   * step, never less than a floor share of the window.
+   */
+  const projectionMarginTokens = (estimate: number, windowTokens: number): number => Math.ceil(Math.max(
+    PROJECTION_MARGIN_FLOOR_SHARE * windowTokens,
+    estimatorErrorShare() * estimate + expectedInflowTokens(),
+  ));
 
   /**
    * The TRANSMISSION fence.
@@ -1310,14 +1391,27 @@ export function registerActiveContext(pi: any, options: {
   const projectionExceedsBudget = (projected: unknown[], ctx: any): {
     tokens: number;
     budgetTokens: number;
+    marginTokens: number;
+    /** Past the wire: this request must not be transmitted at all. */
     over: boolean;
+    /** Inside the margin: still sendable, but the next one may not be. Reduce NOW. */
+    crowded: boolean;
   } => {
     const capacity = currentCapacity(ctx);
     const budgetTokens = Number.isFinite(capacity.budgetTokens) && capacity.budgetTokens > 0
       ? capacity.budgetTokens
       : Number.POSITIVE_INFINITY;
     const tokens = projectedTokenEstimate(projected);
-    return { tokens, budgetTokens, over: tokens > budgetTokens };
+    const marginTokens = Number.isFinite(budgetTokens)
+      ? projectionMarginTokens(tokens, capacity.window)
+      : 0;
+    return {
+      tokens,
+      budgetTokens,
+      marginTokens,
+      over: tokens > budgetTokens,
+      crowded: tokens + marginTokens > budgetTokens,
+    };
   };
 
   const abortOverBudgetProjection = (tokens: number, budgetTokens: number, ctx: any): void => {
@@ -1352,7 +1446,12 @@ export function registerActiveContext(pi: any, options: {
     ctx: any,
   ): Promise<{ projected: unknown[]; aborted: boolean }> => {
     let measured = projectionExceedsBudget(projected, ctx);
-    if (!measured.over) return { projected, aborted: false };
+    // CROWDED, not over, is the trigger for reducing: the request that kills a session
+    // is the one built after this one. Over the wire is the trigger for aborting.
+    if (!measured.crowded) return { projected, aborted: false };
+    // Why this fired, recorded from the measurement that TRIGGERED it rather than the
+    // one taken afterwards, which by then describes a projection that fits.
+    const trigger = measured;
     let reduced = projected;
     // At the fence the only useful action is the fold that keeps the request
     // transmissible, so the reduction runs with every guarded mark waived.
@@ -1367,7 +1466,12 @@ export function registerActiveContext(pi: any, options: {
         ladder.overBudgetReduction = {
           estimatedTokensBefore: projectedTokenEstimate(projected),
           estimatedTokensAfter: measured.tokens,
-          budgetTokens: measured.budgetTokens,
+          budgetTokens: trigger.budgetTokens,
+          marginTokens: trigger.marginTokens,
+          estimatorErrorShare: estimatorErrorShare(),
+          expectedInflowTokens: expectedInflowTokens(),
+          crowded: trigger.crowded,
+          overBeforeReduction: trigger.over,
           transmitted: !measured.over,
         };
       }
@@ -1637,6 +1741,53 @@ export function registerActiveContext(pi: any, options: {
    * fold. Free additions come first (peek reads the agent already discarded), then
    * the quota top-up that guarantees the commit is worth its rewrite.
    */
+  /**
+   * One turn of inflow, as a share of the window: the least a commit at high occupancy
+   * has to free to be worth its rewrite. Measured inflow is used when the session has
+   * any -- rep13 ran at a median 13,865 and a maximum 27,815 tokens per request against
+   * a 400,000 window -- and the floor share stands in until then.
+   */
+  const COMMIT_DEPTH_FLOOR_SHARE = 0.05;
+
+  const commitDepthFloorShare = (snapshot: ActiveContextSnapshot): number => {
+    const window = snapshot.contextWindow;
+    if (!Number.isFinite(window) || window <= 0) return COMMIT_DEPTH_FLOOR_SHARE;
+    const inflow = expectedInflowTokens();
+    return Math.max(COMMIT_DEPTH_FLOOR_SHARE, inflow > 0 ? inflow / window : 0);
+  };
+
+  const atOrAboveBackstop = (snapshot: ActiveContextSnapshot, ratio: number | null): boolean =>
+    typeof ratio === "number" && Number.isFinite(ratio) && ratio >= snapshot.policy.refoldRatio;
+
+  /**
+   * A snapshot whose FRESH tail is narrowed.
+   *
+   * Raising the top-up target does nothing once the eligible mass is exhausted, and at
+   * high occupancy that is exactly the state: measured 2026-08-06 (rep13), the big
+   * stale mass was already folded and what remained was the fresh tail and the newest
+   * payloads, so six commits of two to four folds carried the window from 340k to 370k
+   * and into a provider rejection. Depth therefore means reaching into the fresh tail,
+   * not asking harder for evidence that is not there.
+   *
+   * The newest complete turn stays protected and so does everything the current-turn
+   * guard covers: this narrows freshness, it does not abolish it.
+   */
+  const DEEPENED_FRESH_TURNS = 1;
+  const DEEPENED_FRESH_BYTES_SHARE = 0.25;
+
+  const deepenedFreshnessSnapshot = (snapshot: ActiveContextSnapshot): ActiveContextSnapshot => {
+    const policy = {
+      ...snapshot.policy,
+      freshTurns: Math.min(snapshot.policy.freshTurns, DEEPENED_FRESH_TURNS),
+      freshBytes: Math.floor(snapshot.policy.freshBytes * DEEPENED_FRESH_BYTES_SHARE),
+    };
+    const toolProtectedIndices = toolFreshIndices(snapshot.messages, snapshot.completeTurns, policy);
+    // Unmapped messages are protected in every snapshot: nothing can fold what the
+    // durable branch cannot name.
+    for (const item of snapshot.mapped) if (!item.ref) toolProtectedIndices.add(item.index);
+    return { ...snapshot, toolProtectedIndices };
+  };
+
   const runCommitEpoch = async (
     snapshot: ActiveContextSnapshot,
     trigger: string,
@@ -1651,6 +1802,12 @@ export function registerActiveContext(pi: any, options: {
     let state = persistence.state!;
     let peekAdded = 0;
     let topUpAdded = 0;
+    let deepened = false;
+    let deepenedMarks = 0;
+    let preDeepenShare: number | null = null;
+    // The snapshot the commit adjudicates against: the deepened one narrows freshness
+    // so the marks the deep top-up just made are not refused as fresh.
+    let commitSnapshot = snapshot;
     for (const mark of ephemeralPeekMarks({ snapshot, state, ordinal })) {
       const addition = addPendingMark(state, mark);
       if (addition.added) { state = addition.state; peekAdded += 1; }
@@ -1679,6 +1836,32 @@ export function registerActiveContext(pi: any, options: {
         const addition = addPendingMark(state, mark);
         if (addition.added) { state = addition.state; topUpAdded += 1; }
       }
+      // High-occupancy depth. Near the top of the window a commit that frees less than
+      // one turn of inflow does not reduce anything: it pays a full prefix rewrite,
+      // gives back less than the next stage adds, and the window ratchets UP through
+      // commit after commit. Measured 2026-08-06 (rep13): once the big stale mass was
+      // folded, six commits of two to four folds each carried the window from 340k to
+      // 370k and into a provider rejection, with the backstop firing the whole way.
+      // So a commit at or above the backstop that has not reached one inflow step
+      // reaches further, into everything eligible, instead of billing a rewrite for
+      // crumbs.
+      preDeepenShare = markAccounting(snapshot, state).eligibleFreedWindowShare;
+      const shallow = preDeepenShare < commitDepthFloorShare(snapshot);
+      if (fenceLevel || (shallow && atOrAboveBackstop(snapshot, waiverRatio))) {
+        deepened = true;
+        commitSnapshot = deepenedFreshnessSnapshot(snapshot);
+        for (const mark of topUpMarks({
+          snapshot: commitSnapshot,
+          state,
+          ordinal,
+          excludeRefKeys: fenceLevel && currentTurnCommitGuard ? new Set<string>() : guarded,
+          eligibleOnly: pinnedMassBackstop,
+          targetShare: 1,
+        })) {
+          const addition = addPendingMark(state, mark);
+          if (addition.added) { state = addition.state; topUpAdded += 1; deepenedMarks += 1; }
+        }
+      }
     }
     const accounting = markAccounting(snapshot, state);
     if (!accounting.pending) return null;
@@ -1698,7 +1881,7 @@ export function registerActiveContext(pi: any, options: {
       })
       : 0;
     const result = await commitPendingMarks({
-      snapshot,
+      snapshot: commitSnapshot,
       state,
       generation: lifecycle.generation,
       retainIneligible: retainPendingMarks,
@@ -1719,6 +1902,10 @@ export function registerActiveContext(pi: any, options: {
       ladderMarks: accounting.ladderMarks,
       peekMarks: peekAdded,
       topUpMarks: topUpAdded,
+      deepenedTarget: deepened,
+      deepenedMarks,
+      preDeepenFreedShare: preDeepenShare,
+      depthFloorShare: commitDepthFloorShare(snapshot),
       guardWaived: result.waived.length > 0,
       waivedMarks: result.waived.length,
       appliedMarks: result.applied.length,
@@ -2244,8 +2431,10 @@ export function registerActiveContext(pi: any, options: {
         measurements.latestRatio = contextUsageRatio(observedMeasurement);
         if (durableProviderMeasurementMatches(observedMeasurement) && measurements.latestRatio !== null) {
           measurementStateChanged = accountAnchoredMeasurement(observedMeasurement);
-          measurements.lastProviderMeasurement = observedMeasurement;
+          // Calibrate BEFORE the new measurement becomes the previous one: the inflow
+          // step is the difference between them.
           noteProjectionCalibration(observedMeasurement);
+          measurements.lastProviderMeasurement = observedMeasurement;
           advisoryChanged = armMilestoneForMeasurement(snapshot, observedMeasurement);
           startPreparation(snapshot, measurements.latestRatio, ctx);
           if (!ladder.automaticFailure && measurements.latestRatio >= hardFenceRatio(snapshot) && ladder.preparing) {
@@ -2294,6 +2483,8 @@ export function registerActiveContext(pi: any, options: {
       // under the uncalibrated constant, so nothing is ever sent, so nothing ever
       // measures the ratio, so it aborts forever.
       measurements.lastProjectedChars = bytes(projected);
+      measurements.lastProjectedEstimate = projectedTokenEstimate(projected);
+      measurements.lastProjectedEstimateCalibrated = measurements.projectionCalibrations.length > 0;
       // An aborted request still returns the PROJECTION. Handing back the raw branch
       // instead makes the aborted turn the largest message list the session ever
       // produced -- the corpus, folds and all -- which is the exact inverse of what a
@@ -2678,6 +2869,14 @@ export function registerActiveContext(pi: any, options: {
           overBudgetReduction: ladder.overBudgetReduction ? clone(ladder.overBudgetReduction) : null,
           projectionBudgetTokens: currentCapacity(ctx).budgetTokens,
           projectionCharsPerToken: projectionCharsPerToken(),
+          projectionEstimatorErrorShare: estimatorErrorShare(),
+          projectionExpectedInflowTokens: expectedInflowTokens(),
+          projectionMarginTokens: measurements.lastProjectedChars === null
+            ? null
+            : projectionMarginTokens(
+              Math.ceil(measurements.lastProjectedChars / projectionCharsPerToken()),
+              currentCapacity(ctx).window,
+            ),
           projectionEstimatedTokens: measurements.lastProjectedChars === null
             ? null
             : Math.ceil(measurements.lastProjectedChars / projectionCharsPerToken()),

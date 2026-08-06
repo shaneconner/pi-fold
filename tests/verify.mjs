@@ -5106,6 +5106,214 @@ async function gateProjectionCalibration() {
   };
 }
 
+/**
+ * The last three feet of the window.
+ *
+ * Measured 2026-08-06 (rep 13), the healthiest lever run so far: 47 of 64 stages, fold
+ * blocks of 14/20/10 then 4/2/2/3/2/2, zero guard waivers, and a provider rejection at
+ * stage 48 with NO fence event all run. Three numbers explain it.
+ *
+ * The estimator was good but not perfect: against each measurement its error ran from
+ * -2.4% to +5.4%. Inflow ran 8,589 to 27,815 tokens per request, median 13,865. And the
+ * last measurement read 370,320 tokens against a 383,616 budget: 13,296 of headroom,
+ * less than one median step. The fence weighed that request at 366,934, called it under
+ * budget, and transmitted. The request AFTER it crossed the real limit. At 96% full an
+ * estimator accurate to a few percent is still a coin flip, and the request that kills
+ * the session is never the one being weighed.
+ *
+ * The commits were impotent for a separate reason: once the big stale mass was folded,
+ * each commit freed less than one stage of inflow, so six of them carried the window
+ * from 340k to 370k while the backstop fired the whole way.
+ */
+async function gateFenceMarginAndDepth() {
+  const window = 200_000;
+  const sevenChars = (chars) => Math.round(chars / 7);
+  const runtime = makeRuntime(
+    makeFixture({ turns: 80, resultChars: 10_000, contextWindow: window }),
+    { ...FULL_LEVER_SET, providerTotalWindow: window },
+  );
+  await startRuntime(runtime);
+  const budgetTokens = (await toolStatus(runtime)).details.automatic.projectionBudgetTokens;
+  assert.equal(budgetTokens, 183_616, "The truthful serving budget moved");
+
+  // Climb toward the top of the window in real steps, declaring seven chars per token
+  // throughout, which is what this workload actually measured.
+  const climb = [];
+  for (let step = 0; step < 12; step += 1) {
+    const chars = bytesOf((await project(runtime)).messages);
+    await measure(runtime, sevenChars(chars), window, undefined, "toolUse");
+    const status = (await toolStatus(runtime)).details.automatic;
+    climb.push({
+      chars,
+      declared: sevenChars(chars),
+      estimate: status.projectionEstimatedTokens,
+      margin: status.projectionMarginTokens,
+      charsPerToken: status.projectionCharsPerToken,
+      aborts: runtime.aborts,
+      reduction: status.overBudgetReduction,
+    });
+    if (status.overBudgetReduction) break;
+    // One stage of inflow: a payload of the size this workload actually gathers.
+    runtime.appendMessage({
+      role: "assistant",
+      content: [{ type: "toolCall", id: `stage-${step}`, name: "read", arguments: { path: `stage-${step}.txt` } }],
+      stopReason: "toolUse",
+      timestamp: 700 + step,
+    }, "inflow");
+    runtime.appendMessage({
+      role: "toolResult",
+      toolCallId: `stage-${step}`,
+      toolName: "read",
+      content: [{ type: "text", text: `Stage ${step}: ${"s".repeat(140_000)}` }],
+      isError: false,
+      timestamp: 700 + step,
+    }, "inflow");
+  }
+
+  // The estimator tracks the declared reality closely -- this is not a calibration
+  // failure -- and the fence still acted, because it stopped waiting for the wire.
+  // The first pass has nothing measured yet and necessarily uses the bootstrap
+  // constant; the drift claim is about the CALIBRATED estimator.
+  const calibrated = climb.filter((entry) =>
+    typeof entry.estimate === "number" && entry.charsPerToken !== context.ESTIMATED_BYTES_PER_TOKEN);
+  assert(calibrated.length >= 2, "The climb never calibrated");
+  const worstDrift = Math.max(...calibrated.map((entry) =>
+    Math.abs(entry.estimate - entry.declared) / entry.declared));
+  assert(worstDrift <= 0.1, `The calibrated estimate drifted ${(worstDrift * 100).toFixed(1)}% from measured`);
+  const fired = climb.find((entry) => entry.reduction);
+  assert(fired, "The fence never fired while the window filled, which is the rep13 death");
+  assert(fired.reduction.estimatedTokensBefore < budgetTokens,
+    `The fence waited until ${fired.reduction.estimatedTokensBefore} exceeded the ${budgetTokens} budget: that is the wire, not a margin`);
+  assert(fired.reduction.crowded === true, "The reduction did not record why it fired");
+  assert(fired.reduction.marginTokens >= 0.05 * window,
+    `The margin was ${fired.reduction.marginTokens} tokens, under the floor share of the window`);
+  assert(fired.reduction.estimatedTokensAfter < fired.reduction.estimatedTokensBefore,
+    "The pre-wire reduction freed nothing");
+  // The bootstrap pass of an already-huge session may still abort: it has nothing
+  // measured yet. Once calibrated, a request inside the budget is REDUCED, never
+  // aborted, which is the difference between surviving the top of the window and dying
+  // at it.
+  assert.equal(fired.reduction.transmitted, true,
+    "The pre-wire reduction aborted a request that was inside the budget");
+  assert.equal(fired.aborts, calibrated[0].aborts,
+    "A calibrated pass inside the budget raised an abort");
+
+  // Calibration recency: the session's ratio drifts from seven chars per token to five.
+  // The estimate must follow it, because at this occupancy a stale ratio is the whole
+  // error budget. The smallest recent ratio wins, so the dangerous direction is instant.
+  const drifting = makeRuntime(
+    makeFixture({ turns: 16, resultChars: 8_000, contextWindow: window }),
+    { ...FULL_LEVER_SET, providerTotalWindow: window },
+  );
+  await startRuntime(drifting);
+  const ratios = [];
+  for (const perToken of [7, 7, 7, 5, 5, 5]) {
+    const chars = bytesOf((await project(drifting)).messages);
+    await measure(drifting, Math.round(chars / perToken), window, undefined, "toolUse");
+    const status = (await toolStatus(drifting)).details.automatic;
+    ratios.push({
+      perToken,
+      declared: Math.round(chars / perToken),
+      estimate: status.projectionEstimatedTokens,
+      charsPerToken: status.projectionCharsPerToken,
+      margin: status.projectionMarginTokens,
+    });
+  }
+  const afterDrift = ratios.slice(-2);
+  for (const entry of afterDrift) {
+    const error = Math.abs(entry.estimate - entry.declared) / entry.declared;
+    assert(error <= 0.1,
+      `After the ratio drifted to ${entry.perToken}, the estimate was ${(error * 100).toFixed(1)}% off measured reality`);
+    assert(entry.charsPerToken <= 5.5,
+      `The session still weighs itself at ${entry.charsPerToken} chars per token after drifting to 5`);
+  }
+  // The one pass that CANNOT know is the first at the new ratio: nothing has measured
+  // it yet. That is precisely what the margin is for, so the shortfall there must fit
+  // inside the margin, and it must not repeat on the next pass.
+  const transition = ratios[3];
+  assert(transition.declared - transition.estimate <= transition.margin,
+    `The drift cost ${transition.declared - transition.estimate} tokens against a ${transition.margin}-token margin`);
+  assert(afterDrift.every((entry) => entry.estimate >= entry.declared * 0.95),
+    "The estimate stayed optimistic after the session had measured its new ratio");
+
+  // High-occupancy commit depth. The rep13 shape: the stale mass is folded, the window
+  // is above the backstop, and what is left is the fresh tail plus the newest payloads.
+  // Raising a target share reaches none of that, so the commits become crumbs and the
+  // window ratchets UP through every one of them.
+  const deep = makeRuntime(
+    makeFixture({ turns: 30, resultChars: 12_000, contextWindow: 100_000 }),
+    { ...FULL_LEVER_SET, providerTotalWindow: 100_000 },
+  );
+  await startRuntime(deep);
+  const epochs = [];
+  const projections = [];
+  for (let step = 0; step < 10; step += 1) {
+    // One more complete turn of inflow, so the newest turns are genuinely fresh.
+    deep.appendMessage({
+      role: "user", content: [{ type: "text", text: `Stage ${step}.` }], timestamp: 700 + step,
+    }, "inflow");
+    deep.appendMessage({
+      role: "assistant",
+      content: [{ type: "toolCall", id: `deep-${step}`, name: "read", arguments: { path: `deep-${step}.txt` } }],
+      stopReason: "toolUse",
+      timestamp: 700 + step,
+    }, "inflow");
+    deep.appendMessage({
+      role: "toolResult",
+      toolCallId: `deep-${step}`,
+      toolName: "read",
+      content: [{ type: "text", text: `Deep ${step}: ${"d".repeat(24_000)}` }],
+      isError: false,
+      timestamp: 700 + step,
+    }, "inflow");
+    deep.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: `Completed stage ${step}.` }],
+      stopReason: "stop",
+      timestamp: 700 + step,
+    }, "inflow");
+    await measure(deep, 86_000 + step * 100, 100_000);
+    const action = (await toolStatus(deep)).details.automatic.lastAutomaticAction;
+    if (action?.epoch) epochs.push(action.epoch);
+    projections.push(bytesOf((await project(deep)).messages));
+  }
+  assert(epochs.length >= 3, `Only ${epochs.length} commit epochs ran; the ratchet is not being measured`);
+  const shallow = epochs.filter((epoch) => epoch.preDeepenFreedShare < epoch.depthFloorShare);
+  assert(shallow.length >= 1,
+    "No commit was ever shallow, so the crumb-commit pattern is not being measured");
+  for (const epoch of shallow) {
+    assert.equal(epoch.deepenedTarget, true,
+      `A commit freeing ${epoch.preDeepenFreedShare} of the window did not deepen against a ${epoch.depthFloorShare} floor`);
+  }
+  // Deepening has to REACH something the ordinary top-up could not: that is the whole
+  // difference between reaching into the fresh tail and asking harder for mass that is
+  // not there.
+  const reached = shallow.filter((epoch) => epoch.deepenedMarks >= 1);
+  assert(reached.length >= 1,
+    `Deepening added no marks in ${shallow.length} shallow commits; it reached nothing the top-up had not`);
+  // The property the rep13 ratchet violated: the window ends no larger than it started,
+  // across a run where every pass added a stage of inflow.
+  assert(projections.at(-1) <= projections[0],
+    `The window ratcheted from ${projections[0]} to ${projections.at(-1)} chars across ${epochs.length} commits`);
+
+  return {
+    budgetTokens,
+    climbSteps: climb.length,
+    firedAtEstimate: fired.reduction.estimatedTokensBefore,
+    firedMarginTokens: fired.reduction.marginTokens,
+    headroomAtFiring: budgetTokens - fired.reduction.estimatedTokensBefore,
+    reducedTo: fired.reduction.estimatedTokensAfter,
+    worstDriftPercent: Number((worstDrift * 100).toFixed(1)),
+    charsPerTokenAfterDrift: afterDrift.at(-1).charsPerToken,
+    commitEpochs: epochs.length,
+    shallowEpochs: shallow.length,
+    deepenedEpochs: epochs.filter((epoch) => epoch.deepenedTarget === true).length,
+    deepeningReachedMarks: reached.reduce((total, epoch) => total + epoch.deepenedMarks, 0),
+    projectionFirst: projections[0],
+    projectionLast: projections.at(-1),
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -5164,6 +5372,7 @@ const gates = [
   [55, "Epoch batching under the full lever set", gateEpochBatchingUnderFullLevers],
   [56, "Projection budget fence & guard waiver", gateProjectionBudgetFence],
   [57, "Projection estimator calibration & post-fence integrity", gateProjectionCalibration],
+  [58, "Fence margin, calibration recency & commit depth", gateFenceMarginAndDepth],
 ];
 
 let failures = 0;
