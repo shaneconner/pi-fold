@@ -205,6 +205,7 @@ function makeRuntime(built, {
   surfacing,
   foldScheduling,
   foldPeekResults,
+  currentTurnCommitGuard,
   stageIdentifiedBriefs,
   ephemeralPeek,
   truthfulCapacity,
@@ -306,6 +307,7 @@ function makeRuntime(built, {
     ...(surfacing === undefined ? {} : { surfacing }),
     ...(foldScheduling === undefined ? {} : { foldScheduling }),
     ...(foldPeekResults === undefined ? {} : { foldPeekResults }),
+    ...(currentTurnCommitGuard === undefined ? {} : { currentTurnCommitGuard }),
     ...(stageIdentifiedBriefs === undefined ? {} : { stageIdentifiedBriefs }),
     ...(ephemeralPeek === undefined ? {} : { ephemeralPeek }),
     ...(truthfulCapacity === undefined ? {} : { truthfulCapacity }),
@@ -336,10 +338,10 @@ async function startRuntime(runtime) {
   return runtime.handlers.get("context")({ messages: runtime.messages }, runtime.ctx);
 }
 
-function measuredAssistant(tokens, contextWindow, suffix = "measurement") {
+function measuredAssistant(tokens, contextWindow, suffix = "measurement", stopReason = "stop") {
   return {
     role: "assistant",
-    stopReason: "stop",
+    stopReason,
     content: [{ type: "text", text: suffix }],
     provider: "openai-codex",
     model: "gpt-test",
@@ -349,10 +351,15 @@ function measuredAssistant(tokens, contextWindow, suffix = "measurement") {
   };
 }
 
-async function measure(runtime, tokens, contextWindow = runtime.usage.contextWindow, suffix) {
+async function measure(runtime, tokens, contextWindow = runtime.usage.contextWindow, suffix, stopReason) {
   runtime.usage = { tokens, contextWindow };
   const message = runtime.appendMessage(
-    measuredAssistant(tokens, contextWindow, suffix ?? `measurement-${tokens}-${runtime.branch.length}`),
+    measuredAssistant(
+      tokens,
+      contextWindow,
+      suffix ?? `measurement-${tokens}-${runtime.branch.length}`,
+      stopReason,
+    ),
     "provider-measurement",
   );
   await runtime.handlers.get("message_end")({ message }, runtime.ctx);
@@ -4179,6 +4186,143 @@ async function gateStageIdentifiedBriefs() {
   };
 }
 
+/**
+ * A commit must never fold what the CURRENT excursion just gathered. Measured
+ * 2026-08-06 (rep 8): nineteen folds landed between the agent's last read result and
+ * its next reply, so the agent answered from a window where its own just-gathered
+ * evidence had become placeholders. The fresh tail is a BYTE bound and did not catch
+ * it; the boundary that matters is the last terminal assistant message.
+ */
+async function currentTurnRuntime({ guard }) {
+  const runtime = makeRuntime(
+    makeFixture({ turns: 40, resultChars: 10_000, contextWindow: 100_000 }),
+    {
+      foldScheduling: "epoch",
+      retainPendingMarks: true,
+      ...(guard ? { currentTurnCommitGuard: true } : {}),
+    },
+  );
+  await startRuntime(runtime);
+  for (const tokens of [76_000, 78_000, 80_000, 82_000, 84_000]) {
+    await measure(runtime, tokens, 100_000);
+  }
+  const before = (materialized(runtime).pendingMarks ?? []).map((mark) => mark.id);
+
+  // The current excursion: ten read batches gathered since the last reply, far past
+  // the 24,000-byte fresh tail, so nothing but the turn boundary protects them.
+  const excursion = [];
+  for (let step = 0; step < 10; step += 1) {
+    runtime.appendMessage({
+      role: "assistant",
+      content: [{
+        type: "toolCall",
+        id: `excursion-${step}`,
+        name: "read",
+        arguments: { path: `excursion-${step}.txt` },
+      }],
+      stopReason: "toolUse",
+      timestamp: 900 + step,
+    }, "excursion");
+    runtime.appendMessage({
+      role: "toolResult",
+      toolCallId: `excursion-${step}`,
+      toolName: "read",
+      content: [{ type: "text", text: `Excursion ${step}: ${"e".repeat(20_000)}` }],
+      isError: false,
+      timestamp: 900 + step,
+    }, "excursion");
+    excursion.push(runtime.branch.at(-1).id);
+  }
+  // Two further tool-calling generations, so the consumed-batch index accepts reads
+  // inside a turn the agent has not closed yet.
+  for (let step = 0; step < 2; step += 1) {
+    runtime.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: `Still working ${step}.` }],
+      stopReason: "toolUse",
+      timestamp: 950 + step,
+    }, "excursion");
+  }
+  await project(runtime);
+  return { runtime, before, excursion };
+}
+
+async function gateCurrentTurnCommitGuard() {
+  const { runtime, before, excursion } = await currentTurnRuntime({ guard: true });
+  assert(before.length >= 3, "The fixture accumulated too few pre-turn marks to measure");
+
+  // The agent marks its own just-gathered reads, one batch at a time.
+  for (const id of excursion) await toolCall(runtime, { action: "fold", ids: [id] });
+  const state = materialized(runtime);
+  const snapshot = context.mapActiveContext({
+    sessionId: runtime.built.sessionId,
+    eventMessages: runtime.messages,
+    contextEntries: runtime.branch,
+    contextWindow: 100_000,
+  });
+  const turnKeys = context.currentTurnRefKeys(snapshot);
+  assert.equal(turnKeys.size, excursion.length, "The turn boundary did not find the excursion");
+
+  // The mass split this gate exists to exercise: a large share of the ELIGIBLE marked
+  // mass was gathered in the current turn, so freshness alone would let it fold.
+  const eligible = state.pendingMarks.filter((mark) =>
+    context.markEligibility(snapshot, state, mark) === "eligible");
+  const eligibleTurn = eligible.filter((mark) =>
+    context.markTouchesCurrentTurn(state, mark, turnKeys));
+  const mass = (marks) => marks.reduce((total, mark) =>
+    total + context.markFreedBytes(snapshot, state, mark), 0);
+  const turnShare = mass(eligibleTurn) / mass(eligible);
+  assert(eligibleTurn.length >= 3 && turnShare >= 0.5,
+    `Current-turn eligible mass share was ${turnShare}; the fixture proves nothing`);
+
+  // The commit fires with the turn still OPEN.
+  await measure(runtime, 88_000, 100_000, undefined, "toolUse");
+  const epoch = (await toolStatus(runtime)).details.automatic.lastAutomaticAction?.epoch;
+  assert(epoch, "No commit epoch ran");
+  assert.equal(epoch.currentTurnRetained, eligibleTurn.length + (state.pendingMarks.length - eligible.length),
+    "The epoch did not retain every current-turn mark");
+
+  // Only the older half folded, and nothing the current turn gathered moved a byte.
+  const after = materialized(runtime);
+  const foldedKeys = new Set(after.folds.flatMap((fold) =>
+    fold.parts.filter((part) => part.kind === "raw").map((part) => json.objectRefKey(part.ref))));
+  assert(![...turnKeys].some((key) => foldedKeys.has(key)),
+    "A commit folded evidence the current turn had just gathered");
+  assert(epoch.appliedMarks >= 1, "The guard starved the commit of its older marks");
+
+  // Retained, not dropped: every guarded mark survives with its reason stated and is
+  // still pending for the commit after the turn closes.
+  const guarded = epoch.refused.filter((mark) => /current turn/.test(mark.reason));
+  assert.equal(guarded.length, epoch.currentTurnRetained);
+  assert(guarded.every((mark) => mark.retained === true));
+  const stillPending = new Set((after.pendingMarks ?? []).map((mark) => mark.id));
+  assert(guarded.every((mark) => stillPending.has(mark.id)),
+    "A guarded mark was refused without staying pending");
+
+  // Control: the same session without the guard folds exactly that evidence, so the
+  // guard is what held it and not the fresh tail.
+  const control = await currentTurnRuntime({ guard: false });
+  for (const id of control.excursion) await toolCall(control.runtime, { action: "fold", ids: [id] });
+  await measure(control.runtime, 88_000, 100_000, undefined, "toolUse");
+  const controlState = materialized(control.runtime);
+  const controlFolded = new Set(controlState.folds.flatMap((fold) =>
+    fold.parts.filter((part) => part.kind === "raw").map((part) => part.ref.entryId)));
+  const controlTurnFolds = control.excursion.filter((id) => controlFolded.has(id));
+  assert(controlTurnFolds.length >= 3,
+    "The control did not fold current-turn evidence, so the guard proves nothing");
+
+  return {
+    preTurnMarks: before.length,
+    excursionBatches: excursion.length,
+    eligibleCurrentTurnMarks: eligibleTurn.length,
+    currentTurnMassShare: Number(turnShare.toFixed(3)),
+    appliedMarks: epoch.appliedMarks,
+    currentTurnRetained: epoch.currentTurnRetained,
+    currentTurnFolds: 0,
+    controlCurrentTurnFolds: controlTurnFolds.length,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -4231,6 +4375,7 @@ const gates = [
   [49, "Advisory delivery accounting", gateAdvisoryDelivery],
   [50, "Projection instrumentation", gateProjectionInstrumentation],
   [51, "Stage-identified fold briefs", gateStageIdentifiedBriefs],
+  [52, "Current-turn commit guard", gateCurrentTurnCommitGuard],
 ];
 
 let failures = 0;

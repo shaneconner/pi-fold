@@ -164,6 +164,14 @@ export const DEFAULT_ELIGIBLE_SHARE_COMMIT_THRESHOLD = 0.30;
  */
 export const DEFAULT_STAGE_IDENTIFIED_BRIEFS = false;
 
+/**
+ * A commit that runs between an agent's read and its use of that read replaces the
+ * agent's own just-gathered evidence with placeholders. The guard excludes every
+ * tool result produced since the last terminal assistant message from the applied
+ * set; those marks stay pending for the next commit.
+ */
+export const DEFAULT_CURRENT_TURN_COMMIT_GUARD = false;
+
 /** The default status payload stops carrying the whole fold tree. */
 export const DEFAULT_STATUS_INDEX_DIET = false;
 export const STATUS_DIET_SUGGESTIONS = 5;

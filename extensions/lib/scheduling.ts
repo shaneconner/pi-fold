@@ -23,6 +23,7 @@ import {
   parsePendingMarks,
   pendingMarkKey,
 } from "./persistence.ts";
+import { terminalAssistant } from "./transcript.ts";
 import {
   EPOCH_COMMIT_TARGET_WINDOW_SHARE,
   EPOCH_MAX_TOPUP_MARKS,
@@ -171,6 +172,52 @@ export function markFreedBytes(
   const placeholders = mark.kind === "tool-result" ? mark.parts.length : 1;
   const placeholder = placeholders * (mark.brief.length + ESTIMATED_PLACEHOLDER_OVERHEAD_BYTES);
   return Math.max(0, bytes(source) - placeholder);
+}
+
+/**
+ * The evidence boundary of the CURRENT turn: the position of the last terminal
+ * assistant message. Everything after it was gathered by the excursion still in
+ * progress, which is exactly the evidence a commit must not fold.
+ *
+ * Measured 2026-08-06 (rep 8): nineteen folds landed between the last read result and
+ * the agent's next reply, rewriting the projection from 938k to 487k chars, so the
+ * agent answered from a window where its own just-gathered evidence had become
+ * placeholders. Freshness in bytes did not catch it; the boundary is a TURN.
+ */
+export function currentTurnBoundary(snapshot: Pick<ActiveContextSnapshot, "messages">): number {
+  let boundary = -1;
+  for (let index = 0; index < snapshot.messages.length; index += 1) {
+    if (terminalAssistant(snapshot.messages[index])) boundary = index;
+  }
+  return boundary;
+}
+
+/** Every tool-result evidence key produced since that boundary. */
+export function currentTurnRefKeys(snapshot: ActiveContextSnapshot): Set<string> {
+  const boundary = currentTurnBoundary(snapshot);
+  const keys = new Set<string>();
+  for (const item of snapshot.mapped) {
+    if (item.index <= boundary || !item.ref) continue;
+    if (messageRole(item.message) !== "toolResult") continue;
+    keys.add(objectRefKey(item.ref));
+  }
+  return keys;
+}
+
+/** Whether a pending mark covers any evidence the current excursion just gathered. */
+export function markTouchesCurrentTurn(
+  state: ActiveContextState,
+  mark: PendingMark,
+  currentTurn: ReadonlySet<string>,
+): boolean {
+  if (!currentTurn.size) return false;
+  const refs = mark.mark === "refold"
+    ? (() => {
+      const fold = state.folds.find((item) => item.id === mark.id);
+      return fold ? flattenFoldRefs(fold, state) : [];
+    })()
+    : candidateSourceRefs(mark.parts, state);
+  return refs.some((ref) => currentTurn.has(objectRefKey(ref)));
 }
 
 export type MarkEligibility = "eligible" | "protected" | "unfulfillable";
@@ -484,13 +531,22 @@ export function topUpMarks(input: {
   state: ActiveContextState;
   ordinal: number;
   targetShare?: number;
+  /** Evidence keys the top-up may never propose, e.g. the current excursion's reads. */
+  excludeRefKeys?: ReadonlySet<string>;
+  /** Measure progress against ELIGIBLE mass, so pinned or protected marks never count. */
+  eligibleOnly?: boolean;
 }): PendingFoldMark[] {
   const { snapshot } = input;
   const target = input.targetShare ?? EPOCH_COMMIT_TARGET_WINDOW_SHARE;
   const claimed = claimedRefKeys(input.state);
+  for (const key of input.excludeRefKeys ?? []) claimed.add(key);
   const marks: PendingFoldMark[] = [];
   let state = input.state;
-  let share = markAccounting(snapshot, state).freedWindowShare;
+  const progress = (value: ActiveContextState): number => {
+    const accounting = markAccounting(snapshot, value);
+    return input.eligibleOnly ? accounting.eligibleFreedWindowShare : accounting.freedWindowShare;
+  };
+  let share = progress(state);
   for (let attempt = 0; attempt < EPOCH_MAX_TOPUP_MARKS && share < target; attempt += 1) {
     const candidate = selectAutomaticToolBatch(snapshot, state, 1, claimed)[0];
     if (!candidate) break;
@@ -506,7 +562,7 @@ export function topUpMarks(input: {
     state = addition.state;
     marks.push(mark);
     for (const ref of candidate.sourceRefs) claimed.add(objectRefKey(ref));
-    share = markAccounting(snapshot, state).freedWindowShare;
+    share = progress(state);
   }
   return marks;
 }
@@ -550,9 +606,34 @@ export async function commitPendingMarks(input: {
    * agent's judgment and leaves nothing for the next commit to act on.
    */
   retainIneligible?: boolean;
+  /**
+   * Never fold evidence the CURRENT excursion gathered. A commit that runs between
+   * an agent's read and its use of that read hands the agent a window where its own
+   * just-gathered evidence is a placeholder. Such marks stay pending for the next
+   * commit rather than being applied or dropped.
+   */
+  guardCurrentTurn?: boolean;
 }): Promise<CommitEpochResult> {
   const marks = pendingMarks(input.state);
   const retained: PendingMark[] = [];
+  const guardReasons = new Map<string, string>();
+  const currentTurn = input.guardCurrentTurn
+    ? currentTurnRefKeys(input.snapshot)
+    : new Set<string>();
+  if (input.guardCurrentTurn) {
+    const applicable: PendingMark[] = [];
+    for (const mark of marks) {
+      if (markTouchesCurrentTurn(input.state, mark, currentTurn)) {
+        retained.push(mark);
+        guardReasons.set(
+          pendingMarkKey(mark),
+          "evidence was gathered in the current turn; the mark stays pending until the turn closes",
+        );
+      } else applicable.push(mark);
+    }
+    marks.length = 0;
+    marks.push(...applicable);
+  }
   if (input.retainIneligible) {
     const applicable: PendingMark[] = [];
     for (const mark of marks) {
@@ -568,7 +649,8 @@ export async function commitPendingMarks(input: {
     mark: mark.mark,
     id: mark.id,
     origin: mark.origin,
-    reason: "span is still fresh or protected; the mark stays pending until it is eligible",
+    reason: guardReasons.get(pendingMarkKey(mark)) ??
+      "span is still fresh or protected; the mark stays pending until it is eligible",
     retained: true,
   }));
   // Oldest first, then by id: a chapter mark that absorbs an earlier tool-result

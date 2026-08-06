@@ -106,6 +106,7 @@ import {
   DEFAULT_PROJECTION_INSTRUMENTATION,
   DEFAULT_PROVIDER_TOTAL_WINDOW,
   DEFAULT_RETAIN_PENDING_MARKS,
+  DEFAULT_CURRENT_TURN_COMMIT_GUARD,
   DEFAULT_STAGE_IDENTIFIED_BRIEFS,
   DEFAULT_STATUS_INDEX_DIET,
   DEFAULT_TRUTHFUL_CAPACITY,
@@ -150,6 +151,8 @@ import {
   markedFoldIds,
   markOrdinal,
   pendingMarks,
+  currentTurnRefKeys,
+  markTouchesCurrentTurn,
   schedulingStatus,
   tailAdjacent,
   topUpMarks,
@@ -226,6 +229,7 @@ export function registerActiveContext(pi: any, options: {
   retainPendingMarks?: boolean;
   eligibleShareCommit?: boolean;
   eligibleShareCommitThreshold?: number;
+  currentTurnCommitGuard?: boolean;
   stageIdentifiedBriefs?: boolean;
   statusIndexDiet?: boolean;
   advisoryDelivery?: boolean;
@@ -305,6 +309,14 @@ export function registerActiveContext(pi: any, options: {
   const eligibleShareThreshold = (options.eligibleShareCommit ?? DEFAULT_ELIGIBLE_SHARE_COMMIT)
     ? options.eligibleShareCommitThreshold ?? DEFAULT_ELIGIBLE_SHARE_COMMIT_THRESHOLD
     : null;
+  if (options.currentTurnCommitGuard !== undefined && typeof options.currentTurnCommitGuard !== "boolean") {
+    throw new Error("currentTurnCommitGuard must be a boolean");
+  }
+  if (options.currentTurnCommitGuard && !epochScheduling) {
+    throw new Error("currentTurnCommitGuard requires epoch fold scheduling; immediate mode has no commits");
+  }
+  // An automatic commit never folds what this turn just gathered.
+  const currentTurnCommitGuard = options.currentTurnCommitGuard ?? DEFAULT_CURRENT_TURN_COMMIT_GUARD;
   if (options.stageIdentifiedBriefs !== undefined && typeof options.stageIdentifiedBriefs !== "boolean") {
     throw new Error("stageIdentifiedBriefs must be a boolean");
   }
@@ -1467,8 +1479,9 @@ export function registerActiveContext(pi: any, options: {
       const addition = addPendingMark(state, mark);
       if (addition.added) { state = addition.state; peekAdded += 1; }
     }
+    const guarded = currentTurnCommitGuard ? currentTurnRefKeys(snapshot) : new Set<string>();
     if (topUp) {
-      for (const mark of topUpMarks({ snapshot, state, ordinal })) {
+      for (const mark of topUpMarks({ snapshot, state, ordinal, excludeRefKeys: guarded })) {
         const addition = addPendingMark(state, mark);
         if (addition.added) { state = addition.state; topUpAdded += 1; }
       }
@@ -1481,6 +1494,7 @@ export function registerActiveContext(pi: any, options: {
       state,
       generation: lifecycle.generation,
       retainIneligible: retainPendingMarks,
+      guardCurrentTurn: currentTurnCommitGuard,
     });
     persistence.state = result.state;
     const bytesAfter = bytes(projectActiveContext(snapshot, result.state));
@@ -1499,6 +1513,8 @@ export function registerActiveContext(pi: any, options: {
       appliedMarks: result.applied.length,
       refusedMarks: result.refused.length,
       retainedMarks: result.retained.length,
+      currentTurnRetained: result.retained.filter((mark) =>
+        markTouchesCurrentTurn(state, mark, guarded)).length,
       eligibleMarks: accounting.eligibleMarks,
       estimatedRewriteTokens: accounting.rewriteTokens,
       estimatedFreedTokens: accounting.freedTokens,
