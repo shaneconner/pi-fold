@@ -15,6 +15,7 @@ import {
 import type { AutomaticRungSelection } from "./folding.ts";
 import {
   foldInterval,
+  hardFenceRatio,
   refsProtected,
   toolRefsProtected,
 } from "./measurement.ts";
@@ -219,6 +220,55 @@ export function markTouchesCurrentTurn(
     })()
     : candidateSourceRefs(mark.parts, state);
   return refs.some((ref) => currentTurn.has(objectRefKey(ref)));
+}
+
+/**
+ * How many of the newest guarded marks the pressure waiver still protects. The agent's
+ * MOST RECENT reads are the ones an in-flight excursion is about to work from, so they
+ * are the last thing surrendered; everything older is fair game once the window is the
+ * bigger risk.
+ */
+export const GUARD_WAIVER_PROTECTED_MARKS = 2;
+
+/**
+ * How many marks the guard must be holding before the pressure waiver releases any.
+ * Without a floor the waiver degrades into exactly the per-pass folding epoch
+ * scheduling exists to prevent: the batch drains, one new mark is guarded on the next
+ * pass, and releasing that one mark buys a whole prefix invalidation. Below the fence
+ * the waiver only ever releases a BATCH. The fence itself ignores this floor.
+ */
+export const GUARD_WAIVER_MINIMUM_MARKS = 4;
+
+/**
+ * Survivability outranks the guard.
+ *
+ * The current-turn guard is correct while there is room to wait, and fatal once there
+ * is not: a workload that never emits a terminal assistant message has ONE turn, so
+ * the boundary never advances and every mark is guarded forever. Measured 2026-08-06
+ * (rep 11): 58 assistant messages, all stopReason "toolUse", ZERO terminal ones, so
+ * the automatic commit applied nothing all run; the only marks that ever landed came
+ * from the agent's own two explicit commits. The window reached 359,625 tokens and the
+ * next request went out at ~458k estimated and was rejected by the provider.
+ *
+ * So: the guard holds in full while the commit has other work. It is waived only when
+ * it would STARVE the commit -- no other mark could be applied -- and pressure has
+ * reached the backstop, and then only for the OLDEST guarded marks. At the hard fence
+ * every guarded mark is waived, because the only useful action left is the fold that
+ * keeps the request transmissible.
+ */
+export function guardWaiverCount(input: {
+  snapshot: ActiveContextSnapshot;
+  ratio: number | null;
+  guardedMarks: number;
+  /** Marks this commit can apply WITHOUT the waiver. While any exist, the guard holds. */
+  otherApplicableMarks: number;
+}): number {
+  const { snapshot, ratio, guardedMarks, otherApplicableMarks } = input;
+  if (guardedMarks <= 0 || typeof ratio !== "number" || !Number.isFinite(ratio)) return 0;
+  if (ratio >= hardFenceRatio(snapshot)) return guardedMarks;
+  if (ratio < snapshot.policy.refoldRatio || otherApplicableMarks > 0) return 0;
+  if (guardedMarks < GUARD_WAIVER_MINIMUM_MARKS) return 0;
+  return Math.max(1, guardedMarks - GUARD_WAIVER_PROTECTED_MARKS);
 }
 
 export type MarkEligibility = "eligible" | "protected" | "unfulfillable";
@@ -596,6 +646,8 @@ export interface CommitEpochResult {
   applied: AppliedMark[];
   refused: RefusedMark[];
   retained: PendingMark[];
+  /** Guarded marks the pressure waiver released into this commit, oldest first. */
+  waived: PendingMark[];
 }
 
 /**
@@ -621,23 +673,42 @@ export async function commitPendingMarks(input: {
    * commit rather than being applied or dropped.
    */
   guardCurrentTurn?: boolean;
+  /**
+   * How many guarded marks the pressure waiver releases anyway, oldest first. The
+   * guard protects an in-flight excursion; it may never cost the session its ability
+   * to send a request at all. See `guardWaiverCount`.
+   */
+  guardWaiver?: number;
 }): Promise<CommitEpochResult> {
   const marks = pendingMarks(input.state);
   const retained: PendingMark[] = [];
+  const waived: PendingMark[] = [];
   const guardReasons = new Map<string, string>();
   const currentTurn = input.guardCurrentTurn
     ? currentTurnRefKeys(input.snapshot)
     : new Set<string>();
   if (input.guardCurrentTurn) {
     const applicable: PendingMark[] = [];
+    const guarded: PendingMark[] = [];
     for (const mark of marks) {
-      if (markTouchesCurrentTurn(input.state, mark, currentTurn)) {
-        retained.push(mark);
-        guardReasons.set(
-          pendingMarkKey(mark),
-          "evidence was gathered in the current turn; the mark stays pending until the turn closes",
-        );
-      } else applicable.push(mark);
+      if (markTouchesCurrentTurn(input.state, mark, currentTurn)) guarded.push(mark);
+      else applicable.push(mark);
+    }
+    // Oldest first: the newest reads are the ones the excursion is about to use, so
+    // they are the last evidence the waiver surrenders.
+    guarded.sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id));
+    const waiverCount = Math.max(0, Math.min(guarded.length, Math.trunc(input.guardWaiver ?? 0)));
+    for (const [index, mark] of guarded.entries()) {
+      if (index < waiverCount) {
+        waived.push(mark);
+        applicable.push(mark);
+        continue;
+      }
+      retained.push(mark);
+      guardReasons.set(
+        pendingMarkKey(mark),
+        "evidence was gathered in the current turn; the mark stays pending until the turn closes",
+      );
     }
     marks.length = 0;
     marks.push(...applicable);
@@ -714,7 +785,7 @@ export async function commitPendingMarks(input: {
       });
     }
   }
-  return { state, applied, refused, retained };
+  return { state, applied, refused, retained, waived };
 }
 
 /** The scheduling block reported by the status action. */

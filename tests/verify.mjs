@@ -4233,8 +4233,11 @@ async function gateStageIdentifiedBriefs() {
  * it; the boundary that matters is the last terminal assistant message.
  */
 async function currentTurnRuntime({ guard }) {
+  // The fixture stays INSIDE the serving budget on purpose: the guard is a
+  // batching-economics rule, and above the budget the transmission fence waives it to
+  // keep the request sendable. Gate 56 measures that regime.
   const runtime = makeRuntime(
-    makeFixture({ turns: 40, resultChars: 10_000, contextWindow: 100_000 }),
+    makeFixture({ turns: 40, resultChars: 4_000, contextWindow: 100_000 }),
     {
       foldScheduling: "epoch",
       retainPendingMarks: true,
@@ -4266,7 +4269,7 @@ async function currentTurnRuntime({ guard }) {
       role: "toolResult",
       toolCallId: `excursion-${step}`,
       toolName: "read",
-      content: [{ type: "text", text: `Excursion ${step}: ${"e".repeat(20_000)}` }],
+      content: [{ type: "text", text: `Excursion ${step}: ${"e".repeat(12_000)}` }],
       isError: false,
       timestamp: 900 + step,
     }, "excursion");
@@ -4685,6 +4688,8 @@ async function gateEpochBatchingUnderFullLevers() {
       kind: action?.kind ?? null,
       appliedMarks: action?.epoch ? action.epoch.appliedMarks : null,
       retainedMarks: action?.epoch ? action.epoch.retainedMarks : null,
+      guardWaived: action?.epoch ? action.epoch.guardWaived : null,
+      waivedMarks: action?.epoch ? action.epoch.waivedMarks : null,
     });
     return passes.at(-1);
   };
@@ -4700,30 +4705,40 @@ async function gateEpochBatchingUnderFullLevers() {
   assert.equal(below.at(-1).marks - below[0].marks, below.length - 1,
     "Marks did not accumulate one per pass below the threshold");
 
-  // Above it, with the turn still OPEN, the guard retains every mark, so the epoch
-  // applies nothing. That epoch paid for no rewrite, so no fold may land either: the
-  // ladder keeps marking and the batch keeps growing.
+  // Above the backstop, with the turn still OPEN, the guard would retain every mark
+  // and starve the commit. Survivability outranks the guard there: the waiver releases
+  // the OLDEST guarded marks, so the accumulated batch lands in ONE commit instead of
+  // dribbling out as one inline fold per pass, and the waiver is in the accounting.
   const accumulated = below.at(-1).marks;
   const above = [];
   for (let index = 0; index < 8; index += 1) above.push(await step(86_000 + index * 100));
-  const starved = above.filter((pass) => pass.appliedMarks === 0);
-  assert(starved.length >= 6,
-    `The guard did not starve the commit, so the regression shape was never entered: ${
-      above.map((pass) => pass.appliedMarks).join(",")}`);
-  assert(starved.every((pass) => pass.retainedMarks > 0), "A starved epoch retained no mark");
-  const foldsAtStarvation = new Set(starved.map((pass) => pass.folds));
-  assert.equal(foldsAtStarvation.size, 1,
-    `A fold landed on a pass whose commit epoch applied nothing: ${
-      above.map((pass) => `${pass.kind}/${pass.folds}`).join(",")}`);
-  assert(above.at(-1).marks > accumulated,
-    "Marks stopped accumulating while the turn stayed open");
-  assert(starved.every((pass) => pass.kind === "mark" || pass.kind === "epoch-commit"),
-    `A pass folded outside a commit epoch: ${above.map((pass) => pass.kind).join(",")}`);
+  const waivers = above.filter((pass) => pass.guardWaived === true);
+  assert(waivers.length >= 1,
+    `The starved commit never waived the guard: ${
+      above.map((pass) => `${pass.kind}/applied=${pass.appliedMarks}`).join(",")}`);
+  const firstWaiver = waivers[0];
+  assert(firstWaiver.waivedMarks >= 1, "The waiver released no mark");
+  assert(firstWaiver.appliedMarks >= 1, "The waived commit still applied nothing");
+  assert(firstWaiver.retainedMarks >= 1,
+    "The waiver surrendered the newest reads instead of keeping them protected");
+  assert(firstWaiver.appliedMarks >= 4,
+    `The waived commit applied ${firstWaiver.appliedMarks} marks; the batch did not land together`);
+  assert(above.every((pass) => pass.guardWaived !== true || pass.waivedMarks > 0),
+    "A commit reported a waiver that released nothing");
 
-  // Nothing anywhere folded without an epoch that applied at least one mark.
+  // The rep10 property still holds everywhere: no pass folds unless a commit epoch
+  // applied at least one mark, so folds never dribble out one rewrite at a time.
   assert(passes.every((pass, index) =>
     index === 0 || pass.folds === passes[index - 1].folds || pass.appliedMarks > 0),
     "A fold landed outside a commit epoch that applied marks");
+  const foldingPasses = passes.filter((pass, index) =>
+    index > 0 && pass.folds > passes[index - 1].folds);
+  assert(foldingPasses.length <= Math.ceil(above.length / 2),
+    `${foldingPasses.length} of ${passes.length} passes moved bytes; batching degraded to per-pass folding`);
+  assert(foldingPasses.length >= 1, "Nothing ever reduced the window above the backstop");
+  // The waiver releases a BATCH or nothing: a lone guarded mark never buys a rewrite.
+  assert(waivers.every((pass) => pass.waivedMarks >= 2),
+    `A waiver released ${waivers.map((pass) => pass.waivedMarks).join(",")} marks; the batch floor is not holding`);
 
   // The turn closes and its evidence ages past the fresh window. Now ONE commit
   // applies the whole accumulated batch in a single rewrite.
@@ -4760,12 +4775,186 @@ async function gateEpochBatchingUnderFullLevers() {
     belowThresholdPasses: below.length,
     belowThresholdFolds: below.at(-1).folds,
     accumulatedMarks: accumulated,
-    starvedPasses: starved.length,
-    foldsWhileStarved: 0,
+    waivedCommits: waivers.length,
+    marksReleasedByFirstWaiver: firstWaiver.waivedMarks,
+    marksKeptProtected: firstWaiver.retainedMarks,
+    passesThatMovedBytes: foldingPasses.length,
+    passesTotal: passes.length,
     marksAtClose: pendingAtClose,
     committedInOneEpoch: true,
     appliedInOneCommit: closing.epoch.appliedMarks,
     foldsAddedByThatCommit: foldsAdded,
+  };
+}
+
+/**
+ * The transmission fence, and the guard waiver that serves it.
+ *
+ * Measured 2026-08-06 (rep 11): the hard fence gates on `measurements.latestRatio`,
+ * which describes the request the provider already ANSWERED. The last measurement read
+ * 359,625 tokens of a 400,000 window (ratio 0.937 against a 0.959 fence) so nothing
+ * aborted, and the projection that went out was 1,831,936 chars -- about 458k estimated
+ * tokens, 1.2x the window. The provider rejected it twice and the worker died at stage
+ * 39 of 64. Nothing in that run ever measured the request about to be SENT.
+ *
+ * The run also proved the guard boundary can never advance: all 58 assistant messages
+ * carried stopReason "toolUse" and not one was terminal, so `currentTurnBoundary` sat
+ * at -1 the whole session and every mark was guarded forever. The only marks that ever
+ * landed came from the agent's own two explicit commits.
+ */
+async function gateProjectionBudgetFence() {
+  // The waiver arithmetic first, in isolation.
+  const built = makeFixture({ turns: 8, resultChars: 4_000, contextWindow: 100_000 });
+  const snapshot = epochSnapshot(built);
+  const waiver = (ratio, guardedMarks, otherApplicableMarks = 0) =>
+    context.guardWaiverCount({ snapshot, ratio, guardedMarks, otherApplicableMarks });
+  assert.equal(waiver(0.5, 8), 0, "The guard was waived below the pressure backstop");
+  assert.equal(waiver(0.86, 8, 3), 0, "The guard was waived while the commit had other work");
+  assert.equal(waiver(0.86, 8), 6, "The starved waiver did not keep the newest reads protected");
+  assert.equal(waiver(0.86, 3), 0, "A sub-batch waiver bought a rewrite for almost nothing");
+  assert.equal(waiver(0.99, 3), 3, "The hard fence did not waive every guarded mark");
+  assert.equal(waiver(0.99, 1), 1, "The hard fence honoured the batch floor it must ignore");
+  assert.equal(waiver(null, 8), 0, "An unmeasured ratio waived the guard");
+
+  // A session whose PROJECTION is far past the serving budget while the last measured
+  // ratio is calm: exactly the rep11 shape, where the excursion outgrew the window
+  // between one provider response and the next request.
+  const runtime = makeRuntime(
+    makeFixture({ turns: 40, resultChars: 12_000, contextWindow: 100_000 }),
+    { ...FULL_LEVER_SET, providerTotalWindow: 100_000 },
+  );
+  await startRuntime(runtime);
+  for (let step = 0; step < 12; step += 1) {
+    runtime.appendMessage({
+      role: "assistant",
+      content: [{ type: "toolCall", id: `over-${step}`, name: "read", arguments: { path: `over-${step}.txt` } }],
+      stopReason: "toolUse",
+      timestamp: 800 + step,
+    }, "excursion");
+    runtime.appendMessage({
+      role: "toolResult",
+      toolCallId: `over-${step}`,
+      toolName: "read",
+      content: [{ type: "text", text: `Overflow ${step}: ${"o".repeat(24_000)}` }],
+      isError: false,
+      timestamp: 800 + step,
+    }, "excursion");
+  }
+  for (let step = 0; step < 2; step += 1) {
+    runtime.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: `Still working ${step}.` }],
+      stopReason: "toolUse",
+      timestamp: 850 + step,
+    }, "excursion");
+  }
+  // The boundary the guard depends on never advanced: not one terminal assistant
+  // message exists in this session, which is what rep11 measured.
+  const openSnapshot = context.mapActiveContext({
+    sessionId: runtime.built.sessionId,
+    eventMessages: runtime.messages,
+    contextEntries: runtime.branch,
+    contextWindow: 100_000,
+  });
+  const boundary = context.currentTurnBoundary(openSnapshot);
+  assert(boundary < runtime.messages.length - 24,
+    "The turn boundary advanced into the excursion, so the starving guard is not being measured");
+  assert(context.currentTurnRefKeys(openSnapshot).size >= 12,
+    "The guard does not hold the excursion, so there is nothing for the waiver to release");
+
+  // A calm measured ratio, well under the hard fence: the lagging fence sees nothing.
+  await measure(runtime, 70_000, 100_000, undefined, "toolUse");
+  const status = await toolStatus(runtime);
+  const budgetTokens = status.details.automatic.projectionBudgetTokens;
+  assert.equal(budgetTokens, 90_000, "The serving budget is not the window minus the reservation");
+  assert(status.details.automatic.pressureRatio < context.hardFenceRatio({ contextWindow: 100_000 }),
+    "The measured ratio already sat at the hard fence, so the lagging fence would have caught it");
+
+  // The request is built. Either it now fits, or it was aborted; it is NEVER sent over
+  // budget. Both outcomes are proven against the same projection the host would send.
+  const projection = await project(runtime);
+  const projectedTokens = context.estimatedTokens(bytesOf(projection.messages));
+  const abortedRequests = runtime.aborts;
+  const reduction = (await toolStatus(runtime)).details.automatic.overBudgetReduction;
+  assert(reduction, "The over-budget projection was neither reduced nor recorded");
+  assert(reduction.estimatedTokensBefore > budgetTokens,
+    `The fixture projected ${reduction.estimatedTokensBefore} tokens, inside the ${budgetTokens} budget`);
+  assert(reduction.estimatedTokensAfter < reduction.estimatedTokensBefore,
+    "The emergency reduction freed nothing");
+  if (reduction.transmitted) {
+    assert(projectedTokens <= budgetTokens,
+      `A projection of ${projectedTokens} tokens was transmitted against a ${budgetTokens} budget`);
+  } else {
+    assert(abortedRequests >= 1, "An over-budget projection was transmitted without an abort");
+  }
+
+  // The reduction ran at fence pressure: it applied marks and held NOTHING back.
+  const epoch = (await toolStatus(runtime)).details.automatic.lastAutomaticAction?.epoch;
+  assert(epoch, "The over-budget path never opened a commit epoch");
+  assert(epoch.appliedMarks >= 1, "The fence-level commit applied nothing");
+  assert.equal(epoch.retainedMarks, 0, "The fence left marks guarded while the request would not fit");
+
+  // The rep11 shape exactly: the excursion is the ONLY foldable evidence, so the
+  // top-up has nothing unguarded to reach for and the fence waiver is the only thing
+  // standing between the session and an untransmittable request.
+  const guardedOnly = makeRuntime(
+    makeFixture({ turns: 8, tools: false, chapterChars: 40, contextWindow: 100_000 }),
+    { ...FULL_LEVER_SET, providerTotalWindow: 100_000 },
+  );
+  await startRuntime(guardedOnly);
+  for (let step = 0; step < 14; step += 1) {
+    guardedOnly.appendMessage({
+      role: "assistant",
+      content: [{ type: "toolCall", id: `only-${step}`, name: "read", arguments: { path: `only-${step}.txt` } }],
+      stopReason: "toolUse",
+      timestamp: 800 + step,
+    }, "excursion");
+    guardedOnly.appendMessage({
+      role: "toolResult",
+      toolCallId: `only-${step}`,
+      toolName: "read",
+      content: [{ type: "text", text: `Only ${step}: ${"o".repeat(30_000)}` }],
+      isError: false,
+      timestamp: 800 + step,
+    }, "excursion");
+  }
+  for (let step = 0; step < 2; step += 1) {
+    guardedOnly.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: `Still working ${step}.` }],
+      stopReason: "toolUse",
+      timestamp: 850 + step,
+    }, "excursion");
+  }
+  await measure(guardedOnly, 70_000, 100_000, undefined, "toolUse");
+  await project(guardedOnly);
+  const guardedStatus = (await toolStatus(guardedOnly)).details.automatic;
+  const guardedEpoch = guardedStatus.lastAutomaticAction?.epoch;
+  assert(guardedEpoch, "The all-guarded session never opened a commit epoch at the fence");
+  assert.equal(guardedEpoch.guardWaived, true,
+    "The fence did not waive the guard when every mark was current-turn");
+  assert(guardedEpoch.waivedMarks >= 1, "The fence waiver released no mark");
+  assert.equal(guardedEpoch.retainedMarks, 0, "The fence held marks back with the request unsendable");
+  assert(materialized(guardedOnly).folds.length >= 1, "The fence-level waiver folded nothing");
+
+  // The invariant, stated once: no projection this runtime returns exceeds the budget.
+  const finalProjection = await project(runtime);
+  const finalTokens = context.estimatedTokens(bytesOf(finalProjection.messages));
+  assert(finalTokens <= budgetTokens || runtime.aborts > abortedRequests,
+    `A ${finalTokens}-token projection was returned against a ${budgetTokens}-token budget`);
+
+  return {
+    waiverBelowBackstop: 0,
+    waiverWhenStarved: waiver(0.86, 8),
+    waiverAtFence: waiver(0.99, 3),
+    budgetTokens,
+    projectedTokensBefore: reduction.estimatedTokensBefore,
+    projectedTokensAfter: reduction.estimatedTokensAfter,
+    transmitted: reduction.transmitted === true,
+    aborts: runtime.aborts,
+    fenceAppliedMarks: epoch.appliedMarks,
+    allGuardedWaivedMarks: guardedEpoch.waivedMarks,
+    allGuardedFolds: materialized(guardedOnly).folds.length,
   };
 }
 
@@ -4825,6 +5014,7 @@ const gates = [
   [53, "Pinned mass backstop", gatePinnedMassBackstop],
   [54, "Per-peek ephemeral override", gatePerPeekEphemeral],
   [55, "Epoch batching under the full lever set", gateEpochBatchingUnderFullLevers],
+  [56, "Projection budget fence & guard waiver", gateProjectionBudgetFence],
 ];
 
 let failures = 0;

@@ -151,6 +151,8 @@ import {
   ladderSelectionMark,
   ladderBrief,
   markAccounting,
+  markEligibility,
+  guardWaiverCount,
   markedFoldIds,
   markOrdinal,
   pendingMarks,
@@ -452,6 +454,8 @@ export function registerActiveContext(pi: any, options: {
     lastSelectionSourceIds: [] as string[],
     pendingContextNote: null as string | null,
     lastAutomaticAction: null as Record<string, unknown> | null,
+    /** What the last over-budget projection cost and whether the reduction saved it. */
+    overBudgetReduction: null as Record<string, unknown> | null,
     automaticFailure: null as AutomaticFailureState | null,
     failedPreparations: new Set<string>(),
     actionQueue: Promise.resolve<unknown>(undefined),
@@ -1229,6 +1233,98 @@ export function registerActiveContext(pi: any, options: {
     return true;
   };
 
+  /**
+   * The TRANSMISSION fence.
+   *
+   * `abortUnsafeHardContext` gates on `measurements.latestRatio`, which describes the
+   * request the provider ALREADY answered. It is a lagging indicator: between that
+   * response and the next request an excursion can add a hundred thousand tokens of
+   * tool results, and nothing in the fence looks at the projection actually about to
+   * be sent. Measured 2026-08-06 (rep 11): the last measurement read 359,625 tokens of
+   * a 400,000 window, ratio 0.937 against a 0.959 hard fence, so no abort fired -- and
+   * the projection that went out was 1,831,936 chars, about 458k estimated tokens, 1.2x
+   * the whole window. The provider rejected it twice and the run died. rep4 aborted
+   * correctly only because its 272k DESCRIPTOR window put the stale ratio over the
+   * fence by luck of arithmetic, not because anything measured the request.
+   *
+   * So the projection itself is measured here, against the truthful serving budget the
+   * capacity accounting already computes. Over budget, an emergency reduction runs at
+   * fence pressure -- where every guarded mark is waived -- and the rebuilt projection
+   * is measured again. If it still does not fit, the request is aborted BEFORE
+   * transmission, which is the whole point of having a fence.
+   */
+  const projectionExceedsBudget = (projected: unknown[], ctx: any): {
+    tokens: number;
+    budgetTokens: number;
+    over: boolean;
+  } => {
+    const capacity = currentCapacity(ctx);
+    const budgetTokens = Number.isFinite(capacity.budgetTokens) && capacity.budgetTokens > 0
+      ? capacity.budgetTokens
+      : Number.POSITIVE_INFINITY;
+    const tokens = estimatedTokens(bytes(projected));
+    return { tokens, budgetTokens, over: tokens > budgetTokens };
+  };
+
+  const abortOverBudgetProjection = (tokens: number, budgetTokens: number, ctx: any): void => {
+    const key = sha256Value({
+      sessionId: persistence.state?.sessionId ?? null,
+      revision: persistence.state?.revision ?? null,
+      tokens,
+      budgetTokens,
+      phase: "projection-budget-fence",
+    });
+    ladder.pendingContextNote =
+      `The ${brandNoun} projection estimates ${tokens} tokens against a ${budgetTokens}-token serving budget. ` +
+      "The provider request was aborted before transmission; run /compact or make an explicit bounded context fold.";
+    if (advisory.hardFenceNoticeKey !== key) {
+      advisory.hardFenceNoticeKey = key;
+      safeNotify(
+        ctx,
+        "Provider request aborted: the projection exceeds the serving budget. " +
+        "Run /compact or make an explicit bounded context fold.",
+        "error",
+      );
+    }
+    if (typeof ctx.abort !== "function") {
+      throw new Error(`Pi projection-budget abort capability is unavailable at ${tokens} estimated tokens`);
+    }
+    ctx.abort();
+  };
+
+  const enforceProjectionBudget = async (
+    snapshot: ActiveContextSnapshot,
+    projected: unknown[],
+    ctx: any,
+  ): Promise<{ projected: unknown[]; aborted: boolean }> => {
+    let measured = projectionExceedsBudget(projected, ctx);
+    if (!measured.over) return { projected, aborted: false };
+    let reduced = projected;
+    // At the fence the only useful action is the fold that keeps the request
+    // transmissible, so the reduction runs with every guarded mark waived.
+    try {
+      const action = await attemptAutomaticRung(snapshot, 1, ctx, "projection-budget", {
+        waiveToolCadence: true,
+        waiverRatio: 1,
+      });
+      if (action && persistence.state) {
+        reduced = projectWithAdvisory(snapshot);
+        measured = projectionExceedsBudget(reduced, ctx);
+        ladder.overBudgetReduction = {
+          estimatedTokensBefore: estimatedTokens(bytes(projected)),
+          estimatedTokensAfter: measured.tokens,
+          budgetTokens: measured.budgetTokens,
+          transmitted: !measured.over,
+        };
+      }
+    } catch (error) {
+      suspendAutomatic(error, "projection-budget", ctx);
+    }
+    if (!measured.over) return { projected: reduced, aborted: false };
+    abortOverBudgetProjection(measured.tokens, measured.budgetTokens, ctx);
+    return { projected: reduced, aborted: true };
+  };
+
   const startPreparation = (snapshot: ActiveContextSnapshot, ratio: number | null, ctx: any): void => {
     if (lifecycle.shuttingDown || !persistence.state || ladder.automaticFailure || ratio === null || persistence.state.prepared || ladder.preparing ||
         ratio < snapshot.policy.warmRatio ||
@@ -1491,6 +1587,11 @@ export function registerActiveContext(pi: any, options: {
     snapshot: ActiveContextSnapshot,
     trigger: string,
     topUp: boolean,
+    /**
+     * Pressure the waiver is measured against. Defaults to the measured ratio; the
+     * over-budget reduction forces the fence so nothing survivable is held back.
+     */
+    waiverRatio: number | null = measurements.latestRatio,
   ): Promise<Record<string, unknown> | null> => {
     const ordinal = markOrdinal(snapshot);
     let state = persistence.state!;
@@ -1501,12 +1602,25 @@ export function registerActiveContext(pi: any, options: {
       if (addition.added) { state = addition.state; peekAdded += 1; }
     }
     const guarded = currentTurnCommitGuard ? currentTurnRefKeys(snapshot) : new Set<string>();
+    // At the fence everything unpinned is fair game, INCLUDING the top-up's reach: a
+    // session whose only foldable evidence is the open excursion has nothing else to
+    // propose, and excluding it there leaves the commit with nothing to apply at the
+    // exact moment reduction is the only thing keeping the request sendable.
+    const fenceLevel = typeof waiverRatio === "number" && Number.isFinite(waiverRatio) &&
+      waiverRatio >= hardFenceRatio(snapshot);
     if (topUp) {
       // Measuring top-up progress against ELIGIBLE mass is what keeps the pressure
       // backstop working under a peek-heavy agent: pinned and retained marks are mass
       // no commit can move, and counting them as progress stops the top-up dead.
       for (const mark of topUpMarks({
-        snapshot, state, ordinal, excludeRefKeys: guarded, eligibleOnly: pinnedMassBackstop,
+        snapshot,
+        state,
+        ordinal,
+        excludeRefKeys: fenceLevel && currentTurnCommitGuard ? new Set<string>() : guarded,
+        eligibleOnly: pinnedMassBackstop,
+        // The fence tops up until there is nothing left to propose: a reduction that
+        // stops at the ordinary target can leave the request still untransmittable.
+        ...(fenceLevel ? { targetShare: 1 } : {}),
       })) {
         const addition = addPendingMark(state, mark);
         if (addition.added) { state = addition.state; topUpAdded += 1; }
@@ -1515,12 +1629,27 @@ export function registerActiveContext(pi: any, options: {
     const accounting = markAccounting(snapshot, state);
     if (!accounting.pending) return null;
     const bytesBefore = bytes(projectActiveContext(snapshot, state));
+    // The guard protects an in-flight excursion, never at the cost of the session's
+    // ability to send a request at all: above the pressure backstop the oldest guarded
+    // marks are released, and at the fence all of them are.
+    const guardWaiver = currentTurnCommitGuard
+      ? guardWaiverCount({
+        snapshot,
+        ratio: waiverRatio,
+        guardedMarks: pendingMarks(state).filter((mark) =>
+          markTouchesCurrentTurn(state, mark, guarded)).length,
+        otherApplicableMarks: pendingMarks(state).filter((mark) =>
+          !markTouchesCurrentTurn(state, mark, guarded) &&
+          markEligibility(snapshot, state, mark) === "eligible").length,
+      })
+      : 0;
     const result = await commitPendingMarks({
       snapshot,
       state,
       generation: lifecycle.generation,
       retainIneligible: retainPendingMarks,
       guardCurrentTurn: currentTurnCommitGuard,
+      guardWaiver,
     });
     persistence.state = result.state;
     const bytesAfter = bytes(projectActiveContext(snapshot, result.state));
@@ -1536,6 +1665,8 @@ export function registerActiveContext(pi: any, options: {
       ladderMarks: accounting.ladderMarks,
       peekMarks: peekAdded,
       topUpMarks: topUpAdded,
+      guardWaived: result.waived.length > 0,
+      waivedMarks: result.waived.length,
       appliedMarks: result.applied.length,
       refusedMarks: result.refused.length,
       pinnedBytes: accounting.pinnedBytes,
@@ -1559,7 +1690,7 @@ export function registerActiveContext(pi: any, options: {
   const applyAutomaticRung = async (
     snapshot: ActiveContextSnapshot,
     ratio: number,
-    rungOptions: { waiveToolCadence?: boolean; toolOnly?: boolean } = {},
+    rungOptions: { waiveToolCadence?: boolean; toolOnly?: boolean; waiverRatio?: number } = {},
   ): Promise<Record<string, unknown> | null> => {
     if (!persistence.state || ladder.automaticFailure || ladder.preparing) return null;
     const rungSelectionOptions = {
@@ -1617,6 +1748,7 @@ export function registerActiveContext(pi: any, options: {
             ? "eligible-share"
             : "window-pressure",
           true,
+          rungOptions.waiverRatio ?? ratio,
         );
       }
       // An inline rung is free only INSIDE a rewrite the epoch already paid for. Below
@@ -1755,7 +1887,7 @@ export function registerActiveContext(pi: any, options: {
     ratio: number,
     ctx: any,
     phase: string,
-    rungOptions: { waiveToolCadence?: boolean; toolOnly?: boolean } = {},
+    rungOptions: { waiveToolCadence?: boolean; toolOnly?: boolean; waiverRatio?: number } = {},
   ): Promise<Record<string, unknown> | null> => {
     if (!persistence.state || !measurements.lastProviderMeasurement ||
         !durableProviderMeasurementMatches(measurements.lastProviderMeasurement)) return null;
@@ -1800,9 +1932,10 @@ export function registerActiveContext(pi: any, options: {
     ratio: number,
     ctx: any,
     phase: string,
+    rungOptions: { waiveToolCadence?: boolean; toolOnly?: boolean; waiverRatio?: number } = {},
   ): Promise<Record<string, unknown> | null> => {
     const operation = ladder.actionQueue.then(() =>
-      runAutomaticRungTransaction(snapshot, ratio, ctx, phase));
+      runAutomaticRungTransaction(snapshot, ratio, ctx, phase, rungOptions));
     ladder.actionQueue = operation.catch(() => undefined);
     return operation;
   };
@@ -2093,6 +2226,14 @@ export function registerActiveContext(pi: any, options: {
         return { messages: event.messages };
       }
       if (abortUnsafeHardContext(snapshot, ctx, true)) {
+        updateStatus(ctx);
+        return { messages: event.messages };
+      }
+      // A projection larger than the serving budget is never transmitted, whatever the
+      // last measured ratio says about the request before it.
+      const budgeted = await enforceProjectionBudget(snapshot, projected, ctx);
+      projected = budgeted.projected;
+      if (budgeted.aborted) {
         updateStatus(ctx);
         return { messages: event.messages };
       }
@@ -2467,6 +2608,8 @@ export function registerActiveContext(pi: any, options: {
           lastSelectionKind: ladder.lastSelectionKind,
           lastSelectionSourceIds: ladder.lastSelectionSourceIds,
           lastAutomaticAction: ladder.lastAutomaticAction,
+          overBudgetReduction: ladder.overBudgetReduction ? clone(ladder.overBudgetReduction) : null,
+          projectionBudgetTokens: currentCapacity(ctx).budgetTokens,
           automaticSuspended: ladder.automaticFailure !== null,
           automaticFailure: ladder.automaticFailure ? clone(ladder.automaticFailure) : null,
           lastCompactionDecision: nativeCompaction.lastThresholdDecision,
