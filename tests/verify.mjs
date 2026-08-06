@@ -2843,7 +2843,7 @@ async function gateEpochQuotaTopUp() {
     ids: [built.turnEntries[0][2]],
     brief: "The completed first inspection is stale and its exact output stays recoverable.",
   });
-  assert.equal(agentFold.details.marked, true);
+  assert.equal(agentFold.details.ok, true);
   assert.equal(agentFold.details.scheduling, "epoch");
   const agentMarkId = agentFold.details.id;
   assert.equal(materialized(runtime).pendingMarks.length, 1);
@@ -2925,13 +2925,13 @@ async function gateMarkAlwaysMeansMark() {
     ids: [built.turnEntries[0][2]],
     brief: "The oldest completed inspection is stale and its exact output stays recoverable.",
   });
-  assert.equal(distant.details.marked, true);
+  assert.equal(distant.details.ok, true);
   const near = await toolCall(runtime, {
     action: "fold",
     ids: [built.turnEntries[10][2]],
     brief: "The recently completed inspection is stale and its exact output stays recoverable.",
   });
-  assert.equal(near.details.marked, true, "A tail-adjacent span still folded inline");
+  assert.equal(near.details.ok, true, "A tail-adjacent span still folded inline");
   const state = materialized(runtime);
   assert.equal(state.folds.length, 0, "A fold landed without a commit");
   assert.equal(state.pendingMarks.length, 2);
@@ -3575,8 +3575,9 @@ async function gateRetainedPendingMarks() {
   const marked = await toolCall(runtime, {
     action: "fold", ids: freshSpan, brief: "The closing task stays exactly recoverable behind this fold.",
   });
-  assert.equal(marked.details.marked, true);
-  assert.equal(marked.details.eligibleNow, false);
+  // Accept-and-hold: a fresh span is ACCEPTED and deferred, never refused.
+  assert.equal(marked.details.ok, true);
+  assert.equal(marked.details.deferred, true);
   assert.equal(bytesOf((await project(runtime)).messages), before, "A mark moved projection bytes");
   const pendingId = marked.details.id;
   assert.equal(materialized(runtime).pendingMarks.length, 1);
@@ -3586,7 +3587,7 @@ async function gateRetainedPendingMarks() {
   const tailMark = await toolCall(runtime, {
     action: "fold", ids: tailSpan, brief: "The previous task stays exactly recoverable behind this fold.",
   });
-  assert.equal(tailMark.details.marked, true, "A tail-adjacent span still folded inline");
+  assert.equal(tailMark.details.ok, true, "A tail-adjacent span still folded inline");
   assert.equal(materialized(runtime).folds.length, 0);
 
   // A stale span alongside them, so one commit has both kinds of mark to sort.
@@ -3594,7 +3595,7 @@ async function gateRetainedPendingMarks() {
   const staleMark = await toolCall(runtime, {
     action: "fold", ids: staleSpan, brief: "An early completed task stays exactly recoverable behind this fold.",
   });
-  assert.equal(staleMark.details.eligibleNow, true);
+  assert.equal(staleMark.details.deferred, false);
 
   const scheduling = (await toolStatus(runtime)).details.automatic.scheduling;
   assert.equal(scheduling.pending, 3);
@@ -5302,25 +5303,25 @@ async function gateCurationTrigger() {
     occupancyTokens,
     budgetTokens: 90_000,
     window: 100_000,
-    staleToolShare: staleBytes / 4 / 100_000,
+    staleToolShare: staleBytes / 4 / 90_000,
     staleToolTokens: Math.ceil(staleBytes / 4),
     staleToolResults: 4,
     eligibleFolds: 4,
   });
   const occupancyAt = (share) => Math.ceil(share * 90_000);
-  const staleAt = (share) => share * 100_000 * 4;
+  const staleAt = (share) => share * 90_000 * 4;
   const fires = (occupancyShare, staleShare) =>
     context.curationTriggerFires(signals(occupancyAt(occupancyShare), staleAt(staleShare)));
 
   // Each side of each threshold, and the AND between them.
-  assert.equal(context.CURATION_OCCUPANCY_SHARE, 0.50);
+  assert.equal(context.CURATION_OCCUPANCY_SHARE, 0.80);
   assert.equal(context.CURATION_STALE_TOOL_SHARE, 0.20);
-  assert.equal(fires(0.50, 0.20), true, "The trigger did not fire at both thresholds");
-  assert.equal(fires(0.49, 0.20), false, "The trigger fired below the occupancy threshold");
-  assert.equal(fires(0.50, 0.19), false, "The trigger fired below the stale-mass threshold");
+  assert.equal(fires(0.80, 0.20), true, "The trigger did not fire at both thresholds");
+  assert.equal(fires(0.79, 0.20), false, "The trigger fired below the occupancy threshold");
+  assert.equal(fires(0.80, 0.19), false, "The trigger fired below the stale-mass threshold");
   assert.equal(fires(0.99, 0.19), false, "Occupancy alone fired the trigger");
   assert.equal(fires(0.10, 0.99), false, "Stale mass alone fired the trigger");
-  assert.equal(fires(0.80, 0.60), true);
+  assert.equal(fires(0.90, 0.60), true);
   assert.equal(
     context.curationTriggerFires(signals(null, staleAt(0.9))),
     false,
@@ -5330,14 +5331,14 @@ async function gateCurationTrigger() {
   // Live: the signals the runtime reports come from the same measurement the fence uses.
   const runtime = makeRuntime(built, { ...SEALED_SPINE, guidedCuration: true });
   await startRuntime(runtime);
-  await measure(runtime, 60_000, 100_000);
+  await measure(runtime, 76_000, 100_000);
   await project(runtime);
   const live = (await toolStatus(runtime)).details.automatic.curation;
   assert.equal(live.guided, true);
-  assert.equal(live.occupancyThreshold, 0.50);
+  assert.equal(live.occupancyThreshold, 0.80);
   assert.equal(live.staleToolThreshold, 0.20);
   assert(live.signals, "The runtime reported no curation signals");
-  assert(live.signals.occupancy > 0.5, "The live fixture did not reach the occupancy threshold");
+  assert(live.signals.occupancy > 0.8, "The live fixture did not reach the occupancy threshold");
   assert(live.signals.staleToolTokens > 0);
 
   return {
@@ -5413,7 +5414,7 @@ async function gateCurationLastCall() {
     { ...SEALED_SPINE, guidedCuration: true },
   );
   await startRuntime(runtime);
-  await measure(runtime, 60_000, 100_000, undefined, "toolUse");
+  await measure(runtime, 76_000, 100_000, undefined, "toolUse");
   const announced = await project(runtime);
   const notice = announced.messages.find((message) =>
     message.customType === "pi-fold-active-context-curation");
@@ -5444,7 +5445,11 @@ async function gateCurationLastCall() {
       brief: `Agent-curated span ${index}: the exact stale output stays recoverable behind this fold.`,
     })),
   });
-  assert.equal(batched.details.marks.filter((mark) => mark.marked).length, 2);
+  const batchedIds = batched.details.marks.map((mark) => mark.id);
+  const pendingAfterBatch = (materialized(runtime).pendingMarks ?? []).map((mark) => mark.id);
+  assert.equal(batchedIds.length, 2);
+  assert(batchedIds.every((id) => pendingAfterBatch.includes(id)),
+    "An agent mark made during the gate did not join the pending batch");
 
   // The agent engaged, so it gets its grace round; then the cap proceeds regardless.
   runtime.appendMessage({
@@ -5453,7 +5458,7 @@ async function gateCurationLastCall() {
     stopReason: "toolUse",
     timestamp: 980,
   }, "continuation");
-  for (const tokens of [61_000, 62_000, 63_000]) {
+  for (const tokens of [76_500, 77_000, 77_500]) {
     await measure(runtime, tokens, 100_000, undefined, "toolUse");
     await project(runtime);
   }
@@ -5575,7 +5580,7 @@ async function gateAutoSnapAndCorrections() {
     })),
   });
   assert.equal(batched.details.marks.length, 3);
-  assert(batched.details.marks.every((mark) => mark.marked === true));
+  assert(batched.details.marks.every((mark) => mark.ok === true));
   assert.equal(new Set(batched.details.marks.map((mark) => mark.id)).size, 3);
   assert.deepEqual(batched.details.corrections, []);
   assert.equal(materialized(runtime).pendingMarks.length, 3);
@@ -6327,6 +6332,439 @@ async function gateLeverCollapse() {
   };
 }
 
+/**
+ * The quiet runtime, and the rep-15 storm replay.
+ *
+ * Rep 15 accumulated stale mass early and the eligible-share cadence trigger fired 164
+ * commit events from ordinal 17, every one of them bypassing the announced gate. Under
+ * guided curation that trigger is gone: below the curation threshold NOTHING folds
+ * automatically, however much marked mass has piled up.
+ */
+async function gateQuietRuntimeStormReplay() {
+  const built = makeFixture({ turns: 20, resultChars: 14_000, contextWindow: 100_000 });
+  const runtime = makeRuntime(built, { ...SEALED_SPINE, guidedCuration: true });
+  await startRuntime(runtime);
+  const stream = () => runtime.appended
+    .filter((entry) => entry.customType === "pi-fold-context-event")
+    .map((entry) => entry.data);
+  const commits = () => stream().filter((record) =>
+    record.kind === "context.commit" && record.deferred === false);
+
+  // Stale mass from the earliest ordinals, exactly the rep-15 shape.
+  await toolCall(runtime, {
+    action: "fold",
+    marks: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((turn) => ({
+      ids: [built.turnEntries[turn][2]],
+      brief: `Stale inspection ${turn}: the exact output stays recoverable behind this fold.`,
+    })),
+  });
+  const marked = (await toolStatus(runtime)).details.automatic.scheduling;
+  assert(marked.eligibleFreedWindowShare >= context.EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD,
+    `The replay needs mass over the old cadence threshold; it carried ${marked.eligibleFreedWindowShare}`);
+
+  // The whole climb below the threshold: not one automatic commit, not one new fold.
+  const foldsBefore = materialized(runtime).folds.length;
+  // Small inflow steps on purpose: the transmission fence reduces when a projection is
+  // CROWDED (estimate plus margin over budget), and the margin grows with the inflow
+  // step. This gate is about the curation flow, so the safety net must stay unarmed.
+  for (const tokens of [24_000, 34_000, 44_000, 54_000, 62_000, 68_000]) {
+    await measure(runtime, tokens, 100_000, undefined, "toolUse");
+    await project(runtime);
+  }
+  await settle();
+  assert.equal(commits().length, 0,
+    `The runtime folded ${commits().length} time(s) below the curation threshold`);
+  assert.equal(materialized(runtime).folds.length, foldsBefore);
+
+  // Crossing the threshold announces, and then exactly ONE deep commit lands.
+  //
+  // Which lane carries it is not the property under test: at 0.80 of a 90,000-token
+  // synthetic budget the fence's crowded margin (a share of the estimator's own error)
+  // sits right on the trigger, so the sanctioned safety net can reach the same commit
+  // one pass before the gate does. Item 1 permits exactly that. What is pinned is the
+  // count -- one deep event, not a storm -- and the announcement in front of it.
+  await measure(runtime, 72_100, 100_000, undefined, "toolUse");
+  const announced = await project(runtime);
+  await settle();
+  assert(announced.messages.some((message) =>
+    message.customType === "pi-fold-active-context-curation" &&
+    /A commit epoch will fold/.test(String(message.content))),
+  "Crossing the curation threshold did not announce");
+
+  runtime.appendMessage({
+    role: "assistant",
+    content: [{ type: "text", text: "Continuing the task." }],
+    stopReason: "toolUse",
+    timestamp: 990,
+  }, "continuation");
+  await measure(runtime, 72_600, 100_000, undefined, "toolUse");
+  await project(runtime);
+  await settle();
+  const afterGate = commits().length;
+  assert.equal(afterGate, 1, `The crossing produced ${afterGate} commit events instead of one`);
+  const commit = commits()[0];
+  assert.match(String(commit.trigger), /^(guided-curation:|window-pressure$)/);
+  assert(commit.applied_marks >= 5,
+    `The commit applied ${commit.applied_marks} marks; it was not the ONE deep event`);
+
+  // Quiet again once occupancy falls back below the threshold.
+  await measure(runtime, 40_000, 100_000, undefined, "toolUse");
+  await project(runtime);
+  await settle();
+  assert.equal(commits().length, 1, "The runtime kept folding after the commit");
+
+  // The retune itself, and the parts of the thermostat that did NOT move.
+  assert.equal(context.CURATION_OCCUPANCY_SHARE, 0.80);
+  assert.equal(context.CURATION_TARGET_OCCUPANCY_SHARE, 0.35);
+  assert.equal(context.COMMIT_RECLAIM_FLOOR_SHARE, 0.02);
+
+  // Plain epoch scheduling is unchanged: the cadence trigger is the guided-mode deletion.
+  const plain = makeRuntime(
+    makeFixture({ turns: 20, resultChars: 14_000, contextWindow: 100_000 }),
+    { ...SEALED_SPINE },
+  );
+  await startRuntime(plain);
+  await toolCall(plain, {
+    action: "fold",
+    marks: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((turn) => ({
+      ids: [plain.built.turnEntries[turn][2]],
+      brief: `Stale inspection ${turn}: the exact output stays recoverable behind this fold.`,
+    })),
+  });
+  await measure(plain, 40_000, 100_000, undefined, "toolUse");
+  await project(plain);
+  await settle();
+  const plainCommits = plain.appended
+    .filter((entry) => entry.customType === "pi-fold-context-event")
+    .map((entry) => entry.data)
+    .filter((record) => record.kind === "context.commit" && record.deferred === false);
+  assert.equal(plainCommits.length, 1, "Plain epoch scheduling lost its eligible-share trigger");
+  assert.equal(plainCommits[0].trigger, "eligible-share");
+
+  return {
+    commitsBelowThreshold: 0,
+    commitsAfterGate: afterGate,
+    deepCommitMarks: commit.applied_marks,
+    guidedTrigger: commit.trigger,
+    plainModeTrigger: plainCommits[0].trigger,
+    occupancyShare: context.CURATION_OCCUPANCY_SHARE,
+  };
+}
+
+/**
+ * ONE serving budget. The descriptor understates the wire; the trigger, the gate, the
+ * reminders and the fence must all read the same truthful number, and the run must be
+ * able to prove which number it got from the stream alone.
+ */
+async function gateOneTruthfulBudget() {
+  const built = makeFixture({ turns: 16, resultChars: 30_000, contextWindow: 272_000 });
+  const runtime = makeRuntime(built, {
+    foldScheduling: "epoch",
+    guidedCuration: true,
+    // The live shape: a 272,000-token per-request descriptor over a 400,000 window.
+    providerTotalWindow: 400_000,
+  });
+  await startRuntime(runtime);
+  const stream = () => runtime.appended
+    .filter((entry) => entry.customType === "pi-fold-context-event")
+    .map((entry) => entry.data);
+
+  // Line one of the stream states the resolved budget.
+  const capacity = stream().find((record) => record.kind === "context.capacity");
+  assert(capacity, "The run never stated its resolved serving budget");
+  assert.equal(capacity.mode, "truthful");
+  assert.equal(capacity.window_tokens, 400_000);
+  assert.equal(capacity.budget_tokens, 383_616);
+  assert.equal(capacity.descriptor_window, 272_000);
+  assert.equal(capacity.guided_curation, true);
+
+  await measure(runtime, 180_000, 272_000, undefined, "toolUse");
+  await project(runtime);
+  await measure(runtime, 330_000, 272_000, undefined, "toolUse");
+  const announced = await project(runtime);
+  await settle();
+
+  // Every curation-side record carries the truthful budget, and none carries the
+  // descriptor's 255,616.
+  const budgeted = stream().filter((record) =>
+    typeof record.budget_tokens === "number");
+  assert(budgeted.length >= 2, "No budgeted records were emitted");
+  for (const record of budgeted) {
+    assert.equal(record.budget_tokens, 383_616,
+      `${record.kind} carried ${record.budget_tokens} instead of the truthful budget`);
+  }
+  const gateRecord = stream().find((record) => record.kind === "context.gate");
+  assert(gateRecord, "The gate never evaluated at truthful occupancy");
+  assert.equal(gateRecord.window_tokens, 400_000);
+  const notice = announced.messages.find((message) =>
+    message.customType === "pi-fold-active-context-curation");
+  assert(notice, "No curation carrier was delivered");
+  assert.match(String(notice.content), /383616-token serving budget/);
+  assert.equal(/255616/.test(String(notice.content)), false,
+    "A curation message quoted the descriptor budget");
+
+  // The status surface reads the same source.
+  const status = (await toolStatus(runtime)).details.automatic;
+  assert.equal(status.capacity.budgetTokens, 383_616);
+  assert.equal(status.capacity.descriptorWindow, 272_000);
+  assert.equal(status.curation.signals.budgetTokens, 383_616);
+
+  return {
+    mode: capacity.mode,
+    budgetTokens: capacity.budget_tokens,
+    descriptorWindow: capacity.descriptor_window,
+    budgetedRecords: budgeted.length,
+  };
+}
+
+/** Two reminders per window cycle, one line each, re-armed by every commit. */
+async function gateSparseReminders() {
+  assert.deepEqual([...context.CURATION_REMINDER_SHARES], [0.45, 0.65]);
+  const runtime = makeRuntime(
+    makeFixture({ turns: 14, resultChars: 9_000, contextWindow: 100_000 }),
+    { ...SEALED_SPINE, guidedCuration: true },
+  );
+  await startRuntime(runtime);
+  const reminders = (projected) => projected.messages.filter((message) =>
+    message.customType === "pi-fold-active-context-curation" &&
+    typeof message.details?.reminder === "number");
+
+  // Below the first share: nothing.
+  await measure(runtime, 30_000, 100_000, undefined, "toolUse");
+  assert.equal(reminders(await project(runtime)).length, 0);
+
+  // First share, then the second; each fires ONCE and each is one line.
+  await measure(runtime, 42_000, 100_000, undefined, "toolUse");
+  const first = reminders(await project(runtime));
+  assert.equal(first.length, 1);
+  assert.equal(first[0].details.reminder, 0);
+  assert.equal(first[0].display, false);
+  assert.equal(first[0].details.ephemeral, true);
+  const text = String(first[0].content);
+  assert.equal(text.includes("\n"), false, "A reminder is more than one line");
+  assert.match(text, /so the folds are neat when the fold event triggers/);
+  assert.match(text, /nothing folds until 80%/);
+  assert.equal(/\?/.test(text), false, "A reminder asks a question");
+
+  await measure(runtime, 44_000, 100_000, undefined, "toolUse");
+  assert.equal(reminders(await project(runtime)).length, 0, "The first reminder repeated");
+  await measure(runtime, 60_000, 100_000, undefined, "toolUse");
+  const second = reminders(await project(runtime));
+  assert.equal(second.length, 1);
+  assert.equal(second[0].details.reminder, 1);
+  await measure(runtime, 66_000, 100_000, undefined, "toolUse");
+  assert.equal(reminders(await project(runtime)).length, 0, "A third reminder fired in one cycle");
+
+  // No other pre-gate guidance: the recurring milestone/advisory nag is gone here.
+  const projected = await project(runtime);
+  assert.equal(projected.messages.some((message) =>
+    message.customType === "pi-fold-active-context-advisory" ||
+    message.customType === "pi-fold-active-context-milestone"), false,
+  "Guided curation still delivers the recurring pressure nag");
+
+  // A commit re-arms them, so a window that climbs twice is reminded twice.
+  await toolCall(runtime, { action: "commit" });
+  await measure(runtime, 50_000, 100_000, undefined, "toolUse");
+  const rearmed = reminders(await project(runtime));
+  assert.equal(rearmed.length, 1, "The reminders did not re-arm after a commit");
+  await settle();
+  const records = runtime.appended
+    .filter((entry) => entry.customType === "pi-fold-context-event")
+    .map((entry) => entry.data)
+    .filter((record) => record.kind === "context.reminder");
+  assert.equal(records.length, 3);
+  assert.equal(records[0].reminder_share, 0.45);
+  assert.equal(records[1].reminder_share, 0.65);
+
+  return {
+    shares: [...context.CURATION_REMINDER_SHARES],
+    remindersPerCycle: 2,
+    rearmedAfterCommit: rearmed.length,
+    streamRecords: records.length,
+  };
+}
+
+/**
+ * Accept and hold. A mark over a still-fresh span is scheduled, never refused, and it
+ * folds in a LATER commit once the span ages out -- never in the commit while fresh.
+ */
+async function gateAcceptAndHold() {
+  const fixture = { turns: 10, resultChars: 8_000, contextWindow: 100_000 };
+  const built = makeFixture(fixture);
+  const runtime = makeRuntime(built, { foldScheduling: "epoch" });
+  await startRuntime(runtime);
+
+  const freshSpan = [built.turnEntries[9][0], built.turnEntries[9].at(-1)];
+  const held = await toolCall(runtime, {
+    action: "fold", ids: freshSpan, brief: "The closing task stays exactly recoverable behind this fold.",
+  });
+  assert.equal(held.details.ok, true, "A fresh span was not accepted");
+  assert.equal(held.details.deferred, true);
+  assert.match(String(held.details.scheduled), /folds at the first commit after it ages out/);
+  assert.match(String(held.details.activation), /held, not refused/);
+  // Refusal language is reserved for the unconstructible.
+  assert.equal(/refus/i.test(JSON.stringify(held.details.marks)), false,
+    "A held mark was described as a refusal");
+  const heldId = held.details.id;
+
+  const staleSpan = [built.turnEntries[1][0], built.turnEntries[1].at(-1)];
+  const stale = await toolCall(runtime, {
+    action: "fold", ids: staleSpan, brief: "An early completed task stays exactly recoverable behind this fold.",
+  });
+  assert.equal(stale.details.ok, true);
+  assert.equal(stale.details.deferred, false);
+
+  // The commit while the span is still fresh: it applies the stale mark and HOLDS the
+  // fresh one, and the stream says deferred rather than refused.
+  const committed = await toolCall(runtime, { action: "commit" });
+  assert(committed.details.applied.length >= 1);
+  assert.equal(committed.details.applied.some((mark) => mark.id === heldId), false,
+    "A fresh span was folded by the commit that should have held it");
+  assert.equal(committed.details.deferredMarks >= 1, true);
+  assert.equal(committed.details.refusedMarks, 0, "A held mark was counted as a refusal");
+  assert((materialized(runtime).pendingMarks ?? []).some((mark) => mark.id === heldId),
+    "The held mark did not survive its commit");
+
+  // Age the span out with new turns, and the LATER commit folds it.
+  const aged = makeFixture({ ...fixture, turns: 14, sessionId: built.sessionId });
+  for (const entry of aged.entries.slice(built.entries.length)) runtime.branch.push(entry);
+  runtime.messages.length = 0;
+  runtime.messages.push(...aged.messages);
+  await project(runtime);
+  const later = await toolCall(runtime, { action: "commit" });
+  assert(later.details.applied.some((mark) => mark.id === heldId),
+    "The held mark never folded after its span aged out");
+  assert.equal(later.details.refusedMarks, 0, "The aged mark was refused rather than folded");
+
+  return {
+    heldAccepted: held.details.ok,
+    heldDeferred: held.details.deferred,
+    foldedWhileFresh: false,
+    foldedLater: true,
+    deferredAtFirstCommit: committed.details.deferredMarks,
+  };
+}
+
+/** Copy that carries the WHY and the numbers, and receipts that keep their verbs. */
+async function gateCurationCopyAndReceipts() {
+  const runtime = makeRuntime(
+    makeFixture({ turns: 14, resultChars: 9_000, contextWindow: 100_000 }),
+    { ...SEALED_SPINE, guidedCuration: true },
+  );
+  await startRuntime(runtime);
+  await measure(runtime, 76_000, 100_000, undefined, "toolUse");
+  const announced = await project(runtime);
+  const notice = String(announced.messages.find((message) =>
+    message.customType === "pi-fold-active-context-curation").content);
+  // The WHY, in one sentence: marking well is better caching is fewer, cheaper events.
+  assert.match(notice, /Marking well is what makes this cheap/);
+  assert.match(notice, /rewrite the prefix once instead of once per fold/);
+  assert.match(notice, /the next fold event arrives later/);
+
+  // Receipts carry concrete impact and keep their correction verbs.
+  const receipt = context.contextReceipt({
+    kind: "epoch-commit",
+    ordinal: 42,
+    trigger: "guided-curation:non-context-response",
+    foldsCommitted: 4,
+    foldsCreated: 4,
+    freedTokens: 31_000,
+    occupancyBefore: 76_000,
+    occupancyAfter: 45_000,
+    spansFolded: 1,
+    toolResultsFolded: 3,
+  });
+  const line = context.receiptLine(receipt);
+  assert.match(line, /Occupancy 76000→45000 tokens/);
+  assert.match(line, /1 span\(s\) folded, 3 tool result\(s\) folded/);
+  const block = context.receiptBlockText({ receipts: [receipt], toolName: "active_context" });
+  assert.match(block, /"action":"rebrief"/);
+  assert.match(block, /"action":"reboundary"/);
+  assert.match(block, /"action":"expand"/);
+
+  // The rollback receipt says where it landed and what overfilled.
+  const rollback = context.receiptLine(context.contextReceipt({
+    kind: "overflow-recovery",
+    ordinal: 51,
+    trigger: "provider-rejection:400",
+    freedTokens: 120_000,
+    occupancyBefore: 420_000,
+    occupancyAfter: 300_000,
+    recovered: true,
+    note: "A rollback was required: the provider rejected the last request, which overfilled the " +
+      "serving budget at 420000 estimated tokens against 383616. 1 reduction(s) landed it at 300000 " +
+      "tokens. Nothing durable was written for it, and the request was rebuilt inside the budget " +
+      "rather than dropped.",
+  }));
+  assert.match(rollback, /overfilled the serving budget at 420000 estimated tokens against 383616/);
+  assert.match(rollback, /landed it at 300000 tokens/);
+
+  return {
+    noticeCarriesWhy: true,
+    receiptImpact: line.includes("→"),
+    correctionVerbsKept: true,
+  };
+}
+
+/**
+ * One structural mutation per handoff.
+ *
+ * Rep 15 landed two context.commit records 50ms apart inside one ordinal (revisions 14
+ * and 15): the announced commit ran, the rebuilt projection was still inside the fence
+ * margin, and the crowded reduction committed a second time in the same pass. Two real
+ * mutations, two prefix rewrites, one model call.
+ */
+async function gateMutationBudgetPerHandoff() {
+  const runtime = makeRuntime(
+    makeFixture({ turns: 18, resultChars: 14_000, contextWindow: 100_000 }),
+    { ...SEALED_SPINE, guidedCuration: true },
+  );
+  await startRuntime(runtime);
+  const stream = () => runtime.appended
+    .filter((entry) => entry.customType === "pi-fold-context-event")
+    .map((entry) => entry.data);
+
+  // Drive the pass that used to double-commit: announce, proceed, and leave the rebuilt
+  // projection crowded enough for the budget lane to want a second commit.
+  for (const tokens of [70_000, 78_000, 82_000, 86_000, 90_000]) {
+    await measure(runtime, tokens, 100_000, undefined, "toolUse");
+    await project(runtime);
+    await settle();
+  }
+
+  const records = stream();
+  const handoffs = [];
+  let current = [];
+  for (const record of records) {
+    if (record.kind === "context.commit" && record.deferred === false) current.push(record);
+    if (record.kind === "context.prefix") { handoffs.push(current); current = []; }
+  }
+  handoffs.push(current);
+  for (const [index, batch] of handoffs.entries()) {
+    assert(batch.length <= 1,
+      `Handoff ${index} carried ${batch.length} structural mutations: ${batch.map((record) => record.trigger)}`);
+  }
+  // The invariant is enforced, not hoped for: a second attempt in one handoff is
+  // recorded as a deferral with its reason, never silently dropped.
+  const deferrals = records.filter((record) =>
+    record.kind === "context.commit" && record.reason === "mutation-budget-spent");
+  for (const deferral of deferrals) {
+    assert.equal(deferral.deferred, true);
+    assert.equal(deferral.applied_marks, 0);
+    assert(deferral.mutations_since_handoff >= 1);
+  }
+  const mutations = records.filter((record) =>
+    record.kind === "context.commit" && record.deferred === false);
+  assert(mutations.length >= 1, "The replay never committed at all");
+
+  return {
+    handoffs: handoffs.length,
+    maxMutationsPerHandoff: Math.max(0, ...handoffs.map((batch) => batch.length)),
+    mutations: mutations.length,
+    budgetDeferrals: deferrals.length,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -6396,6 +6834,12 @@ const gates = [
   [66, "Overflow rollback & recovery", gateOverflowRecovery],
   [67, "Context event stream", gateContextEventStream],
   [68, "Lever collapse", gateLeverCollapse],
+  [69, "Quiet runtime & rep-15 storm replay", gateQuietRuntimeStormReplay],
+  [70, "One truthful serving budget", gateOneTruthfulBudget],
+  [71, "Sparse occupancy reminders", gateSparseReminders],
+  [72, "Accept-and-hold marks", gateAcceptAndHold],
+  [73, "Curation copy & receipt impact", gateCurationCopyAndReceipts],
+  [74, "One structural mutation per handoff", gateMutationBudgetPerHandoff],
 ];
 
 let failures = 0;

@@ -194,12 +194,26 @@ export const MAX_PINNED_PEEKS = 64;
 export const DEFAULT_GUIDED_CURATION = false;
 
 /**
- * Signal one: measured occupancy of the truthful serving budget. Half full is early
- * on purpose -- the point of announcing a commit is to leave the agent enough room to
- * fold up and correct before the fold happens, and an announcement at the backstop is
- * an announcement with nothing left to spend.
+ * Signal one: measured occupancy of the truthful serving budget.
+ *
+ * Four fifths, not half (Shane RULING 2026-08-06, after rep 15): below this line the
+ * runtime is QUIET -- nothing folds automatically at all -- so the threshold is where
+ * the fold event should happen, and the remaining fifth of the budget is the runway the
+ * gate rounds and the commit itself spend. An earlier line buys announcement room by
+ * spending window the agent still wants for the task.
  */
-export const CURATION_OCCUPANCY_SHARE = 0.50;
+export const CURATION_OCCUPANCY_SHARE = 0.80;
+
+/**
+ * The two sparse reminders, as shares of the truthful serving budget.
+ *
+ * Exactly two per window cycle, one line each, informatory: mark chapters as you go so
+ * the folds are neat when the fold event triggers. They are the ONLY pre-gate guidance
+ * in guided curation -- recurring pressure nags trained rep 15's agent to ignore the
+ * one message that mattered -- and they re-arm after each commit cycle, so a window that
+ * climbs twice is reminded twice.
+ */
+export const CURATION_REMINDER_SHARES: readonly number[] = Object.freeze([0.45, 0.65]);
 
 /**
  * Signal two: tool-result mass OUTSIDE the fresh tail, as a share of the window.

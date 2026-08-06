@@ -9,6 +9,7 @@ import {
   CONTEXT_RECEIPT_BLOCK_BYTES,
   CURATION_GATE_MAX_ROUNDS,
   CURATION_OCCUPANCY_SHARE,
+  CURATION_REMINDER_SHARES,
   CURATION_STALE_TOOL_SHARE,
   DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
   MAX_CONTEXT_RECEIPTS,
@@ -66,9 +67,10 @@ export interface CurationSignals {
   /** Measured provider tokens as a share of the truthful serving budget; null unmeasured. */
   occupancy: number | null;
   occupancyTokens: number | null;
+  /** THE serving budget: one resolved value, the same one the fence and estimator use. */
   budgetTokens: number;
   window: number;
-  /** Stale tool mass as a share of the window, in the session's own measured tokens. */
+  /** Stale tool mass as a share of the serving budget, in the session's own tokens. */
   staleToolShare: number;
   staleToolTokens: number;
   staleToolResults: number;
@@ -76,17 +78,25 @@ export interface CurationSignals {
   eligibleFolds: number;
 }
 
+/**
+ * Both signals are measured against ONE resolved serving budget, handed in by the
+ * caller that owns the capacity accounting. Nothing here re-derives a window from a
+ * descriptor: rep 15's trigger and gate ran the whole run against a 272,000-token
+ * per-request descriptor while the fence used the truthful 383,616, because the budget
+ * was computed twice from two different places.
+ */
 export function curationSignals(input: {
   snapshot: ActiveContextSnapshot;
   state: ActiveContextState;
   usedTokens: number | null;
   budgetTokens: number;
+  /** The resolved serving WINDOW the budget was taken from, reported for audit. */
+  window: number;
   /** The session's own measured serialized chars per token; never a fixed constant. */
   charsPerToken: number;
   eligibleFolds: number;
 }): CurationSignals {
   const mass = staleToolMass(input.snapshot, input.state);
-  const window = input.snapshot.contextWindow;
   const charsPerToken = Number.isFinite(input.charsPerToken) && input.charsPerToken > 0
     ? input.charsPerToken
     : 4;
@@ -97,8 +107,8 @@ export function curationSignals(input: {
       : input.usedTokens / input.budgetTokens,
     occupancyTokens: input.usedTokens,
     budgetTokens: input.budgetTokens,
-    window,
-    staleToolShare: window > 0 ? staleToolTokens / window : 0,
+    window: input.window,
+    staleToolShare: input.budgetTokens > 0 ? staleToolTokens / input.budgetTokens : 0,
     staleToolTokens,
     staleToolResults: mass.results,
     eligibleFolds: input.eligibleFolds,
@@ -114,6 +124,41 @@ export function curationTriggerFires(signals: CurationSignals): boolean {
     Number.isFinite(signals.occupancy) &&
     signals.occupancy >= CURATION_OCCUPANCY_SHARE &&
     signals.staleToolShare >= CURATION_STALE_TOOL_SHARE;
+}
+
+/**
+ * The sparse reminders.
+ *
+ * Two per window cycle, one line each, tail-appended, and informatory. Below the
+ * curation threshold NOTHING folds automatically, so the only useful thing to say
+ * before the fold event is: mark as you go, and the folds will be neat when it fires.
+ * `fired` is the count already spent this cycle; a commit resets it to zero.
+ */
+export function dueReminderIndex(
+  occupancy: number | null,
+  fired: number,
+  shares: readonly number[] = CURATION_REMINDER_SHARES,
+): number | null {
+  if (occupancy === null || !Number.isFinite(occupancy)) return null;
+  for (let index = Math.max(0, Math.trunc(fired)); index < shares.length; index += 1) {
+    if (occupancy >= shares[index]) return index;
+  }
+  return null;
+}
+
+export function curationReminderText(input: {
+  signals: CurationSignals;
+  toolName: string;
+  brandNoun?: string;
+}): string {
+  const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
+  const occupancy = input.signals.occupancy === null
+    ? "unmeasured"
+    : `${Math.round(input.signals.occupancy * 100)}%`;
+  return `[${brand} curation] Occupancy ${occupancy} of the ${input.signals.budgetTokens}-token serving ` +
+    `budget; nothing folds until ${Math.round(CURATION_OCCUPANCY_SHARE * 100)}%. Mark finished chapters as ` +
+    `you go with ${input.toolName} {"action":"fold","marks":[{"ids":["<start>","<end>"],` +
+    "\"brief\":\"<factual brief>\"}]} so the folds are neat when the fold event triggers.";
 }
 
 export type CurationProceedReason = "go" | "non-context-response" | "round-cap";
@@ -217,8 +262,9 @@ export function curationNoticeText(input: {
       `(${signals.staleToolResults} result(s), about ${signals.staleToolTokens} tokens). ` +
       `${input.pendingMarks} mark(s) pending. A commit epoch will fold that mass into briefed placeholders; ` +
       "the exact source stays expandable and nothing is lost.",
-    "Curating it first pays twice: briefs you write are what makes these spans findable later, and marks " +
-      "batched into one commit cost one prefix rewrite instead of one per fold.",
+    "Marking well is what makes this cheap: your briefs are what makes these spans findable later, and " +
+      "spans batched into one commit rewrite the prefix once instead of once per fold, so the cache survives " +
+      "and the next fold event arrives later.",
     `Available now: ${input.toolName} ` +
       "{\"action\":\"fold\",\"marks\":[{\"ids\":[\"<start>\",\"<end>\"],\"brief\":\"<factual brief>\"}]} " +
       "batches several spans with briefs in one call; " +
@@ -238,6 +284,12 @@ export interface ContextReceipt {
   foldsCommitted: number;
   foldsCreated: number;
   freedTokens: number;
+  /** Measured occupancy either side of the action, in tokens. The impact, concretely. */
+  occupancyBefore: number | null;
+  occupancyAfter: number | null;
+  /** What the action actually folded, split the way an agent thinks about it. */
+  spansFolded: number;
+  toolResultsFolded: number;
   /** Bite-sized splitting, when an oversized span became sequential folds. */
   splitFolds: number;
   splitFromChars: number;
@@ -256,6 +308,10 @@ export function contextReceipt(input: Partial<ContextReceipt> & { kind: string; 
     foldsCommitted: input.foldsCommitted ?? 0,
     foldsCreated: input.foldsCreated ?? 0,
     freedTokens: input.freedTokens ?? 0,
+    occupancyBefore: input.occupancyBefore ?? null,
+    occupancyAfter: input.occupancyAfter ?? null,
+    spansFolded: input.spansFolded ?? 0,
+    toolResultsFolded: input.toolResultsFolded ?? 0,
     splitFolds: input.splitFolds ?? 0,
     splitFromChars: input.splitFromChars ?? 0,
     absorbedWedges: input.absorbedWedges ?? 0,
@@ -275,11 +331,19 @@ export function withReceipt(
 }
 
 export function receiptLine(receipt: ContextReceipt): string {
+  const occupancy = receipt.occupancyBefore !== null && receipt.occupancyAfter !== null
+    ? `Occupancy ${receipt.occupancyBefore}→${receipt.occupancyAfter} tokens.`
+    : "";
+  const folded = receipt.spansFolded || receipt.toolResultsFolded
+    ? `${receipt.spansFolded} span(s) folded, ${receipt.toolResultsFolded} tool result(s) folded.`
+    : "";
   const parts = [
     `${receipt.kind}${receipt.trigger ? ` (${receipt.trigger})` : ""} at ordinal ${receipt.ordinal}:`,
     receipt.foldsCommitted ? `${receipt.foldsCommitted} mark(s) committed,` : "",
     receipt.foldsCreated ? `${receipt.foldsCreated} fold(s) created,` : "",
     `about ${receipt.freedTokens} tokens freed.`,
+    occupancy,
+    folded,
     receipt.splitFolds
       ? `A ${receipt.splitFromChars}-char span was split into ${receipt.splitFolds} bite-sized folds.`
       : "",

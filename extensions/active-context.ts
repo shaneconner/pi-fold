@@ -109,6 +109,7 @@ import {
   CURATION_GATE_MAX_ROUNDS,
   CURATION_TARGET_OCCUPANCY_SHARE,
   CURATION_OCCUPANCY_SHARE,
+  CURATION_REMINDER_SHARES,
   CURATION_STALE_TOOL_SHARE,
   EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD,
   DEFAULT_CONTEXT_WINDOW,
@@ -151,8 +152,10 @@ import {
   advanceCurationGate,
   contextReceipt,
   curationNoticeText,
+  curationReminderText,
   curationSignals,
   curationTriggerFires,
+  dueReminderIndex,
   receiptBlockText,
   withReceipt,
 } from "./lib/curation.ts";
@@ -450,6 +453,8 @@ export function registerActiveContext(pi: any, options: {
   const measurements = {
     latestRatio: null as number | null,
     lastProviderMeasurement: null as ProviderContextMeasurement | null,
+    /** What the host/model descriptor last claimed, kept so the gap stays auditable. */
+    descriptorWindow: null as number | null,
     /** Serialized size of the projection this process last handed the host. */
     lastProjectedChars: null as number | null,
     /**
@@ -487,6 +492,8 @@ export function registerActiveContext(pi: any, options: {
     lastChange: "append" as ProjectionChange,
     /** Events emitted since the last handoff, which is the attribution candidate set. */
     sinceHandoff: [] as Array<{ seq: number; kind: string }>,
+    /** Structural mutations emitted since the last handoff. The per-generation budget. */
+    mutationsSinceHandoff: 0,
     /** Provider responses this session, so event SPACING is readable from the stream. */
     requests: 0,
     lastMutationRequest: 0,
@@ -501,6 +508,8 @@ export function registerActiveContext(pi: any, options: {
     gate: null as CurationGate | null,
     lastSignals: null as CurationSignals | null,
     receipts: [] as ContextReceipt[],
+    /** Reminders already spent this window cycle; a commit re-arms them. */
+    remindersFired: 0,
     /** Every context-management tool call this session, the gate's engagement signal. */
     contextCalls: 0,
     marksAtGateOpen: 0,
@@ -585,6 +594,13 @@ export function registerActiveContext(pi: any, options: {
    * session entry. An in-memory ledger is invisible to an analyst reading session
    * artifacts, and telemetry may never block or fail the action it describes.
    */
+  /**
+   * Open a pass's mutation budget. ONE structural mutation per pass is the budget: the
+   * rep-15 defect was a second commit inside the SAME pass, after the first had already
+   * rebuilt the projection, so the counter is armed wherever a pass begins.
+   */
+  const beginMutationPass = (): void => { instrumentation.mutationsSinceHandoff = 0; };
+
   const emit = (kind: ContextEventKind, payload: Record<string, unknown> = {}): ContextEvent => {
     const record = recordContextEvent(instrumentation.ledger, kind, {
       session_id: persistence.state?.sessionId ?? "",
@@ -659,15 +675,33 @@ export function registerActiveContext(pi: any, options: {
    * real headroom. The descriptor is still read, and still reported, so the gap stays
    * auditable rather than assumed.
    */
-  const budgetWindowFor = (ctx: any): number | null =>
-    providerTotalWindow ?? contextWindowFor(ctx);
+  const budgetWindowFor = (ctx: any): number | null => {
+    // Remembered so the ctx-free callers (trigger, gate, reminders, advisory) report the
+    // same descriptor gap the fence does instead of re-reading a second source.
+    measurements.descriptorWindow = contextWindowFor(ctx);
+    return providerTotalWindow ?? measurements.descriptorWindow;
+  };
 
-  const currentCapacity = (ctx: any): ReturnType<typeof capacityAccounting> => capacityAccounting({
-    window: budgetWindowFor(ctx) ?? lifecycle.latestSnapshot?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-    truthful: providerTotalWindow !== null,
-    descriptorWindow: contextWindowFor(ctx),
-    usedTokens: measurements.lastProviderMeasurement?.tokens ?? null,
-  });
+  /**
+   * THE serving budget. One resolution, one formula, one value.
+   *
+   * Every consumer -- the curation trigger, the last-call gate, the sparse reminders,
+   * the transmission fence, the projection estimator and every instrumentation record --
+   * reads this. Measured 2026-08-06 (rep 15): the trigger and gate ran a whole run
+   * against a 272,000-token per-request DESCRIPTOR (budget 255,616) while the fence used
+   * the truthful 383,616, because the same arithmetic lived in three places. A second
+   * copy of this formula is the defect; there is now only one.
+   */
+  const servingCapacity = (window: number | null): ReturnType<typeof capacityAccounting> =>
+    capacityAccounting({
+      window: window ?? lifecycle.latestSnapshot?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      truthful: providerTotalWindow !== null,
+      descriptorWindow: measurements.descriptorWindow,
+      usedTokens: measurements.lastProviderMeasurement?.tokens ?? null,
+    });
+
+  const currentCapacity = (ctx: any): ReturnType<typeof capacityAccounting> =>
+    servingCapacity(budgetWindowFor(ctx));
 
   const snapshotForEvent = (ctx: any, messages: unknown[]): ActiveContextSnapshot => mapActiveContext({
     sessionId: ctx.sessionManager.getSessionId(),
@@ -762,9 +796,11 @@ export function registerActiveContext(pi: any, options: {
     instrumentation.lastMutationTokens = null;
     instrumentation.lastChange = "append";
     instrumentation.sinceHandoff = [];
+    instrumentation.mutationsSinceHandoff = 0;
     curation.gate = null;
     curation.lastSignals = null;
     curation.receipts = [];
+    curation.remindersFired = 0;
     curation.contextCalls = 0;
     curation.marksAtGateOpen = 0;
     curation.recoveryAttempts = 0;
@@ -1599,17 +1635,22 @@ export function registerActiveContext(pi: any, options: {
         margin_tokens: measured.marginTokens,
         recovered: !measured.over,
       });
+      const overflowBefore = projectedTokenEstimate(projected);
       deliverReceipt(contextReceipt({
         kind: "overflow-recovery",
         ordinal: markOrdinal(snapshot),
         trigger: `provider-rejection:${curation.pendingRejection?.status ?? "unknown"}`,
-        freedTokens: Math.max(0, projectedTokenEstimate(projected) - measured.tokens),
+        freedTokens: Math.max(0, overflowBefore - measured.tokens),
+        occupancyBefore: overflowBefore,
+        occupancyAfter: measured.tokens,
         recovered: true,
         note: measured.over
-          ? "The rebuilt request still exceeds the serving budget; the run stops here rather than " +
-            "sending a request the provider will reject again."
-          : "A rollback was required: the provider rejected the last request, nothing durable was " +
-            "written for it, and the request was rebuilt inside the budget rather than dropped.",
+          ? `The rebuilt request is still ${measured.tokens} tokens against a ${measured.budgetTokens}-token ` +
+            "serving budget, so the run stops here rather than sending a request the provider will reject again."
+          : "A rollback was required: the provider rejected the last request, which overfilled the serving " +
+            `budget at ${overflowBefore} estimated tokens against ${measured.budgetTokens}. ` +
+            `${attempts} reduction(s) landed it at ${measured.tokens} tokens. Nothing durable was written ` +
+            "for it, and the request was rebuilt inside the budget rather than dropped.",
       }));
       curation.pendingRejection = null;
     }
@@ -1715,6 +1756,48 @@ export function registerActiveContext(pi: any, options: {
     return projected;
   };
 
+  /**
+   * The sparse reminders: exactly two one-line notices per window cycle, on the same
+   * tail carrier as everything else here.
+   *
+   * They are the ONLY pre-gate guidance guided curation delivers. A recurring nag is
+   * how rep 15's agent learned to skim context messages; two lines per cycle, keyed to
+   * occupancy and re-armed by every commit, are cheap enough to read every time.
+   */
+  const appendCurationReminder = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
+    if (!guidedCuration || curation.gate || !persistence.state) return projected;
+    const signals = measuredCurationSignals(snapshot);
+    const index = dueReminderIndex(signals.occupancy, curation.remindersFired);
+    if (index === null) return projected;
+    curation.remindersFired = index + 1;
+    emit("context.reminder", {
+      reminder_index: index,
+      reminder_share: CURATION_REMINDER_SHARES[index],
+      occupancy: signals.occupancy,
+      occupancy_tokens: signals.occupancyTokens,
+      budget_tokens: signals.budgetTokens,
+      window_tokens: signals.window,
+      pending_marks: pendingMarks(persistence.state).length,
+    });
+    projected.push({
+      role: "custom",
+      customType: curationProjectionType,
+      content: curationReminderText({ signals, toolName, brandNoun }),
+      display: false,
+      details: {
+        source: activeContextSource(entryTypePrefix),
+        ephemeral: true,
+        reminder: index,
+        reminderShare: CURATION_REMINDER_SHARES[index],
+        signals: { ...signals },
+      },
+      timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
+        ? ownValue(snapshot.messages.at(-1), "timestamp")
+        : 0,
+    });
+    return projected;
+  };
+
   /** The last-call notice, on the same carrier and under the same rules. */
   const appendCurationNotice = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
     if (!curation.gate || !curation.lastSignals) return projected;
@@ -1774,14 +1857,11 @@ export function registerActiveContext(pi: any, options: {
    */
   const advisoryCuration = (snapshot: ActiveContextSnapshot) => {
     const accounting = markAccounting(snapshot, persistence.state!);
-    const used = measurements.lastProviderMeasurement?.tokens ?? null;
-    const reserve = Math.min(
-      ACTIVE_CONTEXT_POLICY.responseReserve,
-      Math.floor(snapshot.contextWindow * 0.1),
-    );
-    const budgetTokens = snapshot.contextWindow - reserve;
+    const capacity = servingCapacity(snapshot.contextWindow);
+    const used = capacity.usedTokens;
+    const budgetTokens = capacity.budgetTokens;
     return {
-      headroomTokens: used === null ? null : budgetTokens - used,
+      headroomTokens: capacity.headroomTokens,
       budgetTokens,
       pendingMarks: accounting.pending,
       eligibleMarks: accounting.eligibleMarks,
@@ -1802,6 +1882,10 @@ export function registerActiveContext(pi: any, options: {
     });
     appendReceipts(projected, snapshot);
     appendCurationNotice(projected, snapshot);
+    // Guided curation carries exactly two reminders and the last-call notice. The
+    // milestone and live-advisory carriers are the recurring pressure nag they replace,
+    // so under this mode they are not built at all.
+    if (guidedCuration) return appendSurfacing(appendCurationReminder(projected, snapshot), snapshot);
     const armed = advisoryState(persistence.state!).armed;
     if (!armed || armed.milestone !== advisory.armedMilestone || measurements.latestRatio === null ||
         measurements.latestRatio < 0.85 * armed.threshold) return appendSurfacing(projected, snapshot);
@@ -1905,6 +1989,7 @@ export function registerActiveContext(pi: any, options: {
     });
     instrumentation.previousText = text;
     instrumentation.sinceHandoff = [];
+    instrumentation.mutationsSinceHandoff = 0;
   };
 
   const commitDeterministicCandidate = async (
@@ -2052,14 +2137,32 @@ export function registerActiveContext(pi: any, options: {
     // exact moment reduction is the only thing keeping the request sendable.
     const fenceLevel = typeof waiverRatio === "number" && Number.isFinite(waiverRatio) &&
       waiverRatio >= hardFenceRatio(snapshot);
+    // ONE STRUCTURAL MUTATION PER HANDOFF.
+    //
+    // Measured 2026-08-06 (rep 15): two context.commit records 50ms apart inside one
+    // ordinal, revisions 14 and 15 -- two REAL mutations, not a duplicated record. The
+    // pass had committed at the announced trigger, rebuilt the projection, found it
+    // still CROWDED (inside the fence margin, but transmissible), and committed again.
+    // The second commit bought margin the next pass would have bought anyway and cost a
+    // whole second prefix rewrite. So a second commit in the same handoff defers unless
+    // the request is genuinely untransmittable: the fence and the recovery lane are
+    // safety, and safety outranks the budget.
+    if (instrumentation.mutationsSinceHandoff > 0 && !fenceLevel && curation.recoveryAttempts === 0) {
+      emit("context.commit", {
+        trigger,
+        deferred: true,
+        reason: "mutation-budget-spent",
+        applied_marks: 0,
+        mutations_since_handoff: instrumentation.mutationsSinceHandoff,
+        pending_marks: pendingMarks(state).length,
+      });
+      return null;
+    }
     // The thermostat. Firing at the trigger line and folding down to the target line is
     // what makes event SPACING structural rather than hoped for.
-    const usedTokens = measurements.lastProviderMeasurement?.tokens ?? null;
-    const reserve = Math.min(
-      ACTIVE_CONTEXT_POLICY.responseReserve,
-      Math.floor(snapshot.contextWindow * 0.1),
-    );
-    const budgetTokens = snapshot.contextWindow - reserve;
+    const capacity = servingCapacity(snapshot.contextWindow);
+    const usedTokens = capacity.usedTokens;
+    const budgetTokens = capacity.budgetTokens;
     const hysteresisShare = usedTokens === null || snapshot.contextWindow <= 0
       ? 0
       : Math.max(0, (usedTokens - CURATION_TARGET_OCCUPANCY_SHARE * budgetTokens) /
@@ -2187,8 +2290,10 @@ export function registerActiveContext(pi: any, options: {
         ? null
         : usedTokens - instrumentation.lastMutationTokens,
       applied_marks: result.applied.length,
-      refused_marks: result.refused.length,
-      retained_marks: result.retained.length,
+      // Refusal is TERMINAL only. A mark whose span was still fresh is deferred, not
+      // refused: it is held and folds at the first commit after the span ages out.
+      refused_marks: result.refused.filter((mark) => !mark.retained).length,
+      deferred_marks: result.retained.length,
       waived_marks: result.waived.length,
       pending_marks: accounting.pending,
       agent_marks: accounting.agentMarks,
@@ -2205,10 +2310,18 @@ export function registerActiveContext(pi: any, options: {
       pinned_results: accounting.pinnedResults,
       window_tokens: snapshot.contextWindow,
     });
+    instrumentation.mutationsSinceHandoff += 1;
+    // A commit closes the window cycle: the reminders re-arm and fire again as
+    // occupancy re-climbs, which is the only thing that makes them recurrent.
+    curation.remindersFired = 0;
     instrumentation.lastMutationRequest = instrumentation.requests;
     instrumentation.lastMutationTokens = usedTokens;
+    let foldedToolResults = 0;
+    let foldedSpans = 0;
     for (const applied of result.applied) {
       const fold = persistence.state.folds.find((item) => item.id === applied.foldId);
+      if (fold?.kind === "tool-result") foldedToolResults += 1;
+      else foldedSpans += 1;
       emit("context.fold", {
         commit_seq: commitEvent.seq,
         fold_id: applied.foldId,
@@ -2245,13 +2358,19 @@ export function registerActiveContext(pi: any, options: {
       deepenedMarks,
       absorbedWedges: wedges.absorbed.length,
       absorbed: wedges.absorbed,
+      // What the commit actually folded, the way an agent counts it, so the receipt can
+      // report impact instead of an opaque mark total.
+      foldedSpans,
+      foldedToolResults,
+      occupancyTokensBefore: usedTokens,
       preDeepenFreedShare: preDeepenShare,
       depthFloorShare: commitDepthFloorShare(snapshot),
       reclaimFloorShare: COMMIT_RECLAIM_FLOOR_SHARE,
       guardWaived: result.waived.length > 0,
       waivedMarks: result.waived.length,
       appliedMarks: result.applied.length,
-      refusedMarks: result.refused.length,
+      refusedMarks: result.refused.filter((mark) => !mark.retained).length,
+      deferredMarks: result.retained.length,
       pinnedBytes: accounting.pinnedBytes,
       pinnedResults: accounting.pinnedResults,
       retainedMarks: result.retained.length,
@@ -2272,17 +2391,15 @@ export function registerActiveContext(pi: any, options: {
     };
   };
 
-  /** The two curation signals, measured against the same truthful budget the fence uses. */
+  /** The two curation signals, measured against the ONE serving budget. */
   const measuredCurationSignals = (snapshot: ActiveContextSnapshot): CurationSignals => {
-    const reserve = Math.min(
-      ACTIVE_CONTEXT_POLICY.responseReserve,
-      Math.floor(snapshot.contextWindow * 0.1),
-    );
+    const capacity = servingCapacity(snapshot.contextWindow);
     return curationSignals({
       snapshot,
       state: persistence.state!,
-      usedTokens: measurements.lastProviderMeasurement?.tokens ?? null,
-      budgetTokens: snapshot.contextWindow - reserve,
+      usedTokens: capacity.usedTokens,
+      budgetTokens: capacity.budgetTokens,
+      window: capacity.window,
       charsPerToken: projectionCharsPerToken(),
       eligibleFolds: markAccounting(snapshot, persistence.state!).eligibleMarks,
     });
@@ -2381,6 +2498,9 @@ export function registerActiveContext(pi: any, options: {
       ? Math.ceil(savedBytes / projectionCharsPerToken())
       : 0;
     const foldIds = Array.isArray(action.foldIds) ? action.foldIds.length : 0;
+    const occupancyBefore = epoch && typeof epoch.occupancyTokensBefore === "number"
+      ? epoch.occupancyTokensBefore
+      : measurements.lastProviderMeasurement?.tokens ?? null;
     deliverReceipt(contextReceipt({
       kind,
       ordinal: markOrdinal(snapshot),
@@ -2388,6 +2508,11 @@ export function registerActiveContext(pi: any, options: {
       foldsCommitted: epoch ? Number(epoch.appliedMarks ?? 0) : 0,
       foldsCreated: foldIds || (epoch ? Number(epoch.appliedMarks ?? 0) : 0),
       freedTokens,
+      // The impact, in the same unit the budget is stated in.
+      occupancyBefore,
+      occupancyAfter: occupancyBefore === null ? null : Math.max(0, occupancyBefore - freedTokens),
+      spansFolded: epoch ? Number(epoch.foldedSpans ?? 0) : foldIds,
+      toolResultsFolded: epoch ? Number(epoch.foldedToolResults ?? 0) : 0,
       splitFolds: Number(action.splitFolds ?? 0),
       splitFromChars: Number(action.splitFromChars ?? 0),
       absorbedWedges: Number(epoch?.absorbedWedges ?? 0),
@@ -2454,13 +2579,24 @@ export function registerActiveContext(pi: any, options: {
     let inlineRungs = true;
     if (epochScheduling) {
       const eligibleShare = markAccounting(snapshot, persistence.state).eligibleFreedWindowShare;
-      const backstopDue = epochCommitDue(snapshot, ratio, eligibleShare);
+      // QUIET RUNTIME (guided curation). The eligible-share cadence trigger is DELETED
+      // here: it is an economic trigger with no announcement in front of it, and under
+      // guided curation it fired 164 commits from ordinal 17 in rep 15, every one of
+      // them bypassing the gate the mode exists to run. What remains is the announced
+      // trigger and, underneath it, the pressure backstop plus the fence and the
+      // recovery lane -- the safety net, which is never gated. Plain epoch scheduling
+      // keeps the cadence trigger; it has no announcement to bypass.
+      const backstopDue = guidedCuration
+        ? epochCommitDue(snapshot, ratio)
+        : epochCommitDue(snapshot, ratio, eligibleShare);
       const verdict = curationCommitVerdict(snapshot, backstopDue, rungOptions.announcing === true);
       if (verdict.due) {
         epoch = await runCommitEpoch(
           snapshot,
           verdict.trigger ??
-            (eligibleShare >= EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD ? "eligible-share" : "window-pressure"),
+            (!guidedCuration && eligibleShare >= EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD
+              ? "eligible-share"
+              : "window-pressure"),
           true,
           rungOptions.waiverRatio ?? ratio,
         );
@@ -2776,7 +2912,29 @@ export function registerActiveContext(pi: any, options: {
     }
   };
 
-  pi.on("session_start", async (_event: unknown, ctx: any) => { await safeLifecycleLoad(ctx, "session-start"); });
+  /**
+   * State the resolved serving budget once, at startup, before anything reads it. A
+   * budget nobody can see in the stream is how rep 15 spent a whole run on a 272,000
+   * descriptor without a single record saying so.
+   */
+  const recordResolvedCapacity = (ctx: any): void => {
+    const capacity = currentCapacity(ctx);
+    emit("context.capacity", {
+      mode: capacity.mode,
+      window_tokens: capacity.window,
+      budget_tokens: capacity.budgetTokens,
+      output_reservation: capacity.outputReservation,
+      descriptor_window: capacity.descriptorWindow,
+      guided_curation: guidedCuration,
+      curation_occupancy_share: CURATION_OCCUPANCY_SHARE,
+      reminder_shares: CURATION_REMINDER_SHARES.join(","),
+    });
+  };
+
+  pi.on("session_start", async (_event: unknown, ctx: any) => {
+    await safeLifecycleLoad(ctx, "session-start");
+    recordResolvedCapacity(ctx);
+  });
   pi.on("session_tree", async (_event: unknown, ctx: any) => { await safeLifecycleLoad(ctx, "session-tree"); });
   pi.on("session_compact", async (event: Record<string, unknown>, ctx: any) => {
     const reason = boundReceiptText(ownValue(event, "reason"), 64, "unknown");
@@ -2885,6 +3043,7 @@ export function registerActiveContext(pi: any, options: {
 
   const handleContext = async (event: { messages: unknown[] }, ctx: any) => {
     if (lifecycle.shuttingDown) return { messages: event.messages };
+    beginMutationPass();
     if (!persistence.state) persistence.state = emptyActiveContextState(ctx.sessionManager.getSessionId());
     lifecycle.latestSnapshot = null;
     lifecycle.latestSnapshotError = null;
@@ -3070,6 +3229,7 @@ export function registerActiveContext(pi: any, options: {
 
   pi.on("message_end", async (event: Record<string, unknown>, ctx: any) => {
     if (lifecycle.shuttingDown) return;
+    beginMutationPass();
     try {
       const message = ownValue(event, "message");
       instrumentation.requests += 1;
@@ -3133,6 +3293,7 @@ export function registerActiveContext(pi: any, options: {
     if (lifecycle.shuttingDown || lifecycle.blockingToolHarvestedThisTurn || lifecycle.blockingToolHarvestQueuedThisTurn ||
         typeof calledTool !== "string" || !blockingTools.has(calledTool)) return;
     lifecycle.blockingToolHarvestQueuedThisTurn = true;
+    beginMutationPass();
     const operation = ladder.actionQueue.then(async () => {
       try {
         if (!persistence.state || measurements.latestRatio === null || !measurements.lastProviderMeasurement || ladder.automaticFailure ||
@@ -3163,6 +3324,7 @@ export function registerActiveContext(pi: any, options: {
     ladder.actionQueue = operation.catch(() => undefined);
   });
   pi.on("turn_end", async (_event: unknown, ctx: any) => {
+    beginMutationPass();
     lifecycle.blockingToolHarvestedThisTurn = false;
     lifecycle.blockingToolHarvestQueuedThisTurn = false;
     if (lifecycle.shuttingDown || !persistence.state || !persistence.persisted) return;
@@ -3669,6 +3831,8 @@ export function registerActiveContext(pi: any, options: {
         recordGateEvent("proceeded", curation.lastSignals, curation.gate.roundsUsed, "go");
         curation.gate = null;
       }
+      // The agent's own commit closes the window cycle exactly as an automatic one does.
+      curation.remindersFired = 0;
       const ordinal = markOrdinal(snapshot);
       let staged = persistence.state;
       let peekMarks = 0;
@@ -3704,7 +3868,9 @@ export function registerActiveContext(pi: any, options: {
         // An explicit commit never tops up: the agent asked for exactly its marks.
         topUpMarks: 0,
         appliedMarks: result.applied.length,
-        refusedMarks: result.refused.length,
+        // Refusal is TERMINAL; a mark whose span is still fresh is DEFERRED and held.
+        refusedMarks: result.refused.filter((mark) => !mark.retained).length,
+        deferredMarks: result.retained.length,
         retainedMarks: result.retained.length,
         eligibleMarks: accounting.eligibleMarks,
         estimatedRewriteTokens: accounting.rewriteTokens,
@@ -3856,10 +4022,14 @@ export function registerActiveContext(pi: any, options: {
         let staged = persistence.state;
         for (const item of resolved) {
           const { candidate } = item;
-          const eligibleNow = !refsProtected(candidate.sourceRefs, staged, snapshot) &&
-            (candidate.kind !== "tool-result" ||
-              !toolRefsProtected(candidate.sourceRefs, staged, snapshot));
-          const briefed = eligibleNow
+          // ACCEPT AND HOLD. A span that is still fresh or protected is not a refusal:
+          // the mark is a standing decision, it is recorded now, and it folds at the
+          // first commit after the span ages out. Refusal is reserved for a mark that
+          // cannot be constructed at all.
+          const deferred = refsProtected(candidate.sourceRefs, staged, snapshot) ||
+            (candidate.kind === "tool-result" &&
+              toolRefsProtected(candidate.sourceRefs, staged, snapshot));
+          const briefed = !deferred
             ? await prepareFold({
               candidate,
               snapshot,
@@ -3881,18 +4051,23 @@ export function registerActiveContext(pi: any, options: {
           });
           const addition = addPendingMark(staged, mark);
           if (!addition.added) {
-            if (resolved.length === 1) throw new Error(`Fold mark refused: ${addition.reason}`);
-            marks.push({ id: mark.id, kind: mark.kind, marked: false, reason: addition.reason });
+            marks.push({ id: mark.id, kind: mark.kind, ok: false, deferred: false, reason: addition.reason });
             continue;
           }
           staged = addition.state;
           marks.push({
             id: mark.id,
             kind: mark.kind,
-            marked: true,
+            ok: true,
+            deferred,
+            ...(deferred
+              ? {
+                scheduled: "the span is still in the fresh window; this mark is held and folds at the " +
+                  "first commit after it ages out",
+              }
+              : {}),
             brief: mark.brief,
             provenance: normalizeLegacyProvenance(mark.briefProvenance),
-            eligibleNow,
           });
         }
         await persistManual(staged, action, ctx);
@@ -3901,19 +4076,21 @@ export function registerActiveContext(pi: any, options: {
         // The single-span shape is the head of the batched one: one call carrying one
         // span answers exactly as it always did, and a batch adds fields rather than
         // replacing them.
-        const only = marks.length === 1 && marks[0].marked === true ? marks[0] : null;
+        const only = marks.length === 1 && marks[0].ok === true ? marks[0] : null;
         return toolPayload({
           version: 1,
           action,
           scheduling: "epoch",
-          marked: marks.some((mark) => mark.marked === true),
+          ok: marks.some((mark) => mark.ok === true),
+          deferredMarks: marks.filter((mark) => mark.deferred === true).length,
           ...(only
             ? {
               id: only.id,
               kind: only.kind,
               brief: only.brief,
               provenance: only.provenance,
-              eligibleNow: only.eligibleNow,
+              deferred: only.deferred,
+              ...(only.scheduled ? { scheduled: only.scheduled } : {}),
             }
             : {}),
           marks,
@@ -3927,8 +4104,10 @@ export function registerActiveContext(pi: any, options: {
           estimatedFreedWindowShare: accounting.freedWindowShare,
           estimatedEligibleWindowShare: accounting.eligibleFreedWindowShare,
           estimatedRewriteTokens: accounting.rewriteTokens,
-          activation: "recorded as pending marks; no context bytes moved. They apply together at the " +
-            "next commit epoch, which you can open with the commit action or leave to window pressure.",
+          activation: "accepted as pending marks; no context bytes moved. They apply together at the " +
+            "next commit epoch, which you can open with the commit action or leave to the fold event. " +
+            "A mark over a still-fresh span is held, not refused: it is scheduled, and it folds at the " +
+            "first commit after that span ages out of the fresh window.",
           commit: { action: "commit" },
         });
       }

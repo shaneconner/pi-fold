@@ -137,8 +137,12 @@ export type ContextEventKind =
   | "context.attempt"
   /** One auto-snap applied to a requested span, referencing its attempt. */
   | "context.correction"
+  /** The resolved serving budget, stated once at startup so a live run can prove it. */
+  | "context.capacity"
   /** One evaluation of the guided-curation last-call gate. */
   | "context.gate"
+  /** One sparse occupancy reminder delivered into the window. */
+  | "context.reminder"
   /** One receipt delivered into the window. */
   | "context.receipt"
   /** One commit epoch: the single mutation an epoch pays for. */
