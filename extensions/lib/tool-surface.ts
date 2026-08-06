@@ -23,27 +23,26 @@ export function buildActiveContextTool(input: {
   allowedActions: readonly string[];
   fullSurface: boolean;
   maxBriefChars: number;
-  ephemeralPeek?: boolean;
-  perPeekEphemeral?: boolean;
   statusDetails: readonly string[];
   minPeekSliceBytes: number;
+  defaultPeekBytes: number;
   handler: ToolHandler;
 }) {
   const peekGuidance = input.allowedActions.includes("peek")
-    ? " Peek is the ephemeral point read: it returns one fold's exact source at any depth, ancestors still collapsed, and changes nothing, so the content arrives as a tool result that can later fold away as a completed read batch; expand is the durable in-place restoration. Narrow a large read with offset and bytes, or peek a child fold id."
+    ? ` Peek is the ephemeral point read: it returns one fold's index view -- every nested fold's brief in full, plus the head and tail of the raw source with the omitted middle stated -- at any depth, ancestors still collapsed, changing nothing. It returns at most ${input.defaultPeekBytes} bytes unless you widen it with bytes, and it lives for one model call unless you pass ephemeral false or retain true. Expand is the durable in-place restoration.`
     : "";
-  const reclaimGuidance = input.ephemeralPeek && input.allowedActions.includes("peek")
-    ? " Peek results live for one model call: once the next model call that reads one has run, its duplicate bytes leave the projection and the fold keeps the exact source. Pass retain true to keep a result in the window, and retain false to release it again."
+  const correctionGuidance = input.allowedActions.includes("rebrief")
+    ? " Curation is correctable: rebrief replaces a fold's brief, and reboundary with ids re-cuts a span into exactly one fold, which merges adjacent folds when the span covers several and splits one when the span sits inside it. Reboundary with a single id returns that fold's span to raw."
     : "";
   const commitGuidance = input.allowedActions.includes("commit")
-    ? " Fold scheduling is epoch mode: fold records a pending mark and moves no context bytes, and commit applies every pending mark in one rewrite. Mark freely as you work; commit at a natural boundary in the work, or let window pressure commit for you."
+    ? " Fold scheduling is epoch mode: fold records pending marks and moves no context bytes, and commit applies every pending mark in one rewrite. One fold call carries several {ids, brief} pairs through marks, so batching costs one call. Mark freely as you work; commit at a natural boundary in the work, or let window pressure commit for you."
     : "";
   return {
     name: input.name,
     label: input.label,
     description: input.fullSurface
-      ? `Page, peek, fold, expand, refold, or protect exact Pi active-context evidence.${peekGuidance}${reclaimGuidance}${commitGuidance} Mutations persist immediately and affect the next model call inside the same continuing turn; no turn boundary is required. Supplied fold briefs have a hard 1200-character maximum.`
-      : `Use only the configured active-context actions: ${input.allowedActions.join(", ")}.${peekGuidance}${reclaimGuidance}${commitGuidance} Call fold only by copying the exact eligibleChapter.action returned by status; if status has no eligibleChapter, continue the task without folding. Supplied fold briefs have a hard 1200-character maximum.`,
+      ? `Page, peek, fold, expand, refold, protect, rebrief, or re-cut exact Pi active-context evidence.${peekGuidance}${correctionGuidance}${commitGuidance} Mutations persist immediately and affect the next model call inside the same continuing turn; no turn boundary is required. Supplied fold briefs have a hard 1200-character maximum.`
+      : `Use only the configured active-context actions: ${input.allowedActions.join(", ")}.${peekGuidance}${correctionGuidance}${commitGuidance} Call fold only by copying the exact eligibleChapter.action returned by status; if status has no eligibleChapter, continue the task without folding. Supplied fold briefs have a hard 1200-character maximum.`,
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -52,6 +51,21 @@ export function buildActiveContextTool(input: {
         action: { type: "string", enum: input.allowedActions },
         ids: { type: "array", minItems: 1, maxItems: 64, items: { type: "string", minLength: 1 } },
         id: { type: "string", minLength: 1 },
+        marks: {
+          type: "array",
+          minItems: 1,
+          maxItems: 64,
+          description: "Fold only: several spans with their own briefs in one call. An invalid or overlapping span is corrected to the nearest valid edge and the correction is reported back.",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["ids"],
+            properties: {
+              ids: { type: "array", minItems: 1, maxItems: 64, items: { type: "string", minLength: 1 } },
+              brief: { type: "string", minLength: 1, maxLength: input.maxBriefChars },
+            },
+          },
+        },
         brief: {
           type: "string",
           minLength: 1,
@@ -62,24 +76,16 @@ export function buildActiveContextTool(input: {
         bytes: {
           type: "integer",
           minimum: input.minPeekSliceBytes,
-          description: "Peek only: bytes of exact source to return from offset, for a bounded slice of a large fold.",
+          description: `Peek only: bytes of exact source to return, widening or narrowing the ${input.defaultPeekBytes}-byte default.`,
         },
-        ...(input.ephemeralPeek
-          ? {
-            retain: {
-              type: "boolean",
-              description: "Peek only: keep this result in the window instead of letting it be reclaimed after one model call.",
-            },
-          }
-          : {}),
-        ...(input.perPeekEphemeral
-          ? {
-            ephemeral: {
-              type: "boolean",
-              description: "Peek only: decide this read's lifetime yourself. True releases its duplicate bytes once a model call has read them; false keeps them for as long as any other tool result.",
-            },
-          }
-          : {}),
+        retain: {
+          type: "boolean",
+          description: "Peek only: keep this result in the window instead of letting it be reclaimed after one model call.",
+        },
+        ephemeral: {
+          type: "boolean",
+          description: "Peek only: decide this read's lifetime yourself. True, the default, releases its duplicate bytes once a model call has read them; false keeps them for as long as any other tool result.",
+        },
         limit: { type: "integer", minimum: 1, maximum: 100 },
         detail: { type: "string", enum: [...input.statusDetails] },
       },

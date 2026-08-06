@@ -35,6 +35,7 @@ import {
   childFoldIds,
   clearPrepared,
   flattenFoldRefs,
+  foldBrief,
   foldIdFor,
   foldMap,
   normalizedPart,
@@ -49,7 +50,10 @@ import {
   CONSOLIDATION_WIDTH_THRESHOLD,
   EXPAND_LEASE_GENERATIONS,
   MAX_EXPAND_LEASES,
+  MAX_FOLD_SPAN_CHARS,
   MAX_PINNED_PEEKS,
+  PEEK_DEFAULT_MAX_BYTES,
+  PEEK_HEAD_SHARE,
   STATUS_DIET_SUGGESTIONS,
 } from "./policy.ts";
 import type {
@@ -102,7 +106,14 @@ export function selectAutomaticChapter(
       if (refsProtected(refs, state, snapshot)) continue;
       const size = bytes(encodedFoldSource(snapshot, state, parts, "chapter"));
       if (size > snapshot.policy.maxChapterChars) break;
-      if (size >= snapshot.policy.minChapterChars) best = { kind: "chapter", parts, sourceRefs: refs };
+      // Bite-sized by construction. A multi-unit chapter never grows past the cap, so
+      // the ladder cannot build the 60kB fold whose tail hid the answer (rep 6); a
+      // SINGLE unit that alone exceeds it is still accepted, because there is no
+      // interior boundary to stop at and refusing would leave the biggest span in the
+      // window as the one thing nothing may reclaim.
+      const biteSized = size <= MAX_FOLD_SPAN_CHARS || endIndex === unitIndex;
+      if (size >= snapshot.policy.minChapterChars && biteSized) best = { kind: "chapter", parts, sourceRefs: refs };
+      if (size > MAX_FOLD_SPAN_CHARS) break;
     }
     if (best) return best;
   }
@@ -723,7 +734,7 @@ export function foldPlaceholder(fold: ActiveFold, state: ActiveContextState, sna
   const parent = fold.parentId ?? "root";
   return [
     `[${activeContextBrand(snapshot.brandNoun)} fold ${fold.id}]`,
-    fold.brief,
+    foldBrief(fold, state),
     `Topology: kind=${fold.kind}; parent=${parent}; children=${childFoldIds(fold).length}; ` +
       `previous=${navigation.previous ?? "none"}; next=${navigation.next ?? "none"}.`,
     `Expand exactly: ${snapshot.toolName} {"action":"expand","id":"${fold.id}"}`,
@@ -919,12 +930,14 @@ export function peekReclaimText(
  * said otherwise. An `ephemeral` argument is only honoured where per-peek lifetimes
  * are enabled, so a deployment that never opted in cannot be steered by an argument.
  */
-export function peekLifetimeIsEphemeral(
-  snapshot: Pick<ActiveContextSnapshot, "ephemeralPeek" | "perPeekEphemeral">,
-  requested: unknown,
-): boolean {
-  if (snapshot.perPeekEphemeral && typeof requested === "boolean") return requested;
-  return snapshot.ephemeralPeek;
+/**
+ * Peek lifetime. Ephemeral is the default -- a peek copies a fold's stored source back
+ * into the window and the fold store still holds it losslessly -- and the caller may
+ * override that for one read in either direction, because only the caller knows
+ * whether THIS read is a glance or a fact it is about to work from.
+ */
+export function peekLifetimeIsEphemeral(requested: unknown): boolean {
+  return typeof requested === "boolean" ? requested : true;
 }
 
 /**
@@ -940,7 +953,6 @@ export function reclaimedPeeks(
 ): ReclaimedPeek[] {
   // With per-peek lifetimes the deployment default is only a default: a call that
   // carried an explicit `ephemeral` decides for itself, in either direction.
-  if (!snapshot.ephemeralPeek && !snapshot.perPeekEphemeral) return [];
   const pinned = new Set(state.pinnedPeeks ?? []);
   const expanded = new Set(state.expanded);
   const explicitProtected = explicitProtectedKeys(state);
@@ -1059,7 +1071,7 @@ export function foldStatusRow(fold: ActiveFold, state: ActiveContextState, snaps
     // A paged row without the brief is a chronological id and nothing else: the
     // agent that paged the tree to find WHICH fold holds something got the one
     // field that answers it withheld, while the tree detail carried it all along.
-    brief: fold.brief,
+    brief: foldBrief(fold, state),
     sourceChars: fold.sourceChars,
     actions: {
       primary: projection === "folded"
@@ -1104,7 +1116,7 @@ export function foldTreeDetail(
     kind: fold.kind,
     depth: foldDepth(state, fold),
     parentId: fold.parentId,
-    brief: fold.brief,
+    brief: foldBrief(fold, state),
     sourceCount: flattenFoldRefs(fold, state).length,
     state: state.expanded.includes(fold.id) ? "expanded" : "folded",
     peekable: true,
@@ -1139,7 +1151,7 @@ export function foldIndexRow(
     sourceCount: refs.length,
     sourceBytes: fold.sourceChars,
     reclaimableBytes,
-    brief: fold.brief,
+    brief: foldBrief(fold, state),
     peek: { action: "peek", id: fold.id },
     expand: { action: "expand", id: fold.id },
   };
@@ -1354,15 +1366,14 @@ export function peekFoldSource(input: {
   state: ActiveContextState;
   entries: Array<Record<string, unknown>>;
   sessionId: string;
+  /** Explicit widening. Absent, a peek returns the bounded index view. */
   maximumBytes?: number;
   /** Byte offset into the exact stored source; the narrowing half of admission control. */
   offset?: number;
   /** Whether this read is pinned against ephemeral reclamation, for the envelope only. */
   retained?: boolean;
-  /** Whether consumed peek results are reclaimed at all, so the envelope tells the truth. */
+  /** Whether this read's duplicate bytes are reclaimed after one model call. */
   ephemeral?: boolean;
-  /** State a non-ephemeral lifetime out loud, where the lifetime was a per-peek choice. */
-  reportDurableLifetime?: boolean;
   toolName?: string;
   projectEntry?: (entry: Record<string, unknown>) => unknown[];
 }): Record<string, unknown> {
@@ -1378,13 +1389,25 @@ export function peekFoldSource(input: {
   const source = stableStringify(messages);
   const sourceBytes = bytes(source);
   const offset = Math.min(Math.max(0, input.offset ?? 0), sourceBytes);
+  const budget = input.maximumBytes ?? PEEK_DEFAULT_MAX_BYTES;
   const window = offset > 0 ? utf8Slice(source, offset) : source;
-  const returned = boundedUtf8(window, input.maximumBytes ?? ACTIVE_CONTEXT_POLICY.maxChapterChars);
-  const returnedBytes = bytes(returned);
-  const nextOffset = offset + returnedBytes < sourceBytes ? offset + returnedBytes : null;
-  const truncated = nextOffset !== null;
+  // Offset zero is the INDEX read and takes head AND tail, because chain keys and
+  // conclusions live at the end of a source and a head-only slice silently omits
+  // exactly that region. An explicit offset is paging and stays contiguous.
+  const view = offset > 0
+    ? { text: boundedUtf8(window, budget), omittedBytes: 0, contiguous: true }
+    : boundedHeadTail(window, budget);
+  const returned = view.text;
+  const returnedBytes = bytes(returned) - bytes(headTailMarker(view.omittedBytes));
+  const nextOffset = view.contiguous && offset + returnedBytes < sourceBytes
+    ? offset + returnedBytes
+    : null;
+  const truncated = view.omittedBytes > 0 || nextOffset !== null;
   const children = childFoldIds(fold);
   const toolName = input.toolName ?? "active_context";
+  // The index view: every nested fold's brief in FULL. A brief is the navigable unit,
+  // so truncating it is the one economy that costs the read its purpose.
+  const index = descendantIndexRows(fold, input.state);
   return {
     version: 1,
     action: "peek",
@@ -1392,42 +1415,40 @@ export function peekFoldSource(input: {
     kind: fold.kind,
     parentId: fold.parentId,
     depth: foldDepth(input.state, fold),
-    brief: fold.brief,
+    brief: foldBrief(fold, input.state),
     sourceCount: messages.length,
     sourceSha256: fold.sourceSha256,
     sourceBytes,
     offset,
     returnedBytes,
+    omittedBytes: view.omittedBytes,
     nextOffset,
     truncated,
-    // Narrower reads that are always constructible, so a refusal can name one. The tail
-    // read exists because chain keys and conclusions live at the END of a source, and a
-    // truncated head slice silently omits exactly that region.
+    view: offset > 0 ? "slice" : (view.omittedBytes > 0 ? "index" : "complete"),
+    ...(index.length ? { index } : {}),
+    // Narrower and WIDER reads that are always constructible, so a refusal or a
+    // truncation can name one.
     children,
     narrower: {
-      slice: { action: "peek", id: fold.id, offset: nextOffset ?? 0, bytes: returnedBytes },
-      ...(truncated
-        ? { tail: { action: "peek", id: fold.id, offset: Math.max(0, sourceBytes - returnedBytes) } }
-        : {}),
+      ...(nextOffset === null ? {} : { slice: { action: "peek", id: fold.id, offset: nextOffset, bytes: returnedBytes } }),
       ...(children.length ? { child: { action: "peek", id: children[0] } } : {}),
     },
-    retained: input.retained === true,
-    ...(input.ephemeral || input.reportDurableLifetime
-      ? {
-        lifetime: input.retained === true
-          ? "pinned: these bytes stay in the window until you refold or unpin the fold."
-          : (input.ephemeral
-            ? "one model call: once the next model call that reads this result has run, these duplicate bytes are dropped " +
-              `from the projection and the fold keeps the exact source. Pin it with ${toolName} ` +
-              `{"action":"peek","id":"${fold.id}","retain":true}.`
-            : "durable: these bytes stay in the window like any other tool result until the ladder " +
-              "folds them. Release them after one read with " +
-              `${toolName} {"action":"peek","id":"${fold.id}","ephemeral":true}.`),
-      }
+    ...(truncated
+      ? { wider: { action: "peek", id: fold.id, bytes: Math.min(sourceBytes, ACTIVE_CONTEXT_POLICY.maxChapterChars) } }
       : {}),
+    retained: input.retained === true,
+    lifetime: input.retained === true
+      ? "pinned: these bytes stay in the window until you refold or unpin the fold."
+      : (input.ephemeral === false
+        ? "durable: these bytes stay in the window like any other tool result until the ladder " +
+          `folds them. Release them after one read with ${toolName} ` +
+          `{"action":"peek","id":"${fold.id}","ephemeral":true}.`
+        : "one model call: once the next model call that reads this result has run, these duplicate bytes are dropped " +
+          `from the projection and the fold keeps the exact source. Pin it with ${toolName} ` +
+          `{"action":"peek","id":"${fold.id}","retain":true}.`),
     note: truncated
-      ? `Truncated: this reply carries bytes ${offset}..${offset + returnedBytes} of ${sourceBytes} exact ` +
-        `source bytes; continue at offset ${nextOffset} or expand ${fold.id} to restore it in place.`
+      ? `Bounded read: ${returnedBytes} of ${sourceBytes} exact source bytes, ${view.omittedBytes} omitted ` +
+        `from the middle. Widen with bytes, page with offset, or expand ${fold.id} to restore it in place.`
       : "Complete exact source; the fold stayed collapsed and no projection changed.",
     source: returned,
     // Serialized AFTER the source on purpose: a reader that just consumed a bounded slice
@@ -1436,11 +1457,69 @@ export function peekFoldSource(input: {
     // was finished because the chain key lived in the unshown tail of a truncated peek).
     ...(truncated
       ? {
-        truncationReminder: `STOP: you have read bytes ${offset}..${offset + returnedBytes} of ` +
-          `${sourceBytes}. The remainder, INCLUDING THE TAIL of this fold, was NOT shown. ` +
-          `Read on with {"action":"peek","id":"${fold.id}","offset":${nextOffset}} or jump to ` +
-          `the tail with {"action":"peek","id":"${fold.id}","offset":${Math.max(0, sourceBytes - returnedBytes)}}.`,
+        truncationReminder: `STOP: ${view.omittedBytes || sourceBytes - returnedBytes} of ${sourceBytes} ` +
+          "bytes were NOT shown" +
+          (view.omittedBytes ? " (the middle; the head and tail are both above)" : " (everything after this slice)") +
+          `. Widen with {"action":"peek","id":"${fold.id}","bytes":${
+            Math.min(sourceBytes, ACTIVE_CONTEXT_POLICY.maxChapterChars)}}` +
+          (nextOffset === null ? "" : ` or read on with {"action":"peek","id":"${fold.id}","offset":${nextOffset}}`) +
+          ".",
       }
       : {}),
   };
+}
+
+/** The marker a head+tail view puts where the omitted middle was. */
+export function headTailMarker(omittedBytes: number): string {
+  return omittedBytes > 0 ? `\n... [${omittedBytes} exact source bytes omitted] ...\n` : "";
+}
+
+/**
+ * A bounded view that keeps the head AND the tail. A head-only bound drops exactly the
+ * region a staged chain keeps its key in; the omitted size is stated where the reading
+ * ends so "there is more" is never an inference.
+ */
+export function boundedHeadTail(
+  source: string,
+  budget: number,
+): { text: string; omittedBytes: number; contiguous: boolean } {
+  const total = bytes(source);
+  if (total <= budget) return { text: source, omittedBytes: 0, contiguous: true };
+  const headBudget = Math.max(1, Math.floor(budget * PEEK_HEAD_SHARE));
+  const head = boundedUtf8(source, headBudget);
+  const tailBudget = Math.max(1, budget - bytes(head));
+  const tailStart = Math.max(bytes(head), total - tailBudget);
+  const tail = boundedUtf8(utf8Slice(source, tailStart), tailBudget);
+  const omittedBytes = Math.max(0, total - bytes(head) - bytes(tail));
+  if (omittedBytes <= 0) return { text: source, omittedBytes: 0, contiguous: true };
+  return {
+    text: `${head}${headTailMarker(omittedBytes)}${tail}`,
+    omittedBytes,
+    contiguous: false,
+  };
+}
+
+/** Every descendant fold, in transcript order, with its brief in full. */
+export function descendantIndexRows(
+  fold: ActiveFold,
+  state: ActiveContextState,
+): Array<Record<string, unknown>> {
+  const byId = foldMap(state);
+  const rows: Array<Record<string, unknown>> = [];
+  const visit = (parent: ActiveFold): void => {
+    for (const childId of childFoldIds(parent)) {
+      const child = byId.get(childId);
+      if (!child) continue;
+      rows.push({
+        id: child.id,
+        kind: child.kind,
+        depth: foldDepth(state, child),
+        brief: foldBrief(child, state),
+        peek: { action: "peek", id: child.id },
+      });
+      visit(child);
+    }
+  };
+  visit(fold);
+  return rows;
 }

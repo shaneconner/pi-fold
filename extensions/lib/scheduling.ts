@@ -16,6 +16,7 @@ import type { AutomaticRungSelection } from "./folding.ts";
 import {
   foldInterval,
   hardFenceRatio,
+  orderedRoots,
   refsProtected,
   toolRefsProtected,
 } from "./measurement.ts";
@@ -25,12 +26,13 @@ import {
   parsePendingMarks,
   pendingMarkKey,
 } from "./persistence.ts";
-import { terminalAssistant } from "./transcript.ts";
+import { currentTurnRefKeys } from "./transcript.ts";
 import {
   EPOCH_COMMIT_TARGET_WINDOW_SHARE,
+  EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD,
   EPOCH_MAX_TOPUP_MARKS,
-  EPOCH_TAIL_ADJACENT_MESSAGES,
   ESTIMATED_BYTES_PER_TOKEN,
+  MAX_WEDGE_ABSORB_TOKENS,
   ESTIMATED_PLACEHOLDER_OVERHEAD_BYTES,
   MAX_PENDING_MARKS,
 } from "./policy.ts";
@@ -45,6 +47,9 @@ import type {
 import {
   automaticToolBrief,
   candidateSourceRefs,
+  chapterRangeIsUnitAligned,
+  partsForRange,
+  spanBytes,
   deterministicChapterCandidateBrief,
   deterministicConsolidationBrief,
   resultCall,
@@ -126,30 +131,6 @@ export function markOrdinal(snapshot: Pick<ActiveContextSnapshot, "mapped">): nu
 }
 
 /**
- * A fold whose span BEGINS this close to the tail invalidates almost nothing, so it
- * applies immediately even in epoch mode. The measurement is the FIRST mapped source
- * index, not the last: a positional prefix cache is invalidated from the earliest
- * byte the rewrite touches, so a span reaching back from the tail is as expensive as
- * its oldest ref. Deterministic in mapped positions.
- */
-export function tailAdjacent(
-  snapshot: ActiveContextSnapshot,
-  candidate: FoldCandidate,
-  state: ActiveContextState,
-): boolean {
-  const refs = candidate.sourceRefs.length ? candidate.sourceRefs : candidateSourceRefs(candidate.parts, state);
-  const indexByKey = new Map(snapshot.mapped.flatMap((item) =>
-    item.ref ? [[objectRefKey(item.ref), item.index] as const] : []));
-  let first = -1;
-  for (const ref of refs) {
-    const index = indexByKey.get(objectRefKey(ref));
-    if (index === undefined) return false;
-    if (first < 0 || index < first) first = index;
-  }
-  return first >= 0 && snapshot.mapped.length - 1 - first <= EPOCH_TAIL_ADJACENT_MESSAGES;
-}
-
-/**
  * Estimated bytes a mark would remove from the projection. Fold marks use a
  * placeholder estimate rather than a trial fold: the number is presentational, so
  * paying a full preparation per mark on every status call is not worth exactness.
@@ -174,36 +155,6 @@ export function markFreedBytes(
   const placeholders = mark.kind === "tool-result" ? mark.parts.length : 1;
   const placeholder = placeholders * (mark.brief.length + ESTIMATED_PLACEHOLDER_OVERHEAD_BYTES);
   return Math.max(0, bytes(source) - placeholder);
-}
-
-/**
- * The evidence boundary of the CURRENT turn: the position of the last terminal
- * assistant message. Everything after it was gathered by the excursion still in
- * progress, which is exactly the evidence a commit must not fold.
- *
- * Measured 2026-08-06 (rep 8): nineteen folds landed between the last read result and
- * the agent's next reply, rewriting the projection from 938k to 487k chars, so the
- * agent answered from a window where its own just-gathered evidence had become
- * placeholders. Freshness in bytes did not catch it; the boundary is a TURN.
- */
-export function currentTurnBoundary(snapshot: Pick<ActiveContextSnapshot, "messages">): number {
-  let boundary = -1;
-  for (let index = 0; index < snapshot.messages.length; index += 1) {
-    if (terminalAssistant(snapshot.messages[index])) boundary = index;
-  }
-  return boundary;
-}
-
-/** Every tool-result evidence key produced since that boundary. */
-export function currentTurnRefKeys(snapshot: ActiveContextSnapshot): Set<string> {
-  const boundary = currentTurnBoundary(snapshot);
-  const keys = new Set<string>();
-  for (const item of snapshot.mapped) {
-    if (item.index <= boundary || !item.ref) continue;
-    if (messageRole(item.message) !== "toolResult") continue;
-    keys.add(objectRefKey(item.ref));
-  }
-  return keys;
 }
 
 /** Whether a pending mark covers any evidence the current excursion just gathered. */
@@ -384,38 +335,23 @@ export function markAccounting(
   };
 }
 
-export interface CommitTriggerOptions {
-  /**
-   * Eligible marked mass, as a share of the truthful window, at which a commit is
-   * worth its one rewrite. Null keeps the pressure trigger as the only trigger.
-   */
-  eligibleShareThreshold?: number | null;
-  eligibleShare?: number | null;
-}
-
 /**
  * The commit trigger.
  *
- * The pressure trigger reuses the ladder's own refold threshold: below it the ladder
- * only marks, at it the accumulated marks become a single rewrite. That is a SAFETY
- * property, not an economic one -- it fires when the window is nearly full, which is
- * the worst moment to discover the marks are worth nothing. The rep4 abort fired at
- * that threshold with pending marks at zero and nothing to free.
- *
- * The ROI trigger asks the economic question instead: commit when the marks that
- * could apply RIGHT NOW would free enough to pay for the rewrite. Pressure stays as
- * the backstop underneath it, and the agent's own commit is always authoritative and
- * immediate regardless of either.
+ * The ROI half asks the economic question: commit when the marks that could apply
+ * RIGHT NOW would free enough to pay for the rewrite. The pressure half reuses the
+ * ladder's own refold threshold and stays underneath as the SAFETY backstop -- it
+ * fires when the window is nearly full, which is the worst moment to discover the
+ * marks are worth nothing (the rep4 abort fired there with zero pending marks). The
+ * agent's own commit is authoritative and immediate regardless of either.
  */
 export function epochCommitDue(
   snapshot: ActiveContextSnapshot,
   ratio: number | null,
-  options: CommitTriggerOptions = {},
+  eligibleShare: number | null = null,
 ): boolean {
-  const { eligibleShareThreshold, eligibleShare } = options;
-  if (typeof eligibleShareThreshold === "number" && Number.isFinite(eligibleShareThreshold) &&
-      typeof eligibleShare === "number" && Number.isFinite(eligibleShare) &&
-      eligibleShare >= eligibleShareThreshold) return true;
+  if (typeof eligibleShare === "number" && Number.isFinite(eligibleShare) &&
+      eligibleShare >= EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD) return true;
   return typeof ratio === "number" && Number.isFinite(ratio) && ratio >= snapshot.policy.refoldRatio;
 }
 
@@ -625,6 +561,122 @@ export function topUpMarks(input: {
   return marks;
 }
 
+/** One sliver a commit swallowed into its later neighbour, reported never inferred. */
+export interface AbsorbedWedge {
+  /** The mark that grew backward to cover it. */
+  intoMarkId: string;
+  startId: string;
+  endId: string;
+  entries: number;
+  tokens: number;
+}
+
+/**
+ * Wedge absorption. THE ANTI-LCM PIN LIVES HERE.
+ *
+ * A sliver of stale raw content hugging a fold boundary is a crumb nothing will ever
+ * reclaim: it is below the minimum chapter size, so no chapter rung will take it, and
+ * it is not a tool batch, so no tool rung will either. Absorbing it costs nothing
+ * because it happens INSIDE a commit the epoch has already paid for -- it grows a
+ * pending mark backward rather than performing a mutation of its own.
+ *
+ * What it must never do is erode deliberate non-sequential curation. An agent holding
+ * folds at 10:20, 40:55 and 60:70 with raw spans between them chose that shape, and a
+ * mechanism that swallowed those gaps would delete the curation element outright. So
+ * the threshold is tiny, measured in the session's own calibrated tokens, and NOT
+ * pressure-scaled: above it, a gap stays raw permanently no matter how full the window
+ * gets or how ragged the projection looks.
+ */
+export function absorbWedgeMarks(input: {
+  snapshot: ActiveContextSnapshot;
+  state: ActiveContextState;
+  /** The session's measured serialized chars per token; never a fixed constant. */
+  charsPerToken: number;
+  /** Evidence absorption may never touch, e.g. the current excursion's own reads. */
+  excludeRefKeys?: ReadonlySet<string>;
+  maxTokens?: number;
+}): { state: ActiveContextState; absorbed: AbsorbedWedge[] } {
+  const { snapshot } = input;
+  const maxTokens = input.maxTokens ?? MAX_WEDGE_ABSORB_TOKENS;
+  const charsPerToken = Number.isFinite(input.charsPerToken) && input.charsPerToken > 0
+    ? input.charsPerToken
+    : ESTIMATED_BYTES_PER_TOKEN;
+  const exclude = input.excludeRefKeys ?? new Set<string>();
+  let state = input.state;
+  const absorbed: AbsorbedWedge[] = [];
+  const indexByKey = new Map(snapshot.mapped.flatMap((item) =>
+    item.ref ? [[objectRefKey(item.ref), item.index] as const] : []));
+  const markInterval = (mark: PendingFoldMark): { start: number; end: number } | null => {
+    const indices = candidateSourceRefs(mark.parts, state)
+      .map((ref) => indexByKey.get(objectRefKey(ref)))
+      .filter((index): index is number => index !== undefined);
+    return indices.length ? { start: Math.min(...indices), end: Math.max(...indices) } : null;
+  };
+  // One pass, oldest first. Each absorption rewrites exactly one mark, and a mark that
+  // has already grown is not a candidate to grow again in the same commit.
+  for (let guard = 0; guard < MAX_PENDING_MARKS; guard += 1) {
+    const marks = pendingMarks(state);
+    const occupied = [
+      ...orderedRoots(state, snapshot).map((root) => ({ start: root.start, end: root.end })),
+      ...marks.flatMap((mark) => {
+        if (mark.mark !== "fold") return [];
+        const interval = markInterval(mark);
+        return interval ? [interval] : [];
+      }),
+    ].sort((left, right) => left.start - right.start);
+    let applied = false;
+    for (const mark of marks) {
+      if (mark.mark !== "fold") continue;
+      const interval = markInterval(mark);
+      if (!interval) continue;
+      const previous = occupied.filter((item) => item.end < interval.start).at(-1);
+      const gapStart = previous ? previous.end + 1 : -1;
+      const gapEnd = interval.start - 1;
+      if (gapStart < 0 || gapEnd < gapStart) continue;
+      if (absorbed.some((item) => item.intoMarkId === mark.id)) continue;
+      const gapTokens = Math.ceil(spanBytes(snapshot, gapStart, gapEnd + 1) / charsPerToken);
+      // The whole discriminator, in one line: above this, the gap is the agent's.
+      if (gapTokens > maxTokens) continue;
+      const gapRefs = [];
+      let usable = true;
+      for (let index = gapStart; index <= gapEnd; index += 1) {
+        const ref = snapshot.mapped[index]?.ref;
+        if (!ref || exclude.has(objectRefKey(ref))) { usable = false; break; }
+        gapRefs.push(ref);
+      }
+      if (!usable || !gapRefs.length) continue;
+      if (refsProtected(gapRefs, state, snapshot)) continue;
+      // Structural safety: the grown span must still be a valid closed chapter, which
+      // is what keeps every tool call paired with its result in the projection.
+      if (!chapterRangeIsUnitAligned(snapshot, gapStart, interval.end)) continue;
+      const parts = partsForRange(snapshot, state, gapStart, interval.end, new Set<FoldKind>(["tool-result"]));
+      if (!parts) continue;
+      const grown = foldMarkFor({
+        candidate: { kind: "chapter", parts, sourceRefs: candidateSourceRefs(parts, state) },
+        brief: `${mark.brief} It also holds ${gapRefs.length} short adjacent entry(s) absorbed at commit.`
+          .slice(0, snapshot.policy.maxBriefChars),
+        briefProvenance: mark.briefProvenance,
+        origin: mark.origin,
+        ordinal: mark.ordinal,
+      });
+      const kept = pendingMarks(state).filter((item) => pendingMarkKey(item) !== pendingMarkKey(mark));
+      if (kept.some((item) => pendingMarkKey(item) === pendingMarkKey(grown))) continue;
+      state = withPendingMarks(state, [...kept, grown]);
+      absorbed.push({
+        intoMarkId: grown.id,
+        startId: gapRefs[0].entryId,
+        endId: gapRefs.at(-1)!.entryId,
+        entries: gapRefs.length,
+        tokens: gapTokens,
+      });
+      applied = true;
+      break;
+    }
+    if (!applied) break;
+  }
+  return { state, absorbed };
+}
+
 export interface AppliedMark {
   mark: PendingMark["mark"];
   id: string;
@@ -794,26 +846,21 @@ export function schedulingStatus(input: {
   state: ActiveContextState;
   mode: string;
   ratio: number | null;
-  eligibleShareThreshold?: number | null;
 }): Record<string, unknown> {
   const accounting = markAccounting(input.snapshot, input.state);
-  const threshold = input.eligibleShareThreshold ?? null;
+  const threshold = EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD;
   return {
     mode: input.mode,
     ...accounting,
     targetWindowShare: EPOCH_COMMIT_TARGET_WINDOW_SHARE,
-    tailAdjacentMessages: EPOCH_TAIL_ADJACENT_MESSAGES,
-    commitDue: epochCommitDue(input.snapshot, input.ratio, {
-      eligibleShareThreshold: threshold,
-      eligibleShare: accounting.eligibleFreedWindowShare,
-    }),
+    commitDue: epochCommitDue(input.snapshot, input.ratio, accounting.eligibleFreedWindowShare),
     commitTrigger: {
-      mode: threshold === null ? "pressure" : "eligible-share",
+      mode: "eligible-share",
       eligibleShareThreshold: threshold,
       eligibleShare: accounting.eligibleFreedWindowShare,
       backstopRatio: input.snapshot.policy.refoldRatio,
       pressureDue: epochCommitDue(input.snapshot, input.ratio),
-      roiDue: threshold !== null && accounting.eligibleFreedWindowShare >= threshold,
+      roiDue: accounting.eligibleFreedWindowShare >= threshold,
     },
     commitRatio: input.snapshot.policy.refoldRatio,
     marks: pendingMarks(input.state).map((mark) => ({

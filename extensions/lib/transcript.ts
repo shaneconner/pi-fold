@@ -3,6 +3,7 @@ import {
   evidenceRef,
   evidenceValue,
   isPlainRecord,
+  objectRefKey,
   sha256Text,
   stableStringify,
 } from "../json.ts";
@@ -403,9 +404,6 @@ export function mapActiveContext(input: {
   readOnlyTools?: ReadonlySet<string>;
   readOnlyContextActions?: ReadonlySet<string>;
   contextWindow?: number;
-  ephemeralPeek?: boolean;
-  stageIdentifiedBriefs?: boolean;
-  perPeekEphemeral?: boolean;
 }): ActiveContextSnapshot {
   const policy = Object.freeze({ ...ACTIVE_CONTEXT_POLICY, ...(input.policy ?? {}) }) as typeof ACTIVE_CONTEXT_POLICY;
   const projectEntry = input.projectEntry ?? sessionEntryMessages;
@@ -501,8 +499,35 @@ export function mapActiveContext(input: {
     readOnlyContextActions: input.readOnlyContextActions ?? READ_ONLY_CONTEXT_ACTIONS_DEFAULT,
     contextWindow: reportedContextWindow ?? DEFAULT_CONTEXT_WINDOW,
     windowSource: reportedContextWindow === null ? "fallback" : "reported",
-    ephemeralPeek: input.ephemeralPeek === true,
-    stageIdentifiedBriefs: input.stageIdentifiedBriefs === true,
-    perPeekEphemeral: input.perPeekEphemeral === true,
   };
+}
+
+/**
+ * The evidence boundary of the CURRENT turn: the position of the last terminal
+ * assistant message. Everything after it was gathered by the excursion still in
+ * progress, which is exactly the evidence a commit must not fold.
+ *
+ * Measured 2026-08-06 (rep 8): nineteen folds landed between the last read result and
+ * the agent's next reply, rewriting the projection from 938k to 487k chars, so the
+ * agent answered from a window where its own just-gathered evidence had become
+ * placeholders. Freshness in bytes did not catch it; the boundary is a TURN.
+ */
+export function currentTurnBoundary(snapshot: Pick<ActiveContextSnapshot, "messages">): number {
+  let boundary = -1;
+  for (let index = 0; index < snapshot.messages.length; index += 1) {
+    if (terminalAssistant(snapshot.messages[index])) boundary = index;
+  }
+  return boundary;
+}
+
+/** Every tool-result evidence key produced since that boundary. */
+export function currentTurnRefKeys(snapshot: ActiveContextSnapshot): Set<string> {
+  const boundary = currentTurnBoundary(snapshot);
+  const keys = new Set<string>();
+  for (const item of snapshot.mapped) {
+    if (item.index <= boundary || !item.ref) continue;
+    if (messageRole(item.message) !== "toolResult") continue;
+    keys.add(objectRefKey(item.ref));
+  }
+  return keys;
 }

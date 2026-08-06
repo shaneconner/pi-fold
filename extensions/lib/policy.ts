@@ -41,20 +41,20 @@ export const PROVIDER_CONTEXT_MEASUREMENT_ENTRY = `${DEFAULT_ENTRY_NAMESPACE}-pr
 export const ACTIVE_CONTEXT_STATUS_KEY = DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX;
 export const ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
   "status", "peek", "fold", "expand", "refold", "protect", "unprotect",
-] as const);
-/** The immediate-mode surface plus the epoch-mode commit verb. */
-export const EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
-  ...ACTIVE_CONTEXT_TOOL_ACTIONS, "commit",
+  // The correction verbs. Curation the agent cannot fix afterwards is curation it
+  // will not risk making, so re-briefing a fold and dissolving a mis-cut boundary
+  // are part of the ordinary surface, not an epoch-only extra.
+  "rebrief", "reboundary",
 ] as const);
 /**
- * Retained pending marks make "mark" a standing decision rather than a one-shot
- * attempt, so withdrawing one needs a verb of its own. It exists only where marks
- * can be retained; nothing else grows a surface it cannot use.
+ * The epoch surface: the immediate actions plus the commit verb, plus `unmark`.
+ * A mark is a standing decision rather than a one-shot attempt, so withdrawing one
+ * needs a verb of its own.
  */
-export const RETAINED_MARK_ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
-  ...EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS, "unmark",
+export const EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
+  ...ACTIVE_CONTEXT_TOOL_ACTIONS, "commit", "unmark",
 ] as const);
-export type ActiveContextToolAction = typeof RETAINED_MARK_ACTIVE_CONTEXT_TOOL_ACTIONS[number];
+export type ActiveContextToolAction = typeof EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS[number];
 export const USER_RESCUE_MAX_SOURCE_CHARS = 512_000;
 export const DEFAULT_CONTEXT_WINDOW = 272_000;
 export const TOOL_FOLD_CADENCE_MIN_TOKENS = 12_000;
@@ -105,8 +105,11 @@ export const DEFAULT_FOLD_SCHEDULING: FoldSchedulingMode = "immediate";
  * one, so it is set where a commit is unambiguously worth its single rewrite.
  */
 export const EPOCH_COMMIT_TARGET_WINDOW_SHARE = 0.40;
-/** A fold whose span begins within this many mapped messages of the tail invalidates almost nothing. */
-export const EPOCH_TAIL_ADJACENT_MESSAGES = 16;
+/**
+ * Commit when the ELIGIBLE marked mass is worth its one rewrite. Window pressure stays
+ * underneath as the safety backstop; this is the economic trigger above it.
+ */
+export const EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD = 0.30;
 export const MAX_PENDING_MARKS = 256;
 /** Enough batches to actually reach the floor on a wide window before the loop exits. */
 export const EPOCH_MAX_TOPUP_MARKS = 64;
@@ -116,97 +119,136 @@ export const ESTIMATED_BYTES_PER_TOKEN = 4;
 export const ESTIMATED_PLACEHOLDER_OVERHEAD_BYTES = 240;
 
 // ---------------------------------------------------------------------------
-// Iteration-2 reliability levers. Every one of them is OFF by default, because
-// the immediate-mode default projection and durable state are pinned byte-for-byte
-// by an offline gate; a lever that changed either without being asked for would be
-// a regression no matter how good it is.
+// The reliability spine. Every behavior below shipped as an off-by-default lever
+// through iterations 2 and 3 and was sealed ON by rep 14 (64/64), so it is now
+// simply how pi-fold works: the flags and their conditional twins are gone, and
+// git history is the lineage. What stays configurable is only what is genuinely a
+// deployment fact (`providerTotalWindow`) or an experiment condition (`guidance`,
+// `foldScheduling`, `foldPeekResults`, `guidedCuration`).
+//
+// Sealed unconditional: ephemeral peek (with the per-call `ephemeral` override),
+// admission control, retained pending marks, the eligible-share commit trigger,
+// stage-identified briefs, the current-turn commit guard, the pinned-mass backstop,
+// the status index diet, delivery-counted advisories, and projection instrumentation.
 // ---------------------------------------------------------------------------
-
-/**
- * A peek copies a fold's stored source back into the window. Those bytes are a pure
- * duplicate of evidence the runtime still holds losslessly, and once the model call
- * that asked for them has answered, keeping them costs a full window slot for nothing.
- * With this on, a CONSUMED peek result renders as a short recall stub in the next
- * projection unless the agent expanded the fold or pinned the read.
- */
-export const DEFAULT_EPHEMERAL_PEEK = false;
 
 /**
  * The provider serving window is the TOTAL admission budget minus whatever output
  * reservation the deployment actually asked for; the per-request max-input descriptor
  * assumes a full output reservation and understates the real ceiling. Measured
  * 2026-08-06: a run aborted at ~297k projected tokens against a 272k descriptor while
- * the same provider had just accepted 339,689 tokens.
+ * the same provider had just accepted 339,689 tokens. Declaring the total window is
+ * the deployment's own fact, so it is the option; there is no separate boolean, and
+ * an undeclared window falls back to the descriptor and SAYS so in the accounting.
  */
-export const DEFAULT_TRUTHFUL_CAPACITY = false;
-export const DEFAULT_PROVIDER_TOTAL_WINDOW = 400_000;
 
-/** Preflight a peek/expand against the target's exact stored size and real headroom. */
-export const DEFAULT_ADMISSION_CONTROL = false;
 /** Narrowing is what makes a refusal governance instead of denial. */
 export const PEEK_MIN_SLICE_BYTES = 1_024;
 
-/** Marks refused at commit are kept pending instead of silently dropped. */
-export const DEFAULT_RETAIN_PENDING_MARKS = false;
-
-/** Commit when the ELIGIBLE marked mass is worth its one rewrite, not when the window is nearly full. */
-export const DEFAULT_ELIGIBLE_SHARE_COMMIT = false;
-export const DEFAULT_ELIGIBLE_SHARE_COMMIT_THRESHOLD = 0.30;
-
-/**
- * A deterministic read-only tool fold used to describe itself with one generic
- * sentence per tool, so every fold of the same tool carried the SAME brief and no
- * index could answer "which fold holds X". Measured 2026-08-06: three probe answers
- * lived in two stage folds and no run, control included, ever peeked the right one.
- * With this on the automatic brief carries bounded exact anchors instead: the call
- * arguments, a leading label from the result head, and a TRAILING anchor from the
- * result tail, where chain keys and conclusions live.
- */
-export const DEFAULT_STAGE_IDENTIFIED_BRIEFS = false;
-
-/**
- * A commit that runs between an agent's read and its use of that read replaces the
- * agent's own just-gathered evidence with placeholders. The guard excludes every
- * tool result produced since the last terminal assistant message from the applied
- * set; those marks stay pending for the next commit.
- */
-export const DEFAULT_CURRENT_TURN_COMMIT_GUARD = false;
-
-/**
- * Pinned peek mass is ineligible for reclamation by construction, and the freeing
- * target a commit tops up against counted it as progress already made. Measured
- * 2026-08-06 (rep 7): retain-pinned peeks held the eligible share below the ROI
- * threshold forever, no commit ever fired, and the window grew to 235k tokens with
- * no accounting field naming the cause. With this on, an automatic commit measures
- * its top-up against ELIGIBLE mass, so the backstop keeps reclaiming non-pinned
- * evidence no matter what the ineligible marks add up to.
- */
-export const DEFAULT_PINNED_MASS_BACKSTOP = false;
-
-/**
- * Peek lifetime as a per-call decision. The config default answers "are peek results
- * ephemeral in this deployment"; it cannot answer "is THIS read a glance or a fact I
- * am about to work from". With this on, `peek` accepts an explicit `ephemeral`
- * boolean that overrides the deployment default for that one read, in either
- * direction, and the peek envelope reports the lifetime it actually has.
- */
-export const DEFAULT_PER_PEEK_EPHEMERAL = false;
-
-/** The default status payload stops carrying the whole fold tree. */
-export const DEFAULT_STATUS_INDEX_DIET = false;
+/** How many folds the dieted status payload ranks by what they would reclaim. */
 export const STATUS_DIET_SUGGESTIONS = 5;
 
-/**
- * Count an advisory when it is DELIVERED, not when it is armed. Arming used to spend
- * the milestone budget, and any automatic fold in the same context pass cleared the arm
- * before it was ever projected, so the budget drained with zero deliveries.
- */
-export const DEFAULT_ADVISORY_DELIVERY = false;
-
-/** Split real projection rewrites from provider-side cache-miss observations. */
-export const DEFAULT_PROJECTION_INSTRUMENTATION = false;
 export const MAX_PROJECTION_HASH_RECORDS = 64;
 export const MAX_PINNED_PEEKS = 64;
+
+// ---------------------------------------------------------------------------
+// Guided curation. The one iteration-4 experiment condition: the two-signal
+// curation trigger, its bounded last-call gate, and the reactive receipt block.
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_GUIDED_CURATION = false;
+
+/**
+ * Signal one: measured occupancy of the truthful serving budget. Half full is early
+ * on purpose -- the point of announcing a commit is to leave the agent enough room to
+ * fold up and correct before the fold happens, and an announcement at the backstop is
+ * an announcement with nothing left to spend.
+ */
+export const CURATION_OCCUPANCY_SHARE = 0.50;
+
+/**
+ * Signal two: tool-result mass OUTSIDE the fresh tail, as a share of the window.
+ * Occupancy alone announces commits a commit cannot serve -- a window full of
+ * conversation has nothing stale to fold. Rep 14 ran 138 tool results over ~4.2MB of
+ * payload against a 400k window, so a fifth of the window (~80k tokens, ~320KB) is
+ * roughly a dozen ordinary results: reached early in a tool-heavy run, and never
+ * reached by a run whose window is not actually made of stale tool output. It is half
+ * the commit's own top-up target, so the announcement always precedes a commit that
+ * has at least half a target of real mass to work with.
+ */
+export const CURATION_STALE_TOOL_SHARE = 0.20;
+
+/**
+ * The gate's hard round cap. Every context pass with the gate open consumes one round,
+ * so the commit proceeds after at most this many passes NO MATTER WHAT the agent does;
+ * a pass whose response was not a context-tool call proceeds immediately. Two is a
+ * bounded conversation, not a negotiation, and it makes a stall non-constructible.
+ */
+export const CURATION_GATE_MAX_ROUNDS = 2;
+
+/** How many automatic-action receipts stay in the window; the oldest ages out. */
+export const MAX_CONTEXT_RECEIPTS = 3;
+/** Hard byte cap on the rendered receipt block, so a receipt can never itself bloat. */
+export const CONTEXT_RECEIPT_BLOCK_BYTES = 900;
+/** Durable instrumentation records kept in the in-memory ledger for status. */
+export const MAX_CONTEXT_ATTEMPT_RECORDS = 128;
+
+// ---------------------------------------------------------------------------
+// Bite-sized folds and bounded peeks. These two constants are one decision read
+// from two ends, so they are stated together and kept equal.
+//
+// Measured 2026-08-06 (rep 6): a single 60,432-byte chapter fold hid the needed
+// fact in its tail, and every peek of it was either truncated short of the answer
+// or too expensive to widen. A fold is only navigable if reading one back is cheap,
+// so a fold's source is capped and an oversized span is SPLIT into sequential
+// bounded folds, each with its own brief. The peek bound is the same number, so a
+// default peek of one bite-sized fold returns it whole -- about 4,000 tokens, a
+// read any session can afford -- and only a legacy oversized fold is ever truncated.
+// ---------------------------------------------------------------------------
+
+/** A fold whose exact source exceeds this is split into sequential bounded folds. */
+export const MAX_FOLD_SPAN_CHARS = 16_000;
+/**
+ * The other bound: a SLIVER of stale raw content hugging a fold boundary is absorbed
+ * into its later neighbour inside a commit the epoch already paid for.
+ *
+ * The threshold is deliberately tiny, measured in the session's own calibrated TOKENS,
+ * and it is not pressure-scaled. Non-sequential curation is a first-class state: an
+ * agent may hold folds at 10:20, 40:55 and 60:70 with raw spans between them ON
+ * PURPOSE, and a mechanism that swallowed those gaps would quietly turn pi-fold into
+ * system-controlled compaction with the curation element deleted. 256 tokens is about
+ * one short prompt or one one-line result -- nobody deliberately keeps a sliver that
+ * small as standing context -- and it sits an order of magnitude under the minimum
+ * chapter size the ladder itself will fold. Anything larger stays raw permanently,
+ * however ragged the projection looks; the ladder's ordinary fold eligibility is the
+ * only thing that ever touches it, and absorption never becomes a second folding path.
+ *
+ * Later, not earlier, because extending the LATER fold backward mutates at a shallower
+ * prefix position and preserves more of the cache. There is no content-affinity logic,
+ * every absorption is receipted, and a wrong grouping is one `reboundary` away.
+ */
+export const MAX_WEDGE_ABSORB_TOKENS = 256;
+/** What a peek returns without an explicit widening argument. */
+export const PEEK_DEFAULT_MAX_BYTES = 16_000;
+/** Head share of a truncated peek; the remainder is the tail, where conclusions live. */
+export const PEEK_HEAD_SHARE = 0.6;
+
+// ---------------------------------------------------------------------------
+// Overflow rollback and recovery.
+// ---------------------------------------------------------------------------
+
+/**
+ * How many times one inflow may be recovered before the runtime gives up.
+ *
+ * A provider context-overflow rejection mutates nothing durable -- the assistant
+ * message never lands and the projection is rebuilt per request -- so recovery is a
+ * reduction plus a rebuild, not a branch rewind. Two attempts is the cap: the first
+ * folds at fence pressure with the guard fully waived, the second reaches into the
+ * fresh tail, and a third would be asking the same question of the same evidence.
+ * Past it the run fails LOUDLY, because an inflow that cannot fit after maximal
+ * folding is a genuine impossibility rather than a recoverable state.
+ */
+export const OVERFLOW_RECOVERY_MAX_ATTEMPTS = 2;
 
 /** Active-context tool actions that read without mutating, so their results may fold. */
 export const READ_ONLY_CONTEXT_ACTIONS_DEFAULT: ReadonlySet<string> = new Set(["status"]);
@@ -358,14 +400,17 @@ export interface ActiveContextState {
   tokensSinceToolFold: number;
   leases: Record<string, number>;
   surfacing?: SurfacingRecord[];
-  /** Epoch scheduling only; omitted when empty so pre-0.1.2 state digests never move. */
+  /** Epoch scheduling only; omitted when empty so immediate-mode state digests never move. */
   pendingMarks?: PendingMark[];
-  /**
-   * Fold ids whose peek result the agent asked to keep raw. Ephemeral peek only, and
-   * omitted when empty for the same reason `pendingMarks` is: a key that appears only
-   * when a lever is used cannot move a default digest.
-   */
+  /** Fold ids whose peek result the agent asked to keep raw. Omitted when empty. */
   pinnedPeeks?: string[];
+  /**
+   * Agent-corrected fold briefs, by fold id. A fold RECORD is content-addressed and
+   * immutable -- rewriting its brief in place would report a conflicting durable fold
+   * and suspend automatic management -- so a re-brief is durable state beside the
+   * record rather than a mutation of it. Omitted when empty.
+   */
+  briefs?: Record<string, string>;
   prepared?: PreparedFold;
   advisory?: {
     highWater: number;
@@ -400,6 +445,7 @@ export interface ActiveContextCheckpointV2 {
   leases?: Record<string, number>;
   surfacing?: SurfacingRecord[];
   pendingMarks?: PendingMark[];
+  briefs?: Record<string, string>;
   advisory?: NonNullable<ActiveContextState["advisory"]>;
   stateSha256: string;
 }
@@ -420,6 +466,7 @@ export interface ActiveContextDeltaV2 {
   leases?: Record<string, number>;
   surfacing?: SurfacingRecord[];
   pendingMarks?: PendingMark[];
+  briefs?: Record<string, string>;
   advisory?: NonNullable<ActiveContextState["advisory"]>;
   stateSha256: string;
 }
@@ -461,12 +508,6 @@ export interface ActiveContextSnapshot {
   readOnlyContextActions: ReadonlySet<string>;
   contextWindow: number;
   windowSource: "reported" | "fallback";
-  /** Consumed peek results render as recall stubs instead of duplicate source bytes. */
-  ephemeralPeek: boolean;
-  /** Automatic tool briefs carry bounded exact call arguments and result anchors. */
-  stageIdentifiedBriefs: boolean;
-  /** A peek call may override the deployment's ephemeral default for itself. */
-  perPeekEphemeral: boolean;
 }
 
 export interface FoldCandidate {

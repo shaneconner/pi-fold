@@ -26,6 +26,7 @@ import {
   activeContextStatus,
   automaticPreparationId,
   commitPreparedFold,
+  descendantIds,
   encodedFoldSource,
   foldCandidatesDetail,
   foldTreeDetail,
@@ -73,6 +74,9 @@ import type {
 import {
   childFoldIds,
   clearPrepared,
+  deriveFoldParents,
+  flattenFoldRefs,
+  foldBrief,
   makeFoldRecordEntry,
   makeStateCheckpoint,
   makeStateDelta,
@@ -97,28 +101,22 @@ import {
   DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX,
   DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
-  DEFAULT_ADMISSION_CONTROL,
-  DEFAULT_ADVISORY_DELIVERY,
+  CONTEXT_RECEIPT_BLOCK_BYTES,
+  CURATION_GATE_MAX_ROUNDS,
+  CURATION_OCCUPANCY_SHARE,
+  CURATION_STALE_TOOL_SHARE,
+  EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD,
   DEFAULT_CONTEXT_WINDOW,
-  DEFAULT_ELIGIBLE_SHARE_COMMIT,
-  DEFAULT_ELIGIBLE_SHARE_COMMIT_THRESHOLD,
-  DEFAULT_EPHEMERAL_PEEK,
   DEFAULT_FOLD_SCHEDULING,
-  DEFAULT_PROJECTION_INSTRUMENTATION,
-  DEFAULT_PROVIDER_TOTAL_WINDOW,
-  DEFAULT_RETAIN_PENDING_MARKS,
-  DEFAULT_CURRENT_TURN_COMMIT_GUARD,
-  DEFAULT_PER_PEEK_EPHEMERAL,
-  DEFAULT_PINNED_MASS_BACKSTOP,
-  DEFAULT_STAGE_IDENTIFIED_BRIEFS,
-  DEFAULT_STATUS_INDEX_DIET,
-  DEFAULT_TRUTHFUL_CAPACITY,
+  DEFAULT_GUIDED_CURATION,
   ESTIMATED_BYTES_PER_TOKEN,
   DEFAULT_SURFACING_ENABLED,
   entryTypeNamespace,
   EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS,
   EPOCH_COMMIT_TARGET_WINDOW_SHARE,
-  RETAINED_MARK_ACTIVE_CONTEXT_TOOL_ACTIONS,
+  MAX_FOLD_SPAN_CHARS,
+  OVERFLOW_RECOVERY_MAX_ATTEMPTS,
+  PEEK_DEFAULT_MAX_BYTES,
   PEEK_MIN_SLICE_BYTES,
   PEEK_READ_ONLY_CONTEXT_ACTIONS,
   FOLD_SCHEDULING_MODES,
@@ -141,6 +139,23 @@ import type {
   SurfacingSuggestion,
 } from "./lib/policy.ts";
 import {
+  absorbWedgeMarks,
+} from "./lib/scheduling.ts";
+import {
+  advanceCurationGate,
+  contextReceipt,
+  curationNoticeText,
+  curationSignals,
+  curationTriggerFires,
+  receiptBlockText,
+  withReceipt,
+} from "./lib/curation.ts";
+import type {
+  ContextReceipt,
+  CurationGate,
+  CurationSignals,
+} from "./lib/curation.ts";
+import {
   addPendingMark,
   claimedRefKeys,
   commitPendingMarks,
@@ -156,21 +171,24 @@ import {
   markedFoldIds,
   markOrdinal,
   pendingMarks,
-  currentTurnRefKeys,
   markTouchesCurrentTurn,
   schedulingStatus,
-  tailAdjacent,
   topUpMarks,
   withPendingMarks,
 } from "./lib/scheduling.ts";
 import {
   automaticToolBrief,
+  candidateSpanChars,
   deterministicChapterCandidateBrief,
   deterministicConsolidationBrief,
   manualFoldCandidate,
   selectAutomaticToolBatch,
   selectAutomaticToolForRung,
+  snapFoldCandidate,
+  snapToFoldBoundaries,
+  splitCandidateBySize,
 } from "./lib/selection.ts";
+import type { SpanCorrection } from "./lib/selection.ts";
 import {
   acceptSurfacingSuggestion,
   FOLD_BRIEF_SUGGESTION_SOURCE,
@@ -183,15 +201,24 @@ import {
   ledgerSummary,
   messageDigests,
   observeCacheUsage,
+  recordContextEvent,
   recordProjection,
 } from "./lib/instrumentation.ts";
-import type { ProjectionChange } from "./lib/instrumentation.ts";
+import type {
+  ContextEventRecord,
+  ProjectionChange,
+} from "./lib/instrumentation.ts";
 import { buildActiveContextCommands, buildActiveContextTool } from "./lib/tool-surface.ts";
-import { mapActiveContext, toolFreshIndices } from "./lib/transcript.ts";
+import {
+  currentTurnRefKeys,
+  mapActiveContext,
+  toolFreshIndices,
+} from "./lib/transcript.ts";
 
 // Test seam only; the package API is registerPiFold because package.json exports block deep imports.
 export * from "./lib/advisory.ts";
 export * from "./lib/canonical.ts";
+export * from "./lib/curation.ts";
 export * from "./lib/folding.ts";
 export * from "./lib/instrumentation.ts";
 export * from "./lib/measurement.ts";
@@ -210,6 +237,42 @@ export interface SuggestionSourceHandle {
 
 export type SuggestionSourceRegistrar = (source: SuggestionSource) => SuggestionSourceHandle;
 
+/**
+ * The batched fold request: several {span, brief} pairs in one call, with the single
+ * `ids` form still accepted because it is the shape a status action hands back.
+ */
+export interface BatchedMarkRequest {
+  ids: string[];
+  brief?: string;
+}
+
+export function batchedMarkRequests(params: Record<string, unknown>): BatchedMarkRequest[] {
+  const batched = params.marks;
+  if (batched === undefined) {
+    return [{
+      ids: stringIds(params.ids),
+      ...(typeof params.brief === "string" && params.brief.trim() ? { brief: params.brief } : {}),
+    }];
+  }
+  const values = denseOwnArrayValues(batched);
+  if (!values || !values.length || values.length > 64) {
+    throw new Error("marks must be a dense array of 1-64 {ids, brief} objects");
+  }
+  return values.map((value, index) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`marks[${index}] must be an object with ids and an optional brief`);
+    }
+    const brief = ownValue(value, "brief");
+    if (brief !== undefined && (typeof brief !== "string" || !brief.trim())) {
+      throw new Error(`marks[${index}].brief must be a nonempty string`);
+    }
+    return {
+      ids: stringIds(ownValue(value, "ids")),
+      ...(typeof brief === "string" && brief.trim() ? { brief } : {}),
+    };
+  });
+}
+
 export function registerActiveContext(pi: any, options: {
   summarizeContextSpan?: (request: Record<string, unknown>, ctx: unknown) => Promise<Record<string, unknown>>;
   setProjectionProvider?: (provider: (ctx: any) => Array<Record<string, unknown>>) => void;
@@ -227,20 +290,8 @@ export function registerActiveContext(pi: any, options: {
   guidance?: GuidanceProfile;
   foldScheduling?: FoldSchedulingMode;
   foldPeekResults?: boolean;
-  ephemeralPeek?: boolean;
-  perPeekEphemeral?: boolean;
-  truthfulCapacity?: boolean;
+  guidedCuration?: boolean;
   providerTotalWindow?: number;
-  admissionControl?: boolean;
-  retainPendingMarks?: boolean;
-  eligibleShareCommit?: boolean;
-  eligibleShareCommitThreshold?: number;
-  currentTurnCommitGuard?: boolean;
-  pinnedMassBackstop?: boolean;
-  stageIdentifiedBriefs?: boolean;
-  statusIndexDiet?: boolean;
-  advisoryDelivery?: boolean;
-  projectionInstrumentation?: boolean;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
   registerSuggestionSource: SuggestionSourceRegistrar;
@@ -265,102 +316,27 @@ export function registerActiveContext(pi: any, options: {
     throw new Error("foldPeekResults must be a boolean");
   }
   // Peek mutates nothing, so its own tool result is a foldable read batch. Epoch mode
-  // adopts that classification with its scheduling; immediate mode keeps the pre-0.1.2
-  // classification unless the deployment opts in, because a peek copies a fold's stored
-  // source back into the window and a window that cannot reclaim it grows without bound.
+  // adopts that classification with its scheduling; immediate mode keeps the narrower
+  // one unless the deployment opts in, because a peek copies a fold's stored source
+  // back into the window and a window that cannot reclaim it grows without bound.
   const foldPeekResults = options.foldPeekResults ?? epochScheduling;
-  if (options.ephemeralPeek !== undefined && typeof options.ephemeralPeek !== "boolean") {
-    throw new Error("ephemeralPeek must be a boolean");
+  if (options.guidedCuration !== undefined && typeof options.guidedCuration !== "boolean") {
+    throw new Error("guidedCuration must be a boolean");
   }
-  // A deletion, not a fold: the duplicate bytes of a peek the model has already read
-  // leave the projection while the fold store keeps the source. Off by default so the
-  // pinned immediate-mode projection and durable state do not move.
-  const ephemeralPeek = options.ephemeralPeek ?? DEFAULT_EPHEMERAL_PEEK;
-  if (options.perPeekEphemeral !== undefined && typeof options.perPeekEphemeral !== "boolean") {
-    throw new Error("perPeekEphemeral must be a boolean");
+  if (options.guidedCuration && !epochScheduling) {
+    throw new Error("guidedCuration requires epoch fold scheduling; immediate mode has no commit to announce");
   }
-  // The deployment default answers whether peeks are ephemeral HERE; only the caller
-  // knows whether THIS read is a glance or a fact it is about to work from.
-  const perPeekEphemeral = options.perPeekEphemeral ?? DEFAULT_PER_PEEK_EPHEMERAL;
-  if (options.truthfulCapacity !== undefined && typeof options.truthfulCapacity !== "boolean") {
-    throw new Error("truthfulCapacity must be a boolean");
-  }
-  if (options.admissionControl !== undefined && typeof options.admissionControl !== "boolean") {
-    throw new Error("admissionControl must be a boolean");
-  }
-  const truthfulCapacity = options.truthfulCapacity ?? DEFAULT_TRUTHFUL_CAPACITY;
+  // Announce the commit instead of performing it silently, and give the agent a
+  // bounded last call to curate what is about to fold.
+  const guidedCuration = options.guidedCuration ?? DEFAULT_GUIDED_CURATION;
   if (options.providerTotalWindow !== undefined &&
       (!Number.isSafeInteger(options.providerTotalWindow) || options.providerTotalWindow <= 0)) {
     throw new Error("providerTotalWindow must be a positive integer");
   }
-  const providerTotalWindow = options.providerTotalWindow ?? DEFAULT_PROVIDER_TOTAL_WINDOW;
-  const admissionControl = options.admissionControl ?? DEFAULT_ADMISSION_CONTROL;
-  if (options.retainPendingMarks !== undefined && typeof options.retainPendingMarks !== "boolean") {
-    throw new Error("retainPendingMarks must be a boolean");
-  }
-  if (options.retainPendingMarks && !epochScheduling) {
-    throw new Error("retainPendingMarks requires epoch fold scheduling; immediate mode has no marks");
-  }
-  // Mark always means mark: a mark is accepted on any span, and a commit applies the
-  // eligible ones and KEEPS the rest. The tail-adjacent inline special case dissolves
-  // with it, because "mark" no longer sometimes means "fold now".
-  const retainPendingMarks = options.retainPendingMarks ?? DEFAULT_RETAIN_PENDING_MARKS;
-  if (options.eligibleShareCommit !== undefined && typeof options.eligibleShareCommit !== "boolean") {
-    throw new Error("eligibleShareCommit must be a boolean");
-  }
-  if (options.eligibleShareCommitThreshold !== undefined &&
-      (typeof options.eligibleShareCommitThreshold !== "number" ||
-        !Number.isFinite(options.eligibleShareCommitThreshold) ||
-        options.eligibleShareCommitThreshold <= 0 || options.eligibleShareCommitThreshold >= 1)) {
-    throw new Error("eligibleShareCommitThreshold must be a number in (0, 1)");
-  }
-  if (options.eligibleShareCommit && !epochScheduling) {
-    throw new Error("eligibleShareCommit requires epoch fold scheduling; immediate mode has no marks");
-  }
-  // Commit on what the marks are WORTH, not on how full the window is. Pressure stays
-  // underneath as the safety backstop.
-  const eligibleShareThreshold = (options.eligibleShareCommit ?? DEFAULT_ELIGIBLE_SHARE_COMMIT)
-    ? options.eligibleShareCommitThreshold ?? DEFAULT_ELIGIBLE_SHARE_COMMIT_THRESHOLD
-    : null;
-  if (options.currentTurnCommitGuard !== undefined && typeof options.currentTurnCommitGuard !== "boolean") {
-    throw new Error("currentTurnCommitGuard must be a boolean");
-  }
-  if (options.currentTurnCommitGuard && !epochScheduling) {
-    throw new Error("currentTurnCommitGuard requires epoch fold scheduling; immediate mode has no commits");
-  }
-  // An automatic commit never folds what this turn just gathered.
-  const currentTurnCommitGuard = options.currentTurnCommitGuard ?? DEFAULT_CURRENT_TURN_COMMIT_GUARD;
-  if (options.pinnedMassBackstop !== undefined && typeof options.pinnedMassBackstop !== "boolean") {
-    throw new Error("pinnedMassBackstop must be a boolean");
-  }
-  if (options.pinnedMassBackstop && !epochScheduling) {
-    throw new Error("pinnedMassBackstop requires epoch fold scheduling; immediate mode has no commits");
-  }
-  // Pinned mass can never be reclaimed, so it may never count as freeing already done.
-  const pinnedMassBackstop = options.pinnedMassBackstop ?? DEFAULT_PINNED_MASS_BACKSTOP;
-  if (options.stageIdentifiedBriefs !== undefined && typeof options.stageIdentifiedBriefs !== "boolean") {
-    throw new Error("stageIdentifiedBriefs must be a boolean");
-  }
-  // One generic sentence per tool made every fold of that tool look identical, so no
-  // index could answer which fold holds a given stage. Off by default: the brief is
-  // part of the durable fold record the immediate-mode digest pins.
-  const stageIdentifiedBriefs = options.stageIdentifiedBriefs ?? DEFAULT_STAGE_IDENTIFIED_BRIEFS;
-  if (options.statusIndexDiet !== undefined && typeof options.statusIndexDiet !== "boolean") {
-    throw new Error("statusIndexDiet must be a boolean");
-  }
-  const statusIndexDiet = options.statusIndexDiet ?? DEFAULT_STATUS_INDEX_DIET;
-  if (options.advisoryDelivery !== undefined && typeof options.advisoryDelivery !== "boolean") {
-    throw new Error("advisoryDelivery must be a boolean");
-  }
-  // Spend the milestone budget when the advisory REACHES the agent, and stop letting
-  // an automatic fold discard an arm that has not spoken yet.
-  const advisoryDelivery = options.advisoryDelivery ?? DEFAULT_ADVISORY_DELIVERY;
-  if (options.projectionInstrumentation !== undefined &&
-      typeof options.projectionInstrumentation !== "boolean") {
-    throw new Error("projectionInstrumentation must be a boolean");
-  }
-  const projectionInstrumentation = options.projectionInstrumentation ??
-    DEFAULT_PROJECTION_INSTRUMENTATION;
+  // The deployment's own fact, and the only capacity knob: declaring it makes every
+  // ratio, fence and budget truthful, and leaving it out falls back to the provider
+  // descriptor and SAYS "descriptor" in the capacity accounting.
+  const providerTotalWindow = options.providerTotalWindow ?? null;
   const readOnlyContextActions = foldPeekResults
     ? PEEK_READ_ONLY_CONTEXT_ACTIONS
     : READ_ONLY_CONTEXT_ACTIONS_DEFAULT;
@@ -392,17 +368,18 @@ export function registerActiveContext(pi: any, options: {
   const milestoneProjectionType = `${entryTypePrefix}-milestone`;
   const advisoryProjectionType = `${entryTypePrefix}-advisory`;
   const surfacingProjectionType = `${entryTypePrefix}-surfacing`;
+  const receiptProjectionType = `${entryTypePrefix}-receipts`;
+  const curationProjectionType = `${entryTypePrefix}-curation`;
   const entryNamespace = entryTypeNamespace(entryTypePrefix);
   const providerMeasurementEntryType = `${entryNamespace}-provider-context-measurement`;
   const nativeReceiptEntryType = `${entryNamespace}-native-compaction-receipt`;
+  const contextInstrumentationEntryType = `${entryNamespace}-context-instrumentation`;
   const nativeDecisionEntryType = `${entryNamespace}-native-compaction-decision`;
   // The commit verb only exists where marks exist; immediate mode keeps its exact
   // seven-action surface and description.
-  const defaultToolActions = retainPendingMarks
-    ? RETAINED_MARK_ACTIVE_CONTEXT_TOOL_ACTIONS
-    : epochScheduling
-      ? EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS
-      : ACTIVE_CONTEXT_TOOL_ACTIONS;
+  const defaultToolActions = epochScheduling
+    ? EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS
+    : ACTIVE_CONTEXT_TOOL_ACTIONS;
   const configuredToolActions = denseOwnArrayValues(
     options.toolActions ?? defaultToolActions,
   );
@@ -413,7 +390,7 @@ export function registerActiveContext(pi: any, options: {
   const allowedToolActionSet = new Set<string>();
   for (const value of configuredToolActions) {
     if (typeof value !== "string" ||
-        !RETAINED_MARK_ACTIVE_CONTEXT_TOOL_ACTIONS.includes(value as ActiveContextToolAction) ||
+        !EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS.includes(value as ActiveContextToolAction) ||
         allowedToolActionSet.has(value)) {
       throw new Error(`Invalid or duplicate active-context tool action '${String(value)}'`);
     }
@@ -500,6 +477,25 @@ export function registerActiveContext(pi: any, options: {
     lastChange: "append" as ProjectionChange,
   };
 
+  // Owns the guided-curation gate, the receipt ring, the context-event stream, and the
+  // overflow recovery lane. Nothing here is durable session STATE: it describes what
+  // this process did to the live window, and the durable copy is the appended
+  // instrumentation entry, which is what an external adjudicator reads.
+  const curation = {
+    gate: null as CurationGate | null,
+    lastSignals: null as CurationSignals | null,
+    receipts: [] as ContextReceipt[],
+    /** Every context-management tool call this session, the gate's engagement signal. */
+    contextCalls: 0,
+    marksAtGateOpen: 0,
+    /** Recovery attempts spent on the CURRENT inflow; reset by any accepted request. */
+    recoveryAttempts: 0,
+    /** A provider rejection observed but not yet recovered from. */
+    pendingRejection: null as { status: number; ordinal: number } | null,
+    lastRecovery: null as Record<string, unknown> | null,
+    instrumentationQueue: Promise.resolve<void>(undefined),
+  };
+
   // Owns advisory arming and hard-fence delivery; durable effects use persistenceQueue.
   const advisory = {
     historicalGuidanceEntries: 0,
@@ -565,6 +561,36 @@ export function registerActiveContext(pi: any, options: {
       receipt.tokens === measurement.tokens && receipt.contextWindow === measurement.contextWindow);
   };
 
+  /**
+   * Record one context-management event, in the ledger AND as a durable session entry.
+   * An in-memory ledger is invisible to the external adjudicator that reads session
+   * artifacts, and telemetry may never block or fail the action it describes.
+   */
+  const recordEvent = (record: ContextEventRecord): ContextEventRecord => {
+    recordContextEvent(instrumentation.ledger, record);
+    const operation = curation.instrumentationQueue.then(async () => {
+      try { await pi.appendEntry(contextInstrumentationEntryType, record); }
+      catch { /* Telemetry is never a lifecycle boundary. */ }
+    });
+    curation.instrumentationQueue = operation.then(() => undefined, () => undefined);
+    return record;
+  };
+
+  const currentOrdinal = (): number =>
+    lifecycle.latestSnapshot ? markOrdinal(lifecycle.latestSnapshot) : 0;
+
+  const deliverReceipt = (receipt: ContextReceipt): void => {
+    curation.receipts = withReceipt(curation.receipts, receipt);
+    recordEvent({
+      version: 1,
+      kind: "receipt",
+      sessionId: persistence.state?.sessionId ?? "",
+      receipt: { ...receipt },
+      ordinal: receipt.ordinal,
+      occurredAt: Date.now(),
+    });
+  };
+
   const safeNotify = (ctx: any, message: string, level: "info" | "warning" | "error"): void => {
     try { ctx.ui?.notify?.(message, level); } catch { /* Presentation cannot block Pi lifecycle progress. */ }
   };
@@ -599,11 +625,11 @@ export function registerActiveContext(pi: any, options: {
    * auditable rather than assumed.
    */
   const budgetWindowFor = (ctx: any): number | null =>
-    truthfulCapacity ? providerTotalWindow : contextWindowFor(ctx);
+    providerTotalWindow ?? contextWindowFor(ctx);
 
   const currentCapacity = (ctx: any): ReturnType<typeof capacityAccounting> => capacityAccounting({
     window: budgetWindowFor(ctx) ?? lifecycle.latestSnapshot?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-    truthful: truthfulCapacity,
+    truthful: providerTotalWindow !== null,
     descriptorWindow: contextWindowFor(ctx),
     usedTokens: measurements.lastProviderMeasurement?.tokens ?? null,
   });
@@ -618,9 +644,6 @@ export function registerActiveContext(pi: any, options: {
     readOnlyTools,
     readOnlyContextActions,
     contextWindow: budgetWindowFor(ctx) ?? undefined,
-    ephemeralPeek,
-    perPeekEphemeral,
-    stageIdentifiedBriefs,
   });
 
   const authoritativeSnapshotFor = (ctx: any): ActiveContextSnapshot => {
@@ -639,9 +662,6 @@ export function registerActiveContext(pi: any, options: {
       readOnlyTools,
       readOnlyContextActions,
       contextWindow: budgetWindowFor(ctx) ?? undefined,
-      ephemeralPeek,
-      perPeekEphemeral,
-      stageIdentifiedBriefs,
     });
   };
 
@@ -702,6 +722,14 @@ export function registerActiveContext(pi: any, options: {
     instrumentation.ledger = emptyLedger();
     instrumentation.previousDigests = null;
     instrumentation.lastChange = "append";
+    curation.gate = null;
+    curation.lastSignals = null;
+    curation.receipts = [];
+    curation.contextCalls = 0;
+    curation.marksAtGateOpen = 0;
+    curation.recoveryAttempts = 0;
+    curation.pendingRejection = null;
+    curation.lastRecovery = null;
     advisory.historicalGuidanceEntries = 0;
     advisory.armedMilestone = null;
     advisory.advisoryScheduleKey = null;
@@ -1414,7 +1442,12 @@ export function registerActiveContext(pi: any, options: {
     };
   };
 
-  const abortOverBudgetProjection = (tokens: number, budgetTokens: number, ctx: any): void => {
+  const abortOverBudgetProjection = (
+    tokens: number,
+    budgetTokens: number,
+    ctx: any,
+    recoveryAttempts = 0,
+  ): void => {
     const key = sha256Value({
       sessionId: persistence.state?.sessionId ?? null,
       revision: persistence.state?.revision ?? null,
@@ -1423,8 +1456,12 @@ export function registerActiveContext(pi: any, options: {
       phase: "projection-budget-fence",
     });
     ladder.pendingContextNote =
-      `The ${brandNoun} projection estimates ${tokens} tokens against a ${budgetTokens}-token serving budget. ` +
-      "The provider request was aborted before transmission; run /compact or make an explicit bounded context fold.";
+      `The ${brandNoun} projection estimates ${tokens} tokens against a ${budgetTokens}-token serving budget` +
+      (recoveryAttempts
+        ? `, after ${recoveryAttempts} recovery attempt(s) that folded everything foldable. The remaining ` +
+          "inflow does not fit at any folding depth, which is an impossibility rather than a recoverable state."
+        : ".") +
+      " The provider request was aborted before transmission; run /compact or make an explicit bounded context fold.";
     if (advisory.hardFenceNoticeKey !== key) {
       advisory.hardFenceNoticeKey = key;
       safeNotify(
@@ -1440,46 +1477,94 @@ export function registerActiveContext(pi: any, options: {
     ctx.abort();
   };
 
+  /**
+   * Enforce the budget, and RECOVER rather than die.
+   *
+   * A provider context-overflow rejection mutates nothing durable: the assistant
+   * message never lands and this runtime rebuilds the projection from the branch on
+   * every request. So the terminal path is not an abort, it is a rollback: do not
+   * append the failed exchange, fold at fence pressure until the request fits, rebuild,
+   * and let Pi resend. Recovery is capped, and the cap is what makes it safe -- an
+   * inflow that still will not fit after maximal folding is a genuine impossibility,
+   * and that one fails LOUDLY exactly as before.
+   */
   const enforceProjectionBudget = async (
     snapshot: ActiveContextSnapshot,
     projected: unknown[],
     ctx: any,
   ): Promise<{ projected: unknown[]; aborted: boolean }> => {
     let measured = projectionExceedsBudget(projected, ctx);
+    const rejected = curation.pendingRejection !== null;
     // CROWDED, not over, is the trigger for reducing: the request that kills a session
-    // is the one built after this one. Over the wire is the trigger for aborting.
-    if (!measured.crowded) return { projected, aborted: false };
+    // is the one built after this one. A provider rejection outranks our own estimate:
+    // it is ground truth that the last request did not fit, whatever we measured.
+    if (!measured.crowded && !rejected) return { projected, aborted: false };
     // Why this fired, recorded from the measurement that TRIGGERED it rather than the
     // one taken afterwards, which by then describes a projection that fits.
     const trigger = measured;
     let reduced = projected;
+    let attempts = 0;
+    let reducedAtLeastOnce = false;
     // At the fence the only useful action is the fold that keeps the request
-    // transmissible, so the reduction runs with every guarded mark waived.
-    try {
-      const action = await attemptAutomaticRung(snapshot, 1, ctx, "projection-budget", {
-        waiveToolCadence: true,
-        waiverRatio: 1,
-      });
-      if (action && persistence.state) {
-        reduced = projectWithAdvisory(snapshot);
-        measured = projectionExceedsBudget(reduced, ctx);
-        ladder.overBudgetReduction = {
-          estimatedTokensBefore: projectedTokenEstimate(projected),
-          estimatedTokensAfter: measured.tokens,
-          budgetTokens: trigger.budgetTokens,
-          marginTokens: trigger.marginTokens,
-          estimatorErrorShare: estimatorErrorShare(),
-          expectedInflowTokens: expectedInflowTokens(),
-          crowded: trigger.crowded,
-          overBeforeReduction: trigger.over,
-          transmitted: !measured.over,
-        };
+    // transmissible, so every reduction runs with every guarded mark waived.
+    while (attempts < OVERFLOW_RECOVERY_MAX_ATTEMPTS && (measured.crowded || measured.over || rejected)) {
+      attempts += 1;
+      curation.recoveryAttempts += 1;
+      let action: Record<string, unknown> | null = null;
+      try {
+        action = await attemptAutomaticRung(snapshot, 1, ctx, "projection-budget", {
+          waiveToolCadence: true,
+          waiverRatio: 1,
+        });
+      } catch (error) {
+        suspendAutomatic(error, "projection-budget", ctx);
+        break;
       }
-    } catch (error) {
-      suspendAutomatic(error, "projection-budget", ctx);
+      if (!action || !persistence.state) break;
+      reducedAtLeastOnce = true;
+      reduced = projectWithAdvisory(snapshot);
+      measured = projectionExceedsBudget(reduced, ctx);
+      if (!measured.over && !measured.crowded) break;
+    }
+    if (reducedAtLeastOnce) {
+      ladder.overBudgetReduction = {
+        estimatedTokensBefore: projectedTokenEstimate(projected),
+        estimatedTokensAfter: measured.tokens,
+        budgetTokens: trigger.budgetTokens,
+        marginTokens: trigger.marginTokens,
+        estimatorErrorShare: estimatorErrorShare(),
+        expectedInflowTokens: expectedInflowTokens(),
+        crowded: trigger.crowded,
+        overBeforeReduction: trigger.over,
+        transmitted: !measured.over,
+        recoveryAttempts: attempts,
+        providerRejected: rejected,
+      };
+    }
+    if (rejected) {
+      curation.lastRecovery = {
+        status: curation.pendingRejection?.status ?? null,
+        attempts,
+        estimatedTokensAfter: measured.tokens,
+        budgetTokens: measured.budgetTokens,
+        recovered: !measured.over,
+      };
+      deliverReceipt(contextReceipt({
+        kind: "overflow-recovery",
+        ordinal: markOrdinal(snapshot),
+        trigger: `provider-rejection:${curation.pendingRejection?.status ?? "unknown"}`,
+        freedTokens: Math.max(0, projectedTokenEstimate(projected) - measured.tokens),
+        recovered: true,
+        note: measured.over
+          ? "The rebuilt request still exceeds the serving budget; the run stops here rather than " +
+            "sending a request the provider will reject again."
+          : "A rollback was required: the provider rejected the last request, nothing durable was " +
+            "written for it, and the request was rebuilt inside the budget rather than dropped.",
+      }));
+      curation.pendingRejection = null;
     }
     if (!measured.over) return { projected: reduced, aborted: false };
-    abortOverBudgetProjection(measured.tokens, measured.budgetTokens, ctx);
+    abortOverBudgetProjection(measured.tokens, measured.budgetTokens, ctx, attempts);
     return { projected: reduced, aborted: true };
   };
 
@@ -1498,6 +1583,8 @@ export function registerActiveContext(pi: any, options: {
       ? selection.candidate.sourceRefs.slice(0, 8).map((ref) => ref.entryId)
       : [];
     if (selection?.kind !== "chapter-prepare") return;
+    // Already bite-sized: the chapter selector never proposes a span past the cap, so a
+    // model brief is never spent on a fold nobody can read back cheaply.
     const candidate = selection.candidate;
     const id = automaticPreparationId(candidate, persistence.state);
     const controller = new AbortController();
@@ -1550,6 +1637,62 @@ export function registerActiveContext(pi: any, options: {
   };
   // Appended at the very TAIL, after the stable prefix, so a suggestion never
   // invalidates a cached prefix and never becomes durable transcript.
+  /**
+   * The receipt block: what the runtime did to this window, as status rather than as
+   * advice. Appended at the TAIL after the stable prefix, exactly like the advisory and
+   * suggestion carriers, so reporting an action never costs a cached prefix. It is
+   * hard-bounded and its ring evicts the oldest entry, because a report about bloat
+   * that becomes bloat has argued against itself.
+   */
+  const appendReceipts = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
+    const content = receiptBlockText({ receipts: curation.receipts, toolName, brandNoun });
+    if (!content) return projected;
+    projected.push({
+      role: "custom",
+      customType: receiptProjectionType,
+      content,
+      display: false,
+      details: {
+        source: activeContextSource(entryTypePrefix),
+        ephemeral: true,
+        receipts: curation.receipts.map((receipt) => ({ ...receipt })),
+        maxBytes: CONTEXT_RECEIPT_BLOCK_BYTES,
+      },
+      timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
+        ? ownValue(snapshot.messages.at(-1), "timestamp")
+        : 0,
+    });
+    return projected;
+  };
+
+  /** The last-call notice, on the same carrier and under the same rules. */
+  const appendCurationNotice = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
+    if (!curation.gate || !curation.lastSignals) return projected;
+    projected.push({
+      role: "custom",
+      customType: curationProjectionType,
+      content: curationNoticeText({
+        signals: curation.lastSignals,
+        roundsUsed: curation.gate.roundsUsed,
+        pendingMarks: persistence.state ? pendingMarks(persistence.state).length : 0,
+        toolName,
+        brandNoun,
+      }),
+      display: false,
+      details: {
+        source: activeContextSource(entryTypePrefix),
+        ephemeral: true,
+        roundsUsed: curation.gate.roundsUsed,
+        maxRounds: CURATION_GATE_MAX_ROUNDS,
+        signals: { ...curation.lastSignals },
+      },
+      timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
+        ? ownValue(snapshot.messages.at(-1), "timestamp")
+        : 0,
+    });
+    return projected;
+  };
+
   const appendSurfacing = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
     const content = surfacingText({ suggestions: surfacing.suggestions, brandNoun });
     if (!content) return projected;
@@ -1604,8 +1747,11 @@ export function registerActiveContext(pi: any, options: {
     const projected = projectActiveContext(snapshot, persistence.state!).filter((message) => {
       const customType = ownValue(message, "customType");
       return customType !== milestoneProjectionType && customType !== advisoryProjectionType &&
-        customType !== surfacingProjectionType;
+        customType !== surfacingProjectionType && customType !== receiptProjectionType &&
+        customType !== curationProjectionType;
     });
+    appendReceipts(projected, snapshot);
+    appendCurationNotice(projected, snapshot);
     const armed = advisoryState(persistence.state!).armed;
     if (!armed || armed.milestone !== advisory.armedMilestone || measurements.latestRatio === null ||
         measurements.latestRatio < 0.85 * armed.threshold) return appendSurfacing(projected, snapshot);
@@ -1640,7 +1786,7 @@ export function registerActiveContext(pi: any, options: {
         chapterEndpoints,
         remediationCount,
         brandNoun,
-        curation: advisoryDelivery ? advisoryCuration(snapshot) : null,
+        curation: advisoryCuration(snapshot),
       }),
       display: false,
       details: { source: activeContextSource(entryTypePrefix), ephemeral: true, milestone: armed.milestone },
@@ -1650,10 +1796,8 @@ export function registerActiveContext(pi: any, options: {
     });
     // The budget is spent HERE, where the advisory actually reaches the agent, and the
     // arm is released only once it has spoken.
-    if (advisoryDelivery) {
-      persistence.state = recordAdvisoryDelivery(persistence.state!, armed.milestone);
-      advisory.armedMilestone = null;
-    }
+    persistence.state = recordAdvisoryDelivery(persistence.state!, armed.milestone);
+    advisory.armedMilestone = null;
     // A suggestion never shares an advisory with urgent fence text: at the fence the
     // only useful next action is the fold that keeps the request transmissible.
     return armed.milestone === "urgent" ? projected : appendSurfacing(projected, snapshot);
@@ -1664,7 +1808,6 @@ export function registerActiveContext(pi: any, options: {
    * two is what made a scheduling lever look responsible for 12 misses it never caused.
    */
   const noteProjection = (projected: unknown[]): void => {
-    if (!projectionInstrumentation) return;
     const digests = messageDigests(projected);
     const comparison = compareProjections(instrumentation.previousDigests, digests);
     recordProjection(instrumentation.ledger, comparison, digests);
@@ -1812,7 +1955,7 @@ export function registerActiveContext(pi: any, options: {
       const addition = addPendingMark(state, mark);
       if (addition.added) { state = addition.state; peekAdded += 1; }
     }
-    const guarded = currentTurnCommitGuard ? currentTurnRefKeys(snapshot) : new Set<string>();
+    const guarded = currentTurnRefKeys(snapshot);
     // At the fence everything unpinned is fair game, INCLUDING the top-up's reach: a
     // session whose only foldable evidence is the open excursion has nothing else to
     // propose, and excluding it there leaves the commit with nothing to apply at the
@@ -1827,8 +1970,8 @@ export function registerActiveContext(pi: any, options: {
         snapshot,
         state,
         ordinal,
-        excludeRefKeys: fenceLevel && currentTurnCommitGuard ? new Set<string>() : guarded,
-        eligibleOnly: pinnedMassBackstop,
+        excludeRefKeys: fenceLevel ? new Set<string>() : guarded,
+        eligibleOnly: true,
         // The fence tops up until there is nothing left to propose: a reduction that
         // stops at the ordinary target can leave the request still untransmittable.
         ...(fenceLevel ? { targetShare: 1 } : {}),
@@ -1854,8 +1997,8 @@ export function registerActiveContext(pi: any, options: {
           snapshot: commitSnapshot,
           state,
           ordinal,
-          excludeRefKeys: fenceLevel && currentTurnCommitGuard ? new Set<string>() : guarded,
-          eligibleOnly: pinnedMassBackstop,
+          excludeRefKeys: fenceLevel ? new Set<string>() : guarded,
+          eligibleOnly: true,
           targetShare: 1,
         })) {
           const addition = addPendingMark(state, mark);
@@ -1863,29 +2006,37 @@ export function registerActiveContext(pi: any, options: {
         }
       }
     }
+    // Boundary slivers ride along in the mutation this commit already pays for; they
+    // are never a mutation of their own, and a gap above the tiny token threshold is
+    // deliberate curation the absorber must not touch.
+    const wedges = absorbWedgeMarks({
+      snapshot,
+      state,
+      charsPerToken: projectionCharsPerToken(),
+      excludeRefKeys: fenceLevel ? new Set<string>() : guarded,
+    });
+    state = wedges.state;
     const accounting = markAccounting(snapshot, state);
     if (!accounting.pending) return null;
     const bytesBefore = bytes(projectActiveContext(snapshot, state));
     // The guard protects an in-flight excursion, never at the cost of the session's
     // ability to send a request at all: above the pressure backstop the oldest guarded
     // marks are released, and at the fence all of them are.
-    const guardWaiver = currentTurnCommitGuard
-      ? guardWaiverCount({
-        snapshot,
-        ratio: waiverRatio,
-        guardedMarks: pendingMarks(state).filter((mark) =>
-          markTouchesCurrentTurn(state, mark, guarded)).length,
-        otherApplicableMarks: pendingMarks(state).filter((mark) =>
-          !markTouchesCurrentTurn(state, mark, guarded) &&
-          markEligibility(snapshot, state, mark) === "eligible").length,
-      })
-      : 0;
+    const guardWaiver = guardWaiverCount({
+      snapshot,
+      ratio: waiverRatio,
+      guardedMarks: pendingMarks(state).filter((mark) =>
+        markTouchesCurrentTurn(state, mark, guarded)).length,
+      otherApplicableMarks: pendingMarks(state).filter((mark) =>
+        !markTouchesCurrentTurn(state, mark, guarded) &&
+        markEligibility(snapshot, state, mark) === "eligible").length,
+    });
     const result = await commitPendingMarks({
       snapshot: commitSnapshot,
       state,
       generation: lifecycle.generation,
-      retainIneligible: retainPendingMarks,
-      guardCurrentTurn: currentTurnCommitGuard,
+      retainIneligible: true,
+      guardCurrentTurn: true,
       guardWaiver,
     });
     persistence.state = result.state;
@@ -1904,6 +2055,8 @@ export function registerActiveContext(pi: any, options: {
       topUpMarks: topUpAdded,
       deepenedTarget: deepened,
       deepenedMarks,
+      absorbedWedges: wedges.absorbed.length,
+      absorbed: wedges.absorbed,
       preDeepenFreedShare: preDeepenShare,
       depthFloorShare: commitDepthFloorShare(snapshot),
       guardWaived: result.waived.length > 0,
@@ -1924,8 +2077,129 @@ export function registerActiveContext(pi: any, options: {
         ? estimatedTokens(freedBytes) / snapshot.contextWindow
         : 0,
       targetWindowShare: EPOCH_COMMIT_TARGET_WINDOW_SHARE,
-      ...(projectionInstrumentation ? { instrumentation: ledgerSummary(instrumentation.ledger) } : {}),
+      instrumentation: ledgerSummary(instrumentation.ledger),
     };
+  };
+
+  /** The two curation signals, measured against the same truthful budget the fence uses. */
+  const measuredCurationSignals = (snapshot: ActiveContextSnapshot): CurationSignals => {
+    const reserve = Math.min(
+      ACTIVE_CONTEXT_POLICY.responseReserve,
+      Math.floor(snapshot.contextWindow * 0.1),
+    );
+    return curationSignals({
+      snapshot,
+      state: persistence.state!,
+      usedTokens: measurements.lastProviderMeasurement?.tokens ?? null,
+      budgetTokens: snapshot.contextWindow - reserve,
+      charsPerToken: projectionCharsPerToken(),
+      eligibleFolds: markAccounting(snapshot, persistence.state!).eligibleMarks,
+    });
+  };
+
+  const recordGateEvent = (
+    event: "opened" | "held" | "proceeded",
+    signals: CurationSignals,
+    roundsUsed: number,
+    proceededBy: string | null,
+  ): void => {
+    recordEvent({
+      version: 1,
+      kind: "curation-gate",
+      sessionId: persistence.state?.sessionId ?? "",
+      event,
+      occupancy: signals.occupancy,
+      staleToolShare: signals.staleToolShare,
+      staleToolTokens: signals.staleToolTokens,
+      staleToolResults: signals.staleToolResults,
+      eligibleFolds: signals.eligibleFolds,
+      roundsUsed,
+      marksAddedDuringGate: persistence.state
+        ? Math.max(0, pendingMarks(persistence.state).length - curation.marksAtGateOpen)
+        : 0,
+      proceededBy,
+      ordinal: currentOrdinal(),
+      occurredAt: Date.now(),
+    });
+  };
+
+  /**
+   * The last-call gate.
+   *
+   * The backstop and the fence are UNCHANGED and never wait on this: when window
+   * pressure or eligible marked mass says commit, the commit happens. The gate sits in
+   * front of the EARLY curation trigger only, where there is still room to react, and
+   * it is bounded so that it cannot stall a run under any agent behaviour.
+   */
+  const curationCommitVerdict = (
+    snapshot: ActiveContextSnapshot,
+    backstopDue: boolean,
+  ): { due: boolean; trigger: string | null } => {
+    if (!guidedCuration) return { due: backstopDue, trigger: null };
+    const signals = measuredCurationSignals(snapshot);
+    curation.lastSignals = signals;
+    if (backstopDue) {
+      if (curation.gate) {
+        recordGateEvent("proceeded", signals, curation.gate.roundsUsed, "backstop");
+        curation.gate = null;
+      }
+      return { due: true, trigger: null };
+    }
+    if (!curationTriggerFires(signals)) {
+      // The signals fell back below the trigger; the announcement is withdrawn rather
+      // than left standing over a commit that is no longer coming.
+      curation.gate = null;
+      return { due: false, trigger: null };
+    }
+    const pending = pendingMarks(persistence.state!).length;
+    const verdict = advanceCurationGate({
+      gate: curation.gate,
+      ordinal: currentOrdinal(),
+      signals,
+      contextCalls: curation.contextCalls,
+      pendingMarks: pending,
+    });
+    if (verdict.event === "opened") curation.marksAtGateOpen = pending;
+    recordGateEvent(verdict.event, signals, verdict.roundsUsed, verdict.proceededBy);
+    curation.gate = verdict.gate;
+    return verdict.proceed
+      ? { due: true, trigger: `guided-curation:${verdict.proceededBy}` }
+      : { due: false, trigger: null };
+  };
+
+  /**
+   * One receipt per automatic context action, in the window and in the durable stream.
+   * Informatory, never exhortative: it says what happened, what it freed, and which
+   * verbs correct it. A mark that changed nothing is not an event and gets no receipt.
+   */
+  const noteAutomaticReceipt = (
+    snapshot: ActiveContextSnapshot,
+    action: Record<string, unknown>,
+    epoch: Record<string, unknown> | null,
+  ): void => {
+    const kind = String(action.kind ?? "context-action");
+    if (kind === "mark") return;
+    const savedBytes = Number(action.sourceBytesSaved ?? epoch?.sourceBytesSaved ?? 0);
+    const freedTokens = Number.isFinite(savedBytes) && savedBytes > 0
+      ? Math.ceil(savedBytes / projectionCharsPerToken())
+      : 0;
+    const foldIds = Array.isArray(action.foldIds) ? action.foldIds.length : 0;
+    deliverReceipt(contextReceipt({
+      kind,
+      ordinal: markOrdinal(snapshot),
+      trigger: epoch ? String(epoch.trigger ?? "") || null : null,
+      foldsCommitted: epoch ? Number(epoch.appliedMarks ?? 0) : 0,
+      foldsCreated: foldIds || (epoch ? Number(epoch.appliedMarks ?? 0) : 0),
+      freedTokens,
+      splitFolds: Number(action.splitFolds ?? 0),
+      splitFromChars: Number(action.splitFromChars ?? 0),
+      absorbedWedges: Number(epoch?.absorbedWedges ?? 0),
+      recovered: curation.recoveryAttempts > 0,
+      note: epoch && Number(epoch.deepenedMarks ?? 0) > 0
+        ? `The commit reached into the fresh tail for ${epoch.deepenedMarks} further span(s), because a ` +
+          "shallower commit would have freed less than one turn of inflow."
+        : null,
+    }));
   };
 
   const applyAutomaticRung = async (
@@ -1977,17 +2251,14 @@ export function registerActiveContext(pi: any, options: {
     let epoch: Record<string, unknown> | null = null;
     let inlineRungs = true;
     if (epochScheduling) {
-      const commitDue = epochCommitDue(snapshot, ratio, {
-        eligibleShareThreshold,
-        eligibleShare: markAccounting(snapshot, persistence.state).eligibleFreedWindowShare,
-      });
-      if (commitDue) {
+      const eligibleShare = markAccounting(snapshot, persistence.state).eligibleFreedWindowShare;
+      const backstopDue = epochCommitDue(snapshot, ratio, eligibleShare);
+      const verdict = curationCommitVerdict(snapshot, backstopDue);
+      if (verdict.due) {
         epoch = await runCommitEpoch(
           snapshot,
-          eligibleShareThreshold !== null &&
-            markAccounting(snapshot, persistence.state).eligibleFreedWindowShare >= eligibleShareThreshold
-            ? "eligible-share"
-            : "window-pressure",
+          verdict.trigger ??
+            (eligibleShare >= EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD ? "eligible-share" : "window-pressure"),
           true,
           rungOptions.waiverRatio ?? ratio,
         );
@@ -2029,14 +2300,11 @@ export function registerActiveContext(pi: any, options: {
     const applicable = selection;
     if (!applicable || applicable.kind === "chapter-prepare") {
       if (!epoch || !persistence.state) return null;
-      if (!advisoryDelivery) {
-        persistence.state = clearArmedAdvisory(persistence.state);
-        advisory.armedMilestone = null;
-      }
       ladder.pendingContextNote =
         `A commit epoch applied ${(epoch.applied as unknown[]).length} pending mark(s) in one rewrite; ` +
         "exact evidence remains expandable.";
       ladder.lastAutomaticAction = { kind: "epoch-commit", foldIds: [], sourceIds: [], epoch };
+      noteAutomaticReceipt(snapshot, ladder.lastAutomaticAction, epoch);
       return ladder.lastAutomaticAction;
     }
     const projectedBytesBefore = bytes(projectActiveContext(snapshot, persistence.state));
@@ -2095,32 +2363,37 @@ export function registerActiveContext(pi: any, options: {
         `Stale folded chapters were consolidated under ${id}; every child remains expandable.`;
     } else if (applicable.kind === "chapter") {
       const chapter = applicable.candidate;
-      const id = await commitDeterministicCandidate(
-        snapshot,
-        chapter,
-        deterministicChapterCandidateBrief(snapshot, chapter),
-      );
+      // Bite-sized by construction: an oversized coherent chapter becomes sequential
+      // bounded folds, each with its own brief, split only at closed unit boundaries.
+      const spanChars = candidateSpanChars(snapshot, persistence.state, chapter);
+      const parts = splitCandidateBySize(snapshot, persistence.state, chapter);
+      const foldIds: string[] = [];
+      for (const part of parts) {
+        foldIds.push(await commitDeterministicCandidate(
+          snapshot,
+          part,
+          deterministicChapterCandidateBrief(snapshot, part),
+        ));
+      }
       action = {
         kind: "chapter-fold",
-        foldIds: [id],
+        foldIds,
         sourceIds: chapter.sourceRefs.map((ref) => ref.entryId),
+        ...(parts.length > 1 ? { splitFolds: parts.length, splitFromChars: spanChars } : {}),
       };
-      ladder.pendingContextNote =
-        `A coherent stale chapter was folded under ${id}; exact evidence remains expandable.`;
+      ladder.pendingContextNote = parts.length > 1
+        ? `A ${spanChars}-char stale chapter was folded as ${parts.length} bite-sized folds ` +
+          `(${foldIds.join(", ")}); exact evidence remains expandable.`
+        : `A coherent stale chapter was folded under ${foldIds[0]}; exact evidence remains expandable.`;
     }
     if ((!action && !epoch) || !persistence.state) return null;
     const projectedBytesAfter = bytes(projectActiveContext(snapshot, persistence.state));
-    // An automatic fold used to clear the armed advisory here, in the same pass that
-    // armed it and BEFORE the projection was built. That is why the channel was dark.
-    if (!advisoryDelivery) {
-      persistence.state = clearArmedAdvisory(persistence.state);
-      advisory.armedMilestone = null;
-    }
     ladder.lastAutomaticAction = {
       ...(action ?? { kind: "epoch-commit", foldIds: [], sourceIds: [] }),
       ...(epoch ? { epoch } : {}),
       sourceBytesSaved: Math.max(0, projectedBytesBefore - projectedBytesAfter),
     };
+    noteAutomaticReceipt(snapshot, ladder.lastAutomaticAction, epoch);
     return ladder.lastAutomaticAction;
   };
   const runAutomaticRungTransaction = async (
@@ -2358,7 +2631,7 @@ export function registerActiveContext(pi: any, options: {
     advisory.advisoryScheduleKey = scheduleKey;
     const advisoryBefore = stableStringify(advisoryState(persistence.state));
     const advisoryUpdate = updateAdvisoryMilestone(
-      persistence.state, ratio, schedule, scheduleChanged, scheduleKey, advisoryDelivery,
+      persistence.state, ratio, schedule, scheduleChanged, scheduleKey, true,
     );
     persistence.state = advisoryUpdate.state;
     const armed = advisoryState(persistence.state).armed;
@@ -2542,6 +2815,10 @@ export function registerActiveContext(pi: any, options: {
         !durableProviderMeasurementMatches(measurement) ||
         measuredRatio === null) return;
     const measurementStateChanged = accountAnchoredMeasurement(measurement);
+    // The provider accepted a request: whatever the recovery lane spent belongs to an
+    // inflow that is now behind us, and the cap resets for the next one.
+    curation.recoveryAttempts = 0;
+    curation.pendingRejection = null;
     measurements.lastProviderMeasurement = measurement;
     measurements.latestRatio = measuredRatio;
     let snapshot: ActiveContextSnapshot;
@@ -2572,12 +2849,10 @@ export function registerActiveContext(pi: any, options: {
     if (lifecycle.shuttingDown) return;
     try {
       const message = ownValue(event, "message");
-      if (projectionInstrumentation) {
-        observeCacheUsage(instrumentation.ledger, {
-          usage: ownValue(message, "usage"),
-          change: instrumentation.lastChange,
-        });
-      }
+      observeCacheUsage(instrumentation.ledger, {
+        usage: ownValue(message, "usage"),
+        change: instrumentation.lastChange,
+      });
       const measurement = providerContextMeasurement(
         message,
         budgetWindowFor(ctx) ?? DEFAULT_CONTEXT_WINDOW,
@@ -2602,6 +2877,19 @@ export function registerActiveContext(pi: any, options: {
       suspendAutomatic(error, "message-end", ctx);
       try { updateStatus(ctx); } catch { /* The provider loop must keep running. */ }
     }
+  });
+  /**
+   * A provider rejection is ground truth that the last request did not fit, and it
+   * mutates nothing durable: no assistant message lands, and the projection is rebuilt
+   * from the branch on the next request. So it is recorded, not fatal -- the next
+   * context pass folds at fence pressure and rebuilds the request rather than dying.
+   * A 429 is a rate limit, not an overflow, and is deliberately not recovered from.
+   */
+  pi.on("after_provider_response", (event: Record<string, unknown>) => {
+    const status = ownValue(event, "status");
+    if (typeof status !== "number" || status < 400 || status === 429) return;
+    if (curation.recoveryAttempts >= OVERFLOW_RECOVERY_MAX_ATTEMPTS) return;
+    curation.pendingRejection = { status, ordinal: currentOrdinal() };
   });
   pi.on("tool_call", (event: Record<string, unknown>, ctx: any) => {
     const calledTool = ownValue(event, "toolName");
@@ -2721,7 +3009,6 @@ export function registerActiveContext(pi: any, options: {
     requestedBytes: number;
     children: string[];
   }): void => {
-    if (!admissionControl) return;
     const capacity = currentCapacity(input.ctx);
     const verdict = admissionVerdict({
       requestedBytes: input.requestedBytes,
@@ -2778,9 +3065,7 @@ export function registerActiveContext(pi: any, options: {
     const snapshot = authoritativeSnapshotFor(ctx);
     if (action === "status") {
       const detail = ownValue(params, "detail");
-      const details = statusIndexDiet
-        ? ["fold_candidates", "tree", "folds", "objects"]
-        : ["fold_candidates", "tree"];
+      const details = ["fold_candidates", "tree", "folds", "objects"];
       if (detail !== undefined && !details.includes(String(detail))) {
         throw new Error(`status detail must be one of ${details.map((name) => `'${name}'`).join(", ")}`);
       }
@@ -2798,19 +3083,15 @@ export function registerActiveContext(pi: any, options: {
           statusOffset,
           statusLimit,
           snapshot.policy.maxFoldSourceRefs,
-          { diet: statusIndexDiet && !paged },
+          { diet: !paged },
         ),
-        ...(statusIndexDiet
-          ? {
-            headroomTokens: currentCapacity(ctx).headroomTokens,
-            budgetTokens: currentCapacity(ctx).budgetTokens,
-            pendingMarks: accounting.pending,
-            eligibleMarks: accounting.eligibleMarks,
-            retainedMarks: accounting.retainedMarks,
-            eligibleMarkedShare: accounting.eligibleFreedWindowShare,
-            markedShare: accounting.freedWindowShare,
-          }
-          : {}),
+        headroomTokens: currentCapacity(ctx).headroomTokens,
+        budgetTokens: currentCapacity(ctx).budgetTokens,
+        pendingMarks: accounting.pending,
+        eligibleMarks: accounting.eligibleMarks,
+        retainedMarks: accounting.retainedMarks,
+        eligibleMarkedShare: accounting.eligibleFreedWindowShare,
+        markedShare: accounting.freedWindowShare,
         available: true,
         automatic: {
           pressureRatio: measurements.latestRatio,
@@ -2843,8 +3124,7 @@ export function registerActiveContext(pi: any, options: {
           windowSource: snapshot.windowSource,
           capacity: {
             ...currentCapacity(ctx),
-            admissionControl,
-            bytesPerToken: ESTIMATED_BYTES_PER_TOKEN,
+            bytesPerToken: projectionCharsPerToken(),
           },
           consolidationRatio: snapshot.policy.consolidationRatio,
           providerMeasurement: measurements.lastProviderMeasurement ? {
@@ -2867,6 +3147,25 @@ export function registerActiveContext(pi: any, options: {
           lastSelectionSourceIds: ladder.lastSelectionSourceIds,
           lastAutomaticAction: ladder.lastAutomaticAction,
           overBudgetReduction: ladder.overBudgetReduction ? clone(ladder.overBudgetReduction) : null,
+          curation: {
+            guided: guidedCuration,
+            occupancyThreshold: CURATION_OCCUPANCY_SHARE,
+            staleToolThreshold: CURATION_STALE_TOOL_SHARE,
+            maxRounds: CURATION_GATE_MAX_ROUNDS,
+            signals: curation.lastSignals ? { ...curation.lastSignals } : null,
+            gate: curation.gate
+              ? { roundsUsed: curation.gate.roundsUsed, openedOrdinal: curation.gate.openedOrdinal }
+              : null,
+            contextCalls: curation.contextCalls,
+            receipts: curation.receipts.map((receipt) => ({ ...receipt })),
+          },
+          recovery: {
+            attempts: curation.recoveryAttempts,
+            maxAttempts: OVERFLOW_RECOVERY_MAX_ATTEMPTS,
+            pendingRejection: curation.pendingRejection ? { ...curation.pendingRejection } : null,
+            last: curation.lastRecovery ? clone(curation.lastRecovery) : null,
+          },
+          foldSpanCap: MAX_FOLD_SPAN_CHARS,
           projectionBudgetTokens: currentCapacity(ctx).budgetTokens,
           projectionCharsPerToken: projectionCharsPerToken(),
           projectionEstimatorErrorShare: estimatorErrorShare(),
@@ -2888,21 +3187,18 @@ export function registerActiveContext(pi: any, options: {
             state: persistence.state,
             mode: foldScheduling,
             ratio: measurements.latestRatio,
-            eligibleShareThreshold,
           }),
           nativeSummaries: "disabled",
-          instrumentation: projectionInstrumentation
-            ? {
-              enabled: true,
-              ...ledgerSummary(instrumentation.ledger),
-              projectionRecords: clone(instrumentation.ledger.records),
-              cacheObservations: clone(instrumentation.ledger.observations),
-            }
-            : { enabled: false },
+          instrumentation: {
+            enabled: true,
+            ...ledgerSummary(instrumentation.ledger),
+            projectionRecords: clone(instrumentation.ledger.records),
+            cacheObservations: clone(instrumentation.ledger.observations),
+            contextEvents: clone(instrumentation.ledger.events),
+          },
           foldPeekResults,
           peek: {
-            ephemeral: ephemeralPeek,
-            perPeekOverride: perPeekEphemeral,
+            defaultMaxBytes: PEEK_DEFAULT_MAX_BYTES,
             pinned: clone(persistence.state.pinnedPeeks ?? []),
             reclaimed: reclaimedPeeks(snapshot, persistence.state).map((item) => ({
               id: item.foldId,
@@ -2940,32 +3236,24 @@ export function registerActiveContext(pi: any, options: {
     if (action === "peek") {
       const id = String(params.id ?? "").trim();
       if (!id) throw new Error("peek requires id");
-      if (params.retain !== undefined) {
-        if (typeof params.retain !== "boolean") throw new Error("peek retain must be a boolean");
-        // Never accept a retention the runtime cannot honour: without ephemeral peek
-        // nothing reclaims a read, so "retain" would be a silently ignored promise.
-        if (!ephemeralPeek) {
-          throw new Error("peek retain requires ephemeralPeek; peek results are never reclaimed in this runtime");
-        }
+      if (params.retain !== undefined && typeof params.retain !== "boolean") {
+        throw new Error("peek retain must be a boolean");
+      }
+      if (params.ephemeral !== undefined && typeof params.ephemeral !== "boolean") {
+        throw new Error("peek ephemeral must be a boolean");
       }
       const offset = boundedInteger(params.offset, 0, 0, 1_000_000_000, "offset");
+      // The DEFAULT is the bounded index view. Widening is an explicit argument, so
+      // the default path cannot overfill a window: measured 2026-08-06, 14 raw peek
+      // results held 1.9M characters, 82 percent of everything still unfolded.
       const sliceBytes = boundedInteger(
         params.bytes,
-        snapshot.policy.maxChapterChars,
+        PEEK_DEFAULT_MAX_BYTES,
         PEEK_MIN_SLICE_BYTES,
         snapshot.policy.maxChapterChars,
         "bytes",
       );
-      if (params.ephemeral !== undefined) {
-        if (!perPeekEphemeral) {
-          throw new Error("peek ephemeral requires perPeekEphemeral; this runtime has one peek lifetime");
-        }
-        if (typeof params.ephemeral !== "boolean") throw new Error("peek ephemeral must be a boolean");
-      }
-      const effectiveEphemeral = peekLifetimeIsEphemeral(
-        { ephemeralPeek, perPeekEphemeral },
-        params.ephemeral,
-      );
+      const effectiveEphemeral = peekLifetimeIsEphemeral(params.ephemeral);
       const retain = params.retain === true;
       const target = persistence.state.folds.find((item) => item.id === id);
       if (!target) throw new Error(`Unknown active-context fold ${id}`);
@@ -2985,17 +3273,129 @@ export function registerActiveContext(pi: any, options: {
         offset,
         retained: retain,
         ephemeral: effectiveEphemeral,
-        reportDurableLifetime: perPeekEphemeral,
         toolName,
       }));
       // Pinning is the informed choice the envelope names, so it is durable state:
       // a read the agent decided to keep must survive the next projection rebuild.
-      if (ephemeralPeek && params.retain !== undefined) {
+      if (params.retain !== undefined) {
         const next = withPinnedPeek(persistence.state, id, retain);
         if (next !== persistence.state) await persistManual(next, "peek", ctx);
       }
       noteSurfacingAccept(id);
       return payload;
+    }
+    if (action === "rebrief") {
+      const id = String(params.id ?? "").trim();
+      if (!id) throw new Error("rebrief requires id");
+      const brief = typeof params.brief === "string" ? params.brief.trim() : "";
+      if (!brief) throw new Error("rebrief requires a nonempty brief");
+      if (brief.length > snapshot.policy.maxBriefChars) {
+        throw new Error(`rebrief brief must be at most ${snapshot.policy.maxBriefChars} characters`);
+      }
+      const fold = requireActiveFold(snapshot, persistence.state, id);
+      const previous = foldBrief(fold, persistence.state);
+      const briefs = { ...(persistence.state.briefs ?? {}), [id]: brief };
+      await persistManual({ ...persistence.state, revision: persistence.state.revision + 1, briefs }, action, ctx);
+      updateStatus(ctx);
+      return toolPayload({
+        version: 1,
+        action,
+        id,
+        brief,
+        previousBrief: previous,
+        durableRevision: persistence.state.revision,
+        activation: "the fold's placeholder, index rows and suggestions now carry your brief; " +
+          "the exact source and its fold record are untouched.",
+      });
+    }
+    if (action === "reboundary") {
+      // One verb, both directions. `ids` names the span you want to BE one fold: every
+      // fold overlapping it dissolves and the span is re-cut as one, which merges N
+      // adjacent folds when the span covers them and splits one fold when the span sits
+      // inside it. `id` alone is the plain dissolve, which returns a span to raw.
+      if (params.ids !== undefined) {
+        const requestedIds = stringIds(params.ids);
+        const snapped = snapToFoldBoundaries(snapshot, persistence.state, requestedIds);
+        const dissolvedIds = snapped.covered.map((item) => item.id);
+        const briefs = { ...(persistence.state.briefs ?? {}) };
+        for (const dissolvedId of dissolvedIds) delete briefs[dissolvedId];
+        const leases = { ...persistence.state.leases };
+        for (const dissolvedId of dissolvedIds) delete leases[dissolvedId];
+        const dissolvedSet = new Set(dissolvedIds);
+        const flattened: ActiveContextState = {
+          ...persistence.state,
+          revision: persistence.state.revision + 1,
+          folds: deriveFoldParents(persistence.state.folds.filter((item) =>
+            !dissolvedSet.has(item.id) && !dissolvedIds.some((rootId) =>
+              descendantIds(persistence.state!, rootId).has(item.id)))),
+          expanded: persistence.state.expanded.filter((expandedId) => !dissolvedSet.has(expandedId)),
+          leases,
+          ...(Object.keys(briefs).length ? { briefs } : {}),
+        };
+        if (!Object.keys(briefs).length) delete flattened.briefs;
+        persistence.state = flattened;
+        const supplied = typeof params.brief === "string" && params.brief.trim() ? params.brief : undefined;
+        const recut = manualFoldCandidate(snapshot, persistence.state, snapped.ids, { allowProtected: true });
+        const created: Array<Record<string, unknown>> = [];
+        for (const part of splitCandidateBySize(snapshot, persistence.state, recut)) {
+          const { preparedFold, nextState } = await prepareAndCommitExplicit({
+            snapshot, candidate: part, brief: supplied, ctx, signal,
+          });
+          persistence.state = nextState;
+          created.push({ id: preparedFold.id, kind: preparedFold.fold.kind, brief: preparedFold.fold.brief });
+        }
+        await persistManual(persistence.state, action, ctx);
+        updateStatus(ctx);
+        return toolPayload({
+          version: 1,
+          action,
+          mode: dissolvedIds.length > 1 ? "merge" : "recut",
+          dissolved: dissolvedIds,
+          created,
+          corrections: snapped.corrections,
+          startId: snapped.ids[0],
+          endId: snapped.ids[1],
+          durableRevision: persistence.state.revision,
+          activation: "durable immediately; the named span is now exactly one fold per bite-size cap, " +
+            "and every dissolved fold's evidence is inside it or raw again.",
+        });
+      }
+      const id = String(params.id ?? "").trim();
+      if (!id) throw new Error("reboundary requires id, or ids naming the span to re-cut");
+      const fold = requireActiveFold(snapshot, persistence.state, id);
+      if (fold.parentId) {
+        throw new Error(
+          `Fold ${id} is nested under ${fold.parentId}; dissolve ${fold.parentId} first so ${id} is a root`,
+        );
+      }
+      const refs = flattenFoldRefs(fold, persistence.state);
+      const children = childFoldIds(fold);
+      const briefs = { ...(persistence.state.briefs ?? {}) };
+      delete briefs[id];
+      const next: ActiveContextState = {
+        ...persistence.state,
+        revision: persistence.state.revision + 1,
+        folds: deriveFoldParents(persistence.state.folds.filter((item) => item.id !== id)),
+        expanded: persistence.state.expanded.filter((expandedId) => expandedId !== id),
+        ...(Object.keys(briefs).length ? { briefs } : {}),
+      };
+      if (!Object.keys(briefs).length) delete next.briefs;
+      const leases = { ...next.leases };
+      delete leases[id];
+      await persistManual({ ...next, leases }, action, ctx);
+      updateStatus(ctx);
+      return toolPayload({
+        version: 1,
+        action,
+        id,
+        dissolved: true,
+        releasedChildren: children,
+        startId: refs[0]?.entryId ?? null,
+        endId: refs.at(-1)?.entryId ?? null,
+        durableRevision: persistence.state.revision,
+        activation: `the span ${id} held is raw again and its boundary is yours to re-cut; ` +
+          "fold the endpoints you meant, or two sub-spans to split it. No evidence moved.",
+      });
     }
     if (action === "commit") {
       if (!epochScheduling) {
@@ -3007,6 +3407,12 @@ export function registerActiveContext(pi: any, options: {
           refused: [],
           note: "Fold scheduling is immediate; every fold already applied when it was made.",
         });
+      }
+      // An explicit commit is the agent saying go: the announced epoch happens now,
+      // and the gate closes having been answered rather than timed out.
+      if (curation.gate && curation.lastSignals) {
+        recordGateEvent("proceeded", curation.lastSignals, curation.gate.roundsUsed, "go");
+        curation.gate = null;
       }
       const ordinal = markOrdinal(snapshot);
       let staged = persistence.state;
@@ -3021,7 +3427,7 @@ export function registerActiveContext(pi: any, options: {
         snapshot,
         state: staged,
         generation: lifecycle.generation,
-        retainIneligible: retainPendingMarks,
+        retainIneligible: true,
       });
       if (result.applied.length) {
         advisory.armedMilestone = null;
@@ -3051,7 +3457,7 @@ export function registerActiveContext(pi: any, options: {
         estimatedEligibleFreedTokens: accounting.eligibleFreedTokens,
         freedWindowShare: accounting.freedWindowShare,
         durableRevision: persistence.state.revision,
-        ...(projectionInstrumentation ? { instrumentation: ledgerSummary(instrumentation.ledger) } : {}),
+        instrumentation: ledgerSummary(instrumentation.ledger),
         activation: pending
           ? "one batched projection rewrite; durable immediately and projected on the next model call"
           : "no pending marks; nothing was rewritten",
@@ -3068,7 +3474,7 @@ export function registerActiveContext(pi: any, options: {
           snapshot,
           state: persistence.state,
           generation: lifecycle.generation,
-          retainIneligible: retainPendingMarks,
+          retainIneligible: true,
         });
         persistence.state = result.state;
         epochApplied = result.applied;
@@ -3140,96 +3546,186 @@ export function registerActiveContext(pi: any, options: {
       });
     }
     if (action === "fold") {
-      const ids = stringIds(params.ids);
-      const candidate = manualFoldCandidate(snapshot, persistence.state, ids, {
-        allowProtected: retainPendingMarks,
-      });
-      const supplied = typeof params.brief === "string" && params.brief.trim() ? params.brief : undefined;
-      // Tail-adjacent spans invalidate almost nothing, so they still apply at once --
-      // unless marks are retained, where mark always means mark and nothing else.
-      if (epochScheduling &&
-          (retainPendingMarks || !tailAdjacent(snapshot, candidate, persistence.state))) {
-        // Resolve the brief now, while the source is in hand, so the commit epoch
+      // One call, several {span, brief} pairs. Marking is free and committing is not,
+      // so the shape that should be cheapest to express is the BATCH: an agent that
+      // must spend one call per span curates less than one that spends one call.
+      const requested = batchedMarkRequests(params);
+      const resolved: Array<{
+        candidate: FoldCandidate;
+        brief?: string;
+        corrections: SpanCorrection[];
+        splitFrom: number;
+      }> = [];
+      for (const request of requested) {
+        const snapped = snapFoldCandidate(snapshot, persistence.state, request.ids, { allowProtected: true });
+        const spanChars = candidateSpanChars(snapshot, persistence.state, snapped.candidate);
+        const parts = splitCandidateBySize(snapshot, persistence.state, snapped.candidate);
+        for (const [index, part] of parts.entries()) {
+          resolved.push({
+            candidate: part,
+            brief: request.brief,
+            corrections: index === 0
+              ? [
+                ...snapped.corrections,
+                ...(parts.length > 1
+                  ? [{
+                    from: request.ids,
+                    to: [],
+                    reason: `span was ${spanChars} chars, over the ${MAX_FOLD_SPAN_CHARS}-char bite-size cap; ` +
+                      `split into ${parts.length} sequential folds, each with its own brief`,
+                  }]
+                  : []),
+              ]
+              : [],
+            splitFrom: parts.length > 1 && index === 0 ? spanChars : 0,
+          });
+        }
+      }
+      const corrections = resolved.flatMap((item) => item.corrections);
+      if (epochScheduling) {
+        // Resolve every brief now, while the source is in hand, so the commit epoch
         // itself stays deterministic and free of provider calls. A span that is not
         // eligible YET cannot go through preparation at all, so it takes the
         // deterministic brief: the mark is a decision, and refusing to record it
         // because the span is momentarily fresh is exactly the drop being fixed.
-        const eligibleNow = !refsProtected(candidate.sourceRefs, persistence.state, snapshot) &&
-          (candidate.kind !== "tool-result" ||
-            !toolRefsProtected(candidate.sourceRefs, persistence.state, snapshot));
-        const briefed = eligibleNow
-          ? await prepareFold({
+        const marks: Array<Record<string, unknown>> = [];
+        let staged = persistence.state;
+        for (const item of resolved) {
+          const { candidate } = item;
+          const eligibleNow = !refsProtected(candidate.sourceRefs, staged, snapshot) &&
+            (candidate.kind !== "tool-result" ||
+              !toolRefsProtected(candidate.sourceRefs, staged, snapshot));
+          const briefed = eligibleNow
+            ? await prepareFold({
+              candidate,
+              snapshot,
+              state: staged,
+              generation: lifecycle.generation,
+              brief: item.brief,
+              summarize: options.summarizeContextSpan,
+              ctx,
+              signal,
+            })
+            : null;
+          const mark = foldMarkFor({
             candidate,
-            snapshot,
-            state: persistence.state,
-            generation: lifecycle.generation,
-            brief: supplied,
-            summarize: options.summarizeContextSpan,
-            ctx,
-            signal,
-          })
-          : null;
-        const mark = foldMarkFor({
-          candidate,
-          brief: briefed?.fold.brief ?? supplied ?? ladderBrief(snapshot, persistence.state, candidate),
-          briefProvenance: briefed?.fold.provenance ??
-            (supplied ? { kind: "supplied" } : { kind: "deterministic" }),
-          origin: "agent",
-          ordinal: markOrdinal(snapshot),
-        });
-        const addition = addPendingMark(persistence.state, mark);
-        if (!addition.added) throw new Error(`Fold mark refused: ${addition.reason}`);
-        await persistManual(addition.state, action, ctx);
+            brief: briefed?.fold.brief ?? item.brief ?? ladderBrief(snapshot, staged, candidate),
+            briefProvenance: briefed?.fold.provenance ??
+              (item.brief ? { kind: "supplied" } : { kind: "deterministic" }),
+            origin: "agent",
+            ordinal: markOrdinal(snapshot),
+          });
+          const addition = addPendingMark(staged, mark);
+          if (!addition.added) {
+            if (resolved.length === 1) throw new Error(`Fold mark refused: ${addition.reason}`);
+            marks.push({ id: mark.id, kind: mark.kind, marked: false, reason: addition.reason });
+            continue;
+          }
+          staged = addition.state;
+          marks.push({
+            id: mark.id,
+            kind: mark.kind,
+            marked: true,
+            brief: mark.brief,
+            provenance: normalizeLegacyProvenance(mark.briefProvenance),
+            eligibleNow,
+          });
+        }
+        await persistManual(staged, action, ctx);
         updateStatus(ctx);
         const accounting = markAccounting(snapshot, persistence.state);
+        // The single-span shape is the head of the batched one: one call carrying one
+        // span answers exactly as it always did, and a batch adds fields rather than
+        // replacing them.
+        const only = marks.length === 1 && marks[0].marked === true ? marks[0] : null;
         return toolPayload({
           version: 1,
           action,
           scheduling: "epoch",
-          marked: true,
-          id: mark.id,
-          kind: mark.kind,
-          brief: mark.brief,
-          provenance: normalizeLegacyProvenance(mark.briefProvenance),
+          marked: marks.some((mark) => mark.marked === true),
+          ...(only
+            ? {
+              id: only.id,
+              kind: only.kind,
+              brief: only.brief,
+              provenance: only.provenance,
+              eligibleNow: only.eligibleNow,
+            }
+            : {}),
+          marks,
+          // Never silently reinterpreted: a span the runtime moved says so, here.
+          corrections,
           argumentsSha256: executionArgumentsSha256,
           durableRevision: persistence.state.revision,
           pendingMarks: accounting.pending,
           eligibleMarks: accounting.eligibleMarks,
           retainedMarks: accounting.retainedMarks,
-          eligibleNow,
           estimatedFreedWindowShare: accounting.freedWindowShare,
           estimatedEligibleWindowShare: accounting.eligibleFreedWindowShare,
           estimatedRewriteTokens: accounting.rewriteTokens,
-          activation: "recorded as a pending mark; no context bytes moved. It applies at the next " +
-            "commit epoch, which you can open with the commit action or leave to window pressure.",
+          activation: "recorded as pending marks; no context bytes moved. They apply together at the " +
+            "next commit epoch, which you can open with the commit action or leave to window pressure.",
           commit: { action: "commit" },
         });
       }
-      const { preparedFold, nextState } = await prepareAndCommitExplicit({
-        snapshot,
-        candidate,
-        brief: supplied,
-        ctx,
-        signal,
-      });
+      const applied: Array<Record<string, unknown>> = [];
+      for (const item of resolved) {
+        const { preparedFold, nextState } = await prepareAndCommitExplicit({
+          snapshot,
+          candidate: item.candidate,
+          brief: item.brief,
+          ctx,
+          signal,
+        });
+        persistence.state = nextState;
+        applied.push({
+          id: preparedFold.id,
+          kind: preparedFold.fold.kind,
+          brief: preparedFold.fold.brief,
+          provenance: normalizeLegacyProvenance(preparedFold.fold.provenance),
+          expand: { action: "expand", id: preparedFold.id },
+        });
+      }
       advisory.armedMilestone = null;
-      await persistManual(clearArmedAdvisory(nextState), "fold", ctx);
+      await persistManual(clearArmedAdvisory(persistence.state), "fold", ctx);
       updateStatus(ctx);
+      const single = applied.length === 1 ? applied[0] : null;
       return toolPayload({
         version: 1,
         action,
-        id: preparedFold.id,
-        kind: preparedFold.fold.kind,
-        brief: preparedFold.fold.brief,
-        provenance: normalizeLegacyProvenance(preparedFold.fold.provenance),
+        scheduling: "immediate",
+        ...(single
+          ? {
+            id: single.id,
+            kind: single.kind,
+            brief: single.brief,
+            provenance: single.provenance,
+            expand: single.expand,
+          }
+          : {}),
+        folds: applied,
+        corrections,
         argumentsSha256: executionArgumentsSha256,
         durableRevision: persistence.state.revision,
         activation: "durable immediately; projected on the next model call in this same turn",
-        expand: { action: "expand", id: preparedFold.id },
       });
     }
     throw new Error(`Unknown ${toolName} action '${action}'`);
   };
+  /**
+   * Every context-management call, accepted AND refused, in the durable stream.
+   *
+   * A rejected call is the more informative of the two: an agent whose spans keep being
+   * refused looks identical, from fold records alone, to an agent that never tried to
+   * curate at all. The exact validation text is recorded verbatim, because "it failed"
+   * is not a finding and "ids must contain 1-64 values" is.
+   */
+  const requestedMarkCount = (params: Record<string, unknown>): number => {
+    const batched = denseOwnArrayValues(params?.marks);
+    if (batched) return batched.length;
+    return params?.ids === undefined && params?.id === undefined ? 0 : 1;
+  };
+
   const toolHandler = async (
     _toolCallId: string,
     params: Record<string, unknown>,
@@ -3237,7 +3733,36 @@ export function registerActiveContext(pi: any, options: {
     _onUpdate: unknown,
     ctx: any,
   ): Promise<unknown> => {
-    const operation = ladder.actionQueue.then(() => executeAction(params, signal, ctx));
+    const operation = ladder.actionQueue.then(async () => {
+      const action = String(params?.action ?? "");
+      // The gate's engagement signal, counted BEFORE the call can fail: an agent that
+      // reached for a context verb engaged, whether or not the span was valid.
+      curation.contextCalls += 1;
+      const attempt = (ok: boolean, error: string | null, corrections: Array<Record<string, unknown>>) => {
+        recordEvent({
+          version: 1,
+          kind: "attempt",
+          sessionId: persistence.state?.sessionId ?? ctx.sessionManager.getSessionId(),
+          action,
+          ok,
+          error,
+          corrections,
+          marks: requestedMarkCount(params),
+          argumentsSha256: sha256Value(params ?? {}),
+          ordinal: currentOrdinal(),
+          occurredAt: Date.now(),
+        });
+      };
+      try {
+        const result = await executeAction(params, signal, ctx);
+        const corrections = denseOwnArrayValues(ownValue(ownValue(result, "details"), "corrections"));
+        attempt(true, null, (corrections ?? []) as Array<Record<string, unknown>>);
+        return result;
+      } catch (error) {
+        attempt(false, error instanceof Error ? error.message : String(error), []);
+        throw error;
+      }
+    });
     ladder.actionQueue = operation.catch(() => undefined);
     return operation;
   };
@@ -3324,12 +3849,9 @@ export function registerActiveContext(pi: any, options: {
     allowedActions: allowedToolActions,
     fullSurface: allowedToolActions.length === defaultToolActions.length,
     maxBriefChars: ACTIVE_CONTEXT_POLICY.maxBriefChars,
-    ephemeralPeek,
-    perPeekEphemeral,
-    statusDetails: statusIndexDiet
-      ? ["fold_candidates", "tree", "folds", "objects"]
-      : ["fold_candidates", "tree"],
+    statusDetails: ["fold_candidates", "tree", "folds", "objects"],
     minPeekSliceBytes: PEEK_MIN_SLICE_BYTES,
+    defaultPeekBytes: PEEK_DEFAULT_MAX_BYTES,
     handler: toolHandler,
   }));
   for (const command of buildActiveContextCommands({
@@ -3352,6 +3874,8 @@ export function registerActiveContext(pi: any, options: {
     lifecycle.latestSnapshot = null;
     advisory.armedMilestone = null;
     surfacing.suggestions = [];
+    curation.gate = null;
+    curation.receipts = [];
     try { ctx.ui?.setStatus?.(entryTypePrefix, undefined); } catch { /* Shutdown cannot be blocked by UI. */ }
   });
 

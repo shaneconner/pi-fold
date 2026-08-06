@@ -1,6 +1,9 @@
 import { evidenceSha256, sha256Value } from "../json.ts";
 import { ownValue } from "./canonical.ts";
-import { MAX_PROJECTION_HASH_RECORDS } from "./policy.ts";
+import {
+  MAX_CONTEXT_ATTEMPT_RECORDS,
+  MAX_PROJECTION_HASH_RECORDS,
+} from "./policy.ts";
 
 /**
  * Projection instrumentation.
@@ -91,6 +94,66 @@ export interface CacheObservation {
   providerSideMiss: boolean;
 }
 
+/**
+ * The context-management event stream.
+ *
+ * Everything the agent tried and everything the runtime decided, adjudicable from the
+ * session file. It records REJECTED calls as loudly as accepted ones: an agent that
+ * cannot fold because its span keeps being refused looks identical, from fold records
+ * alone, to an agent that never tried. Every record here is also appended as a durable
+ * session entry, because an in-memory ledger is invisible to an external adjudicator.
+ */
+export type ContextEventRecord =
+  | ContextAttemptRecord
+  | CurationGateRecord
+  | ContextReceiptRecord;
+
+/** One context-management tool call, accepted or refused. */
+export interface ContextAttemptRecord {
+  version: 1;
+  kind: "attempt";
+  sessionId: string;
+  action: string;
+  ok: boolean;
+  /** The exact validation text the caller received; null when the call succeeded. */
+  error: string | null;
+  /** Auto-snap corrections applied to the request before it was served. */
+  corrections: Array<Record<string, unknown>>;
+  /** How many {span, brief} pairs a batched mark call carried. */
+  marks: number;
+  argumentsSha256: string;
+  ordinal: number;
+  occurredAt: number;
+}
+
+/** One evaluation of the guided-curation last-call gate. */
+export interface CurationGateRecord {
+  version: 1;
+  kind: "curation-gate";
+  sessionId: string;
+  event: "opened" | "held" | "proceeded";
+  occupancy: number | null;
+  staleToolShare: number;
+  staleToolTokens: number;
+  staleToolResults: number;
+  eligibleFolds: number;
+  roundsUsed: number;
+  marksAddedDuringGate: number;
+  proceededBy: string | null;
+  ordinal: number;
+  occurredAt: number;
+}
+
+/** One receipt delivered into the window. */
+export interface ContextReceiptRecord {
+  version: 1;
+  kind: "receipt";
+  sessionId: string;
+  receipt: Record<string, unknown>;
+  ordinal: number;
+  occurredAt: number;
+}
+
 export interface InstrumentationLedger {
   projections: number;
   /** Projections this runtime actually rewrote. The scheduling dial. */
@@ -102,6 +165,13 @@ export interface InstrumentationLedger {
   observedMisses: number;
   records: ProjectionRecord[];
   observations: CacheObservation[];
+  /** Context-management attempts, gate events and receipts, oldest first. */
+  events: ContextEventRecord[];
+  attempts: number;
+  attemptErrors: number;
+  autoSnapCorrections: number;
+  curationGateEvents: number;
+  receiptsDelivered: number;
 }
 
 export function emptyLedger(): InstrumentationLedger {
@@ -114,7 +184,31 @@ export function emptyLedger(): InstrumentationLedger {
     observedMisses: 0,
     records: [],
     observations: [],
+    events: [],
+    attempts: 0,
+    attemptErrors: 0,
+    autoSnapCorrections: 0,
+    curationGateEvents: 0,
+    receiptsDelivered: 0,
   };
+}
+
+/** Bounded append; the durable session entry is the audit copy, this ring is the status view. */
+export function recordContextEvent(
+  ledger: InstrumentationLedger,
+  record: ContextEventRecord,
+): ContextEventRecord {
+  if (record.kind === "attempt") {
+    ledger.attempts += 1;
+    if (!record.ok) ledger.attemptErrors += 1;
+    ledger.autoSnapCorrections += record.corrections.length;
+  } else if (record.kind === "curation-gate") ledger.curationGateEvents += 1;
+  else ledger.receiptsDelivered += 1;
+  ledger.events.push(record);
+  if (ledger.events.length > MAX_CONTEXT_ATTEMPT_RECORDS) {
+    ledger.events = ledger.events.slice(ledger.events.length - MAX_CONTEXT_ATTEMPT_RECORDS);
+  }
+  return record;
 }
 
 function bounded<T>(values: T[], next: T): T[] {
@@ -180,5 +274,10 @@ export function ledgerSummary(ledger: InstrumentationLedger): Record<string, unk
     projectionsUnchanged: ledger.identical,
     observedCacheMisses: ledger.observedMisses,
     providerSideCacheMisses: ledger.providerSideMisses,
+    contextAttempts: ledger.attempts,
+    contextAttemptErrors: ledger.attemptErrors,
+    autoSnapCorrections: ledger.autoSnapCorrections,
+    curationGateEvents: ledger.curationGateEvents,
+    receiptsDelivered: ledger.receiptsDelivered,
   };
 }

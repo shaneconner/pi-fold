@@ -28,6 +28,7 @@ import {
   ACTIVE_CONTEXT_POLICY,
   CONSOLIDATION_WIDTH_THRESHOLD,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
+  MAX_FOLD_SPAN_CHARS,
 } from "./policy.ts";
 import type {
   ActiveContextSnapshot,
@@ -41,6 +42,7 @@ import type {
 } from "./policy.ts";
 import {
   chapterSegments,
+  currentTurnBoundary,
   scanTurnToolBatches,
   structurallyClosedChapterUnits,
   terminalAssistant,
@@ -254,10 +256,10 @@ export function automaticToolBrief(snapshot: ActiveContextSnapshot, candidate: F
     ? "active-context status inspection"
     : factualBriefValue(name);
   const args = toolCallArguments(snapshot, first.assistantIndex, first.id);
-  if (snapshot.stageIdentifiedBriefs) {
-    const identified = stageIdentifiedToolBrief({ snapshot, refs, calls, factualValue, factualToolName });
-    if (identified) return identified;
-  }
+  // Exact anchors before generic prose: one sentence per tool made every fold of that
+  // tool carry the SAME brief, so no index could answer which fold holds a given stage.
+  const identified = stageIdentifiedToolBrief({ snapshot, refs, calls, factualValue, factualToolName });
+  if (identified) return identified;
   const targets: string[] = [];
   for (const key of ["path", "address", "query", "url", "action", "id"]) {
     const value = ownValue(args, key);
@@ -492,6 +494,223 @@ export function chapterRangeIsUnitAligned(snapshot: ActiveContextSnapshot, start
   if (!units.length || units[0].start !== start || units.at(-1)!.end !== end + 1) return false;
   if (new Set(units.map((unit) => unit.turnStart)).size > snapshot.policy.maxChapterTurns) return false;
   return units.every((unit, index) => index === 0 || unit.start === units[index - 1].end);
+}
+
+/**
+ * Bite-sized folds.
+ *
+ * A fold is only navigable if reading one back is cheap. Measured 2026-08-06 (rep 6):
+ * one 60,432-byte chapter fold hid the fact the run needed in its tail, and every peek
+ * of it was either truncated short of the answer or too expensive to widen. So a span
+ * whose content exceeds the cap becomes SEQUENTIAL folds, each with its own brief,
+ * split only at structurally closed unit boundaries -- never mid-entry.
+ *
+ * A single unit that alone exceeds the cap is returned whole: there is no valid
+ * interior boundary, and refusing to fold it would leave the biggest span in the
+ * window as the one thing nothing may reclaim. The caller reports the split.
+ */
+export function splitCandidateBySize(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+  candidate: FoldCandidate,
+  maxChars: number = MAX_FOLD_SPAN_CHARS,
+): FoldCandidate[] {
+  // A tool-result fold owns exactly one validated assistant batch and a consolidation
+  // owns whole child folds; neither has an interior boundary to split on.
+  if (candidate.kind !== "chapter") return [candidate];
+  const refs = candidate.sourceRefs.length ? candidate.sourceRefs : candidateSourceRefs(candidate.parts, state);
+  const indices = refs.map((ref) => exactMapped(snapshot, ref)?.index ?? -1);
+  if (!indices.length || indices.some((index) => index < 0)) return [candidate];
+  const start = Math.min(...indices);
+  const end = Math.max(...indices);
+  if (spanBytes(snapshot, start, end + 1) <= maxChars) return [candidate];
+  const units = chapterUnits(snapshot).filter((unit) => unit.start >= start && unit.end <= end + 1);
+  if (units.length < 2) return [candidate];
+  const split: FoldCandidate[] = [];
+  const emit = (from: number, to: number): boolean => {
+    const parts = partsForRange(snapshot, state, from, to, new Set<FoldKind>(["tool-result"]));
+    if (!parts) return false;
+    split.push({ kind: "chapter", parts, sourceRefs: candidateSourceRefs(parts, state) });
+    return true;
+  };
+  let runStart = units[0].start;
+  let runBytes = 0;
+  for (const unit of units) {
+    const size = spanBytes(snapshot, unit.start, unit.end);
+    if (runBytes > 0 && runBytes + size > maxChars) {
+      if (!emit(runStart, unit.start - 1)) return [candidate];
+      runStart = unit.start;
+      runBytes = 0;
+    }
+    runBytes += size;
+  }
+  if (runBytes > 0 && !emit(runStart, units.at(-1)!.end - 1)) return [candidate];
+  return split.length ? split : [candidate];
+}
+
+/** Exact serialized size of a candidate's whole span, folds and raw entries alike. */
+export function candidateSpanChars(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+  candidate: FoldCandidate,
+): number {
+  const refs = candidate.sourceRefs.length ? candidate.sourceRefs : candidateSourceRefs(candidate.parts, state);
+  const indices = refs.map((ref) => exactMapped(snapshot, ref)?.index ?? -1).filter((index) => index >= 0);
+  if (!indices.length) return 0;
+  return spanBytes(snapshot, Math.min(...indices), Math.max(...indices) + 1);
+}
+
+/** Exact serialized size of a half-open mapped message range. */
+export function spanBytes(snapshot: ActiveContextSnapshot, start: number, end: number): number {
+  return bytes(snapshot.messages.slice(start, end));
+}
+
+/** One auto-snap the runtime applied to a requested span, reported never inferred. */
+export interface SpanCorrection {
+  from: string[];
+  to: string[];
+  reason: string;
+}
+
+export interface SnappedFoldSpan {
+  candidate: FoldCandidate;
+  corrections: SpanCorrection[];
+}
+
+/**
+ * Resolve a requested span, correcting it where a correction exists.
+ *
+ * A span the agent got slightly wrong -- crossing a fold it forgot about, reaching
+ * into the turn still in flight, landing mid-unit -- is a span it MEANT, and refusing
+ * it teaches the agent that curating is a coin flip. So an invalid span SNAPS to the
+ * nearest valid edge and the correction is stated in the result. Rejection is reserved
+ * for a request with no valid interpretation at all, and it says exactly what failed.
+ */
+export function snapFoldCandidate(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+  ids: string[],
+  options: { allowProtected?: boolean } = {},
+): SnappedFoldSpan {
+  let directError: Error;
+  try {
+    return { candidate: manualFoldCandidate(snapshot, state, ids, options), corrections: [] };
+  } catch (error) {
+    directError = error instanceof Error ? error : new Error(String(error));
+  }
+  const snapped = snapSpanIds(snapshot, state, ids);
+  if (!snapped) throw directError;
+  try {
+    return {
+      candidate: manualFoldCandidate(snapshot, state, snapped.ids, options),
+      corrections: snapped.corrections,
+    };
+  } catch (error) {
+    throw new Error(
+      `${directError.message}. The nearest valid span [${snapped.ids.join(", ")}] was also refused: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+}
+
+/**
+ * The correction itself: pull the endpoints out of any fold they cut through, out of
+ * the turn still in flight, and onto structurally closed unit boundaries.
+ */
+export function snapSpanIds(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+  ids: string[],
+): { ids: string[]; corrections: SpanCorrection[] } | null {
+  let resolved: Array<{ start: number; end: number; fold?: ActiveFold }>;
+  // An unknown id has no nearest valid edge: there is nothing to snap TO.
+  try { resolved = resolveFoldInputIds(snapshot, state, ids); }
+  catch { return null; }
+  const requested = [resolved[0].start, resolved.at(-1)!.end] as [number, number];
+  let [start, end] = requested;
+  const corrections: SpanCorrection[] = [];
+  const note = (reason: string): void => {
+    corrections.push({
+      from: [entryIdAt(snapshot, requested[0]), entryIdAt(snapshot, requested[1])],
+      to: [entryIdAt(snapshot, start), entryIdAt(snapshot, end)],
+      reason,
+    });
+  };
+  for (const root of orderedRoots(state, snapshot)) {
+    if (start > root.start && start <= root.end) {
+      // Nearest edge: absorb the fold whole, or step past it, whichever moves less.
+      start = start - root.start <= root.end + 1 - start ? root.start : root.end + 1;
+      note(`span started inside ${root.fold.id}; corrected to its nearest boundary`);
+    }
+    if (end >= root.start && end < root.end) {
+      end = root.end - end <= end - (root.start - 1) ? root.end : root.start - 1;
+      note(`span ended inside ${root.fold.id}; corrected to its nearest boundary`);
+    }
+  }
+  const boundary = currentTurnBoundary(snapshot);
+  if (boundary >= 0 && end > boundary) {
+    end = boundary;
+    note("span reached into the turn still in flight; corrected back to the last closed turn");
+  }
+  const units = chapterUnits(snapshot);
+  const startUnit = units.find((unit) => start >= unit.start && start < unit.end);
+  if (startUnit && startUnit.start !== start) {
+    start = startUnit.start;
+    note("span started mid-unit; corrected to the start of its closed user/assistant/tool unit");
+  }
+  const endUnit = units.find((unit) => end >= unit.start && end < unit.end);
+  if (endUnit && endUnit.end - 1 !== end) {
+    end = endUnit.end - 1;
+    note("span ended mid-unit; corrected to the end of its closed user/assistant/tool unit");
+  }
+  if (!corrections.length || end < start ||
+      !snapshot.mapped[start]?.ref || !snapshot.mapped[end]?.ref) return null;
+  return { ids: [entryIdAt(snapshot, start), entryIdAt(snapshot, end)], corrections };
+}
+
+/**
+ * Snap a span OUTWARD to whole-fold boundaries.
+ *
+ * The re-boundary verb operates on folds, so a span that cuts one in half has exactly
+ * one sane reading: the agent meant that fold. Outward rather than nearest, because
+ * losing a fold the agent did not name is the surprising outcome and re-cutting a
+ * slightly larger span is not.
+ */
+export function snapToFoldBoundaries(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+  ids: string[],
+): { start: number; end: number; ids: string[]; covered: ActiveFold[]; corrections: SpanCorrection[] } {
+  const resolved = resolveFoldInputIds(snapshot, state, ids);
+  const requested: [number, number] = [resolved[0].start, resolved.at(-1)!.end];
+  let [start, end] = requested;
+  const corrections: SpanCorrection[] = [];
+  // Fixed point: absorbing one fold can pull the span across the next.
+  for (let pass = 0; pass < state.folds.length + 1; pass += 1) {
+    let moved = false;
+    for (const root of orderedRoots(state, snapshot)) {
+      if (root.end < start || root.start > end) continue;
+      if (root.start < start) { start = root.start; moved = true; }
+      if (root.end > end) { end = root.end; moved = true; }
+    }
+    if (!moved) break;
+  }
+  if (start !== requested[0] || end !== requested[1]) {
+    corrections.push({
+      from: [entryIdAt(snapshot, requested[0]), entryIdAt(snapshot, requested[1])],
+      to: [entryIdAt(snapshot, start), entryIdAt(snapshot, end)],
+      reason: "span partially covered one or more folds; corrected outward to their whole boundaries",
+    });
+  }
+  const covered = orderedRoots(state, snapshot)
+    .filter((root) => root.start >= start && root.end <= end)
+    .map((root) => root.fold);
+  return { start, end, ids: [entryIdAt(snapshot, start), entryIdAt(snapshot, end)], covered, corrections };
+}
+
+export function entryIdAt(snapshot: ActiveContextSnapshot, index: number): string {
+  return snapshot.mapped[index]?.ref?.entryId ?? `position-${index}`;
 }
 
 export function manualFoldCandidate(

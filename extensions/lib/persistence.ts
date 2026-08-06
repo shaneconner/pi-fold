@@ -122,6 +122,35 @@ export function validPendingMark(value: unknown): value is PendingMark {
 }
 
 /**
+ * Agent-corrected fold briefs, keyed by fold id. Bounded by the same brief cap a
+ * supplied brief obeys, and refused for a fold that is not in the forest, exactly
+ * like a pin or a refold mark naming a missing fold.
+ */
+export function parseBriefOverrides(
+  value: unknown,
+  ids?: ReadonlySet<string>,
+): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid active-context brief overrides");
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > MAX_ACTIVE_FOLD_RECORDS ||
+      entries.some(([id, brief]) => !id || typeof brief !== "string" || !brief.trim() ||
+        brief.length > ACTIVE_CONTEXT_POLICY.maxBriefChars || (ids && !ids.has(id)))) {
+    throw new Error("Invalid active-context brief overrides");
+  }
+  return Object.fromEntries(entries.sort(([left], [right]) => left.localeCompare(right))) as Record<string, string>;
+}
+
+/** The brief a fold PRESENTS: the agent's correction when it made one, else the record's. */
+export function foldBrief(
+  fold: Pick<ActiveFold, "id" | "brief">,
+  state: Pick<ActiveContextState, "briefs">,
+): string {
+  return state.briefs?.[fold.id] ?? fold.brief;
+}
+
+/**
  * Fold ids whose peek result the agent pinned against ephemeral reclamation. A pin
  * naming a fold that no longer exists is not a silent no-op: it is refused, exactly
  * like a refold mark naming a missing fold.
@@ -317,6 +346,7 @@ export function parseActiveContextState(
   const hasSurfacing = recordLike && Object.prototype.hasOwnProperty.call(value, "surfacing");
   const hasPendingMarks = recordLike && Object.prototype.hasOwnProperty.call(value, "pendingMarks");
   const hasPinnedPeeks = recordLike && Object.prototype.hasOwnProperty.call(value, "pinnedPeeks");
+  const hasBriefs = recordLike && Object.prototype.hasOwnProperty.call(value, "briefs");
   const extraKeys = [
     ...(hasPrepared ? ["prepared"] : []),
     ...(hasAdvisory ? ["advisory"] : []),
@@ -325,6 +355,7 @@ export function parseActiveContextState(
     ...(hasSurfacing ? ["surfacing"] : []),
     ...(hasPendingMarks ? ["pendingMarks"] : []),
     ...(hasPinnedPeeks ? ["pinnedPeeks"] : []),
+    ...(hasBriefs ? ["briefs"] : []),
   ];
   if (!exactRecord(value, [...ACTIVE_STATE_KEYS, ...extraKeys])) throw new Error("Invalid active-context state keys");
   const folds = denseOwnArrayValues(ownValue(value, "folds"));
@@ -356,6 +387,7 @@ export function parseActiveContextState(
     throw new Error("Invalid active-context pending marks");
   }
   const pinnedPeeks = hasPinnedPeeks ? parsePinnedPeeks(ownValue(value, "pinnedPeeks"), ids) : [];
+  const briefs = hasBriefs ? parseBriefOverrides(ownValue(value, "briefs"), ids) : {};
   const source = clone(value) as unknown as ActiveContextState;
   // Provenance normalization is presentation-only; never mutate a durable
   // content-addressed fold record: changing its bytes causes the next re-persist
@@ -376,6 +408,7 @@ export function parseActiveContextState(
     ...(surfacing.length ? { surfacing } : {}),
     ...(marks.length ? { pendingMarks: marks } : {}),
     ...(pinnedPeeks.length ? { pinnedPeeks } : {}),
+    ...(Object.keys(briefs).length ? { briefs } : {}),
     ...(hasAdvisory
       ? { advisory: clone(source.advisory!) }
       : defaultAdvisory ? { advisory: { highWater: 0, delivered: {} } } : {}),
@@ -454,6 +487,7 @@ export function sameStateProjection(left: ActiveContextState, right: ActiveConte
     if (normalizedState.surfacing && normalizedState.surfacing.length === 0) delete normalizedState.surfacing;
     if (normalizedState.pendingMarks && normalizedState.pendingMarks.length === 0) delete normalizedState.pendingMarks;
     if (normalizedState.pinnedPeeks && normalizedState.pinnedPeeks.length === 0) delete normalizedState.pinnedPeeks;
+    if (normalizedState.briefs && !Object.keys(normalizedState.briefs).length) delete normalizedState.briefs;
     return normalizedState;
   };
   return stableStringify(normalized(left)) === stableStringify(normalized(right));
@@ -497,6 +531,7 @@ export function validateV2ProjectionFields(
   surfacingValue?: unknown,
   pendingMarksValue?: unknown,
   pinnedPeeksValue?: unknown,
+  briefsValue?: unknown,
 ): {
   expanded: string[];
   protected: EvidenceRef[];
@@ -507,6 +542,7 @@ export function validateV2ProjectionFields(
   surfacing: SurfacingRecord[];
   pendingMarks: PendingMark[];
   pinnedPeeks: string[];
+  briefs: Record<string, string>;
 } {
   const expanded = denseOwnArrayValues(expandedValue);
   const protectedRefs = denseOwnArrayValues(protectedValue);
@@ -527,6 +563,7 @@ export function validateV2ProjectionFields(
   const surfacing = surfacingValue === undefined ? [] : parseSurfacingLog(surfacingValue);
   const pendingMarks = pendingMarksValue === undefined ? [] : parsePendingMarks(pendingMarksValue);
   const pinnedPeeks = pinnedPeeksValue === undefined ? [] : parsePinnedPeeks(pinnedPeeksValue);
+  const briefs = briefsValue === undefined ? {} : parseBriefOverrides(briefsValue);
   return {
     expanded: clone(expanded) as string[],
     protected: clone(protectedRefs) as EvidenceRef[],
@@ -539,6 +576,7 @@ export function validateV2ProjectionFields(
     surfacing,
     pendingMarks,
     pinnedPeeks,
+    briefs,
   };
 }
 
@@ -556,6 +594,8 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     Object.prototype.hasOwnProperty.call(value, "pendingMarks"));
   const hasPinnedPeeks = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "pinnedPeeks"));
+  const hasBriefs = Boolean(value && typeof value === "object" &&
+    Object.prototype.hasOwnProperty.call(value, "briefs"));
   const optionalKeys = [
     ...(hasAdvisory ? ["advisory"] : []),
     ...(hasTokensSinceToolFold ? ["tokensSinceToolFold"] : []),
@@ -563,6 +603,7 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     ...(hasSurfacing ? ["surfacing"] : []),
     ...(hasPendingMarks ? ["pendingMarks"] : []),
     ...(hasPinnedPeeks ? ["pinnedPeeks"] : []),
+    ...(hasBriefs ? ["briefs"] : []),
   ];
   const checkpoint = kind === "checkpoint" &&
     exactRecord(value, [...STATE_CHECKPOINT_V2_KEYS, ...optionalKeys]);
@@ -578,6 +619,7 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     ownValue(value, "expanded"), ownValue(value, "protected"), ownValue(value, "prepared"),
     ownValue(value, "advisory"), ownValue(value, "tokensSinceToolFold"), ownValue(value, "leases"),
     ownValue(value, "surfacing"), ownValue(value, "pendingMarks"), ownValue(value, "pinnedPeeks"),
+    ownValue(value, "briefs"),
   );
   if (checkpoint) {
     const refs = denseOwnArrayValues(ownValue(value, "foldRefs"));
@@ -642,7 +684,7 @@ export function stateFromFoldRefs(
   wire: Pick<
     ActiveContextCheckpointV2,
     "sessionId" | "revision" | "expanded" | "protected" | "prepared" | "advisory" |
-      "tokensSinceToolFold" | "leases" | "surfacing" | "pendingMarks" | "pinnedPeeks"
+      "tokensSinceToolFold" | "leases" | "surfacing" | "pendingMarks" | "pinnedPeeks" | "briefs"
   >,
   refs: FoldRecordRef[],
   records: Map<string, FoldRecordEntry>,
@@ -665,6 +707,7 @@ export function stateFromFoldRefs(
     ...(wire.surfacing?.length ? { surfacing: clone(wire.surfacing) } : {}),
     ...(wire.pendingMarks?.length ? { pendingMarks: clone(wire.pendingMarks) } : {}),
     ...(wire.pinnedPeeks?.length ? { pinnedPeeks: clone(wire.pinnedPeeks) } : {}),
+    ...(wire.briefs && Object.keys(wire.briefs).length ? { briefs: clone(wire.briefs) } : {}),
     ...(wire.advisory === undefined ? {} : { advisory: clone(wire.advisory) }),
     ...(wire.prepared === null || wire.prepared === undefined ? {} : { prepared: clone(wire.prepared) }),
   };
@@ -817,6 +860,7 @@ export function makeStateCheckpoint(state: ActiveContextState): ActiveContextChe
     ...(state.surfacing?.length ? { surfacing: clone(state.surfacing) } : {}),
     ...(state.pendingMarks?.length ? { pendingMarks: clone(state.pendingMarks) } : {}),
     ...(state.pinnedPeeks?.length ? { pinnedPeeks: clone(state.pinnedPeeks) } : {}),
+    ...(state.briefs && Object.keys(state.briefs).length ? { briefs: clone(state.briefs) } : {}),
     ...(state.advisory ? { advisory: clone(state.advisory) } : {}),
     stateSha256: semanticStateSha256(state),
   }, state.sessionId) as ActiveContextCheckpointV2;
@@ -854,6 +898,7 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
     ...(next.surfacing?.length ? { surfacing: clone(next.surfacing) } : {}),
     ...(next.pendingMarks?.length ? { pendingMarks: clone(next.pendingMarks) } : {}),
     ...(next.pinnedPeeks?.length ? { pinnedPeeks: clone(next.pinnedPeeks) } : {}),
+    ...(next.briefs && Object.keys(next.briefs).length ? { briefs: clone(next.briefs) } : {}),
     ...(next.advisory ? { advisory: clone(next.advisory) } : {}),
     stateSha256: semanticStateSha256(next),
   }, next.sessionId) as ActiveContextDeltaV2;

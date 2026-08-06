@@ -33,6 +33,7 @@ const LEGACY_REPRODUCTION_FIXTURE = Object.freeze({
   entryTypes: Object.freeze([
     "quorum-active-context-fold-record",
     "quorum-active-context-state",
+    "quorum-context-instrumentation",
     "quorum-native-compaction-decision",
     "quorum-native-compaction-receipt",
     "quorum-provider-context-measurement",
@@ -41,6 +42,7 @@ const LEGACY_REPRODUCTION_FIXTURE = Object.freeze({
     "quorum-active-context-advisory",
     "quorum-active-context-milestone",
   ]),
+  receiptType: "quorum-active-context-receipts",
   source: "quorum/active-context",
   placeholderPrefix: "[Quorum active-context fold ",
   milestonePrefix: "[Quorum context milestone ",
@@ -205,19 +207,8 @@ function makeRuntime(built, {
   surfacing,
   foldScheduling,
   foldPeekResults,
-  currentTurnCommitGuard,
-  stageIdentifiedBriefs,
-  ephemeralPeek,
-  perPeekEphemeral,
-  truthfulCapacity,
+  guidedCuration,
   providerTotalWindow,
-  admissionControl,
-  retainPendingMarks,
-  eligibleShareCommit,
-  eligibleShareCommitThreshold,
-  statusIndexDiet,
-  advisoryDelivery,
-  projectionInstrumentation,
   setSuggestionSourceRegistrar,
   loadHostModule,
   packageRegistration = false,
@@ -308,19 +299,8 @@ function makeRuntime(built, {
     ...(surfacing === undefined ? {} : { surfacing }),
     ...(foldScheduling === undefined ? {} : { foldScheduling }),
     ...(foldPeekResults === undefined ? {} : { foldPeekResults }),
-    ...(currentTurnCommitGuard === undefined ? {} : { currentTurnCommitGuard }),
-    ...(stageIdentifiedBriefs === undefined ? {} : { stageIdentifiedBriefs }),
-    ...(ephemeralPeek === undefined ? {} : { ephemeralPeek }),
-    ...(perPeekEphemeral === undefined ? {} : { perPeekEphemeral }),
-    ...(truthfulCapacity === undefined ? {} : { truthfulCapacity }),
+    ...(guidedCuration === undefined ? {} : { guidedCuration }),
     ...(providerTotalWindow === undefined ? {} : { providerTotalWindow }),
-    ...(admissionControl === undefined ? {} : { admissionControl }),
-    ...(retainPendingMarks === undefined ? {} : { retainPendingMarks }),
-    ...(eligibleShareCommit === undefined ? {} : { eligibleShareCommit }),
-    ...(eligibleShareCommitThreshold === undefined ? {} : { eligibleShareCommitThreshold }),
-    ...(statusIndexDiet === undefined ? {} : { statusIndexDiet }),
-    ...(advisoryDelivery === undefined ? {} : { advisoryDelivery }),
-    ...(projectionInstrumentation === undefined ? {} : { projectionInstrumentation }),
     ...(setSuggestionSourceRegistrar ? { setSuggestionSourceRegistrar } : {}),
   };
   runtime.registration = packageRegistration
@@ -580,6 +560,7 @@ async function gateNeutralDefaultBranding() {
   assert.deepEqual(surface.entryTypes, [
     "pi-fold-active-context-fold-record",
     "pi-fold-active-context-state",
+    "pi-fold-context-instrumentation",
     "pi-fold-native-compaction-decision",
     "pi-fold-native-compaction-receipt",
     "pi-fold-provider-context-measurement",
@@ -896,15 +877,16 @@ async function gateAdvisoryMilestones() {
   assert(projected.every((message) => message.role === "custom" && message.details?.ephemeral === true));
   assert.equal(projected[0].timestamp, 0);
   assert(Buffer.byteLength(projected[1].content, "utf8") <= 2_048);
+  // The budget is spent on DELIVERY, so an advisory that reached the agent releases
+  // its arm and does not replay on the next projection of the same plateau.
   const repeatedProjection = await project(jump);
   const repeatedMilestone = repeatedProjection.messages.find((message) =>
     message.customType === "pi-fold-active-context-milestone");
-  assert.equal(json.stableStringify(repeatedMilestone), json.stableStringify(projected[0]));
+  assert.equal(repeatedMilestone, undefined,
+    "A delivered milestone replayed on the next projection of the same plateau");
   let jumpStatus = await toolStatus(jump);
   assert.deepEqual(jumpStatus.details.automatic.advisory.delivered, { chapters: 1 });
-  assert.equal(jumpStatus.details.automatic.advisory.armed.milestone, "chapters");
-  near(jumpStatus.details.automatic.advisory.armed.threshold, wide.chapters.threshold);
-  assert.match(jumpStatus.details.automatic.advisory.armed.scheduleKey, /^[a-f0-9]{64}$/);
+  assert.equal(jumpStatus.details.automatic.advisory.armed, undefined);
   jump.usage = { tokens: 233_920, contextWindow: 100_000 };
   const changedWindowProjection = await project(jump);
   const changedWindowMilestone = changedWindowProjection.messages.find((message) =>
@@ -1509,16 +1491,23 @@ async function gateFoldCandidatesDetail() {
     automaticFailure: false,
     preparing: false,
   });
-  const branchBefore = json.stableStringify(runtime.branch);
-  const appendedBefore = runtime.appended.length;
+  const durableEntries = (entries) => entries.filter((entry) =>
+    !String(entry.customType ?? "").endsWith("-context-instrumentation"));
+  const branchBefore = json.stableStringify(durableEntries(runtime.branch));
+  const appendedBefore = durableEntries(runtime.appended).length;
   const status = await toolStatus(runtime, "active_context", "fold_candidates");
   assert.equal(json.stableStringify(status.details.candidates), json.stableStringify(expected));
   assert.equal(status.details.automatic.measurementFresh, false);
   assert.equal(status.details.candidates.wouldFireNow, null);
   assert.equal(status.details.candidates.blockedBy, "measurement-stale");
   assert(status.details.candidates.tool, "Stale-measurement fixture lacked an otherwise eligible rung");
-  assert.equal(json.stableStringify(runtime.branch), branchBefore);
-  assert.equal(runtime.appended.length, appendedBefore);
+  // Every context-management call is recorded in the durable event stream by design,
+  // so the property under test is that nothing else moved: no state event, no fold
+  // record, no projection change.
+  assert.equal(json.stableStringify(durableEntries(runtime.branch)), branchBefore);
+  assert.equal(durableEntries(runtime.appended).length, appendedBefore);
+  assert(runtime.appended.some((entry) => entry.customType === "pi-fold-context-instrumentation"),
+    "A status call was not recorded in the context-event stream");
   return {
     selectorIdentical: true,
     wouldFireNow: status.details.candidates.wouldFireNow,
@@ -1708,12 +1697,15 @@ async function gateFreshTailShareCap() {
   await startRuntime(wide);
   const wideDetail = (await toolStatus(wide, undefined, "fold_candidates")).details;
   assert.equal(wideDetail.rawTailMinimumBytes, 24_000);
+  // The object list lives behind its own paged query now that the index is dieted.
+  const smallObjects = (await toolStatus(small, undefined, "objects")).details.objects;
+  const wideObjects = (await toolStatus(wide, undefined, "objects")).details.objects;
 
   // Behavioral: identical content, small window → the three oldest turns escape
   // the capped tail and form an eligible chapter; wide window → the uncapped
   // floor covers the whole projection and nothing is foldable.
-  const smallFree = smallDetail.objects.filter((object) => !object.protected).length;
-  const wideFree = wideDetail.objects.filter((object) => !object.protected).length;
+  const smallFree = smallObjects.filter((object) => !object.protected).length;
+  const wideFree = wideObjects.filter((object) => !object.protected).length;
   assert.equal(smallFree, 12, "small window must free the three oldest turns");
   assert.equal(wideFree, 0, "wide window floor must keep this projection fully protected");
   assert.notEqual(smallDetail.candidates.chapter, null, "small window must expose an eligible chapter");
@@ -2102,8 +2094,10 @@ async function gatePeekAndFoldIndex() {
   await startRuntime(runtime);
   const seeded = materialized(runtime);
   const projectionBefore = json.stableStringify(context.projectActiveContext(forest.snapshot, seeded));
-  const branchBefore = json.stableStringify(runtime.branch);
-  const appendedBefore = runtime.appended.length;
+  const durableEntries = (entries) => entries.filter((entry) =>
+    !String(entry.customType ?? "").endsWith("-context-instrumentation"));
+  const branchBefore = json.stableStringify(durableEntries(runtime.branch));
+  const appendedBefore = durableEntries(runtime.appended).length;
   assert(projectionBefore.includes(consolidationId));
   assert.equal(projectionBefore.includes(childId), false);
 
@@ -2118,8 +2112,8 @@ async function gatePeekAndFoldIndex() {
   assert.equal(afterPeek.revision, seeded.revision);
   assert.deepEqual(afterPeek.expanded, seeded.expanded);
   assert.equal(json.stableStringify(context.projectActiveContext(forest.snapshot, afterPeek)), projectionBefore);
-  assert.equal(json.stableStringify(runtime.branch), branchBefore);
-  assert.equal(runtime.appended.length, appendedBefore);
+  assert.equal(json.stableStringify(durableEntries(runtime.branch)), branchBefore);
+  assert.equal(durableEntries(runtime.appended).length, appendedBefore);
 
   const childFold = seeded.folds.find((fold) => fold.id === childId);
   const restored = context.renderFold(
@@ -4608,7 +4602,7 @@ async function gatePerPeekEphemeral() {
 }
 
 /** Every iteration-3 lever at once, which is the shape the live runs seal. */
-const FULL_LEVER_SET = Object.freeze({
+const SEALED_SPINE = Object.freeze({
   foldScheduling: "epoch",
   ephemeralPeek: true,
   truthfulCapacity: true,
@@ -4633,7 +4627,7 @@ const FULL_LEVER_SET = Object.freeze({
 async function fullLeverExcursionRuntime(overrides = {}) {
   const runtime = makeRuntime(
     makeFixture({ turns: 6, resultChars: 2_000, contextWindow: 100_000 }),
-    { ...FULL_LEVER_SET, ...overrides },
+    { ...SEALED_SPINE, ...overrides },
   );
   await startRuntime(runtime);
   for (let step = 0; step < 24; step += 1) {
@@ -4827,7 +4821,7 @@ async function gateProjectionBudgetFence() {
   // between one provider response and the next request.
   const runtime = makeRuntime(
     makeFixture({ turns: 40, resultChars: 12_000, contextWindow: 100_000 }),
-    { ...FULL_LEVER_SET, providerTotalWindow: 100_000 },
+    { ...SEALED_SPINE, providerTotalWindow: 100_000 },
   );
   await startRuntime(runtime);
   for (let step = 0; step < 12; step += 1) {
@@ -4908,7 +4902,7 @@ async function gateProjectionBudgetFence() {
   // standing between the session and an untransmittable request.
   const guardedOnly = makeRuntime(
     makeFixture({ turns: 8, tools: false, chapterChars: 40, contextWindow: 100_000 }),
-    { ...FULL_LEVER_SET, providerTotalWindow: 100_000 },
+    { ...SEALED_SPINE, providerTotalWindow: 100_000 },
   );
   await startRuntime(guardedOnly);
   for (let step = 0; step < 14; step += 1) {
@@ -4995,7 +4989,7 @@ async function gateProjectionCalibration() {
   // projections reads as far over budget; against the session's own measured ratio
   // they are barely half of it.
   const built = makeFixture({ turns: 64, resultChars: 24_000, contextWindow: 400_000 });
-  const runtime = makeRuntime(built, { ...FULL_LEVER_SET, providerTotalWindow: 400_000 });
+  const runtime = makeRuntime(built, { ...SEALED_SPINE, providerTotalWindow: 400_000 });
   await startRuntime(runtime);
   const sevenChars = (chars) => Math.round(chars / 7);
   const baseline = bytesOf((await project(runtime)).messages);
@@ -5037,7 +5031,7 @@ async function gateProjectionCalibration() {
   // it does, the next projection is built FROM THE FOLD STATE and is never the corpus.
   const dense = makeRuntime(
     makeFixture({ turns: 40, resultChars: 20_000, contextWindow: 100_000 }),
-    { ...FULL_LEVER_SET, providerTotalWindow: 100_000 },
+    { ...SEALED_SPINE, providerTotalWindow: 100_000 },
   );
   await startRuntime(dense);
   // Calibrate on a healthy pass, then let the excursion outgrow that baseline by half.
@@ -5130,7 +5124,7 @@ async function gateFenceMarginAndDepth() {
   const sevenChars = (chars) => Math.round(chars / 7);
   const runtime = makeRuntime(
     makeFixture({ turns: 80, resultChars: 10_000, contextWindow: window }),
-    { ...FULL_LEVER_SET, providerTotalWindow: window },
+    { ...SEALED_SPINE, providerTotalWindow: window },
   );
   await startRuntime(runtime);
   const budgetTokens = (await toolStatus(runtime)).details.automatic.projectionBudgetTokens;
@@ -5203,7 +5197,7 @@ async function gateFenceMarginAndDepth() {
   // error budget. The smallest recent ratio wins, so the dangerous direction is instant.
   const drifting = makeRuntime(
     makeFixture({ turns: 16, resultChars: 8_000, contextWindow: window }),
-    { ...FULL_LEVER_SET, providerTotalWindow: window },
+    { ...SEALED_SPINE, providerTotalWindow: window },
   );
   await startRuntime(drifting);
   const ratios = [];
@@ -5242,7 +5236,7 @@ async function gateFenceMarginAndDepth() {
   // window ratchets UP through every one of them.
   const deep = makeRuntime(
     makeFixture({ turns: 30, resultChars: 12_000, contextWindow: 100_000 }),
-    { ...FULL_LEVER_SET, providerTotalWindow: 100_000 },
+    { ...SEALED_SPINE, providerTotalWindow: 100_000 },
   );
   await startRuntime(deep);
   const epochs = [];

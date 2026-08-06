@@ -13,7 +13,10 @@ import {
   refsProtected,
   toolRefsProtected,
 } from "./measurement.ts";
-import { flattenFoldRefs } from "./persistence.ts";
+import {
+  flattenFoldRefs,
+  foldBrief,
+} from "./persistence.ts";
 import {
   SURFACING_CHAR_BUDGET,
   SURFACING_COOLDOWN_ORDINALS,
@@ -259,7 +262,7 @@ export function foldBriefCandidates(input: SuggestionSourceInput): SurfacingCand
     return [{
       source: SURFACING_SOURCE_ID,
       id: fold.id,
-      text: fold.brief,
+      text: foldBrief(fold, state),
       route: `${toolName} {"action":"expand","id":"${fold.id}"}`,
       alternateRoute: `${toolName} {"action":"peek","id":"${fold.id}"}`,
       position: interval.end,

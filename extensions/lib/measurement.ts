@@ -118,6 +118,7 @@ export function hardFenceRatio(value?: unknown, ctx?: any): number {
  * is how a 25 percent error survived four instrumented runs.
  */
 export interface CapacityAccounting {
+  /** "truthful" once the deployment declares its total serving window. */
   mode: "descriptor" | "truthful";
   /** The denominator every pressure ratio and fence is computed against. */
   window: number;
@@ -333,6 +334,11 @@ export function persistenceProjection(state: ActiveContextState, snapshot: Activ
   const survivingPins = (state.pinnedPeeks ?? []).filter((id) => retained.has(id));
   if (survivingPins.length) projected.pinnedPeeks = clone(survivingPins);
   else delete projected.pinnedPeeks;
+  // A brief correction names a fold; once that fold is gone the correction has
+  // nothing to present, exactly like a pin whose fold left the branch.
+  const survivingBriefs = Object.entries(state.briefs ?? {}).filter(([id]) => retained.has(id));
+  if (survivingBriefs.length) projected.briefs = Object.fromEntries(clone(survivingBriefs));
+  else delete projected.briefs;
   if (projected.prepared && projected.prepared.sourceRefs.some((ref) => !mapped.has(objectRefKey(ref)))) {
     delete projected.prepared;
   }
