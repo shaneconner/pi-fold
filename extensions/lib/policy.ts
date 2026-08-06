@@ -110,6 +110,41 @@ export const EPOCH_COMMIT_TARGET_WINDOW_SHARE = 0.40;
  * underneath as the safety backstop; this is the economic trigger above it.
  */
 export const EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD = 0.30;
+/**
+ * The reclaim floor, and the single constant that decides whether a commit is worth
+ * firing at all.
+ *
+ * Measured on memex (19,082 calls, 254 sessions): a token-weighted pooled cache share
+ * of 89.9% across two provider wires, with steady-state requests at 91.6% and any
+ * request following a mutation at 15.7%. A fold costs exactly what one user message
+ * costs. Their mutations are 5.3% of requests; rep 14's were about 34%, and that
+ * FREQUENCY difference is the entire gap between their 90% and our 64% -- the
+ * per-mutation penalty is the same on both.
+ *
+ * So a commit that would free less than this share of the truthful budget does not
+ * fire: it defers and accumulates until it is worth a full prefix. Safety outranks
+ * economics, so the hard fence and overflow recovery fire regardless.
+ */
+export const COMMIT_RECLAIM_FLOOR_SHARE = 0.02;
+
+/**
+ * The thermostat's lower line.
+ *
+ * The floor above says what is worth firing; this says how DEEP a firing goes. The
+ * failure shape it removes is rep 13's crumb ratchet: a trigger that fires, frees a
+ * little, and re-fires almost immediately, so the window climbs a staircase of
+ * mutations. Firing at the trigger line and folding down to a target line makes the
+ * spacing between events structural -- the next event cannot arrive until inflow has
+ * refilled the gap -- so the window saws instead of climbing.
+ *
+ * The gap here is 15 points of a truthful budget. Rep 13's largest measured inflow step
+ * was 27,815 tokens against a 400,000 window, about 7 points, so at least two full
+ * worst-case steps must land before the trigger can re-arm, and the agent keeps roughly
+ * two thirds of its budget as working room after every event. Eligibility still binds:
+ * if the eligible mass cannot reach the target, the commit takes what it may and
+ * records the shortfall rather than loosening a protection to hit a number.
+ */
+export const CURATION_TARGET_OCCUPANCY_SHARE = 0.35;
 export const MAX_PENDING_MARKS = 256;
 /** Enough batches to actually reach the floor on a wide window before the loop exits. */
 export const EPOCH_MAX_TOPUP_MARKS = 64;

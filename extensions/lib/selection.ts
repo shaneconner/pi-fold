@@ -598,20 +598,45 @@ export function snapFoldCandidate(
   } catch (error) {
     directError = error instanceof Error ? error : new Error(String(error));
   }
-  const snapped = snapSpanIds(snapshot, state, ids);
-  if (!snapped) throw directError;
-  try {
-    return {
-      candidate: manualFoldCandidate(snapshot, state, snapped.ids, options),
-      corrections: snapped.corrections,
-    };
-  } catch (error) {
-    throw new Error(
-      `${directError.message}. The nearest valid span [${snapped.ids.join(", ")}] was also refused: ` +
-      `${error instanceof Error ? error.message : String(error)}`,
-      { cause: error },
-    );
+  // Nearest first, then the other reading of the same intent. A span that cuts into a
+  // fold has exactly two constructible corrections -- absorb it, or step past it -- and
+  // which one survives depends on structure the caller cannot see.
+  const alternatives = snapSpanAlternatives(snapshot, state, ids);
+  if (!alternatives.length) throw directError;
+  let lastError: Error = directError;
+  for (const snapped of alternatives) {
+    try {
+      return {
+        candidate: manualFoldCandidate(snapshot, state, snapped.ids, options),
+        corrections: snapped.corrections,
+      };
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
   }
+  throw new Error(
+    `${directError.message}. The nearest valid span [${alternatives[0].ids.join(", ")}] was also ` +
+    `refused: ${lastError.message}`,
+    { cause: lastError },
+  );
+}
+
+/** Every constructible reading of a requested span, nearest intent first. */
+export function snapSpanAlternatives(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+  ids: string[],
+): Array<{ ids: string[]; corrections: SpanCorrection[] }> {
+  const seen = new Set<string>();
+  return (["nearest", "exclude", "absorb"] as const)
+    .flatMap((mode) => {
+      const snapped = snapSpanIds(snapshot, state, ids, mode);
+      if (!snapped) return [];
+      const key = snapped.ids.join("\u0000");
+      if (seen.has(key)) return [];
+      seen.add(key);
+      return [snapped];
+    });
 }
 
 /**
@@ -622,6 +647,8 @@ export function snapSpanIds(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
   ids: string[],
+  /** How an endpoint inside a fold is read: by distance, or always one way. */
+  mode: "nearest" | "absorb" | "exclude" = "nearest",
 ): { ids: string[]; corrections: SpanCorrection[] } | null {
   let resolved: Array<{ start: number; end: number; fold?: ActiveFold }>;
   // An unknown id has no nearest valid edge: there is nothing to snap TO.
@@ -639,13 +666,18 @@ export function snapSpanIds(
   };
   for (const root of orderedRoots(state, snapshot)) {
     if (start > root.start && start <= root.end) {
-      // Nearest edge: absorb the fold whole, or step past it, whichever moves less.
-      start = start - root.start <= root.end + 1 - start ? root.start : root.end + 1;
-      note(`span started inside ${root.fold.id}; corrected to its nearest boundary`);
+      const absorb = mode === "absorb" ||
+        (mode === "nearest" && start - root.start <= root.end + 1 - start);
+      start = absorb ? root.start : root.end + 1;
+      note(`span started inside ${root.fold.id}; corrected to its ` +
+        `${absorb ? "start" : "far"} boundary`);
     }
     if (end >= root.start && end < root.end) {
-      end = root.end - end <= end - (root.start - 1) ? root.end : root.start - 1;
-      note(`span ended inside ${root.fold.id}; corrected to its nearest boundary`);
+      const absorb = mode === "absorb" ||
+        (mode === "nearest" && root.end - end <= end - (root.start - 1));
+      end = absorb ? root.end : root.start - 1;
+      note(`span ended inside ${root.fold.id}; corrected to its ` +
+        `${absorb ? "end" : "near"} boundary`);
     }
   }
   const boundary = currentTurnBoundary(snapshot);
@@ -663,6 +695,26 @@ export function snapSpanIds(
   if (endUnit && endUnit.end - 1 !== end) {
     end = endUnit.end - 1;
     note("span ended mid-unit; corrected to the end of its closed user/assistant/tool unit");
+  }
+  // A chapter spans at most a few closed turns. A longer request is a span the agent
+  // meant, so it is CLAMPED to what one fold may hold rather than refused; the
+  // remainder stays raw and is the agent's to fold next.
+  const covered = units.filter((unit) => unit.start >= start && unit.end <= end + 1);
+  if (covered.length) {
+    const turns: number[] = [];
+    let clamped = end;
+    for (const unit of covered) {
+      if (!turns.includes(unit.turnStart)) {
+        if (turns.length >= snapshot.policy.maxChapterTurns) break;
+        turns.push(unit.turnStart);
+      }
+      clamped = unit.end - 1;
+    }
+    if (clamped < end) {
+      end = clamped;
+      note(`span covered more than the ${snapshot.policy.maxChapterTurns}-turn chapter limit; ` +
+        "corrected to the last turn that fits");
+    }
   }
   if (!corrections.length || end < start ||
       !snapshot.mapped[start]?.ref || !snapshot.mapped[end]?.ref) return null;

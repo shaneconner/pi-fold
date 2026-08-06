@@ -170,6 +170,12 @@ export function updateAdvisoryMilestone(
   };
 }
 
+/**
+ * Wording rule for every dosage below: report what is HAPPENING and name the actions
+ * that change it. The earlier phrasing asked the agent to fold proactively, which is
+ * advice it can only act on by interrupting its own task; the runtime folds either way,
+ * so the honest thing to say is what it will do and what reacting buys.
+ */
 function curationText(milestone: AdvisoryMilestone, percent: number, toolName: string): string {
   if (milestone === "orientation") {
     return "Collapsed folds are a browsable index of the work behind you, and their briefs sit in the cached " +
@@ -178,20 +184,23 @@ function curationText(milestone: AdvisoryMilestone, percent: number, toolName: s
       '{"action":"expand","id":"<fold-id>"}.';
   }
   if (milestone === "notice") {
-    return `Context is ${percent}% full; curate it against the task you are on now. Fold the spans that task ` +
-      `no longer needs with ${toolName} ` +
-      '{"action":"fold","ids":["<start>","<end>"],"brief":"<factual brief>"}, and keep what must stay raw out ' +
-      `of every fold with ${toolName} {"action":"protect","ids":["<entry-id>"]}.`;
+    return `Context is ${percent}% full, and the ladder is folding stale spans as it fills. Spans you fold ` +
+      `yourself carry your brief instead of a generated one: ${toolName} ` +
+      '{"action":"fold","marks":[{"ids":["<start>","<end>"],"brief":"<factual brief>"}]} batches several at ' +
+      `once, and ${toolName} {"action":"protect","ids":["<entry-id>"]} keeps what must stay raw out of every ` +
+      "fold. Continuing the task is the default; nothing here needs a reply.";
   }
   if (milestone === "tools") {
-    return "Completed read-only tool batches are the cheapest thing to fold, and their endpoint ids are in the " +
-      "live advisory. Fold the batches whose detail this task is finished with; each one expands back to the " +
-      `exact entries later with ${toolName} {"action":"expand","id":"<fold-id>"}.`;
+    return "Completed read-only tool batches are what the ladder reclaims first, and their endpoint ids are in " +
+      "the live advisory. A batch it folds keeps a generated brief; one you fold keeps yours. Either way the " +
+      `exact entries come back with ${toolName} {"action":"expand","id":"<fold-id>"}, and a brief that does ` +
+      `not describe what you needed is corrected with ${toolName} ` +
+      '{"action":"rebrief","id":"<fold-id>","brief":"<factual brief>"}.';
   }
-  return "Fold up: hand two or more adjacent folds of finished work to " +
-    `${toolName} {"action":"fold","ids":["<fold-id>","<fold-id>"],"brief":"<factual brief>"} so they nest in ` +
-    "one deeper fold, leaving the oldest material deepest and still exactly recoverable. A closed chapter " +
-    `folds first, from the eligibleChapter endpoints in ${toolName} {"action":"status"}.`;
+  return "Adjacent folds of finished work are the next thing the ladder consolidates. Handing two or more to " +
+    `${toolName} {"action":"fold","ids":["<fold-id>","<fold-id>"],"brief":"<factual brief>"} nests them under ` +
+    "a brief you wrote, leaving the oldest material deepest and still exactly recoverable; a boundary that " +
+    `came out wrong is re-cut with ${toolName} {"action":"reboundary","ids":["<start>","<end>"]}.`;
 }
 
 export function milestoneText(
@@ -217,8 +226,9 @@ export function milestoneText(
   }
   if (milestone === "chapters") {
     return `${prefix} The chapter preparation rung begins at ${percent}%. ` +
-      `Use eligibleChapter endpoints with ${toolName} ` +
-      '{"action":"fold","ids":["<start>","<end>"],"brief":"<factual brief>"}.';
+      `Closed chapters fold from the eligibleChapter endpoints in ${toolName} {"action":"status"}; ` +
+      `${toolName} {"action":"fold","ids":["<start>","<end>"],"brief":"<factual brief>"} folds one with ` +
+      "your own brief instead of a generated one.";
   }
   return `${prefix} The hard context fence is near. The next automatic action is a committed chapter fold ` +
     "or the provider request is aborted before transmission.";

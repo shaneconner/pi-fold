@@ -1,5 +1,6 @@
 import {
   denseOwnArrayValues,
+  evidenceSha256,
   objectRefKey,
   sha256Value,
   stableStringify,
@@ -60,6 +61,7 @@ import {
   parseProviderContextMeasurementReceipt,
   persistenceProjection,
   providerContextMeasurement,
+  providerTokens,
   refsProtected,
   stringIds,
   toolRefsProtected,
@@ -77,6 +79,7 @@ import {
   deriveFoldParents,
   flattenFoldRefs,
   foldBrief,
+  foldIdFor,
   makeFoldRecordEntry,
   makeStateCheckpoint,
   makeStateDelta,
@@ -101,8 +104,10 @@ import {
   DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX,
   DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
+  COMMIT_RECLAIM_FLOOR_SHARE,
   CONTEXT_RECEIPT_BLOCK_BYTES,
   CURATION_GATE_MAX_ROUNDS,
+  CURATION_TARGET_OCCUPANCY_SHARE,
   CURATION_OCCUPANCY_SHARE,
   CURATION_STALE_TOOL_SHARE,
   EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD,
@@ -115,6 +120,7 @@ import {
   EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS,
   EPOCH_COMMIT_TARGET_WINDOW_SHARE,
   MAX_FOLD_SPAN_CHARS,
+  MAX_WEDGE_ABSORB_TOKENS,
   OVERFLOW_RECOVERY_MAX_ATTEMPTS,
   PEEK_DEFAULT_MAX_BYTES,
   PEEK_MIN_SLICE_BYTES,
@@ -201,11 +207,13 @@ import {
   ledgerSummary,
   messageDigests,
   observeCacheUsage,
+  prefixDivergence,
   recordContextEvent,
   recordProjection,
 } from "./lib/instrumentation.ts";
 import type {
-  ContextEventRecord,
+  ContextEvent,
+  ContextEventKind,
   ProjectionChange,
 } from "./lib/instrumentation.ts";
 import { buildActiveContextCommands, buildActiveContextTool } from "./lib/tool-surface.ts";
@@ -373,7 +381,7 @@ export function registerActiveContext(pi: any, options: {
   const entryNamespace = entryTypeNamespace(entryTypePrefix);
   const providerMeasurementEntryType = `${entryNamespace}-provider-context-measurement`;
   const nativeReceiptEntryType = `${entryNamespace}-native-compaction-receipt`;
-  const contextInstrumentationEntryType = `${entryNamespace}-context-instrumentation`;
+  const contextEventEntryType = `${entryNamespace}-context-event`;
   const nativeDecisionEntryType = `${entryNamespace}-native-compaction-decision`;
   // The commit verb only exists where marks exist; immediate mode keeps its exact
   // seven-action surface and description.
@@ -474,7 +482,15 @@ export function registerActiveContext(pi: any, options: {
   const instrumentation = {
     ledger: emptyLedger(),
     previousDigests: null as string[] | null,
+    /** The previous TRANSMITTED projection, for the byte-level prefix comparison. */
+    previousText: null as string | null,
     lastChange: "append" as ProjectionChange,
+    /** Events emitted since the last handoff, which is the attribution candidate set. */
+    sinceHandoff: [] as Array<{ seq: number; kind: string }>,
+    /** Provider responses this session, so event SPACING is readable from the stream. */
+    requests: 0,
+    lastMutationRequest: 0,
+    lastMutationTokens: null as number | null,
   };
 
   // Owns the guided-curation gate, the receipt ring, the context-event stream, and the
@@ -561,33 +577,52 @@ export function registerActiveContext(pi: any, options: {
       receipt.tokens === measurement.tokens && receipt.contextWindow === measurement.contextWindow);
   };
 
+  const currentOrdinal = (): number =>
+    lifecycle.latestSnapshot ? markOrdinal(lifecycle.latestSnapshot) : 0;
+
   /**
-   * Record one context-management event, in the ledger AND as a durable session entry.
-   * An in-memory ledger is invisible to the external adjudicator that reads session
+   * Emit one record into THE context event stream, in the ledger AND as a durable
+   * session entry. An in-memory ledger is invisible to an analyst reading session
    * artifacts, and telemetry may never block or fail the action it describes.
    */
-  const recordEvent = (record: ContextEventRecord): ContextEventRecord => {
-    recordContextEvent(instrumentation.ledger, record);
+  const emit = (kind: ContextEventKind, payload: Record<string, unknown> = {}): ContextEvent => {
+    const record = recordContextEvent(instrumentation.ledger, kind, {
+      session_id: persistence.state?.sessionId ?? "",
+      ordinal: currentOrdinal(),
+      revision: persistence.state?.revision ?? 0,
+      at: Date.now(),
+    }, payload);
+    instrumentation.sinceHandoff.push({ seq: record.seq, kind });
     const operation = curation.instrumentationQueue.then(async () => {
-      try { await pi.appendEntry(contextInstrumentationEntryType, record); }
+      try { await pi.appendEntry(contextEventEntryType, record); }
       catch { /* Telemetry is never a lifecycle boundary. */ }
     });
     curation.instrumentationQueue = operation.then(() => undefined, () => undefined);
     return record;
   };
 
-  const currentOrdinal = (): number =>
-    lifecycle.latestSnapshot ? markOrdinal(lifecycle.latestSnapshot) : 0;
+  /**
+   * Actions of ours that move bytes at or before a prefix position. Receipts, gate
+   * notices and suggestions are appended after the whole projection, so they can only
+   * move the tail and are never a prefix cause.
+   */
+  const PREFIX_MUTATING_KINDS: ReadonlySet<string> = new Set([
+    "context.commit", "context.fold", "context.absorb", "context.split", "context.recovery",
+  ]);
 
   const deliverReceipt = (receipt: ContextReceipt): void => {
     curation.receipts = withReceipt(curation.receipts, receipt);
-    recordEvent({
-      version: 1,
-      kind: "receipt",
-      sessionId: persistence.state?.sessionId ?? "",
-      receipt: { ...receipt },
-      ordinal: receipt.ordinal,
-      occurredAt: Date.now(),
+    emit("context.receipt", {
+      receipt_kind: receipt.kind,
+      trigger: receipt.trigger,
+      folds_committed: receipt.foldsCommitted,
+      folds_created: receipt.foldsCreated,
+      freed_tokens: receipt.freedTokens,
+      split_folds: receipt.splitFolds,
+      split_from_chars: receipt.splitFromChars,
+      absorbed_wedges: receipt.absorbedWedges,
+      recovered: receipt.recovered,
+      note: receipt.note,
     });
   };
 
@@ -721,7 +756,12 @@ export function registerActiveContext(pi: any, options: {
     ladder.pendingContextNote = null;
     instrumentation.ledger = emptyLedger();
     instrumentation.previousDigests = null;
+    instrumentation.previousText = null;
+    instrumentation.requests = 0;
+    instrumentation.lastMutationRequest = 0;
+    instrumentation.lastMutationTokens = null;
     instrumentation.lastChange = "append";
+    instrumentation.sinceHandoff = [];
     curation.gate = null;
     curation.lastSignals = null;
     curation.receipts = [];
@@ -1549,6 +1589,16 @@ export function registerActiveContext(pi: any, options: {
         budgetTokens: measured.budgetTokens,
         recovered: !measured.over,
       };
+      emit("context.recovery", {
+        provider_status: curation.pendingRejection?.status ?? null,
+        attempts,
+        max_attempts: OVERFLOW_RECOVERY_MAX_ATTEMPTS,
+        tokens_before: projectedTokenEstimate(projected),
+        tokens_after: measured.tokens,
+        budget_tokens: measured.budgetTokens,
+        margin_tokens: measured.marginTokens,
+        recovered: !measured.over,
+      });
       deliverReceipt(contextReceipt({
         kind: "overflow-recovery",
         ordinal: markOrdinal(snapshot),
@@ -1813,6 +1863,48 @@ export function registerActiveContext(pi: any, options: {
     recordProjection(instrumentation.ledger, comparison, digests);
     instrumentation.previousDigests = digests;
     instrumentation.lastChange = comparison.change;
+    const text = stableStringify(projected);
+    const divergence = prefixDivergence(instrumentation.previousText, text);
+    const charsPerToken = projectionCharsPerToken();
+    const causes = instrumentation.sinceHandoff.filter((event) =>
+      PREFIX_MUTATING_KINDS.has(event.kind));
+    emit("context.projection", {
+      change: comparison.change,
+      previous_count: comparison.previousCount,
+      next_count: comparison.nextCount,
+      appended_count: comparison.appendedCount,
+      first_divergent_index: comparison.firstDivergentIndex,
+      chars: bytes(projected),
+      estimated_tokens: projectedTokenEstimate(projected),
+      chars_per_token: charsPerToken,
+    });
+    // Emission only. Which of these is a provider-side miss and which is a rewrite we
+    // caused is a join against provider-reported cacheRead, and that join is the
+    // analyst's, not this runtime's.
+    emit("context.prefix", {
+      change: comparison.change,
+      divergent_char: divergence.index,
+      divergent_tokens: divergence.index === null ? null : Math.ceil(divergence.index / charsPerToken),
+      identical_chars: divergence.identicalChars,
+      identical_share: divergence.identicalShare,
+      chars: text.length,
+      previous_chars: instrumentation.previousText?.length ?? 0,
+      estimated_tokens: Math.ceil(text.length / charsPerToken),
+      cause: divergence.index === null
+        ? "pure-append"
+        : (causes.length ? causes.map((event) => event.kind).join(",") : "unattributed"),
+      cause_event_seqs: causes.map((event) => event.seq).join(","),
+      events_since_handoff: instrumentation.sinceHandoff.length,
+      // The request class, which falls straight out of the attribution and makes a run
+      // directly comparable to a production cache table. Not new measurement.
+      request_class: divergence.index === null
+        ? "steady-state"
+        : (causes.some((event) => event.kind === "context.recovery")
+          ? "after-rollback"
+          : (causes.length ? "after-fold" : "after-message")),
+    });
+    instrumentation.previousText = text;
+    instrumentation.sinceHandoff = [];
   };
 
   const commitDeterministicCandidate = async (
@@ -1890,13 +1982,11 @@ export function registerActiveContext(pi: any, options: {
    * any -- rep13 ran at a median 13,865 and a maximum 27,815 tokens per request against
    * a 400,000 window -- and the floor share stands in until then.
    */
-  const COMMIT_DEPTH_FLOOR_SHARE = 0.05;
-
   const commitDepthFloorShare = (snapshot: ActiveContextSnapshot): number => {
     const window = snapshot.contextWindow;
-    if (!Number.isFinite(window) || window <= 0) return COMMIT_DEPTH_FLOOR_SHARE;
+    if (!Number.isFinite(window) || window <= 0) return COMMIT_RECLAIM_FLOOR_SHARE;
     const inflow = expectedInflowTokens();
-    return Math.max(COMMIT_DEPTH_FLOOR_SHARE, inflow > 0 ? inflow / window : 0);
+    return Math.max(COMMIT_RECLAIM_FLOOR_SHARE, inflow > 0 ? inflow / window : 0);
   };
 
   const atOrAboveBackstop = (snapshot: ActiveContextSnapshot, ratio: number | null): boolean =>
@@ -1962,6 +2052,19 @@ export function registerActiveContext(pi: any, options: {
     // exact moment reduction is the only thing keeping the request sendable.
     const fenceLevel = typeof waiverRatio === "number" && Number.isFinite(waiverRatio) &&
       waiverRatio >= hardFenceRatio(snapshot);
+    // The thermostat. Firing at the trigger line and folding down to the target line is
+    // what makes event SPACING structural rather than hoped for.
+    const usedTokens = measurements.lastProviderMeasurement?.tokens ?? null;
+    const reserve = Math.min(
+      ACTIVE_CONTEXT_POLICY.responseReserve,
+      Math.floor(snapshot.contextWindow * 0.1),
+    );
+    const budgetTokens = snapshot.contextWindow - reserve;
+    const hysteresisShare = usedTokens === null || snapshot.contextWindow <= 0
+      ? 0
+      : Math.max(0, (usedTokens - CURATION_TARGET_OCCUPANCY_SHARE * budgetTokens) /
+        snapshot.contextWindow);
+    const freeingTarget = Math.max(EPOCH_COMMIT_TARGET_WINDOW_SHARE, hysteresisShare);
     if (topUp) {
       // Measuring top-up progress against ELIGIBLE mass is what keeps the pressure
       // backstop working under a peek-heavy agent: pinned and retained marks are mass
@@ -1974,7 +2077,7 @@ export function registerActiveContext(pi: any, options: {
         eligibleOnly: true,
         // The fence tops up until there is nothing left to propose: a reduction that
         // stops at the ordinary target can leave the request still untransmittable.
-        ...(fenceLevel ? { targetShare: 1 } : {}),
+        targetShare: fenceLevel ? 1 : freeingTarget,
       })) {
         const addition = addPendingMark(state, mark);
         if (addition.added) { state = addition.state; topUpAdded += 1; }
@@ -1989,7 +2092,9 @@ export function registerActiveContext(pi: any, options: {
       // reaches further, into everything eligible, instead of billing a rewrite for
       // crumbs.
       preDeepenShare = markAccounting(snapshot, state).eligibleFreedWindowShare;
-      const shallow = preDeepenShare < commitDepthFloorShare(snapshot);
+      // Deepen whenever the ordinary reach fell short of the thermostat's target too:
+      // an event that does not reach the lower line is an event that re-fires soon.
+      const shallow = preDeepenShare < Math.max(commitDepthFloorShare(snapshot), freeingTarget);
       if (fenceLevel || (shallow && atOrAboveBackstop(snapshot, waiverRatio))) {
         deepened = true;
         commitSnapshot = deepenedFreshnessSnapshot(snapshot);
@@ -2018,6 +2123,26 @@ export function registerActiveContext(pi: any, options: {
     state = wedges.state;
     const accounting = markAccounting(snapshot, state);
     if (!accounting.pending) return null;
+    // The reclaim floor. One structural mutation per model call is the budget, so a
+    // commit that would free crumbs spends the whole budget on nothing: it defers and
+    // the marks accumulate. Safety outranks economics, so the fence and the overflow
+    // recovery lane fire regardless of what they free.
+    if (!fenceLevel && curation.recoveryAttempts === 0 &&
+        accounting.eligibleFreedWindowShare < COMMIT_RECLAIM_FLOOR_SHARE) {
+      persistence.state = state;
+      emit("context.commit", {
+        trigger,
+        deferred: true,
+        reason: "below-reclaim-floor",
+        applied_marks: 0,
+        pending_marks: accounting.pending,
+        eligible_marks: accounting.eligibleMarks,
+        eligible_freed_share: accounting.eligibleFreedWindowShare,
+        reclaim_floor_share: COMMIT_RECLAIM_FLOOR_SHARE,
+        window_tokens: snapshot.contextWindow,
+      });
+      return null;
+    }
     const bytesBefore = bytes(projectActiveContext(snapshot, state));
     // The guard protects an in-flight excursion, never at the cost of the session's
     // ability to send a request at all: above the pressure backstop the oldest guarded
@@ -2042,6 +2167,69 @@ export function registerActiveContext(pi: any, options: {
     persistence.state = result.state;
     const bytesAfter = bytes(projectActiveContext(snapshot, result.state));
     const freedBytes = Math.max(0, bytesBefore - bytesAfter);
+    const commitEvent = emit("context.commit", {
+      trigger,
+      deferred: false,
+      reason: null,
+      eligible_freed_share: accounting.eligibleFreedWindowShare,
+      reclaim_floor_share: COMMIT_RECLAIM_FLOOR_SHARE,
+      // The two first-class dials: how much ONE event reclaims, and how long since the
+      // last one. A trigger that frees too little re-fires immediately, and that shape
+      // is only visible with both numbers on the same record.
+      target_freed_share: freeingTarget,
+      hysteresis_target_share: hysteresisShare,
+      target_occupancy_share: CURATION_TARGET_OCCUPANCY_SHARE,
+      shortfall_share: Math.max(0, freeingTarget - accounting.eligibleFreedWindowShare),
+      occupancy_tokens_before: usedTokens,
+      budget_tokens: budgetTokens,
+      requests_since_previous: instrumentation.requests - instrumentation.lastMutationRequest,
+      inflow_tokens_since_previous: usedTokens === null || instrumentation.lastMutationTokens === null
+        ? null
+        : usedTokens - instrumentation.lastMutationTokens,
+      applied_marks: result.applied.length,
+      refused_marks: result.refused.length,
+      retained_marks: result.retained.length,
+      waived_marks: result.waived.length,
+      pending_marks: accounting.pending,
+      agent_marks: accounting.agentMarks,
+      ladder_marks: accounting.ladderMarks,
+      peek_marks: peekAdded,
+      topup_marks: topUpAdded,
+      deepened: deepened,
+      deepened_marks: deepenedMarks,
+      absorbed_wedges: wedges.absorbed.length,
+      freed_bytes: freedBytes,
+      freed_tokens: estimatedTokens(freedBytes),
+      rewrite_tokens: accounting.rewriteTokens,
+      pinned_bytes: accounting.pinnedBytes,
+      pinned_results: accounting.pinnedResults,
+      window_tokens: snapshot.contextWindow,
+    });
+    instrumentation.lastMutationRequest = instrumentation.requests;
+    instrumentation.lastMutationTokens = usedTokens;
+    for (const applied of result.applied) {
+      const fold = persistence.state.folds.find((item) => item.id === applied.foldId);
+      emit("context.fold", {
+        commit_seq: commitEvent.seq,
+        fold_id: applied.foldId,
+        fold_kind: fold?.kind ?? applied.mark,
+        origin: applied.origin,
+        source_chars: fold?.sourceChars ?? 0,
+        placeholder_chars: fold?.placeholderChars ?? 0,
+        brief_provenance: fold ? normalizeLegacyProvenance(fold.provenance).kind : null,
+      });
+    }
+    for (const wedge of wedges.absorbed) {
+      emit("context.absorb", {
+        commit_seq: commitEvent.seq,
+        into_fold_id: wedge.intoMarkId,
+        start_id: wedge.startId,
+        end_id: wedge.endId,
+        entries: wedge.entries,
+        tokens: wedge.tokens,
+        threshold_tokens: MAX_WEDGE_ABSORB_TOKENS,
+      });
+    }
     // A bound-out top-up and a silently dropped agent mark are both invisible in an
     // applied/refused list alone, so the epoch reports its own composition.
     return {
@@ -2059,6 +2247,7 @@ export function registerActiveContext(pi: any, options: {
       absorbed: wedges.absorbed,
       preDeepenFreedShare: preDeepenShare,
       depthFloorShare: commitDepthFloorShare(snapshot),
+      reclaimFloorShare: COMMIT_RECLAIM_FLOOR_SHARE,
       guardWaived: result.waived.length > 0,
       waivedMarks: result.waived.length,
       appliedMarks: result.applied.length,
@@ -2076,7 +2265,9 @@ export function registerActiveContext(pi: any, options: {
       actualFreedWindowShare: snapshot.contextWindow > 0
         ? estimatedTokens(freedBytes) / snapshot.contextWindow
         : 0,
-      targetWindowShare: EPOCH_COMMIT_TARGET_WINDOW_SHARE,
+      targetWindowShare: freeingTarget,
+      hysteresisTargetShare: hysteresisShare,
+      requestsSincePreviousCommit: instrumentation.requests - instrumentation.lastMutationRequest,
       instrumentation: ledgerSummary(instrumentation.ledger),
     };
   };
@@ -2103,23 +2294,22 @@ export function registerActiveContext(pi: any, options: {
     roundsUsed: number,
     proceededBy: string | null,
   ): void => {
-    recordEvent({
-      version: 1,
-      kind: "curation-gate",
-      sessionId: persistence.state?.sessionId ?? "",
-      event,
+    emit("context.gate", {
+      gate_event: event,
       occupancy: signals.occupancy,
-      staleToolShare: signals.staleToolShare,
-      staleToolTokens: signals.staleToolTokens,
-      staleToolResults: signals.staleToolResults,
-      eligibleFolds: signals.eligibleFolds,
-      roundsUsed,
-      marksAddedDuringGate: persistence.state
+      occupancy_tokens: signals.occupancyTokens,
+      budget_tokens: signals.budgetTokens,
+      window_tokens: signals.window,
+      stale_tool_share: signals.staleToolShare,
+      stale_tool_tokens: signals.staleToolTokens,
+      stale_tool_results: signals.staleToolResults,
+      eligible_folds: signals.eligibleFolds,
+      rounds_used: roundsUsed,
+      max_rounds: CURATION_GATE_MAX_ROUNDS,
+      marks_added: persistence.state
         ? Math.max(0, pendingMarks(persistence.state).length - curation.marksAtGateOpen)
         : 0,
-      proceededBy,
-      ordinal: currentOrdinal(),
-      occurredAt: Date.now(),
+      proceeded_by: proceededBy,
     });
   };
 
@@ -2134,8 +2324,15 @@ export function registerActiveContext(pi: any, options: {
   const curationCommitVerdict = (
     snapshot: ActiveContextSnapshot,
     backstopDue: boolean,
+    /**
+     * The gate is arbitrated on CONTEXT passes only, because that is the pass that
+     * builds the projection carrying the notice. Opening it on a measurement callback
+     * would announce a commit into a projection nobody was about to receive, and the
+     * very next context pass would close it as an unanswered round.
+     */
+    announcing: boolean,
   ): { due: boolean; trigger: string | null } => {
-    if (!guidedCuration) return { due: backstopDue, trigger: null };
+    if (!guidedCuration || !announcing) return { due: backstopDue, trigger: null };
     const signals = measuredCurationSignals(snapshot);
     curation.lastSignals = signals;
     if (backstopDue) {
@@ -2205,7 +2402,12 @@ export function registerActiveContext(pi: any, options: {
   const applyAutomaticRung = async (
     snapshot: ActiveContextSnapshot,
     ratio: number,
-    rungOptions: { waiveToolCadence?: boolean; toolOnly?: boolean; waiverRatio?: number } = {},
+    rungOptions: {
+      waiveToolCadence?: boolean;
+      toolOnly?: boolean;
+      waiverRatio?: number;
+      announcing?: boolean;
+    } = {},
   ): Promise<Record<string, unknown> | null> => {
     if (!persistence.state || ladder.automaticFailure || ladder.preparing) return null;
     const rungSelectionOptions = {
@@ -2253,7 +2455,7 @@ export function registerActiveContext(pi: any, options: {
     if (epochScheduling) {
       const eligibleShare = markAccounting(snapshot, persistence.state).eligibleFreedWindowShare;
       const backstopDue = epochCommitDue(snapshot, ratio, eligibleShare);
-      const verdict = curationCommitVerdict(snapshot, backstopDue);
+      const verdict = curationCommitVerdict(snapshot, backstopDue, rungOptions.announcing === true);
       if (verdict.due) {
         epoch = await runCommitEpoch(
           snapshot,
@@ -2381,6 +2583,15 @@ export function registerActiveContext(pi: any, options: {
         sourceIds: chapter.sourceRefs.map((ref) => ref.entryId),
         ...(parts.length > 1 ? { splitFolds: parts.length, splitFromChars: spanChars } : {}),
       };
+      if (parts.length > 1) {
+        emit("context.split", {
+          source: "ladder",
+          span_chars: spanChars,
+          parts: parts.length,
+          cap_chars: MAX_FOLD_SPAN_CHARS,
+          fold_ids: foldIds.join(","),
+        });
+      }
       ladder.pendingContextNote = parts.length > 1
         ? `A ${spanChars}-char stale chapter was folded as ${parts.length} bite-sized folds ` +
           `(${foldIds.join(", ")}); exact evidence remains expandable.`
@@ -2401,7 +2612,12 @@ export function registerActiveContext(pi: any, options: {
     ratio: number,
     ctx: any,
     phase: string,
-    rungOptions: { waiveToolCadence?: boolean; toolOnly?: boolean; waiverRatio?: number } = {},
+    rungOptions: {
+      waiveToolCadence?: boolean;
+      toolOnly?: boolean;
+      waiverRatio?: number;
+      announcing?: boolean;
+    } = {},
   ): Promise<Record<string, unknown> | null> => {
     if (!persistence.state || !measurements.lastProviderMeasurement ||
         !durableProviderMeasurementMatches(measurements.lastProviderMeasurement)) return null;
@@ -2446,7 +2662,12 @@ export function registerActiveContext(pi: any, options: {
     ratio: number,
     ctx: any,
     phase: string,
-    rungOptions: { waiveToolCadence?: boolean; toolOnly?: boolean; waiverRatio?: number } = {},
+    rungOptions: {
+      waiveToolCadence?: boolean;
+      toolOnly?: boolean;
+      waiverRatio?: number;
+      announcing?: boolean;
+    } = {},
   ): Promise<Record<string, unknown> | null> => {
     const operation = ladder.actionQueue.then(() =>
       runAutomaticRungTransaction(snapshot, ratio, ctx, phase, rungOptions));
@@ -2718,7 +2939,9 @@ export function registerActiveContext(pi: any, options: {
             }
           }
           if (selectAutomaticToolForRung(snapshot, persistence.state, measurements.latestRatio)) mutationAttempted = true;
-          const action = await attemptAutomaticRung(snapshot, measurements.latestRatio, ctx, "context");
+          const action = await attemptAutomaticRung(
+            snapshot, measurements.latestRatio, ctx, "context", { announcing: true },
+          );
           if (action) {
             mutationAttempted = true;
             persistedSucceeded = true;
@@ -2849,10 +3072,24 @@ export function registerActiveContext(pi: any, options: {
     if (lifecycle.shuttingDown) return;
     try {
       const message = ownValue(event, "message");
-      observeCacheUsage(instrumentation.ledger, {
+      instrumentation.requests += 1;
+      const observation = observeCacheUsage(instrumentation.ledger, {
         usage: ownValue(message, "usage"),
         change: instrumentation.lastChange,
       });
+      if (observation) {
+        // The join key: this is where the stream meets provider-side telemetry.
+        emit("context.usage", {
+          provider: ownValue(message, "provider") ?? null,
+          model: ownValue(message, "model") ?? null,
+          input_tokens: observation.inputTokens,
+          cache_read_tokens: observation.cacheReadTokens,
+          total_tokens: providerTokens(message),
+          projection_change: observation.change,
+          provider_side_miss: observation.providerSideMiss,
+          message_sha256: evidenceSha256(message),
+        });
+      }
       const measurement = providerContextMeasurement(
         message,
         budgetWindowFor(ctx) ?? DEFAULT_CONTEXT_WINDOW,
@@ -3194,7 +3431,8 @@ export function registerActiveContext(pi: any, options: {
             ...ledgerSummary(instrumentation.ledger),
             projectionRecords: clone(instrumentation.ledger.records),
             cacheObservations: clone(instrumentation.ledger.observations),
-            contextEvents: clone(instrumentation.ledger.events),
+            // THE stream, as the durable entries carry it. One shape, one convention.
+            events: clone(instrumentation.ledger.events),
           },
           foldPeekResults,
           peek: {
@@ -3337,12 +3575,29 @@ export function registerActiveContext(pi: any, options: {
         const supplied = typeof params.brief === "string" && params.brief.trim() ? params.brief : undefined;
         const recut = manualFoldCandidate(snapshot, persistence.state, snapped.ids, { allowProtected: true });
         const created: Array<Record<string, unknown>> = [];
+        const correctedBriefs: Record<string, string> = {};
         for (const part of splitCandidateBySize(snapshot, persistence.state, recut)) {
+          // A re-cut that lands back on a span this session already folded meets its own
+          // immutable record. The record wins -- rewriting it would report a conflicting
+          // durable fold and suspend automatic management -- and the supplied brief
+          // becomes a correction beside it, which is what `rebrief` writes anyway.
+          const durable = persistence.persistedFoldRecords.get(foldIdFor(part.kind, part.parts));
           const { preparedFold, nextState } = await prepareAndCommitExplicit({
-            snapshot, candidate: part, brief: supplied, ctx, signal,
+            snapshot, candidate: part, brief: durable ? durable.fold.brief : supplied, ctx, signal,
           });
           persistence.state = nextState;
-          created.push({ id: preparedFold.id, kind: preparedFold.fold.kind, brief: preparedFold.fold.brief });
+          if (durable && supplied) correctedBriefs[preparedFold.id] = supplied;
+          created.push({
+            id: preparedFold.id,
+            kind: preparedFold.fold.kind,
+            brief: supplied ?? preparedFold.fold.brief,
+          });
+        }
+        if (Object.keys(correctedBriefs).length) {
+          persistence.state = {
+            ...persistence.state,
+            briefs: { ...(persistence.state.briefs ?? {}), ...correctedBriefs },
+          };
         }
         await persistManual(persistence.state, action, ctx);
         updateStatus(ctx);
@@ -3580,6 +3835,15 @@ export function registerActiveContext(pi: any, options: {
             splitFrom: parts.length > 1 && index === 0 ? spanChars : 0,
           });
         }
+        if (parts.length > 1) {
+          emit("context.split", {
+            source: "agent",
+            span_chars: spanChars,
+            parts: parts.length,
+            cap_chars: MAX_FOLD_SPAN_CHARS,
+            fold_ids: "",
+          });
+        }
       }
       const corrections = resolved.flatMap((item) => item.corrections);
       if (epochScheduling) {
@@ -3739,19 +4003,29 @@ export function registerActiveContext(pi: any, options: {
       // reached for a context verb engaged, whether or not the span was valid.
       curation.contextCalls += 1;
       const attempt = (ok: boolean, error: string | null, corrections: Array<Record<string, unknown>>) => {
-        recordEvent({
-          version: 1,
-          kind: "attempt",
-          sessionId: persistence.state?.sessionId ?? ctx.sessionManager.getSessionId(),
+        const record = emit("context.attempt", {
           action,
           ok,
           error,
-          corrections,
-          marks: requestedMarkCount(params),
-          argumentsSha256: sha256Value(params ?? {}),
-          ordinal: currentOrdinal(),
-          occurredAt: Date.now(),
+          marks_requested: requestedMarkCount(params),
+          corrections_applied: corrections.length,
+          arguments_sha256: sha256Value(params ?? {}),
         });
+        // One record per correction, referencing its attempt: nothing nests, and a
+        // reader counting corrections never has to unpack an array to do it.
+        for (const correction of corrections) {
+          const from = denseOwnArrayValues(ownValue(correction, "from")) ?? [];
+          const to = denseOwnArrayValues(ownValue(correction, "to")) ?? [];
+          emit("context.correction", {
+            attempt_seq: record.seq,
+            action,
+            requested_start_id: from[0] ?? null,
+            requested_end_id: from[1] ?? null,
+            corrected_start_id: to[0] ?? null,
+            corrected_end_id: to[1] ?? null,
+            reason: ownValue(correction, "reason") ?? null,
+          });
+        }
       };
       try {
         const result = await executeAction(params, signal, ctx);

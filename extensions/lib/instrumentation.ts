@@ -95,63 +95,91 @@ export interface CacheObservation {
 }
 
 /**
- * The context-management event stream.
+ * THE context-management event stream.
  *
- * Everything the agent tried and everything the runtime decided, adjudicable from the
- * session file. It records REJECTED calls as loudly as accepted ones: an agent that
- * cannot fold because its span keeps being refused looks identical, from fold records
- * alone, to an agent that never tried. Every record here is also appended as a durable
- * session entry, because an in-memory ledger is invisible to an external adjudicator.
+ * One stream, one envelope, one naming convention. Every context event this runtime
+ * produces -- tool attempts and their refusals, span corrections, gate lifecycle,
+ * receipts, commits, absorptions, splits, recoveries, projections and provider usage --
+ * lands here as a flat JSONL-style record, and every record is also appended as a
+ * durable session entry so an analyst can reconstruct the whole timeline from session
+ * artifacts alone.
+ *
+ * The envelope is fixed and self-describing:
+ *   v            schema version of the envelope
+ *   seq          monotonic per session, from 1, so records order without a clock
+ *   kind         "context.<noun>", the only field a reader must know to dispatch
+ *   session_id   the session these events belong to
+ *   ordinal      transcript position, the deterministic clock this runtime reasons in
+ *   at           wall-clock milliseconds, the join key against provider-side telemetry
+ *   revision     durable state revision at emit time
+ *
+ * Everything after the envelope is a FLAT snake_case payload. Records are not shaped
+ * around any metric we compute today: a reader that wants a number we never thought of
+ * should be able to get it with a query rather than a code change. Nothing nests, and
+ * anything one-to-many (a correction, an absorbed wedge, a created fold) is its own
+ * record referencing the record it belongs to by `seq`.
  */
-export type ContextEventRecord =
-  | ContextAttemptRecord
-  | CurationGateRecord
-  | ContextReceiptRecord;
+export const CONTEXT_EVENT_SCHEMA_VERSION = 1;
 
-/** One context-management tool call, accepted or refused. */
-export interface ContextAttemptRecord {
-  version: 1;
-  kind: "attempt";
-  sessionId: string;
-  action: string;
-  ok: boolean;
-  /** The exact validation text the caller received; null when the call succeeded. */
-  error: string | null;
-  /** Auto-snap corrections applied to the request before it was served. */
-  corrections: Array<Record<string, unknown>>;
-  /** How many {span, brief} pairs a batched mark call carried. */
-  marks: number;
-  argumentsSha256: string;
+export interface ContextEvent {
+  v: number;
+  seq: number;
+  kind: string;
+  session_id: string;
   ordinal: number;
-  occurredAt: number;
+  at: number;
+  revision: number;
+  [field: string]: unknown;
 }
 
-/** One evaluation of the guided-curation last-call gate. */
-export interface CurationGateRecord {
-  version: 1;
-  kind: "curation-gate";
-  sessionId: string;
-  event: "opened" | "held" | "proceeded";
-  occupancy: number | null;
-  staleToolShare: number;
-  staleToolTokens: number;
-  staleToolResults: number;
-  eligibleFolds: number;
-  roundsUsed: number;
-  marksAddedDuringGate: number;
-  proceededBy: string | null;
-  ordinal: number;
-  occurredAt: number;
-}
+export type ContextEventKind =
+  /** One context-management tool call, accepted or refused. */
+  | "context.attempt"
+  /** One auto-snap applied to a requested span, referencing its attempt. */
+  | "context.correction"
+  /** One evaluation of the guided-curation last-call gate. */
+  | "context.gate"
+  /** One receipt delivered into the window. */
+  | "context.receipt"
+  /** One commit epoch: the single mutation an epoch pays for. */
+  | "context.commit"
+  /** One fold created, by the ladder or by the agent. */
+  | "context.fold"
+  /** One boundary sliver absorbed into its later neighbour. */
+  | "context.absorb"
+  /** One oversized span split into sequential bite-sized folds. */
+  | "context.split"
+  /** One overflow rollback and the recovery that followed it. */
+  | "context.recovery"
+  /** One projection built, classified against the one before it. */
+  | "context.projection"
+  /** One provider response, which is where this stream joins provider usage. */
+  | "context.usage"
+  /** One handoff, compared byte-for-byte against the previous transmitted projection. */
+  | "context.prefix";
 
-/** One receipt delivered into the window. */
-export interface ContextReceiptRecord {
-  version: 1;
-  kind: "receipt";
-  sessionId: string;
-  receipt: Record<string, unknown>;
-  ordinal: number;
-  occurredAt: number;
+/**
+ * Where the prefix first differs from the previous TRANSMITTED projection, in chars.
+ *
+ * A positional cache is keyed on a byte prefix, so the message-level classification is
+ * not enough to attribute a miss: the analyst needs the position, and only the runtime
+ * knows why a byte at that position moved. This is the cheap half -- both projections
+ * are in hand at handoff -- and it is emission only. No analysis of it belongs here.
+ */
+export function prefixDivergence(
+  previous: string | null,
+  next: string,
+): { index: number | null; identicalChars: number; identicalShare: number } {
+  if (previous === null) return { index: null, identicalChars: 0, identicalShare: 0 };
+  const shared = Math.min(previous.length, next.length);
+  let index = 0;
+  while (index < shared && previous.charCodeAt(index) === next.charCodeAt(index)) index += 1;
+  const diverged = index < shared || next.length < previous.length;
+  return {
+    index: diverged ? index : null,
+    identicalChars: index,
+    identicalShare: next.length > 0 ? index / next.length : 0,
+  };
 }
 
 export interface InstrumentationLedger {
@@ -165,13 +193,11 @@ export interface InstrumentationLedger {
   observedMisses: number;
   records: ProjectionRecord[];
   observations: CacheObservation[];
-  /** Context-management attempts, gate events and receipts, oldest first. */
-  events: ContextEventRecord[];
-  attempts: number;
-  attemptErrors: number;
-  autoSnapCorrections: number;
-  curationGateEvents: number;
-  receiptsDelivered: number;
+  /** The stream itself, oldest first. Bounded in memory; durable in full. */
+  events: ContextEvent[];
+  /** The monotonic sequence every record carries. */
+  sequence: number;
+  countsByKind: Record<string, number>;
 }
 
 export function emptyLedger(): InstrumentationLedger {
@@ -185,25 +211,33 @@ export function emptyLedger(): InstrumentationLedger {
     records: [],
     observations: [],
     events: [],
-    attempts: 0,
-    attemptErrors: 0,
-    autoSnapCorrections: 0,
-    curationGateEvents: 0,
-    receiptsDelivered: 0,
+    sequence: 0,
+    countsByKind: {},
   };
 }
 
-/** Bounded append; the durable session entry is the audit copy, this ring is the status view. */
+/**
+ * Stamp the envelope and append. The in-memory ring is the status view and is bounded;
+ * the durable session entry is the audit copy and is not.
+ */
 export function recordContextEvent(
   ledger: InstrumentationLedger,
-  record: ContextEventRecord,
-): ContextEventRecord {
-  if (record.kind === "attempt") {
-    ledger.attempts += 1;
-    if (!record.ok) ledger.attemptErrors += 1;
-    ledger.autoSnapCorrections += record.corrections.length;
-  } else if (record.kind === "curation-gate") ledger.curationGateEvents += 1;
-  else ledger.receiptsDelivered += 1;
+  kind: ContextEventKind,
+  envelope: { session_id: string; ordinal: number; revision: number; at: number },
+  payload: Record<string, unknown> = {},
+): ContextEvent {
+  ledger.sequence += 1;
+  const record: ContextEvent = {
+    v: CONTEXT_EVENT_SCHEMA_VERSION,
+    seq: ledger.sequence,
+    kind,
+    session_id: envelope.session_id,
+    ordinal: envelope.ordinal,
+    at: envelope.at,
+    revision: envelope.revision,
+    ...payload,
+  };
+  ledger.countsByKind[kind] = (ledger.countsByKind[kind] ?? 0) + 1;
   ledger.events.push(record);
   if (ledger.events.length > MAX_CONTEXT_ATTEMPT_RECORDS) {
     ledger.events = ledger.events.slice(ledger.events.length - MAX_CONTEXT_ATTEMPT_RECORDS);
@@ -274,10 +308,7 @@ export function ledgerSummary(ledger: InstrumentationLedger): Record<string, unk
     projectionsUnchanged: ledger.identical,
     observedCacheMisses: ledger.observedMisses,
     providerSideCacheMisses: ledger.providerSideMisses,
-    contextAttempts: ledger.attempts,
-    contextAttemptErrors: ledger.attemptErrors,
-    autoSnapCorrections: ledger.autoSnapCorrections,
-    curationGateEvents: ledger.curationGateEvents,
-    receiptsDelivered: ledger.receiptsDelivered,
+    contextEvents: ledger.sequence,
+    contextEventsByKind: { ...ledger.countsByKind },
   };
 }
