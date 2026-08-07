@@ -6,7 +6,19 @@ import globals from "globals";
 
 export default [
   {
-    ignores: ["node_modules/**"],
+    ignores: [
+      "node_modules/**",
+      // Adopted 2026-08-07 from the quorum repo, where they were never linted
+      // (quorum is a Python project). They are the measurement harness for the
+      // fold-vs-compaction study, not package source — nothing here ships to
+      // npm, since package.json `files` is [extensions, README.md, LICENSE].
+      // Ignored rather than conformed so the move stayed verbatim: `npm run
+      // lint` keeps meaning "the package is clean" instead of going red on
+      // 18 pre-existing unused-variable findings in imported code. Drop these
+      // entries once the harness is conformed.
+      "scripts/**",
+      "tests/**",
+    ],
   },
   js.configs.recommended,
   {
