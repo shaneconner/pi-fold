@@ -6,7 +6,7 @@
 // the ones the experiment needs:
 //   - the active-context runtime is registered ONLY for the pifold arm, and with the run's
 //     guidance profile, so the arm IS the runtime configuration;
-//   - quorum_context actions are NOT policy-restricted: expand/protect/refold usage is a
+//   - context-tool actions are NOT policy-restricted: expand/protect/refold usage is a
 //     first-class metric here, and the soak's status/fold allowlist would suppress it;
 //   - a native compaction is RECORDED, not latched as a failure: for the native arm it is
 //     the event under measurement;
@@ -15,14 +15,16 @@
 import { existsSync, readFileSync, watch } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
-import { registerQuorumExtension } from "../.pi/extensions/quorum/index.js";
-import { registerActiveContext } from "../.pi/extensions/quorum/active-context.ts";
+// The measured runtime is this repo's own package, not a consumer's deployed copy: the
+// bytes under test are tracked, so the run seal pins exactly what executed.
+import { registerActiveContext } from "../extensions/active-context.ts";
+import { registerEvidenceIngestion } from "../extensions/evidence.js";
 import {
-  QUORUM_ACTIVE_CONTEXT_REGISTRATION,
-  QUORUM_NATIVE_COMPACTION_DECISION_ENTRY,
-  QUORUM_NATIVE_COMPACTION_RECEIPT_ENTRY,
-  QUORUM_READ_ONLY_TOOLS,
-} from "../.pi/extensions/quorum/identity.js";
+  PI_FOLD_ACTIVE_CONTEXT_REGISTRATION,
+  PI_FOLD_NATIVE_COMPACTION_DECISION_ENTRY,
+  PI_FOLD_NATIVE_COMPACTION_RECEIPT_ENTRY,
+  PI_FOLD_READ_ONLY_TOOLS,
+} from "./lib/pi_fold_identity.mjs";
 import {
   EXPERIMENT_ALLOWED_TOOLS,
   EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS,
@@ -51,7 +53,7 @@ import {
 // repo_stage returns pinned source bytes and mutates nothing, so it is foldable: stale
 // stage results become eligible tool-fold batches and the autonomous ladder fires on
 // cadence rather than on the model volunteering (the soak minor-3 lesson).
-const EXPERIMENT_READ_ONLY_TOOLS = new Set([...QUORUM_READ_ONLY_TOOLS, EXPERIMENT_TOOL_NAME]);
+const EXPERIMENT_READ_ONLY_TOOLS = new Set([...PI_FOLD_READ_ONLY_TOOLS, EXPERIMENT_TOOL_NAME]);
 
 function allStrings(value, result = []) {
   if (typeof value === "string") result.push(value);
@@ -203,7 +205,7 @@ export function createPiContextExperimentExtension(config) {
   };
 
   return {
-    name: "quorum-context-experiment",
+    name: "pi-fold-context-experiment",
     factory(pi) {
       // Native compaction is an EVENT here, not a latch: the native arm is supposed to
       // produce them. It is only a defect when the arm forbids it.
@@ -218,20 +220,21 @@ export function createPiContextExperimentExtension(config) {
       if (pifold) {
         const registerTool = pi.registerTool.bind(pi);
         pi.registerTool = (definition) => {
-          if (definition?.name === QUORUM_ACTIVE_CONTEXT_REGISTRATION.toolName) {
+          if (definition?.name === PI_FOLD_ACTIVE_CONTEXT_REGISTRATION.toolName) {
             contextToolDefinition = definition;
           }
           return registerTool(definition);
         };
         try {
-          registerQuorumExtension(pi, {
-            activeContextEnabled: false,
-            memoryProjectionEnabled: false,
-            mcpRuntimeEnabled: false,
-            agentToolEnabled: false,
+          // Evidence ingestion, then the runtime. This is the same pair the previous
+          // deployment bootstrap produced with its agent, MCP and memory layers disabled;
+          // no summarizer is configured, so fold briefs stay deterministic.
+          registerEvidenceIngestion(pi, {
+            isMcpTool: () => false,
+            entryTypePrefix: PI_FOLD_ACTIVE_CONTEXT_REGISTRATION.entryTypePrefix,
           });
           registerActiveContext(pi, {
-            ...QUORUM_ACTIVE_CONTEXT_REGISTRATION,
+            ...PI_FOLD_ACTIVE_CONTEXT_REGISTRATION,
             readOnlyTools: EXPERIMENT_READ_ONLY_TOOLS,
             guidance: config.guidance,
             // The second condition dial: fold as soon as a batch is eligible, or batch the
@@ -403,7 +406,7 @@ export function createPiContextExperimentExtension(config) {
           content: event.content ?? event.result?.content ?? null,
           isError: event.isError,
         });
-        if (event.toolName === QUORUM_ACTIVE_CONTEXT_REGISTRATION.toolName && event.isError !== true) {
+        if (event.toolName === PI_FOLD_ACTIVE_CONTEXT_REGISTRATION.toolName && event.isError !== true) {
           appendEvent("context-tool-result", {
             toolCallId: event.toolCallId ?? null,
             action: event.details?.action ?? null,
@@ -437,8 +440,8 @@ export function createPiContextExperimentExtension(config) {
         if (identity.signalAborted) appendFailure(config, "context-aborted", identity.leafId ?? "no-leaf");
         const native = ctx.sessionManager.getBranch().find((entry) => entry?.type === "compaction" ||
           (entry?.type === "custom" && [
-            QUORUM_NATIVE_COMPACTION_DECISION_ENTRY,
-            QUORUM_NATIVE_COMPACTION_RECEIPT_ENTRY,
+            PI_FOLD_NATIVE_COMPACTION_DECISION_ENTRY,
+            PI_FOLD_NATIVE_COMPACTION_RECEIPT_ENTRY,
           ].includes(entry.customType)));
         if (native && config.arm !== "native") {
           appendFailure(config, "unexpected-native-entry", native.customType ?? native.type);

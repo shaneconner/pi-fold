@@ -5,7 +5,6 @@ import {
 } from "node:fs";
 import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 /**
  * The launch identity, read from the password database rather than from $HOME.
@@ -44,25 +43,15 @@ export const SOAK_VERIFICATION_STAGE_INTERVAL_MS = 1_000;
 export const SOAK_VERIFICATION_WATCHDOG_MS = 8 * 60 * 1_000;
 export const SOAK_VERIFICATION_HEARTBEAT_MS = 2_000;
 export const SOAK_MIN_DURABLE_FOLDS = 1;
-export const SOAK_MARKER_ENTRY = "quorum-context-soak-marker-v1";
 export const SOAK_TERMINAL_STABILIZATION_MS = 2 * 60 * 1_000;
 export const SOAK_TOOL_NAME = "archive_stage";
 // This is a model-call policy, not a claim about the runtime's registered schema.
 export const SOAK_MODEL_CONTEXT_ACTIONS = Object.freeze(["status", "fold"]);
-// Derived from this checkout so the attested dependency is the one the exercised code resolves;
-// .pi/git is untracked, so a worktree needs the checkout present (or symlinked) at this path.
-export const SOAK_PI_SUBAGENTS_ROOT = join(
-  dirname(fileURLToPath(import.meta.url)), "..", "..",
-  ".pi", "git", "github.com", "shaneconner", "pi-subagents");
-export const SOAK_EXPECTED_TOOL_NAMES = Object.freeze([
-  "archive_stage", "bash", "edit", "quorum_context", "read", "reload_runtime", "write",
-]);
 export const SOAK_BEHAVIORAL_MODE = "extension-advisory-supervised-archive";
 export const SOAK_RUNNER_MODE = "systemd-supervised-single-session";
-export const SOAK_ADVISORY_HOOK_PREFIX = "[Quorum context milestone ";
-export const SOAK_SANITIZED_ENV_MARKER = "QUORUM_CONTEXT_SOAK_SANITIZED";
+export const SOAK_SANITIZED_ENV_MARKER = "PI_FOLD_SANITIZED";
 export const SOAK_FORBIDDEN_ENV_KEYS = Object.freeze([
-  "QUORUM_PI_ROOT", "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "LD_PRELOAD",
+  "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "LD_PRELOAD",
   "LD_LIBRARY_PATH", "BASH_ENV", "ENV", "NODE_TLS_REJECT_UNAUTHORIZED",
   "PI_CODING_AGENT_DIR", "OPENAI_BASE_URL", "OPENAI_API_BASE", "HTTP_PROXY", "HTTPS_PROXY",
   "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
@@ -75,8 +64,7 @@ export const SOAK_FORBIDDEN_ENV_KEYS = Object.freeze([
 const HEX_64 = /^[0-9a-f]{64}$/;
 const HEX_32 = /^[0-9a-f]{32}$/;
 const RUN_ID = /^[0-9TZ_.:-]+-[0-9a-f]{12}$/;
-const UNIT = /^quorum-pi-context-soak-[a-z0-9_.@-]+\.service$/;
-const FORBIDDEN_VISIBLE = /(?:\bquorum_context\b|\bcontexts?\b|\bfold(?:s|ed|ing)?\b|\bcompact(?:s|ed|ing|ion)?\b|\bthresholds?\b|\bguidance\b|\bacceptance\b|\breceipts?\b|\breductions?\b|\bautomatic\b|\bzero[- ]fallback\b|\bthree[- ]hours?\b|\b100%\b)/i;
+const UNIT = /^pi-fold-context-soak-[a-z0-9_.@-]+\.service$/;
 
 export function assertSoak(condition, message) {
   if (!condition) throw new Error(message);
@@ -146,64 +134,8 @@ export function exactKeys(value, keys) {
     JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
 }
 
-export function assertBlindVisibleText(label, text) {
-  assertSoak(typeof text === "string" && !FORBIDDEN_VISIBLE.test(text),
-    `${label} leaked hidden context-management acceptance criteria`);
-}
-
 export function freshChallenge() {
   return randomBytes(32).toString("hex");
-}
-
-export function stageMarker(stage) {
-  return `ARCHIVE_MARKER_${String(stage).padStart(2, "0")}`;
-}
-
-export function soakSystemPrompt() {
-  const prompt = [
-    "You are a careful archival analyst working in one continuous task.",
-    "Use the available tools accurately, preserve factual continuity, and finish only after the requested archive ends.",
-  ].join(" ");
-  assertBlindVisibleText("isolated system prompt", prompt);
-  return prompt;
-}
-
-export function renderSoakPrompt(firstChallenge) {
-  assertSoak(HEX_64.test(firstChallenge), "Invalid first archive challenge");
-  const prompt = [
-    `Process the staged archive beginning with key ${firstChallenge}.`,
-    `Call ${SOAK_TOOL_NAME} with the current key, keep a cumulative factual analysis, and follow each NEXT_KEY until END.`,
-    "Do not skip, guess, duplicate, or combine stages. Finish with a concise marker-to-claim list and any anomalies.",
-    "Complete this as one continuous run.",
-  ].join(" ");
-  assertBlindVisibleText("soak prompt", prompt);
-  return prompt;
-}
-
-export function archiveStageIsPlateau(stage) {
-  assertSoak(Number.isSafeInteger(stage) && stage >= 1 && stage <= SOAK_STAGE_COUNT,
-    "Invalid archive stage");
-  return stage % 3 === 0;
-}
-
-export function renderArchiveStage(stage, nextChallenge) {
-  assertSoak(Number.isSafeInteger(stage) && stage >= 1 && stage <= SOAK_STAGE_COUNT,
-    "Invalid archive stage");
-  assertSoak(nextChallenge === "END" || HEX_64.test(nextChallenge), "Invalid next archive challenge");
-  const prefix = `${stageMarker(stage)}\nCLAIM: archive stage ${stage} completed with deterministic evidence.\n`;
-  const suffix = `\nNEXT_KEY: ${nextChallenge}\n`;
-  if (archiveStageIsPlateau(stage)) {
-    const rendered = `${prefix}No bulk evidence is released at this external pressure plateau.${suffix}`;
-    assertBlindVisibleText(`archive stage ${stage}`, rendered);
-    return rendered;
-  }
-  const phrase = `Archive ${stage} evidence is factual and complete. `;
-  let body = prefix;
-  while (body.length < SOAK_STAGE_CHARS - suffix.length) body += phrase;
-  const rendered = body.slice(0, SOAK_STAGE_CHARS - suffix.length) + suffix;
-  assertBlindVisibleText(`archive stage ${stage}`, rendered);
-  assertSoak(rendered.length === SOAK_STAGE_CHARS, "Archive stage size drifted");
-  return rendered;
 }
 
 export function monotonicMs() {
@@ -607,33 +539,6 @@ export function verifySourceHashes(project, sourceHashes) {
       `Pinned soak source hash drifted: ${relative}`);
   }
   return true;
-}
-
-export function runtimeSourcePaths(project) {
-  const extensionRoot = join(project, ".pi", "extensions", "quorum");
-  const extensionSources = readdirSync(extensionRoot).sort().flatMap((name) => {
-    const path = join(extensionRoot, name);
-    return lstatSync(path).isFile() ? [`.pi/extensions/quorum/${name}`] : [];
-  });
-  return [
-    ...extensionSources,
-    ".pi/settings.json",
-    "scripts/lib/pi_context_soak_attestation.mjs",
-    "scripts/pi_context_soak_extension.mjs",
-    "scripts/run_pi_context_soak.mjs",
-    "scripts/run_pi_context_soak_worker.mjs",
-    "scripts/adjudicate_pi_context_soak.mjs",
-    "scripts/adjudicate_pi_context_soak.sh",
-    "scripts/audit_pi_context_recovery.mjs",
-    "scripts/launch_pi_context_soak.sh",
-    "scripts/verify_pi_context_soak.mjs",
-    "scripts/verify_pi_context_soak_boot.mjs",
-  ].reduce((result, relative) => {
-    const path = join(project, relative);
-    assertSoak(existsSync(path), `Missing soak runtime source ${relative}`);
-    result[relative] = fileSha256(path);
-    return result;
-  }, {});
 }
 
 export function artifactStat(path) {

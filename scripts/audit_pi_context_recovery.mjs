@@ -1,23 +1,23 @@
 #!/usr/bin/env node
 
 import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { PI_INSTALL_ROOT } from "./lib/pi_context_soak_attestation.mjs";
 
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-// A forensic reader for sealed sessions, so it reads the DEPLOYED runtime rather than the
-// package: it needs identity.js, which is a consumer's wiring and not part of pi-fold.
-// Same convention as verify_pi_context_service.mjs: deployment root as an argument,
-// defaulting to the sibling checkout the package is synced into.
-const extensionRoot = process.env.PI_FOLD_DEPLOYMENT
-  ? resolve(process.env.PI_FOLD_DEPLOYMENT)
-  : join(projectRoot, "..", "quorum", ".pi", "extensions", "quorum");
+// A forensic reader for sealed sessions: this repo's runtime, read through this repo's
+// deployment identity, which is the pair the experiment actually runs. It used to read a
+// consumer's deployed copy instead, because that was where the runtime lived; the runtime
+// lives here now, and entry types are brand-specific, so a session sealed under another
+// brand is that brand's to read.
+const extensionRoot = join(projectRoot, "extensions");
+const identityModule = join(projectRoot, "scripts", "lib", "pi_fold_identity.mjs");
 const sessionFile = process.argv[2] || process.env.PI_SESSION_FILE;
-const markerId = process.argv[3] || process.env.QUORUM_CONTEXT_CANARY_MARKER || null;
-const requiredAgentFolds = Number.parseInt(process.env.QUORUM_REQUIRED_AGENT_FOLDS ?? "0", 10);
+const markerId = process.argv[3] || process.env.PI_FOLD_CANARY_MARKER || null;
+const requiredAgentFolds = Number.parseInt(process.env.PI_FOLD_REQUIRED_AGENT_FOLDS ?? "0", 10);
 if (!Number.isSafeInteger(requiredAgentFolds) || requiredAgentFolds < 0 || requiredAgentFolds > 64) {
-  throw new Error(`Invalid QUORUM_REQUIRED_AGENT_FOLDS: ${process.env.QUORUM_REQUIRED_AGENT_FOLDS}`);
+  throw new Error(`Invalid PI_FOLD_REQUIRED_AGENT_FOLDS: ${process.env.PI_FOLD_REQUIRED_AGENT_FOLDS}`);
 }
 if (!sessionFile || !existsSync(sessionFile)) throw new Error(`Pi session does not exist: ${sessionFile || "missing"}`);
 
@@ -33,7 +33,7 @@ const jiti = createJiti(import.meta.url, {
   },
 });
 const context = await jiti.import(join(extensionRoot, "active-context.ts"));
-const identity = await jiti.import(join(extensionRoot, "identity.js"));
+const identity = await jiti.import(identityModule);
 const json = await jiti.import(join(extensionRoot, "json.ts"));
 
 const manager = SessionManager.open(sessionFile, undefined, projectRoot);
@@ -42,7 +42,7 @@ const markerIndex = markerId ? branch.findIndex((entry) => entry.id === markerId
 if (markerId && markerIndex < 0) throw new Error(`Canary marker ${markerId} is not on the selected Pi branch`);
 const sinceMarker = markerIndex < 0 ? branch : branch.slice(markerIndex + 1);
 const state = context.materializeActiveContextState(branch, manager.getSessionId(),
-  identity.QUORUM_STATE_ENTRY, identity.QUORUM_FOLD_RECORD_ENTRY);
+  identity.PI_FOLD_STATE_ENTRY, identity.PI_FOLD_FOLD_RECORD_ENTRY);
 const messages = manager.buildSessionContext().messages;
 const snapshot = context.mapActiveContext({
   sessionId: manager.getSessionId(),
@@ -60,14 +60,14 @@ const terminal = [...messages].reverse().find((message) => message?.role === "as
 const tokens = terminal?.usage?.totalTokens;
 const contextWindow = terminal?.contextWindow ?? 272_000;
 const stateEntries = sinceMarker.filter((entry) => entry.type === "custom" &&
-  entry.customType === identity.QUORUM_STATE_ENTRY);
+  entry.customType === identity.PI_FOLD_STATE_ENTRY);
 const foldRecords = sinceMarker.filter((entry) => entry.type === "custom" &&
-  entry.customType === identity.QUORUM_FOLD_RECORD_ENTRY);
+  entry.customType === identity.PI_FOLD_FOLD_RECORD_ENTRY);
 const nativeCompactions = sinceMarker.filter((entry) => entry.type === "compaction");
 const nativeDecisions = sinceMarker.filter((entry) => entry.type === "custom" &&
-  entry.customType === identity.QUORUM_NATIVE_COMPACTION_DECISION_ENTRY);
+  entry.customType === identity.PI_FOLD_NATIVE_COMPACTION_DECISION_ENTRY);
 const nativeReceipts = sinceMarker.filter((entry) => entry.type === "custom" &&
-  entry.customType === identity.QUORUM_NATIVE_COMPACTION_RECEIPT_ENTRY);
+  entry.customType === identity.PI_FOLD_NATIVE_COMPACTION_RECEIPT_ENTRY);
 const historicalGuidanceReceipts = sinceMarker.filter((entry) => entry.type === "custom" &&
   entry.customType === context.GUIDANCE_MILESTONE_RECEIPT_ENTRY)
   .map((entry) => context.parseGuidanceMilestoneReceipt(entry.data, manager.getSessionId()));

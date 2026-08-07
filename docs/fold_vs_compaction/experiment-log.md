@@ -26,6 +26,18 @@ The four state trees were then archived and removed from the machine's shared ru
 
 192,955 files, 1.6 GB, compressed to 187 MB. The postmortem's findings are carried forward in `production-postmortem.md`; the rest is answerable only from the archive, which is why the hashes are recorded here rather than the archive being discarded.
 
+## Condition boundary: the runtime moved, and the context tool was renamed (2026-08-07)
+
+Runs from this date forward are not directly comparable to the archived corpus, and the reason is worth stating plainly rather than burying in a commit.
+
+The harness used to load the runtime under measurement out of a consumer's deployed copy. That was wrong on its own terms: the measured bytes were untracked, so a run's `codeCommit` attested the harness while the code actually executing floated free of it. The runtime now comes from `extensions/` in this repo, and the seal pins every source file under that root. This is a strictly better attestation and changes no behavior.
+
+The rename does change one thing the model sees. The context tool was `quorum_context` and is now `pi_fold_context`; entry types moved from `quorum-active-context-*` to `pi-fold-active-context-*`. Tool names appear in the schema the model is given and inside the runtime's own guidance strings ("Expand exactly: ..."), so this is a small change to the prompt surface, not a pure refactor. It is not expected to matter, but it was not measured, so it is recorded as a boundary rather than assumed away.
+
+Everything else about the pifold arm is held: the same registration options, the same guidance profiles, and no summarizer, which is what `summarizer: "deterministic"` means in this runtime. The tool surface the model sees is unchanged in size and shape (`read`, `repo_stage`, and the context tool), because the exposed set is pinned explicitly by the worker rather than inherited from whatever happens to be registered.
+
+Practical consequence: treat post-2026-08-07 reps as a new campaign. Pooling them with the archived corpus would mix a tool-name change and a different `codeCommit` lineage into whatever effect is being claimed.
+
 ## Hypothesis
 
 On long-running work that keeps returning to the same material, agent-governed lossless folding beats stop-the-world compaction on recall and total cost, and locates the window wall that an unmanaged session hits. Headline claim shape: savings at equal or better accuracy.

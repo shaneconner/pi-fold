@@ -30,7 +30,6 @@ import {
   validateStagePlan,
 } from "./lib/pi_context_experiment.mjs";
 import {
-  SOAK_PI_SUBAGENTS_ROOT,
   assertSanitizedRuntimeEnvironment,
   directoryTreeSha256,
   fileSha256,
@@ -58,8 +57,6 @@ const workerDependencyHashes = {
   piPackageJson: fileSha256(join(PI_ROOT, "package.json")),
   piDistTree: directoryTreeSha256(join(PI_ROOT, "dist")),
   piNodeModulesTree: directoryTreeSha256(join(PI_ROOT, "node_modules")),
-  piSubagentsPackageJson: fileSha256(join(SOAK_PI_SUBAGENTS_ROOT, "package.json")),
-  piSubagentsSrcTree: directoryTreeSha256(join(SOAK_PI_SUBAGENTS_ROOT, "src")),
   nodeExecutable: fileSha256(process.execPath),
 };
 assertExperiment(JSON.stringify(workerDependencyHashes) === JSON.stringify(config.dependencyHashes),
@@ -80,17 +77,16 @@ const jiti = createJiti(import.meta.url, {
   alias: {
     "@earendil-works/pi-coding-agent": join(PI_ROOT, "dist", "index.js"),
     typebox: join(PI_ROOT, "node_modules", "typebox", "build", "index.mjs"),
-    "../../pi-subagents": SOAK_PI_SUBAGENTS_ROOT,
   },
 });
 const { createPiContextExperimentExtension } = await jiti.import(
   join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"),
 );
 const { materializeActiveContextState, recoverFoldMessages } = await jiti.import(
-  join(PROJECT, ".pi", "extensions", "quorum", "active-context.ts"),
+  join(PROJECT, "extensions", "active-context.ts"),
 );
-const { QUORUM_STATE_ENTRY, QUORUM_FOLD_RECORD_ENTRY } = await jiti.import(
-  join(PROJECT, ".pi", "extensions", "quorum", "identity.js"),
+const { PI_FOLD_STATE_ENTRY, PI_FOLD_FOLD_RECORD_ENTRY } = await jiti.import(
+  join(PROJECT, "scripts", "lib", "pi_fold_identity.mjs"),
 );
 verifySourceHashes(PROJECT, config.sourceHashes);
 
@@ -330,7 +326,7 @@ try {
   let foldSummary = null;
   if (armRuntime.activeContextEnabled) {
     const activeState = materializeActiveContextState(entries, manager.getSessionId(),
-      QUORUM_STATE_ENTRY, QUORUM_FOLD_RECORD_ENTRY);
+      PI_FOLD_STATE_ENTRY, PI_FOLD_FOLD_RECORD_ENTRY);
     foldSummary = {
       foldCount: activeState.folds.length,
       expanded: [...(activeState.expanded ?? [])],

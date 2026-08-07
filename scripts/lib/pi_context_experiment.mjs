@@ -61,9 +61,9 @@ export const EXPERIMENT_PROVIDER_TOTAL_WINDOWS = Object.freeze({ "gpt-5.6-luna":
 // prefix-cache-routed transport and the comparison is deterministic.
 export const EXPERIMENT_TRANSPORT = "sse";
 export const EXPERIMENT_TRANSPORTS = Object.freeze(["sse", "websocket", "auto"]);
-// The epoch scheduler's implementation, pinned the moment it exists in the extension and
+// The epoch scheduler's implementation, pinned the moment it exists in the runtime and
 // REQUIRED once a run asks for epoch scheduling.
-export const EXPERIMENT_SCHEDULING_SOURCE = ".pi/extensions/quorum/lib/scheduling.ts";
+export const EXPERIMENT_SCHEDULING_SOURCE = "extensions/lib/scheduling.ts";
 
 // Constants, not knobs: the supervisor recomputes the required root and refuses a run
 // directory outside it, and an override set in the launching shell is not in the
@@ -73,7 +73,7 @@ export const EXPERIMENT_RUN_ROOT = join(RUNTIME_HOME, "pi-fold-runs");
 export const EXPERIMENT_STATE_ROOT = join(EXPERIMENT_RUN_ROOT, "state", "ops", "pi-context-experiment");
 export const EXPERIMENT_TMP_ROOT = join(EXPERIMENT_RUN_ROOT, "tmp");
 export const EXPERIMENT_TOOL_NAME = "repo_stage";
-export const EXPERIMENT_MARKER_ENTRY = "quorum-context-experiment-marker-v1";
+export const EXPERIMENT_MARKER_ENTRY = "pi-fold-context-experiment-marker-v1";
 export const EXPERIMENT_RUNNER_MODE = "systemd-supervised-single-session";
 export const EXPERIMENT_BEHAVIORAL_MODE = "staged-repo-comprehension-marathon";
 export const EXPERIMENT_TERMINAL_STABILIZATION_MS = 2 * 60 * 1_000;
@@ -81,7 +81,7 @@ export const EXPERIMENT_TERMINAL_STABILIZATION_MS = 2 * 60 * 1_000;
 // The model may read the pinned checkout freely: rereading after a stop-the-world event is
 // the behaviour under measurement, so removing the read tool would destroy the metric.
 export const EXPERIMENT_ALLOWED_TOOLS = Object.freeze(["read", EXPERIMENT_TOOL_NAME]);
-export const EXPERIMENT_PIFOLD_EXTRA_TOOLS = Object.freeze(["quorum_context"]);
+export const EXPERIMENT_PIFOLD_EXTRA_TOOLS = Object.freeze(["pi_fold_context"]);
 
 // Pacing exists to keep stage RELEASE external (soak integrity), not to burn wall-clock:
 // wall-clock is a measured variable here, so the gate is a floor, not a stretcher.

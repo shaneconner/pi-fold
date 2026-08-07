@@ -20,55 +20,66 @@ const piFold = await jiti.import(join(projectRoot, "extensions", "index.js"));
 const summarizerFactory = await jiti.import(join(projectRoot, "extensions", "summarizer.js"));
 const evidenceModule = await jiti.import(join(projectRoot, "extensions", "evidence.js"));
 
-const LEGACY_REPRODUCTION_FIXTURE = Object.freeze({
-  originName: "Quorum",
+// One synthetic deployment identity, written out in full, so every brand-derived string
+// the runtime renders is asserted against a literal rather than another derivation of
+// itself. The runtime ships no identity of its own: a deployment supplies the tool name,
+// entry types, commands and rendered strings, and this fixture proves that parameter
+// actually reaches every surface.
+//
+// The brand is deliberately neither pi-fold nor any real consumer. The neutrality gate
+// asserts this brand appears NOWHERE in the default surface, and the defaults are
+// themselves pi-fold-branded, so naming the fixture after this package would make that
+// assertion vacuous. Real consumers are checked against their own deployed copies by
+// scripts/verify_pi_context_service.mjs.
+const DEPLOYMENT_IDENTITY_FIXTURE = Object.freeze({
+  originName: "Acme",
   registration: Object.freeze({
-    toolName: "quorum_context",
-    entryTypePrefix: "quorum-active-context",
-    commandNames: Object.freeze({ status: "quorum-context", fold: "fold-context" }),
-    toolLabel: "Quorum Active Context",
-    brandNoun: "Quorum",
+    toolName: "acme_context",
+    entryTypePrefix: "acme-active-context",
+    commandNames: Object.freeze({ status: "acme-context", fold: "fold-context" }),
+    toolLabel: "Acme Active Context",
+    brandNoun: "Acme",
   }),
-  toolName: "quorum_context",
-  commands: Object.freeze(["fold-context", "quorum-context"]),
-  statusKey: "quorum-active-context",
-  statusText: "quorum_context folds: 0 · provider usage unmeasured",
+  toolName: "acme_context",
+  commands: Object.freeze(["acme-context", "fold-context"]),
+  statusKey: "acme-active-context",
+  statusText: "acme_context folds: 0 · provider usage unmeasured",
   entryTypes: Object.freeze([
-    "quorum-active-context-fold-record",
-    "quorum-active-context-state",
-    "quorum-context-event",
-    "quorum-native-compaction-decision",
-    "quorum-native-compaction-receipt",
-    "quorum-provider-context-measurement",
+    "acme-active-context-fold-record",
+    "acme-active-context-state",
+    "acme-context-event",
+    "acme-native-compaction-decision",
+    "acme-native-compaction-receipt",
+    "acme-provider-context-measurement",
   ]),
   projectionTypes: Object.freeze([
-    "quorum-active-context-advisory",
-    "quorum-active-context-milestone",
+    "acme-active-context-advisory",
+    "acme-active-context-milestone",
   ]),
-  receiptType: "quorum-active-context-receipts",
-  source: "quorum/active-context",
-  placeholderPrefix: "[Quorum active-context fold ",
-  milestonePrefix: "[Quorum context milestone ",
-  advisoryPrefix: "[Quorum context advisory] ",
+  receiptType: "acme-active-context-receipts",
+  source: "acme/active-context",
+  placeholderPrefix: "[Acme active-context fold ",
+  milestonePrefix: "[Acme context milestone ",
+  advisoryPrefix: "[Acme context advisory] ",
   placeholder: (fold) => [
-    `[Quorum active-context fold ${fold.id}]`,
+    `[Acme active-context fold ${fold.id}]`,
     fold.brief,
     `Topology: kind=${fold.kind}; parent=root; children=0; previous=none; next=none.`,
-    `Expand exactly: quorum_context {"action":"expand","id":"${fold.id}"}`,
-    "List/page exactly: quorum_context {\"action\":\"status\"}",
+    `Expand exactly: acme_context {"action":"expand","id":"${fold.id}"}`,
+    "List/page exactly: acme_context {\"action\":\"status\"}",
   ].join("\n"),
-  milestoneText: "[Quorum context milestone tools; session active-context-t] The read-only tool-fold rung begins at 71%. Eligible completed tool batches can be folded now; current endpoint ids are in the live advisory.",
-  advisoryText: "[Quorum context advisory] pressure 80%; milestone tools; headroom 10000 of 90000 tokens; unmarked share 100%; 0 pending mark(s), 0 eligible now, together freeing about 0 tokens of the 0 marked; eligible read-only batch endpoints: none; eligibleChapter endpoints: none; session milestone count: 0.",
-  blockedCompaction: "blocked stock automatic compaction; Quorum context folding remains authoritative",
-  completedCompaction: "native compaction completed; Quorum folding state rebuilt",
-  compactionNotice: "Pi native compaction ran; Quorum folding state was rebuilt.",
-  hardFenceNote: "Provider context reached the hard Quorum fence without a newly committed lossless fold. The provider request was aborted before transmission; run /compact or make an explicit bounded context fold.",
-  mcpToolName: "mcp__quorum__fetch",
-  mcpOwnerKind: "quorum-mcp",
-  mcpOwnerId: "quorum:active-context-test",
-  evidenceDirectory: "quorum-evidence",
-  mcpServer: "quorum",
-  mcpFallbackServer: "quorum",
+  milestoneText: "[Acme context milestone tools; session active-context-t] The read-only tool-fold rung begins at 71%. Eligible completed tool batches can be folded now; current endpoint ids are in the live advisory.",
+  advisoryText: "[Acme context advisory] pressure 80%; milestone tools; headroom 10000 of 90000 tokens; unmarked share 100%; 0 pending mark(s), 0 eligible now, together freeing about 0 tokens of the 0 marked; eligible read-only batch endpoints: none; eligibleChapter endpoints: none; session milestone count: 0.",
+  blockedCompaction: "blocked stock automatic compaction; Acme context folding remains authoritative",
+  completedCompaction: "native compaction completed; Acme folding state rebuilt",
+  compactionNotice: "Pi native compaction ran; Acme folding state was rebuilt.",
+  hardFenceNote: "Provider context reached the hard Acme fence without a newly committed lossless fold. The provider request was aborted before transmission; run /compact or make an explicit bounded context fold.",
+  mcpToolName: "mcp__acme__fetch",
+  mcpOwnerKind: "acme-mcp",
+  mcpOwnerId: "acme:active-context-test",
+  evidenceDirectory: "acme-evidence",
+  mcpServer: "acme",
+  mcpFallbackServer: "acme",
 });
 
 const MODEL_BRIEF = async () => ({
@@ -715,7 +726,7 @@ async function gateNeutralDefaultBranding() {
   assert(surface.evidence.path.includes("/pi-fold-evidence/"));
   assert.equal(surface.evidence.mcpServer, "docs");
   assert.equal(surface.evidence.fallbackMcpServer, "pi-fold");
-  assert.equal(new RegExp(LEGACY_REPRODUCTION_FIXTURE.originName, "i").test(json.stableStringify(surface)), false);
+  assert.equal(new RegExp(DEPLOYMENT_IDENTITY_FIXTURE.originName, "i").test(json.stableStringify(surface)), false);
   return {
     tool: surface.toolName,
     label: surface.toolLabel,
@@ -727,8 +738,8 @@ async function gateNeutralDefaultBranding() {
   };
 }
 
-async function gateLegacyBrandingReproduction() {
-  const fixture = LEGACY_REPRODUCTION_FIXTURE;
+async function gateDeploymentBrandingReproduction() {
+  const fixture = DEPLOYMENT_IDENTITY_FIXTURE;
   const surface = await collectRegistrationSurface(fixture.registration, fixture.mcpToolName);
   assert.equal(surface.toolName, fixture.toolName);
   assert.equal(surface.toolLabel, fixture.registration.toolLabel);
@@ -7983,7 +7994,7 @@ const gates = [
   [18, "Follow-up fences & stale anchors", gateFollowupFencesAndAnchors],
   [19, "Fresh-tail share cap", gateFreshTailShareCap],
   [20, "Neutral default branding", gateNeutralDefaultBranding],
-  [21, "Legacy branding reproduction", gateLegacyBrandingReproduction],
+  [21, "Deployment branding reproduction", gateDeploymentBrandingReproduction],
   [22, "Evidence ingestion switch", gateEvidenceIngestionSwitch],
   [23, "Summarizer option", gateSummarizerOption],
   [24, "Guidance profiles", gateGuidanceProfiles],

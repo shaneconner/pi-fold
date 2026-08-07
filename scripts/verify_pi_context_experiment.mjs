@@ -8,11 +8,11 @@
 //   node scripts/verify_pi_context_experiment.mjs
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   EXPERIMENT_ARMS,
   EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS,
@@ -337,7 +337,7 @@ const runConfig = {
   repetition: 2,
   ordinal: 2,
   seed: "0011223344556677",
-  unit: "quorum-pi-context-experiment-run-1.service",
+  unit: "pi-fold-experiment-run-1.service",
   invocationId: "1".repeat(32),
   supervisorPid: 42,
   supervisorStartTicks: 99,
@@ -537,8 +537,8 @@ assert(grader.includes("Campaign mixes adjudicator versions") &&
   grader.includes("adjudicators.size === 1"),
 "the grader must refuse a campaign whose runs were adjudicated by different adjudicator versions");
 assert(launcher.startsWith("#!/bin/bash -p") &&
-  launcher.includes("--setenv=QUORUM_CONTEXT_SOAK_SANITIZED=1") &&
-  launcher.includes("UnsetEnvironment=QUORUM_PI_ROOT NODE_OPTIONS") &&
+  launcher.includes("--setenv=PI_FOLD_SANITIZED=1") &&
+  launcher.includes("UnsetEnvironment=NODE_OPTIONS") &&
   launcher.includes("refusing an experiment launch from a dirty worktree"),
 "the launcher must sanitize its environment and refuse a dirty worktree");
 assert(staging.includes("worktree\", \"add\", \"--quiet\", \"--detach\"") &&
@@ -856,7 +856,7 @@ try {
 {
   assert.deepEqual([...EXPERIMENT_FOLD_SCHEDULING], ["immediate", "epoch"]);
   assert.equal(EXPERIMENT_DEFAULT_FOLD_SCHEDULING, "immediate");
-  assert.equal(EXPERIMENT_SCHEDULING_SOURCE, ".pi/extensions/quorum/lib/scheduling.ts");
+  assert.equal(EXPERIMENT_SCHEDULING_SOURCE, "extensions/lib/scheduling.ts");
   // Runs sealed before the dial existed carry no key and still adjudicate.
   validateExperimentRunConfig(runConfig);
   validateExperimentRunConfig({ ...runConfig, foldScheduling: "epoch" });
@@ -874,9 +874,9 @@ try {
     supervisor.includes("EXPERIMENT_FOLD_SCHEDULING.includes(foldScheduling)") &&
     supervisor.includes("experimentSourceHashes(foldScheduling)") &&
     supervisor.includes("schedulingPresent || foldScheduling !== \"epoch\"") &&
-    supervisor.includes("libPaths.includes(EXPERIMENT_SCHEDULING_SOURCE) === schedulingPresent") &&
+    supervisor.includes("runtimePaths.includes(EXPERIMENT_SCHEDULING_SOURCE) === schedulingPresent") &&
     supervisor.includes("foldScheduling,"),
-  "the supervisor must accept --fold-scheduling, pin the whole extension lib, require the scheduler for epoch, and record it in the run config");
+  "the supervisor must accept --fold-scheduling, pin the whole runtime source tree, require the scheduler for epoch, and record it in the run config");
   assert(worker.includes("foldScheduling: config.foldScheduling ?? EXPERIMENT_DEFAULT_FOLD_SCHEDULING"),
     "the worker must record the run's fold scheduling in the sealed manifest");
   assert(extension.includes("foldScheduling: config.foldScheduling ?? EXPERIMENT_DEFAULT_FOLD_SCHEDULING"),
@@ -1041,10 +1041,10 @@ try {
 // running at 0.864. Both lenses ship in the evidence, and neither replaces the other.
 // ---------------------------------------------------------------------------
 {
-  const prefix = (ordinal, over) => ({ type: "custom", customType: "quorum-context-event",
+  const prefix = (ordinal, over) => ({ type: "custom", customType: "pi-fold-context-event",
     data: { kind: "context.prefix", ordinal, change: "append", divergent_tokens: null,
       estimated_tokens: 0, cause: "pure-append", request_class: "steady-state", ...over } });
-  const custom = (data) => ({ type: "custom", customType: "quorum-context-event", data });
+  const custom = (data) => ({ type: "custom", customType: "pi-fold-context-event", data });
   const entries = [
     prefix(1, { estimated_tokens: 100 }),
     // Pure append: the whole previous projection is a cached prefix.
@@ -1061,7 +1061,7 @@ try {
     custom({ kind: "context.commit", ordinal: 5, deferred: true, reason: "below-reclaim-floor" }),
     prefix(5, { estimated_tokens: 400 }),
     // Non-stream customs are invisible to the metrics.
-    { type: "custom", customType: "quorum-active-context-state", data: { kind: "context.prefix" } },
+    { type: "custom", customType: "pi-fold-active-context-state", data: { kind: "context.prefix" } },
   ];
   const metrics = contextEventMetrics(entries);
   assert.equal(metrics.prefixEvents, 5);
@@ -1111,6 +1111,37 @@ try {
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+}
+
+// ---------------------------------------------------------------------------
+// GATE 27  The harness identity agrees with the runtime that consumes it
+//
+// pi_fold_identity.mjs writes its entry-type namespace out as a literal so the adjudicator
+// and the graders, which run under plain node with no TypeScript loader, can import it.
+// That literal is a copy of what the runtime's entryTypeNamespace() computes, and a copy
+// is a thing that drifts. Here, where jiti IS available, compute it and compare: if the
+// runtime ever changes the rule, this fails instead of a run sealing entry types no reader
+// looks for.
+// ---------------------------------------------------------------------------
+{
+  const jitiPath = join(PROJECT, "node_modules", "jiti", "lib", "jiti.mjs");
+  assert(existsSync(jitiPath), "could not resolve package-local jiti to check the identity namespace");
+  const { createJiti } = await import(pathToFileURL(jitiPath));
+  const policy = await createJiti(import.meta.url).import(join(PROJECT, "extensions", "lib", "policy.ts"));
+  const identity = await import(pathToFileURL(join(PROJECT, "scripts", "lib", "pi_fold_identity.mjs")));
+  const prefix = identity.PI_FOLD_ACTIVE_CONTEXT_REGISTRATION.entryTypePrefix;
+  assert.equal(policy.entryTypeNamespace(prefix), identity.PI_FOLD_ENTRY_NAMESPACE,
+    "the identity module's written-out namespace no longer matches entryTypeNamespace()");
+  assert.equal(identity.PI_FOLD_STATE_ENTRY, `${prefix}-state`);
+  assert.equal(identity.PI_FOLD_FOLD_RECORD_ENTRY, `${prefix}-fold-record`);
+  assert.equal(identity.PI_FOLD_NATIVE_COMPACTION_DECISION_ENTRY,
+    `${identity.PI_FOLD_ENTRY_NAMESPACE}-native-compaction-decision`);
+  assert.equal(identity.PI_FOLD_NATIVE_COMPACTION_RECEIPT_ENTRY,
+    `${identity.PI_FOLD_ENTRY_NAMESPACE}-native-compaction-receipt`);
+  // The runtime is neutral: no deployment brand may be baked into it.
+  assert(!identity.PI_FOLD_READ_ONLY_TOOLS.has("pi_fold_context"),
+    "the deployment's own context tool must be added at registration, not carried in the read-only set");
+  checks.harnessIdentityMatchesRuntimeNamespace = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

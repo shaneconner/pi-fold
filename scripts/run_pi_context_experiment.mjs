@@ -44,7 +44,6 @@ import {
 } from "./lib/pi_context_experiment.mjs";
 import {
   SOAK_MAX_HEARTBEAT_GAP_MS,
-  SOAK_PI_SUBAGENTS_ROOT,
   SOAK_SANITIZED_ENV_MARKER,
   appendJsonLineFsync,
   artifactStat,
@@ -85,6 +84,7 @@ const argumentValue = (name, fallback = null) => {
 const EXPERIMENT_SOURCE_PATHS = Object.freeze([
   "scripts/lib/pi_context_experiment.mjs",
   "scripts/lib/pi_context_soak_attestation.mjs",
+  "scripts/lib/pi_fold_identity.mjs",
   "scripts/pi_context_experiment_extension.mjs",
   "scripts/run_pi_context_experiment.mjs",
   "scripts/run_pi_context_experiment_worker.mjs",
@@ -92,30 +92,32 @@ const EXPERIMENT_SOURCE_PATHS = Object.freeze([
   "scripts/stage_pi_context_experiment.mjs",
 ]);
 
-// The epoch scheduler is pinned the MOMENT it exists in the extension, and is REQUIRED
-// once a run asks for epoch scheduling: a run that cannot pin the code implementing its
-// own condition is not the experiment. Until that file lands, an immediate-scheduling run
-// pins the same set it always did. The iteration-2 reliability levers spread across the
-// whole extension lib, so every lib source is pinned rather than a hand-kept subset.
+// The epoch scheduler is pinned the MOMENT it exists in the runtime, and is REQUIRED once
+// a run asks for epoch scheduling: a run that cannot pin the code implementing its own
+// condition is not the experiment.
+//
+// The measured runtime is this repo's own `extensions/` package, not a consumer's deployed
+// copy, so every byte under measurement is a tracked byte and `codeCommit` describes it.
+// Every source file under that root is pinned rather than a hand-kept subset: a new module
+// joins the seal the moment it exists, and the seal can never silently lag the code.
 function experimentSourceHashes(foldScheduling) {
-  const extensionRoot = join(PROJECT, ".pi", "extensions", "quorum");
+  const runtimeRoot = join(PROJECT, "extensions");
+  assertExperiment(existsSync(runtimeRoot), "pi-fold runtime source root is missing");
   const schedulingPresent = existsSync(join(PROJECT, EXPERIMENT_SCHEDULING_SOURCE));
   assertExperiment(schedulingPresent || foldScheduling !== "epoch",
     `Fold scheduling "epoch" requires ${EXPERIMENT_SCHEDULING_SOURCE}`);
-  const libDir = join(extensionRoot, "lib");
-  assertExperiment(existsSync(libDir), "Quorum extension lib directory is missing");
-  const libPaths = readdirSync(libDir).filter((name) => name.endsWith(".ts")).sort()
-    .map((name) => `.pi/extensions/quorum/lib/${name}`);
-  assertExperiment(libPaths.includes(EXPERIMENT_SCHEDULING_SOURCE) === schedulingPresent,
-    "Extension lib listing disagrees with the scheduling-source existence check");
-  const paths = [
-    ".pi/extensions/quorum/active-context.ts",
-    ".pi/extensions/quorum/identity.js",
-    ".pi/extensions/quorum/index.js",
-    ...libPaths,
-    ...EXPERIMENT_SOURCE_PATHS,
-  ];
-  assertExperiment(existsSync(extensionRoot), "Quorum extension root is missing");
+  const runtimePaths = [];
+  const collect = (directory, prefix) => {
+    for (const name of readdirSync(directory).sort()) {
+      const path = join(directory, name);
+      if (statSync(path).isDirectory()) collect(path, `${prefix}${name}/`);
+      else if (name.endsWith(".ts") || name.endsWith(".js")) runtimePaths.push(`${prefix}${name}`);
+    }
+  };
+  collect(runtimeRoot, "extensions/");
+  assertExperiment(runtimePaths.includes(EXPERIMENT_SCHEDULING_SOURCE) === schedulingPresent,
+    "Runtime source listing disagrees with the scheduling-source existence check");
+  const paths = [...runtimePaths, ...EXPERIMENT_SOURCE_PATHS];
   return paths.reduce((result, relative) => {
     const path = join(PROJECT, relative);
     assertExperiment(existsSync(path), `Missing experiment runtime source ${relative}`);
@@ -129,8 +131,6 @@ function dependencyHashes() {
     piPackageJson: fileSha256(join(PI_ROOT, "package.json")),
     piDistTree: directoryTreeSha256(join(PI_ROOT, "dist")),
     piNodeModulesTree: directoryTreeSha256(join(PI_ROOT, "node_modules")),
-    piSubagentsPackageJson: fileSha256(join(SOAK_PI_SUBAGENTS_ROOT, "package.json")),
-    piSubagentsSrcTree: directoryTreeSha256(join(SOAK_PI_SUBAGENTS_ROOT, "src")),
     nodeExecutable: fileSha256(process.execPath),
   };
 }
@@ -403,7 +403,7 @@ async function run() {
     join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), configPath,
   ], {
     cwd: PROJECT,
-    env: sanitizedChildEnvironment({ QUORUM_CONTEXT_EXPERIMENT_RUN_ID: runId }),
+    env: sanitizedChildEnvironment({ PI_FOLD_EXPERIMENT_RUN_ID: runId }),
     detached: false,
     stdio: ["ignore", stdoutFd, stderrFd],
   });

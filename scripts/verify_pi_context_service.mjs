@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const jitiPaths = [
-  join(projectRoot, ".pi", "pi-subagents", "node_modules", "jiti", "lib", "jiti.mjs"),
+  join(projectRoot, "node_modules", "jiti", "lib", "jiti.mjs"),
   join(
     homedir(), ".npm-global", "lib", "node_modules", "@earendil-works",
     "pi-coding-agent", "node_modules", "jiti", "lib", "jiti.mjs",
@@ -26,14 +26,19 @@ const jiti = createJiti(import.meta.url, {
     ),
   },
 });
-// This verifier checks a CONSUMER's deployed copy, which no longer lives in the same
-// repo as the verifier. The deployment root is therefore an argument, defaulting to the
-// sibling checkout the package is synced into.
-const extensionRoot = process.argv[2]
-  ? resolve(process.argv[2])
-  : join(projectRoot, "..", "quorum", ".pi", "extensions", "quorum");
+// This verifier checks a CONSUMER's deployed copy against the contract that consumer
+// publishes. The deployment root is a REQUIRED argument and has no default: a default
+// would be a path out of this repo into somebody else's, which is the coupling this
+// project spent 2026-08-07 removing. Point it at the deployment you want checked.
+//
+//   node scripts/verify_pi_context_service.mjs <path-to-deployed-extension-root>
+const deploymentArgument = process.argv[2];
+if (!deploymentArgument) {
+  throw new Error("Pass the deployed extension root as the first argument");
+}
+const extensionRoot = resolve(deploymentArgument);
 if (!existsSync(extensionRoot)) {
-  throw new Error(`No deployed extension at ${extensionRoot}; pass the deployment root as the first argument`);
+  throw new Error(`No deployed extension at ${extensionRoot}`);
 }
 const context = await jiti.import(join(extensionRoot, "active-context.ts"));
 const json = await jiti.import(join(extensionRoot, "json.ts"));
@@ -69,7 +74,15 @@ const piFold = {
 };
 const summarizerFactory = await jiti.import(join(extensionRoot, "summarizer.js"));
 
-const LEGACY_REPRODUCTION_FIXTURE = Object.freeze({
+// The deployed consumer's own published contract, written out as literals.
+//
+// These strings name a consumer, not this project, and that is the point: this verifier
+// asks whether a deployment still renders the exact surface its sessions were sealed
+// against. Deriving the expectations from the deployment's own registration would compare
+// a derivation against itself and assert nothing. When a different consumer is checked,
+// this fixture is what changes. pi-fold's own brand is exercised separately, against a
+// synthetic identity, by tests/verify.mjs.
+const CONSUMER_CONTRACT_FIXTURE = Object.freeze({
   originName: "Quorum",
   registration: Object.freeze({
     toolName: "quorum_context",
@@ -764,7 +777,7 @@ async function gateNeutralDefaultBranding() {
   assert(surface.evidence.path.includes("/pi-fold-evidence/"));
   assert.equal(surface.evidence.mcpServer, "docs");
   assert.equal(surface.evidence.fallbackMcpServer, "pi-fold");
-  assert.equal(new RegExp(LEGACY_REPRODUCTION_FIXTURE.originName, "i").test(json.stableStringify(surface)), false);
+  assert.equal(new RegExp(CONSUMER_CONTRACT_FIXTURE.originName, "i").test(json.stableStringify(surface)), false);
   return {
     tool: surface.toolName,
     label: surface.toolLabel,
@@ -776,8 +789,8 @@ async function gateNeutralDefaultBranding() {
   };
 }
 
-async function gateLegacyBrandingReproduction() {
-  const fixture = LEGACY_REPRODUCTION_FIXTURE;
+async function gateConsumerBrandingContract() {
+  const fixture = CONSUMER_CONTRACT_FIXTURE;
   const { readOnlyTools: quorumReadOnlyTools, ...quorumRegistration } =
     identity.QUORUM_ACTIVE_CONTEXT_REGISTRATION;
   assert.deepEqual({ ...quorumRegistration }, { ...fixture.registration });
@@ -7931,7 +7944,7 @@ const gates = [
   [18, "Follow-up fences & stale anchors", gateFollowupFencesAndAnchors],
   [19, "Fresh-tail share cap", gateFreshTailShareCap],
   [20, "Neutral default branding", gateNeutralDefaultBranding],
-  [21, "Legacy branding reproduction", gateLegacyBrandingReproduction],
+  [21, "Legacy branding reproduction", gateConsumerBrandingContract],
   [22, "Evidence ingestion switch", gateEvidenceIngestionSwitch],
   [23, "Summarizer option", gateSummarizerOption],
   [24, "Guidance profiles", gateGuidanceProfiles],

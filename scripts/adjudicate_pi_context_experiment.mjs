@@ -39,6 +39,7 @@ import {
   validateExperimentRunConfig,
   validateStagePlan,
 } from "./lib/pi_context_experiment.mjs";
+import { PI_FOLD_ACTIVE_CONTEXT_REGISTRATION } from "./lib/pi_fold_identity.mjs";
 import {
   artifactStat,
   exactKeys,
@@ -309,7 +310,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
 
   const foldRecords = runEntries.filter((entry) => entry?.type === "custom" &&
     typeof entry.customType === "string" && entry.customType.endsWith(FOLD_RECORD_SUFFIX));
-  const contextToolName = "quorum_context";
+  const contextToolName = PI_FOLD_ACTIVE_CONTEXT_REGISTRATION.toolName;
   const usage = usageTotals(runEntries);
   const rereadRecords = rereadLedgerFromSession(runEntries);
   const reread = computeRereadTax(rereadRecords);
