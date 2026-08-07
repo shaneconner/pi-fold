@@ -1882,7 +1882,6 @@ export function registerActiveContext(pi: any, options: {
   const appendSurfacing = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
     const content = surfacingText({ suggestions: surfacing.suggestions, brandNoun });
     if (!content) return projected;
-    if (!carrierAdmitted("surfacing")) return projected;
     projected.push({
       role: "custom",
       customType: surfacingProjectionType,
@@ -1927,11 +1926,26 @@ export function registerActiveContext(pi: any, options: {
     };
   };
 
-  /** Whatever this pass ended up sending becomes the frozen surface for the next one. */
-  const holdFrozen = (projected: unknown[]): unknown[] => {
+  /**
+   * Whatever this pass ended up sending becomes the frozen surface for the next one,
+   * MINUS the suggestion slate.
+   *
+   * Receipts, reminders and notices are statements about what already happened: they
+   * never go stale, so once one lands it stays landed and is never paid for twice.
+   * Suggestions are live advice, and advice does go stale -- a source withdraws, or the
+   * fence turns urgent and the only useful next action is the fold. Advice that cannot
+   * be withdrawn is worse than advice re-rendered, so the slate rides AFTER the frozen
+   * region and is rebuilt every pass. It only diverges the prefix when its own content
+   * changes, which is exactly when withdrawing it is the point.
+   */
+  const holdFrozen = (
+    projected: unknown[],
+    snapshot: ActiveContextSnapshot,
+    fenced = false,
+  ): unknown[] => {
     freeze.projection = [...projected];
     freeze.active = false;
-    return projected;
+    return fenced ? projected : appendSurfacing(projected, snapshot);
   };
 
   const projectWithAdvisory = (snapshot: ActiveContextSnapshot): unknown[] => {
@@ -1949,7 +1963,7 @@ export function registerActiveContext(pi: any, options: {
       stableStringify(body.slice(0, held)) === freeze.bodyText;
     const projected = freeze.active
       ? [...freeze.projection!, ...body.slice(held)]
-      : body;
+      : [...body];
     if (!freeze.active) freeze.keys.clear();
     freeze.body = body;
     freeze.bodyText = stableStringify(body);
@@ -1958,15 +1972,15 @@ export function registerActiveContext(pi: any, options: {
     // Guided curation carries exactly two reminders and the last-call notice. The
     // milestone and live-advisory carriers are the recurring pressure nag they replace,
     // so under this mode they are not built at all.
-    if (guidedCuration) return holdFrozen(appendSurfacing(appendCurationReminder(projected, snapshot), snapshot));
+    if (guidedCuration) return holdFrozen(appendCurationReminder(projected, snapshot), snapshot);
     const armed = advisoryState(persistence.state!).armed;
     if (!armed || armed.milestone !== advisory.armedMilestone || measurements.latestRatio === null ||
-        measurements.latestRatio < 0.85 * armed.threshold) return holdFrozen(appendSurfacing(projected, snapshot));
+        measurements.latestRatio < 0.85 * armed.threshold) return holdFrozen(projected, snapshot);
     // Keyed on the DELIVERY, not the rung: a rung that genuinely re-armed is a new
     // block and appends, while the same delivery is never rendered twice.
     if (!carrierAdmitted(
       `milestone:${armed.milestone}:${advisoryState(persistence.state!).delivered[armed.milestone] ?? 0}`,
-    )) return holdFrozen(appendSurfacing(projected, snapshot));
+    )) return holdFrozen(projected, snapshot);
     const status = activeContextStatus(snapshot, persistence.state!, 0, 1, snapshot.policy.maxFoldSourceRefs);
     const eligible = ownValue(status, "eligibleChapter");
     const startId = ownValue(eligible, "startId");
@@ -2012,7 +2026,7 @@ export function registerActiveContext(pi: any, options: {
     advisory.armedMilestone = null;
     // A suggestion never shares an advisory with urgent fence text: at the fence the
     // only useful next action is the fold that keeps the request transmissible.
-    return holdFrozen(armed.milestone === "urgent" ? projected : appendSurfacing(projected, snapshot));
+    return holdFrozen(projected, snapshot, armed.milestone === "urgent");
   };
   /**
    * Classify the projection we are about to send against the one before it. A rewrite
