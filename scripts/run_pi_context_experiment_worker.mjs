@@ -35,6 +35,7 @@ import {
   directoryTreeSha256,
   fileSha256,
   monotonicMs,
+  PI_INSTALL_ROOT,
   processStartTicks,
   readJson,
   sha256Json,
@@ -44,7 +45,7 @@ import {
 } from "./lib/pi_context_soak_attestation.mjs";
 
 const PROJECT = dirname(dirname(fileURLToPath(import.meta.url)));
-const PI_ROOT = "/home/shane/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent";
+const PI_ROOT = PI_INSTALL_ROOT;
 const configPath = process.argv[2];
 assertExperiment(configPath && existsSync(configPath), "Experiment worker requires a run config path");
 const config = validateExperimentRunConfig(JSON.parse(readFileSync(configPath, "utf8")));

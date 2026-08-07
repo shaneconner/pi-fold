@@ -10,8 +10,9 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { relative } from "node:path";
+import { join, relative } from "node:path";
 import {
+  RUNTIME_HOME,
   assertSoak,
   exactKeys,
   sha256Json,
@@ -64,8 +65,13 @@ export const EXPERIMENT_TRANSPORTS = Object.freeze(["sse", "websocket", "auto"])
 // REQUIRED once a run asks for epoch scheduling.
 export const EXPERIMENT_SCHEDULING_SOURCE = ".pi/extensions/quorum/lib/scheduling.ts";
 
-export const EXPERIMENT_STATE_ROOT = "/home/shane/quorum-run/state/ops/pi-context-experiment";
-export const EXPERIMENT_TMP_ROOT = "/home/shane/quorum-run/tmp";
+// Constants, not knobs: the supervisor recomputes the required root and refuses a run
+// directory outside it, and an override set in the launching shell is not in the
+// systemd-run --setenv list, so a configurable root would have the supervisor reject the
+// very run it was just handed. Relocating run state is a one-line edit and a commit.
+export const EXPERIMENT_RUN_ROOT = join(RUNTIME_HOME, "pi-fold-runs");
+export const EXPERIMENT_STATE_ROOT = join(EXPERIMENT_RUN_ROOT, "state", "ops", "pi-context-experiment");
+export const EXPERIMENT_TMP_ROOT = join(EXPERIMENT_RUN_ROOT, "tmp");
 export const EXPERIMENT_TOOL_NAME = "repo_stage";
 export const EXPERIMENT_MARKER_ENTRY = "quorum-context-experiment-marker-v1";
 export const EXPERIMENT_RUNNER_MODE = "systemd-supervised-single-session";

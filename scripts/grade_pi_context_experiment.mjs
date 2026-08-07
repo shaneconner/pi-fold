@@ -21,6 +21,7 @@ import {
   validateStagePlan,
 } from "./lib/pi_context_experiment.mjs";
 import {
+  PI_INSTALL_ROOT,
   fileSha256,
   freshChallenge,
   readJson,
@@ -30,7 +31,7 @@ import {
 } from "./lib/pi_context_soak_attestation.mjs";
 
 const PROJECT = dirname(dirname(fileURLToPath(import.meta.url)));
-const PI_ROOT = "/home/shane/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent";
+const PI_ROOT = PI_INSTALL_ROOT;
 
 export const GRADING_RUBRIC = Object.freeze({
   version: 1,

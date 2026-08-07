@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -2573,6 +2574,41 @@ async function gateSurfacingHysteresis() {
     expandedNeverSuggested: true,
     protectedNeverSuggested: true,
   };
+}
+
+/**
+ * No tracked file may name a person's home directory.
+ *
+ * This is a publication rule before it is a hygiene rule: the repo goes public, and an
+ * absolute home path both identifies its author and hard-codes one machine into work
+ * that other people are meant to reproduce. The harness carried 68 of them when it was
+ * adopted. Every root it needs is now derived at runtime from the password database, so
+ * a new one appearing is a regression rather than a style lapse.
+ *
+ * No allowlist, deliberately: an exception list is how the first one comes back. A
+ * fixture that needs a home-shaped string writes an obviously synthetic one.
+ */
+async function gateNoOperatorPaths() {
+  const grep = spawnSync("git", [
+    "-C", projectRoot, "grep", "-I", "-n", "-E", "/(home|Users)/[A-Za-z0-9._-]+", "--", ".",
+  ], { encoding: "utf8" });
+  assert(grep.error === undefined, `git grep did not run: ${grep.error?.message}`);
+  // Exit 1 is git grep's "no matches", which is the passing case. Anything above that is
+  // a broken invocation, and treating it as success would make this gate vacuous.
+  assert(grep.status === 0 || grep.status === 1,
+    `git grep failed with status ${grep.status}: ${grep.stderr}`);
+  const offenders = grep.stdout.split("\n").filter((line) => line.trim().length > 0);
+  assert.deepEqual(offenders, [],
+    `Tracked files name an operator home directory:\n${offenders.join("\n")}`);
+
+  // Prove the pattern is not inert. The known-bad samples are ASSEMBLED rather than
+  // written out, because a literal one in this file would be found by the gate itself.
+  const known = [["", "home", "someone", "x"].join("/"), ["", "Users", "someone"].join("/")];
+  for (const sample of known) {
+    assert(new RegExp("/(home|Users)/[A-Za-z0-9._-]+").test(sample),
+      `The pattern failed to match ${sample}, so the gate proves nothing`);
+  }
+  return { trackedOffenders: 0, knownBadSamples: known.length };
 }
 
 /**
@@ -7976,6 +8012,7 @@ const gates = [
   [48, "Status index diet", gateStatusIndexDiet],
   [49, "Advisory delivery accounting", gateAdvisoryDelivery],
   [85, "Evidence artifacts are content-addressed and immutable", gateEvidencePrimitives],
+  [86, "No operator home paths in tracked files", gateNoOperatorPaths],
   [50, "Projection instrumentation", gateProjectionInstrumentation],
   [51, "Stage-identified fold briefs", gateStageIdentifiedBriefs],
   [52, "Current-turn commit guard", gateCurrentTurnCommitGuard],

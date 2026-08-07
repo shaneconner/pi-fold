@@ -3,8 +3,26 @@ import {
   closeSync, existsSync, fsyncSync, linkSync, lstatSync, openSync, readFileSync, readlinkSync,
   readdirSync, renameSync, statSync, unlinkSync, writeSync,
 } from "node:fs";
+import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+/**
+ * The launch identity, read from the password database rather than from $HOME.
+ *
+ * This is deliberate and load-bearing. The sanitized-environment check below asserts that
+ * HOME is pinned to an expected value; deriving that expectation from process.env.HOME
+ * would compare the variable under test against itself and assert nothing at all. userInfo()
+ * reads the passwd entry for the real uid, so the pin still means what it says on any
+ * machine, and the harness stops encoding one operator's home directory in its source.
+ */
+const IDENTITY = userInfo();
+export const RUNTIME_HOME = IDENTITY.homedir;
+export const RUNTIME_USER = IDENTITY.username;
+export const RUNTIME_XDG_DIR = `/run/user/${IDENTITY.uid}`;
+/** Where the Pi build under measurement is installed, relative to that same identity. */
+export const PI_INSTALL_ROOT =
+  join(RUNTIME_HOME, ".npm-global", "lib", "node_modules", "@earendil-works", "pi-coding-agent");
 
 export const SOAK_PROTOCOL_VERSION = 1;
 export const SOAK_MODE_ACCEPTANCE = "acceptance";
@@ -72,7 +90,7 @@ export function assertSanitizedRuntimeEnvironment(environment, { requireMarker =
     assertSoak(environment[SOAK_SANITIZED_ENV_MARKER] === "1",
       "Soak runtime lacks its sanitized-environment launch marker");
     assertSoak(environment.PATH === "/usr/local/bin:/usr/bin:/bin" &&
-      environment.HOME === "/home/shane" && environment.XDG_RUNTIME_DIR === "/run/user/1000",
+      environment.HOME === RUNTIME_HOME && environment.XDG_RUNTIME_DIR === RUNTIME_XDG_DIR,
     "Soak runtime PATH/HOME/XDG runtime are not pinned");
   }
   return true;

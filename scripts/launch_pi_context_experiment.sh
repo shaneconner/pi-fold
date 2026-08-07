@@ -13,7 +13,9 @@ set -eu
 #       [--guided-curation true|false]
 
 ROOT=$(CDPATH= cd -- "$(/usr/bin/dirname -- "$0")/.." && /bin/pwd)
-STATE_ROOT=/home/shane/quorum-run/state/ops/pi-context-experiment
+RUN_HOME=$(/usr/bin/getent passwd "$(/usr/bin/id -u)" | /usr/bin/cut -d: -f6)
+RUN_USER=$(/usr/bin/id -un)
+STATE_ROOT=$RUN_HOME/pi-fold-runs/state/ops/pi-context-experiment
 CAMPAIGN=
 MODE=
 REP=1
@@ -62,9 +64,9 @@ unset QUORUM_PI_ROOT NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS LD_PRELOAD LD_LI
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM \
   GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_CEILING_DIRECTORIES GIT_NAMESPACE
 PATH=/usr/local/bin:/usr/bin:/bin
-HOME=/home/shane
-USER=shane
-LOGNAME=shane
+HOME=$RUN_HOME
+USER=$RUN_USER
+LOGNAME=$RUN_USER
 XDG_RUNTIME_DIR=/run/user/$(/usr/bin/id -u)
 export PATH HOME USER LOGNAME XDG_RUNTIME_DIR
 export QUORUM_CONTEXT_SOAK_SANITIZED=1
@@ -104,9 +106,9 @@ for ARM in $ARMS; do
     --unit="$UNIT" \
     --remain-after-exit \
     --setenv=QUORUM_CONTEXT_SOAK_SANITIZED=1 \
-    --setenv=HOME=/home/shane \
-    --setenv=USER=shane \
-    --setenv=LOGNAME=shane \
+    --setenv=HOME="$RUN_HOME" \
+    --setenv=USER="$RUN_USER" \
+    --setenv=LOGNAME="$RUN_USER" \
     --setenv=PATH=/usr/local/bin:/usr/bin:/bin \
     --setenv="XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" \
     --setenv=LANG=C.UTF-8 \

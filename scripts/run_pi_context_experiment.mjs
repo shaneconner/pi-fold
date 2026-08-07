@@ -57,6 +57,10 @@ import {
   monotonicMs,
   paceRecordIdentity,
   parseSystemdShow,
+  PI_INSTALL_ROOT,
+  RUNTIME_HOME,
+  RUNTIME_USER,
+  RUNTIME_XDG_DIR,
   processStartTicks,
   readJson,
   readJsonLines,
@@ -68,7 +72,7 @@ import {
 } from "./lib/pi_context_soak_attestation.mjs";
 
 const PROJECT = dirname(dirname(fileURLToPath(import.meta.url)));
-const PI_ROOT = "/home/shane/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent";
+const PI_ROOT = PI_INSTALL_ROOT;
 
 const args = new Set(process.argv.slice(2));
 const verification = args.has("--verification");
@@ -163,10 +167,10 @@ function sanitizedChildEnvironment(extra = {}) {
     if (typeof process.env[key] === "string") environment[key] = process.env[key];
   }
   environment.PATH = "/usr/local/bin:/usr/bin:/bin";
-  environment.HOME = "/home/shane";
-  environment.USER = "shane";
-  environment.LOGNAME = "shane";
-  environment.XDG_RUNTIME_DIR = "/run/user/1000";
+  environment.HOME = RUNTIME_HOME;
+  environment.USER = RUNTIME_USER;
+  environment.LOGNAME = RUNTIME_USER;
+  environment.XDG_RUNTIME_DIR = RUNTIME_XDG_DIR;
   environment[SOAK_SANITIZED_ENV_MARKER] = "1";
   return { ...environment, ...extra };
 }

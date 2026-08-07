@@ -1,10 +1,18 @@
 #!/usr/bin/env node
 
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { PI_INSTALL_ROOT } from "./lib/pi_context_soak_attestation.mjs";
 
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+// A forensic reader for sealed sessions, so it reads the DEPLOYED runtime rather than the
+// package: it needs identity.js, which is a consumer's wiring and not part of pi-fold.
+// Same convention as verify_pi_context_service.mjs: deployment root as an argument,
+// defaulting to the sibling checkout the package is synced into.
+const extensionRoot = process.env.PI_FOLD_DEPLOYMENT
+  ? resolve(process.env.PI_FOLD_DEPLOYMENT)
+  : join(projectRoot, "..", "quorum", ".pi", "extensions", "quorum");
 const sessionFile = process.argv[2] || process.env.PI_SESSION_FILE;
 const markerId = process.argv[3] || process.env.QUORUM_CONTEXT_CANARY_MARKER || null;
 const requiredAgentFolds = Number.parseInt(process.env.QUORUM_REQUIRED_AGENT_FOLDS ?? "0", 10);
@@ -13,7 +21,7 @@ if (!Number.isSafeInteger(requiredAgentFolds) || requiredAgentFolds < 0 || requi
 }
 if (!sessionFile || !existsSync(sessionFile)) throw new Error(`Pi session does not exist: ${sessionFile || "missing"}`);
 
-const piRoot = "/home/shane/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent";
+const piRoot = PI_INSTALL_ROOT;
 const { SessionManager } = await import(pathToFileURL(join(piRoot, "dist", "index.js")));
 const { createJiti } = await import(pathToFileURL(
   join(piRoot, "node_modules", "jiti", "lib", "jiti.mjs"),
@@ -24,9 +32,9 @@ const jiti = createJiti(import.meta.url, {
     typebox: join(piRoot, "node_modules", "typebox", "build", "index.mjs"),
   },
 });
-const context = await jiti.import(join(projectRoot, ".pi", "extensions", "quorum", "active-context.ts"));
-const identity = await jiti.import(join(projectRoot, ".pi", "extensions", "quorum", "identity.js"));
-const json = await jiti.import(join(projectRoot, ".pi", "extensions", "quorum", "json.ts"));
+const context = await jiti.import(join(extensionRoot, "active-context.ts"));
+const identity = await jiti.import(join(extensionRoot, "identity.js"));
+const json = await jiti.import(join(extensionRoot, "json.ts"));
 
 const manager = SessionManager.open(sessionFile, undefined, projectRoot);
 const branch = manager.getBranch();
