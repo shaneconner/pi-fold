@@ -37,7 +37,7 @@ export function buildActiveContextTool(input: {
   // Marking is yours, folding is the runtime's. The epoch guidance says how marks
   // behave and stops there: there is no agent-callable commit verb to describe.
   const epochGuidance = input.allowedActions.includes("unmark")
-    ? " Fold scheduling is epoch mode: fold records pending marks and moves no context bytes, and the runtime applies every pending mark in one rewrite when the fold event fires. One fold call carries several {ids, brief} pairs through marks, so batching costs one call. Mark freely as you work; when to fold is the runtime's to decide, and unmark withdraws a mark you no longer want."
+    ? " Fold scheduling is epoch mode: fold records pending marks and moves no context bytes, and the runtime applies every pending mark in one rewrite when the fold event fires. Mark SEVERAL spans in one call: marks carries several {ids, brief} pairs, and one call answers with your whole picture, every span now held plus the unmarked remainder and what share of the non-fresh window it is. Between fold events nothing else in your context changes, so that result is where the picture lives. Mark freely as you work; when to fold is the runtime's to decide, and unmark withdraws a mark you no longer want."
     : "";
   return {
     name: input.name,
@@ -57,7 +57,7 @@ export function buildActiveContextTool(input: {
           type: "array",
           minItems: 1,
           maxItems: 64,
-          description: "Fold only: several spans with their own briefs in one call. An invalid or overlapping span is corrected to the nearest valid edge and the correction is reported back.",
+          description: "Fold only: several spans with their own briefs in one call, which is the shape to prefer. An invalid or overlapping span is corrected to the nearest valid edge and the correction is reported back.",
           items: {
             type: "object",
             additionalProperties: false,

@@ -248,6 +248,23 @@ export const CONTEXT_RECEIPT_BLOCK_BYTES = 900;
 export const MAX_CONTEXT_ATTEMPT_RECORDS = 128;
 
 // ---------------------------------------------------------------------------
+// The mark response.
+//
+// Measured 2026-08-07 (rep 17): every context action was followed by a projection
+// REWRITE, never an append, because the surface answered a mark by refreshing blocks
+// the agent had already paid to cache. A tail-appended tool result is the one place
+// left that can inform the agent for free, so the awareness moved THERE and the
+// projection went byte-frozen between fold events. The result is bounded on the same
+// principle as the receipt block: a report about bloat that becomes bloat has argued
+// against itself.
+// ---------------------------------------------------------------------------
+
+/** Hard byte cap on the rendered awareness block a mark call answers with. */
+export const CONTEXT_MARK_RESPONSE_BYTES = 900;
+/** How many unmarked candidates the awareness block names; the remainder is an aggregate. */
+export const MAX_UNMARKED_CANDIDATES = 3;
+
+// ---------------------------------------------------------------------------
 // Bite-sized folds and bounded peeks. These two constants are one decision read
 // from two ends, so they are stated together and kept equal.
 //

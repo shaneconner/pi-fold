@@ -35,6 +35,7 @@ import {
   MAX_WEDGE_ABSORB_TOKENS,
   ESTIMATED_PLACEHOLDER_OVERHEAD_BYTES,
   MAX_PENDING_MARKS,
+  MAX_UNMARKED_CANDIDATES,
 } from "./policy.ts";
 import type {
   ActiveContextSnapshot,
@@ -506,6 +507,53 @@ export function claimedRefKeys(state: ActiveContextState): Set<string> {
     for (const ref of candidateSourceRefs(mark.parts, state)) keys.add(objectRefKey(ref));
   }
   return keys;
+}
+
+/** What is still on the table after the marks in hand: the steering number and its parts. */
+export interface UnmarkedRemainder {
+  /** Stale tool results outside the fresh tail that no fold and no pending mark owns. */
+  spans: number;
+  tokens: number;
+  /** Unmarked stale tokens as a share of the non-fresh window. The steering number. */
+  share: number;
+  /** The largest few, by reclaim value, so the next batch is one read away. */
+  candidates: Array<{ id: string; tokens: number }>;
+}
+
+/**
+ * The unmarked remainder, as an AGGREGATE plus a bounded head.
+ *
+ * An exhaustive list is what the status index already is, and re-rendering it is what
+ * this build removed from the projection. What an agent needs to decide the NEXT batch
+ * is one percentage and the few largest names; everything else is a total.
+ */
+export function unmarkedRemainder(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+  charsPerToken: number,
+  limit = MAX_UNMARKED_CANDIDATES,
+): UnmarkedRemainder {
+  const perToken = Number.isFinite(charsPerToken) && charsPerToken > 0 ? charsPerToken : ESTIMATED_BYTES_PER_TOKEN;
+  const claimed = claimedRefKeys(state);
+  const candidates: Array<{ id: string; tokens: number }> = [];
+  let unmarkedBytes = 0;
+  let staleBytes = 0;
+  for (const item of snapshot.mapped) {
+    if (!item.ref || messageRole(item.message) !== "toolResult") continue;
+    if (snapshot.toolProtectedIndices.has(item.index)) continue;
+    const size = bytes(item.message);
+    staleBytes += size;
+    if (claimed.has(objectRefKey(item.ref))) continue;
+    unmarkedBytes += size;
+    candidates.push({ id: item.ref.entryId, tokens: Math.ceil(size / perToken) });
+  }
+  candidates.sort((left, right) => right.tokens - left.tokens || (left.id < right.id ? -1 : 1));
+  return {
+    spans: candidates.length,
+    tokens: Math.ceil(unmarkedBytes / perToken),
+    share: staleBytes > 0 ? unmarkedBytes / staleBytes : 0,
+    candidates: candidates.slice(0, Math.max(0, limit)),
+  };
 }
 
 /** Every fold id already spoken for by a pending refold mark. */

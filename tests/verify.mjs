@@ -961,21 +961,36 @@ async function gateAdvisoryMilestones() {
   assert.equal(projected[0].timestamp, 0);
   assert(Buffer.byteLength(projected[1].content, "utf8") <= 2_048);
   // The budget is spent on DELIVERY, so an advisory that reached the agent releases
-  // its arm and does not replay on the next projection of the same plateau.
+  // its arm and is never delivered a second time on the same plateau.
+  //
+  // RESTATED at the frozen surface. The invariant is unchanged -- one plateau, one
+  // delivery -- but WITHDRAWING a delivered block is itself a prefix rewrite, so a
+  // carrier that landed stays landed until the fold event. "Did not replay" is now the
+  // stronger claim: the same single entry, byte for byte, and no second one behind it.
   const repeatedProjection = await project(jump);
-  const repeatedMilestone = repeatedProjection.messages.find((message) =>
+  const repeatedMilestones = repeatedProjection.messages.filter((message) =>
     message.customType === "pi-fold-active-context-milestone");
-  assert.equal(repeatedMilestone, undefined,
+  assert.equal(repeatedMilestones.length, 1,
     "A delivered milestone replayed on the next projection of the same plateau");
+  assert.equal(
+    json.stableStringify(repeatedMilestones[0]), json.stableStringify(projected[0]),
+    "A delivered milestone was re-rendered rather than frozen",
+  );
   let jumpStatus = await toolStatus(jump);
   assert.deepEqual(jumpStatus.details.automatic.advisory.delivered, { chapters: 1 });
   assert.equal(jumpStatus.details.automatic.advisory.armed, undefined);
   jump.usage = { tokens: 233_920, contextWindow: 100_000 };
   const changedWindowProjection = await project(jump);
-  const changedWindowMilestone = changedWindowProjection.messages.find((message) =>
+  const changedWindowMilestones = changedWindowProjection.messages.filter((message) =>
     message.customType === "pi-fold-active-context-milestone");
-  assert.equal(changedWindowMilestone, undefined,
+  // RESTATED on the same grounds: still exactly the one frozen carrier, so no second
+  // milestone was armed and delivered by the window change.
+  assert.equal(changedWindowMilestones.length, 1,
     "A delivered milestone re-armed when the reported window changed");
+  assert.equal(
+    json.stableStringify(changedWindowMilestones[0]), json.stableStringify(projected[0]),
+    "The window change re-rendered a frozen milestone",
+  );
 
   await measure(jump, 196_520, 272_000);
   await project(jump);
@@ -2145,7 +2160,10 @@ async function gateGuidanceProfiles() {
       `The ${milestone} dosage opens with an instruction rather than a report`);
   }
   const curationRun = await advisoryRun("curation", [81_600, 27_200, 81_600]);
-  assert.deepEqual(curationRun.texts, [curationTexts.orientation]);
+  // RESTATED at the frozen surface: a delivered dosage is frozen in place rather than
+  // withdrawn, so the projections repeat it. The invariant is the DELIVERY count, and
+  // the distinct-text claim is what the list assertion was always making.
+  assert.deepEqual([...new Set(curationRun.texts)], [curationTexts.orientation]);
   assert.deepEqual(curationRun.delivered, { orientation: 1 });
 
   const minimal = guidanceSchedule(272_000, "minimal");
@@ -6642,14 +6660,25 @@ async function gateSparseReminders() {
   assert.match(text, /nothing folds until 80%/);
   assert.equal(/\?/.test(text), false, "A reminder asks a question");
 
+  // RESTATED at the frozen surface. The invariant is unchanged -- each reminder is
+  // DELIVERED exactly once per cycle -- but withdrawing a delivered block is itself a
+  // prefix rewrite, so a carrier that landed stays landed, byte for byte, until the
+  // fold event. "Did not repeat" is now the stronger claim: same index, same bytes.
   await measure(runtime, 44_000, 100_000, undefined, "toolUse");
-  assert.equal(reminders(await project(runtime)).length, 0, "The first reminder repeated");
+  const carried = reminders(await project(runtime));
+  assert.equal(carried.length, 1, "The first reminder repeated");
+  assert.equal(carried[0].details.reminder, 0);
+  assert.equal(json.stableStringify(carried[0]), json.stableStringify(first[0]),
+    "The carried reminder was re-rendered rather than frozen");
   await measure(runtime, 60_000, 100_000, undefined, "toolUse");
   const second = reminders(await project(runtime));
-  assert.equal(second.length, 1);
-  assert.equal(second[0].details.reminder, 1);
+  assert.equal(second.length, 2, "The second reminder did not land beside the first");
+  assert.deepEqual(second.map((message) => message.details.reminder), [0, 1]);
+  assert.equal(json.stableStringify(second[0]), json.stableStringify(first[0]));
   await measure(runtime, 66_000, 100_000, undefined, "toolUse");
-  assert.equal(reminders(await project(runtime)).length, 0, "A third reminder fired in one cycle");
+  const third = reminders(await project(runtime));
+  assert.equal(third.length, 2, "A third reminder fired in one cycle");
+  assert.deepEqual(third.map((message) => message.details.reminder), [0, 1]);
 
   // No other pre-gate guidance: the recurring milestone/advisory nag is gone here.
   const projected = await project(runtime);
@@ -7082,6 +7111,222 @@ async function gateReopenHysteresis() {
   };
 }
 
+/**
+ * MECHANISM 1 and 2. The frozen surface.
+ *
+ * Rep 17 forensics (2026-08-07): every context-tool attempt was followed by a
+ * projection REWRITE, never an append. Measured next-request prefix identity per
+ * action: status 0.60-0.90, held commit 0.013-0.103, peek 0.96. The system prompt and
+ * the tool array were byte-constant all run, so the divergence lived in the rendered
+ * blocks a context action refreshed. Provider prefix caches are positional, so each of
+ * those refreshes was a cache kill; the run posted 0.390 pooled cache share against a
+ * mechanism-limited 0.864.
+ *
+ * The rule this gate pins: between fold events the projection is byte-frozen, and the
+ * only change a context action may cause is the append of its own tool result.
+ */
+async function gateFrozenSurface() {
+  const runtime = makeRuntime(
+    makeFixture({ turns: 14, resultChars: 9_000, contextWindow: 100_000 }),
+    { ...SEALED_SPINE, guidedCuration: true },
+  );
+  await startRuntime(runtime);
+  // Crowd the window until the carriers are live: a reminder has landed and the
+  // occupancy signals are real. A freeze proved on an empty projection proves nothing.
+  await measure(runtime, 48_000, 100_000, undefined, "toolUse");
+  const seeded = await project(runtime);
+  assert(seeded.messages.some((message) =>
+    message.customType === "pi-fold-active-context-curation"), "The fixture never lit a carrier");
+
+  const digest = async () => json.stableStringify((await project(runtime)).messages);
+  const before = await digest();
+  const built = runtime.built;
+
+  // A mark: several spans in one call, which is the shape the copy now asks for.
+  const marked = await toolCall(runtime, {
+    action: "fold",
+    marks: [
+      { ids: [built.turnEntries[0][2]], brief: "The first completed inspection stays exactly recoverable." },
+      { ids: [built.turnEntries[1][2]], brief: "The second completed inspection stays exactly recoverable." },
+    ],
+  });
+  assert.equal(marked.details.ok, true);
+  assert(materialized(runtime).pendingMarks.length >= 2, "The batch marked nothing");
+  assert.equal(await digest(), before, "A mark moved a projection byte");
+
+  // Status: the index render used to refresh in place. It answers in its own result now.
+  const status = await toolStatus(runtime);
+  assert.equal(status.details.version, 1);
+  assert.equal(await digest(), before, "A status call moved a projection byte");
+
+  // Peek, including a refused one: an attempt is an attempt.
+  await toolCall(runtime, { action: "peek", id: "no-such-fold" }).catch(() => undefined);
+  assert.equal(await digest(), before, "A peek attempt moved a projection byte");
+
+  // MECHANISM 2. Nothing anywhere in the projected bytes renders the held marks.
+  const pending = materialized(runtime).pendingMarks;
+  assert(pending.length >= 2);
+  for (const mark of pending) {
+    assert.equal(before.includes(mark.id), false, `Pending mark ${mark.id} was rendered into the projection`);
+  }
+  assert.equal(/\bmark\(s\) pending\b|\bpending mark/i.test(before), false,
+    "The projection renders pending-mark state");
+
+  // The tail still appends: a new raw message extends the frozen projection and
+  // changes nothing before it. That is the one sanctioned non-fold change.
+  await measure(runtime, 50_000, 100_000, undefined, "toolUse");
+  const grown = (await project(runtime)).messages;
+  const held = JSON.parse(before);
+  assert(grown.length > held.length, "The projection did not grow with the new message");
+  assert.equal(json.stableStringify(grown.slice(0, held.length)), before,
+    "An appended message rewrote the frozen prefix");
+
+  // And the freeze does not break folding: the fold event is still free to rewrite.
+  const committed = await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  assert(committed.applied.length >= 1, "The fold event applied nothing");
+  const after = await digest();
+  assert.notEqual(after, before, "The fold event did not rewrite the projection");
+  // A rewrite, not a longer append: some entry the frozen surface already held now
+  // reads differently. That is the sanctioned mutation, and it must still be reachable.
+  const rewritten = JSON.parse(after);
+  const shared = Math.min(rewritten.length, grown.length);
+  assert(
+    rewritten.slice(0, shared).some((message, index) =>
+      json.stableStringify(message) !== json.stableStringify(grown[index])),
+    "The fold event only appended; it never folded",
+  );
+  // MECHANISM 2, the other half: the folds appear once the event materializes them.
+  assert(materialized(runtime).folds.length >= 1);
+  assert(after.includes(materialized(runtime).folds[0].id),
+    "The committed fold never reached the projection");
+
+  return {
+    markFrozen: true,
+    statusFrozen: true,
+    peekFrozen: true,
+    pendingRendered: false,
+    tailAppends: grown.length - held.length,
+    foldEventRewrites: true,
+    committedFolds: materialized(runtime).folds.length,
+  };
+}
+
+/**
+ * MECHANISM 3. The mark response carries the awareness.
+ *
+ * A tail-appended tool result is the one cache-free place left to inform the agent, so
+ * the picture the projection stopped rendering lives here: what is held, what is left
+ * as an aggregate with a bounded head, and the one percentage worth steering by.
+ */
+async function gateMarkResponseAwareness() {
+  const runtime = await epochToolRuntime({ turns: 14, resultChars: 9_000 });
+  const built = runtime.built;
+  const reply = await toolCall(runtime, {
+    action: "fold",
+    marks: [
+      { ids: [built.turnEntries[0][2]], brief: "The first completed inspection stays exactly recoverable." },
+      { ids: [built.turnEntries[1][2]], brief: "The second completed inspection stays exactly recoverable." },
+    ],
+  });
+  const details = reply.details;
+  assert.equal(details.ok, true);
+
+  // (a) Every span now HELD, with its kind and its approximate mass.
+  assert.equal(Array.isArray(details.held), true);
+  assert.equal(details.held.length, materialized(runtime).pendingMarks.length);
+  assert(details.held.length >= 2, "The batch held fewer spans than it marked");
+  assert(details.held.every((span) =>
+    typeof span.id === "string" && typeof span.kind === "string" &&
+    typeof span.tokens === "number" && span.tokens > 0),
+  "A held span was reported without id, kind or tokens");
+  assert.match(String(details.heldNote), /held until it ages out or the next fold event/);
+
+  // (b) The remainder as an AGGREGATE, plus a bounded head of the largest candidates.
+  assert.equal(typeof details.unmarkedSpans, "number");
+  assert(details.unmarkedSpans >= 1, "The crowded fixture reported nothing left unmarked");
+  assert(details.unmarkedTokens > 0);
+  assert(details.unmarkedCandidates.length <= context.MAX_UNMARKED_CANDIDATES,
+    "The candidate list is unbounded");
+  assert(details.unmarkedCandidates.length < details.unmarkedSpans,
+    "The candidate list is the exhaustive list");
+  assert(details.unmarkedCandidates.every((item) =>
+    typeof item.id === "string" && typeof item.tokens === "number"));
+  const ordered = details.unmarkedCandidates.map((item) => item.tokens);
+  assert.deepEqual(ordered, [...ordered].sort((left, right) => right - left),
+    "The candidates are not ordered by reclaim value");
+
+  // (c) The steering number: unmarked share of the non-fresh window.
+  assert.equal(typeof details.unmarkedShare, "number");
+  assert(details.unmarkedShare > 0 && details.unmarkedShare <= 1);
+
+  // All of it inside the receipt block's byte discipline.
+  const awareness = String(details.awareness);
+  const awarenessBytes = Buffer.byteLength(awareness, "utf8");
+  assert(awarenessBytes <= context.CONTEXT_MARK_RESPONSE_BYTES,
+    `The awareness block ran to ${awarenessBytes} bytes over the ${context.CONTEXT_MARK_RESPONSE_BYTES} cap`);
+  assert.match(awareness, /Held until they age out or the next fold event/);
+  assert.match(awareness, /Unmarked remainder: \d+ span\(s\)/);
+  assert.match(awareness, /% of the non-fresh window/);
+  assert.match(awareness, /Largest unmarked by reclaim value/);
+  assert.match(awareness, /Mark several spans in one/);
+
+  // The marks the caller named are in the picture it got back.
+  const heldIds = new Set(details.held.map((span) => span.id));
+  assert(details.marks.every((mark) => mark.ok !== true || heldIds.has(mark.id)),
+    "A mark this call accepted is missing from the held picture");
+
+  return {
+    heldSpans: details.held.length,
+    unmarkedSpans: details.unmarkedSpans,
+    unmarkedTokens: details.unmarkedTokens,
+    candidates: details.unmarkedCandidates.length,
+    candidateCap: context.MAX_UNMARKED_CANDIDATES,
+    awarenessBytes,
+    cap: context.CONTEXT_MARK_RESPONSE_BYTES,
+  };
+}
+
+/** MECHANISM 4. Every surface that describes marking asks for a BATCH. */
+async function gateBatchedMarkCopy() {
+  const runtime = await epochToolRuntime();
+  const description = [...runtime.tools.values()][0].description;
+  assert.match(description, /Mark SEVERAL spans in one call/);
+  assert.match(description, /one call answers with your whole picture/);
+  assert.match(description, /unmarked remainder/);
+  assert.match(description, /Between fold events nothing else in your context changes/);
+  assert.match(description, /that result is where the picture lives/);
+  const marks = [...runtime.tools.values()][0].parameters.properties.marks;
+  assert.match(marks.description, /which is the shape to prefer/);
+
+  const signals = {
+    occupancy: 0.5, occupancyTokens: 50_000, budgetTokens: 100_000, window: 100_000,
+    staleToolShare: 0.3, staleToolTokens: 30_000, staleToolResults: 6, eligibleFolds: 4,
+  };
+  const reminder = context.curationReminderText({ signals, toolName: "active_context" });
+  assert.match(reminder, /Mark SEVERAL finished chapters in one call/);
+  assert.match(reminder, /one call answers with everything held plus what is still unmarked/);
+  // The tool surface's own vocabulary rule: nothing here invites a chat-style answer.
+  assert.equal(/\bthe reply\b/.test(reminder), false, "The reminder says \"the reply\"");
+  assert.equal(reminder.includes("\n"), false, "The reminder stopped being one line");
+
+  const notice = context.curationNoticeText({ signals, roundsUsed: 1, toolName: "active_context" });
+  assert.match(notice, /marks SEVERAL spans in one call/);
+  assert.match(notice, /answers with everything held plus what is still unmarked/);
+  // MECHANISM 2 at the copy level: the notice no longer renders held-mark state.
+  assert.equal(/mark\(s\) pending/.test(notice), false,
+    "The last-call notice still renders pending-mark state");
+
+  const reply = await toolCall(runtime, {
+    action: "fold",
+    ids: [runtime.built.turnEntries[0][2]],
+    brief: "One completed inspection stays exactly recoverable behind this mark.",
+  });
+  assert.match(String(reply.details.activation), /Mark several spans in one call/);
+  assert.match(String(reply.details.activation), /nothing else in your\s+context changed/);
+
+  return { description: true, reminder: true, notice: true, activation: true };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -7159,6 +7404,9 @@ const gates = [
   [75, "No agent-callable commit verb", gateNoAgentCommitVerb],
   [76, "No-yield commit guard on every path", gateNoYieldCommitGuard],
   [77, "Gate reopen hysteresis", gateReopenHysteresis],
+  [78, "Frozen surface & invisible marks", gateFrozenSurface],
+  [79, "Mark response awareness", gateMarkResponseAwareness],
+  [80, "Batched-mark copy", gateBatchedMarkCopy],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

@@ -6,6 +6,7 @@ import {
 import { boundReceiptText } from "./measurement.ts";
 import {
   contextBrand,
+  CONTEXT_MARK_RESPONSE_BYTES,
   CONTEXT_RECEIPT_BLOCK_BYTES,
   CURATION_GATE_MAX_ROUNDS,
   CURATION_OCCUPANCY_SHARE,
@@ -156,9 +157,42 @@ export function curationReminderText(input: {
     ? "unmeasured"
     : `${Math.round(input.signals.occupancy * 100)}%`;
   return `[${brand} curation] Occupancy ${occupancy} of the ${input.signals.budgetTokens}-token serving ` +
-    `budget; nothing folds until ${Math.round(CURATION_OCCUPANCY_SHARE * 100)}%. Mark finished chapters as ` +
-    `you go with ${input.toolName} {"action":"fold","marks":[{"ids":["<start>","<end>"],` +
-    "\"brief\":\"<factual brief>\"}]} so the folds are neat when the fold event triggers.";
+    `budget; nothing folds until ${Math.round(CURATION_OCCUPANCY_SHARE * 100)}%. Mark SEVERAL finished ` +
+    `chapters in one call with ${input.toolName} {"action":"fold","marks":[{"ids":["<start>","<end>"],` +
+    "\"brief\":\"<factual brief>\"}]}: one call answers with everything held plus what is still " +
+    "unmarked, so the folds are neat when the fold event triggers.";
+}
+
+/**
+ * The awareness block a mark call answers with.
+ *
+ * The projection is byte-frozen between fold events, so this tool result is the ONLY
+ * cache-free place left to tell the agent where it stands. It carries three things and
+ * stops: what is now held, what is still on the table as an aggregate with a bounded
+ * head of the largest names, and the one percentage worth steering by. It is hard
+ * bounded on the receipt block's principle: awareness that becomes bloat is bloat.
+ */
+export function markAwarenessText(input: {
+  held: ReadonlyArray<{ id: string; kind: string; tokens: number }>;
+  remainder: { spans: number; tokens: number; share: number; candidates: ReadonlyArray<{ id: string; tokens: number }> };
+  toolName: string;
+  brandNoun?: string;
+}): string {
+  const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
+  const { remainder } = input;
+  const held = input.held.length
+    ? input.held.map((span) => `${span.id} (${span.kind}, about ${span.tokens} tokens)`).join("; ")
+    : "none";
+  const candidates = remainder.candidates.length
+    ? remainder.candidates.map((item) => `${item.id} (about ${item.tokens} tokens)`).join("; ")
+    : "none";
+  return boundReceiptText([
+    `[${brand} marks] Held until they age out or the next fold event: ${held}.`,
+    `Unmarked remainder: ${remainder.spans} span(s), about ${remainder.tokens} tokens of stale mass, ` +
+      `${Math.round(remainder.share * 100)}% of the non-fresh window.`,
+    `Largest unmarked by reclaim value: ${candidates}.`,
+    `Mark several spans in one ${input.toolName} call: one call, and this whole picture comes back with it.`,
+  ].join("\n"), CONTEXT_MARK_RESPONSE_BYTES, `[${brand} marks] Held; the remainder is unavailable this pass.`);
 }
 
 export type CurationProceedReason = "go" | "non-context-response" | "round-cap";
@@ -247,7 +281,6 @@ export function curationNoticeText(input: {
   signals: CurationSignals;
   roundsUsed: number;
   maxRounds?: number;
-  pendingMarks: number;
   toolName: string;
   brandNoun?: string;
 }): string {
@@ -260,14 +293,14 @@ export function curationNoticeText(input: {
     `[${brand} curation] Occupancy ${occupancy} of the ${signals.budgetTokens}-token serving budget; ` +
       `${Math.round(signals.staleToolShare * 100)}% of the window is stale tool output outside the fresh tail ` +
       `(${signals.staleToolResults} result(s), about ${signals.staleToolTokens} tokens). ` +
-      `${input.pendingMarks} mark(s) pending. A commit epoch will fold that mass into briefed placeholders; ` +
+      "A commit epoch will fold that mass into briefed placeholders; " +
       "the exact source stays expandable and nothing is lost.",
     "Marking well is what makes this cheap: your briefs are what makes these spans findable later, and " +
       "spans batched into one commit rewrite the prefix once instead of once per fold, so the cache survives " +
       "and the next fold event arrives later.",
     `Available now: ${input.toolName} ` +
       "{\"action\":\"fold\",\"marks\":[{\"ids\":[\"<start>\",\"<end>\"],\"brief\":\"<factual brief>\"}]} " +
-      "batches several spans with briefs in one call; " +
+      "marks SEVERAL spans in one call, and answers with everything held plus what is still unmarked; " +
       "{\"action\":\"rebrief\",\"id\":\"<fold-id>\",\"brief\":\"<factual brief>\"} corrects an existing " +
       "brief; {\"action\":\"reboundary\",\"id\":\"<fold-id>\"} returns a mis-cut fold to raw so you can " +
       "re-fold it.",

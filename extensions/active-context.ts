@@ -155,6 +155,7 @@ import {
   curationReminderText,
   curationSignals,
   curationTriggerFires,
+  markAwarenessText,
   dueReminderIndex,
   receiptBlockText,
   withReceipt,
@@ -176,6 +177,8 @@ import {
   ladderBrief,
   markAccounting,
   markEligibility,
+  markFreedBytes,
+  unmarkedRemainder,
   guardWaiverCount,
   markedFoldIds,
   markOrdinal,
@@ -498,6 +501,41 @@ export function registerActiveContext(pi: any, options: {
     requests: 0,
     lastMutationRequest: 0,
     lastMutationTokens: null as number | null,
+  };
+  /**
+   * MECHANISM 1. The frozen surface.
+   *
+   * Between fold events the projection is byte-frozen: the only change a context action
+   * may cause is the append of its own tool result at the tail. Rep 17 measured every
+   * single context attempt landing as a projection REWRITE -- status 0.60-0.90 prefix
+   * identity, peek 0.96, the held gate down to 0.013 -- because the surface answered
+   * each one by re-rendering blocks the agent had already paid to cache. Provider prefix
+   * caches are positional, so each of those refreshes was a full or partial cache kill.
+   *
+   * `body` is the last rebuilt fold projection and `projection` is that body plus the
+   * carriers appended to it. While the rebuilt body still starts with `body` verbatim,
+   * nothing structural moved, so the previous projection is reused WHOLE and only the
+   * newly arrived raw messages are appended after it. A carrier whose key is already in
+   * the window is never re-rendered; a fold event, a reveal or an overflow recovery
+   * diverges the body and takes the sanctioned rewrite.
+   */
+  const freeze = {
+    body: null as unknown[] | null,
+    bodyText: null as string | null,
+    projection: null as unknown[] | null,
+    keys: new Set<string>(),
+    /** True only while assembling a pass that reused the frozen projection. */
+    active: false,
+  };
+  /**
+   * A carrier may be built exactly once per freeze window. This is checked BEFORE the
+   * builder runs, because building a milestone spends its delivery budget and building
+   * a reminder advances the reminder cursor: a carrier that cannot land must not pay.
+   */
+  const carrierAdmitted = (key: string): boolean => {
+    if (freeze.active && freeze.keys.has(key)) return false;
+    freeze.keys.add(key);
+    return true;
   };
 
   // Owns the guided-curation gate, the receipt ring, the context-event stream, and the
@@ -1748,6 +1786,7 @@ export function registerActiveContext(pi: any, options: {
   const appendReceipts = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
     const content = receiptBlockText({ receipts: curation.receipts, toolName, brandNoun });
     if (!content) return projected;
+    if (!carrierAdmitted("receipts")) return projected;
     projected.push({
       role: "custom",
       customType: receiptProjectionType,
@@ -1779,6 +1818,7 @@ export function registerActiveContext(pi: any, options: {
     const signals = measuredCurationSignals(snapshot);
     const index = dueReminderIndex(signals.occupancy, curation.remindersFired);
     if (index === null) return projected;
+    if (!carrierAdmitted(`reminder:${index}`)) return projected;
     curation.remindersFired = index + 1;
     emit("context.reminder", {
       reminder_index: index,
@@ -1811,13 +1851,15 @@ export function registerActiveContext(pi: any, options: {
   /** The last-call notice, on the same carrier and under the same rules. */
   const appendCurationNotice = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
     if (!curation.gate || !curation.lastSignals) return projected;
+    // Keyed on the gate, not on the round: the round counter was a per-pass rewrite of
+    // an already-cached block, which is the exact cost this build removed.
+    if (!carrierAdmitted(`notice:${curation.gate.openedOrdinal}`)) return projected;
     projected.push({
       role: "custom",
       customType: curationProjectionType,
       content: curationNoticeText({
         signals: curation.lastSignals,
         roundsUsed: curation.gate.roundsUsed,
-        pendingMarks: persistence.state ? pendingMarks(persistence.state).length : 0,
         toolName,
         brandNoun,
       }),
@@ -1839,6 +1881,7 @@ export function registerActiveContext(pi: any, options: {
   const appendSurfacing = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
     const content = surfacingText({ suggestions: surfacing.suggestions, brandNoun });
     if (!content) return projected;
+    if (!carrierAdmitted("surfacing")) return projected;
     projected.push({
       role: "custom",
       customType: surfacingProjectionType,
@@ -1883,22 +1926,46 @@ export function registerActiveContext(pi: any, options: {
     };
   };
 
+  /** Whatever this pass ended up sending becomes the frozen surface for the next one. */
+  const holdFrozen = (projected: unknown[]): unknown[] => {
+    freeze.projection = [...projected];
+    freeze.active = false;
+    return projected;
+  };
+
   const projectWithAdvisory = (snapshot: ActiveContextSnapshot): unknown[] => {
-    const projected = projectActiveContext(snapshot, persistence.state!).filter((message) => {
+    const body = projectActiveContext(snapshot, persistence.state!).filter((message) => {
       const customType = ownValue(message, "customType");
       return customType !== milestoneProjectionType && customType !== advisoryProjectionType &&
         customType !== surfacingProjectionType && customType !== receiptProjectionType &&
         customType !== curationProjectionType;
     });
+    // The freeze test, stated as bytes rather than as intent: if the rebuilt body still
+    // OPENS with the frozen body verbatim, nothing structural moved and the previous
+    // projection is reused whole, with only what arrived since appended after it.
+    const held = freeze.body?.length ?? 0;
+    freeze.active = freeze.projection !== null && body.length >= held &&
+      stableStringify(body.slice(0, held)) === freeze.bodyText;
+    const projected = freeze.active
+      ? [...freeze.projection!, ...body.slice(held)]
+      : body;
+    if (!freeze.active) freeze.keys.clear();
+    freeze.body = body;
+    freeze.bodyText = stableStringify(body);
     appendReceipts(projected, snapshot);
     appendCurationNotice(projected, snapshot);
     // Guided curation carries exactly two reminders and the last-call notice. The
     // milestone and live-advisory carriers are the recurring pressure nag they replace,
     // so under this mode they are not built at all.
-    if (guidedCuration) return appendSurfacing(appendCurationReminder(projected, snapshot), snapshot);
+    if (guidedCuration) return holdFrozen(appendSurfacing(appendCurationReminder(projected, snapshot), snapshot));
     const armed = advisoryState(persistence.state!).armed;
     if (!armed || armed.milestone !== advisory.armedMilestone || measurements.latestRatio === null ||
-        measurements.latestRatio < 0.85 * armed.threshold) return appendSurfacing(projected, snapshot);
+        measurements.latestRatio < 0.85 * armed.threshold) return holdFrozen(appendSurfacing(projected, snapshot));
+    // Keyed on the DELIVERY, not the rung: a rung that genuinely re-armed is a new
+    // block and appends, while the same delivery is never rendered twice.
+    if (!carrierAdmitted(
+      `milestone:${armed.milestone}:${advisoryState(persistence.state!).delivered[armed.milestone] ?? 0}`,
+    )) return holdFrozen(appendSurfacing(projected, snapshot));
     const status = activeContextStatus(snapshot, persistence.state!, 0, 1, snapshot.policy.maxFoldSourceRefs);
     const eligible = ownValue(status, "eligibleChapter");
     const startId = ownValue(eligible, "startId");
@@ -1944,7 +2011,7 @@ export function registerActiveContext(pi: any, options: {
     advisory.armedMilestone = null;
     // A suggestion never shares an advisory with urgent fence text: at the fence the
     // only useful next action is the fold that keeps the request transmissible.
-    return armed.milestone === "urgent" ? projected : appendSurfacing(projected, snapshot);
+    return holdFrozen(armed.milestone === "urgent" ? projected : appendSurfacing(projected, snapshot));
   };
   /**
    * Classify the projection we are about to send against the one before it. A rewrite
@@ -4062,6 +4129,15 @@ export function registerActiveContext(pi: any, options: {
         await persistManual(staged, action, ctx);
         updateStatus(ctx);
         const accounting = markAccounting(snapshot, persistence.state);
+        // MECHANISM 3. The projection is byte-frozen between fold events, so this reply
+        // is the only cache-free channel left: it carries the whole picture, not just
+        // an acknowledgement of the spans this call named.
+        const held = pendingMarks(persistence.state).map((mark) => ({
+          id: mark.id,
+          kind: mark.kind,
+          tokens: estimatedTokens(markFreedBytes(snapshot, persistence.state!, mark)),
+        }));
+        const remainder = unmarkedRemainder(snapshot, persistence.state, projectionCharsPerToken());
         // The single-span shape is the head of the batched one: one call carrying one
         // span answers exactly as it always did, and a batch adds fields rather than
         // replacing them.
@@ -4093,10 +4169,19 @@ export function registerActiveContext(pi: any, options: {
           estimatedFreedWindowShare: accounting.freedWindowShare,
           estimatedEligibleWindowShare: accounting.eligibleFreedWindowShare,
           estimatedRewriteTokens: accounting.rewriteTokens,
-          activation: "accepted as pending marks; no context bytes moved. They apply together at the " +
-            "next commit epoch, which the runtime opens at the fold event. " +
+          held,
+          heldNote: "held until it ages out or the next fold event",
+          unmarkedSpans: remainder.spans,
+          unmarkedTokens: remainder.tokens,
+          unmarkedShare: remainder.share,
+          unmarkedCandidates: remainder.candidates,
+          awareness: markAwarenessText({ held, remainder, toolName, brandNoun }),
+          activation: "accepted as pending marks; no context bytes moved, and nothing else in your " +
+            "context changed either. They apply together at the next commit epoch, which the runtime " +
+            "opens at the fold event. " +
             "A mark over a still-fresh span is held, not refused: it is scheduled, and it folds at the " +
-            "first commit after that span ages out of the fresh window.",
+            "first commit after that span ages out of the fresh window. " +
+            "Mark several spans in one call: this whole picture comes back with each one.",
         });
       }
       const applied: Array<Record<string, unknown>> = [];
