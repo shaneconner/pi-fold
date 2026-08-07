@@ -46,7 +46,6 @@ case "$MODE" in smoke|full) ;; *) echo "--mode must be smoke or full" >&2; exit 
 case "$REP" in ''|*[!0-9]*) echo "--rep must be an integer" >&2; exit 2;; esac
 case "$FOLD_SCHEDULING" in immediate|epoch) ;; *) echo "--fold-scheduling must be immediate or epoch" >&2; exit 2;; esac
 case "$FOLD_PEEK_RESULTS" in true|false) ;; *) echo "--fold-peek-results must be true or false" >&2; exit 2;; esac
-# pi-fold refuses guided curation without a commit to announce; refuse it before launch.
 
 unset NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS LD_PRELOAD LD_LIBRARY_PATH \
   BASH_ENV ENV NODE_TLS_REJECT_UNAUTHORIZED PI_CODING_AGENT_DIR OPENAI_BASE_URL OPENAI_API_BASE \
