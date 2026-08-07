@@ -404,14 +404,34 @@ export function receiptBlockText(input: {
 }): string | null {
   if (!input.receipts.length) return null;
   const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
-  return boundReceiptText([
-    `[${brand} actions] Recent automatic context actions, newest last. Exact source remains expandable.`,
-    ...input.receipts.map(receiptLine),
-    `Correct any of it: ${input.toolName} ` +
-      "{\"action\":\"expand\",\"id\":\"<fold-id>\"} restores a span in place; " +
-      "{\"action\":\"rebrief\",\"id\":\"<fold-id>\",\"brief\":\"<factual brief>\"} replaces a brief that " +
-      "does not describe what you needed; {\"action\":\"reboundary\",\"id\":\"<fold-id>\"} returns a " +
-      "mis-cut fold to raw so you can fold the span you meant.",
-  ].join("\n"), CONTEXT_RECEIPT_BLOCK_BYTES,
-  `[${brand} actions] Recent automatic context actions are unavailable this pass.`);
+  const header =
+    `[${brand} actions] Recent automatic context actions, newest last. Exact source remains expandable.`;
+  const verbs = `Correct any of it: ${input.toolName} ` +
+    "{\"action\":\"expand\",\"id\":\"<fold-id>\"} restores a span in place; " +
+    "{\"action\":\"rebrief\",\"id\":\"<fold-id>\",\"brief\":\"<factual brief>\"} replaces a brief that " +
+    "does not describe what you needed; {\"action\":\"reboundary\",\"id\":\"<fold-id>\"} returns a " +
+    "mis-cut fold to raw so you can fold the span you meant.";
+  // The verbs are the only part of this block an agent can act on, and they sit last, so
+  // a plain tail truncation drops them precisely when the report runs long -- which is
+  // when a commit did the most and correcting it matters most. Reserve them, and spend
+  // what remains on receipt lines newest-first: an older action that no longer fits is
+  // the right thing to lose, and its structured record is still in the ring.
+  const fixed = Buffer.byteLength(header, "utf8") + Buffer.byteLength(verbs, "utf8") + 1;
+  if (fixed > CONTEXT_RECEIPT_BLOCK_BYTES) {
+    return `[${brand} actions] Recent automatic context actions are unavailable this pass.`;
+  }
+  let remaining = CONTEXT_RECEIPT_BLOCK_BYTES - fixed;
+  const kept: string[] = [];
+  for (let index = input.receipts.length - 1; index >= 0; index -= 1) {
+    const line = receiptLine(input.receipts[index]);
+    if (Buffer.byteLength(line, "utf8") + 1 > remaining) {
+      // Not even the newest line fits whole: carry as much of it as the reservation
+      // leaves rather than reporting an action with no detail at all.
+      if (!kept.length && remaining > 1) kept.push(boundReceiptText(line, remaining - 1, ""));
+      break;
+    }
+    remaining -= Buffer.byteLength(line, "utf8") + 1;
+    kept.unshift(line);
+  }
+  return [header, ...kept, verbs].join("\n");
 }

@@ -39,12 +39,18 @@ export function buildActiveContextTool(input: {
   const epochGuidance = input.allowedActions.includes("unmark")
     ? " Fold scheduling is epoch mode: fold records pending marks and moves no context bytes, and the runtime applies every pending mark in one rewrite when the fold event fires. Mark SEVERAL spans in one call: marks carries several {ids, brief} pairs, and one call answers with your whole picture, every span now held plus the unmarked remainder and what share of the non-fresh window it is. Between fold events nothing else in your context changes, so that result is where the picture lives. Mark freely as you work; when to fold is the runtime's to decide, and unmark withdraws a mark you no longer want."
     : "";
+  // The standing facts about how this runtime behaves. They belong HERE, in the tool
+  // surface, because the tool surface sits in the stable prefix: it is cached from the
+  // first request and costs nothing per request thereafter, forever. The same sentences
+  // delivered as in-window carriers cost a cache break on the pass that renders them
+  // and every pass that displaces them. Anything always true is said once, here.
+  const standingGuidance = " Folding is automatic, lossless and recoverable: the runtime folds stale spans on its own when the window needs room, nothing is ever discarded, and every folded span keeps its exact source. You are never asked to make room and no fold is ever announced in advance. Work normally and let it happen.";
   return {
     name: input.name,
     label: input.label,
     description: input.fullSurface
-      ? `Page, peek, fold, expand, refold, protect, rebrief, or re-cut exact Pi active-context evidence.${peekGuidance}${correctionGuidance}${epochGuidance} Mutations persist immediately and affect the next model call inside the same continuing turn; no turn boundary is required. Supplied fold briefs have a hard 1200-character maximum.`
-      : `Use only the configured active-context actions: ${input.allowedActions.join(", ")}.${peekGuidance}${correctionGuidance}${epochGuidance} Call fold only by copying the exact eligibleChapter.action returned by status; if status has no eligibleChapter, continue the task without folding. Supplied fold briefs have a hard 1200-character maximum.`,
+      ? `Page, peek, fold, expand, refold, protect, rebrief, or re-cut exact Pi active-context evidence.${peekGuidance}${correctionGuidance}${epochGuidance}${standingGuidance} Mutations persist immediately and affect the next model call inside the same continuing turn; no turn boundary is required. Supplied fold briefs have a hard 1200-character maximum.`
+      : `Use only the configured active-context actions: ${input.allowedActions.join(", ")}.${peekGuidance}${correctionGuidance}${epochGuidance}${standingGuidance} Call fold only by copying the exact eligibleChapter.action returned by status; if status has no eligibleChapter, continue the task without folding. Supplied fold briefs have a hard 1200-character maximum.`,
     parameters: {
       type: "object",
       additionalProperties: false,

@@ -278,10 +278,21 @@ export function recordProjection(
  * Read one provider response against the projection that produced it. A miss on a
  * projection that only grew is provider-side by construction: no byte we control
  * moved, so no scheduling change could have prevented the re-read.
+ *
+ * A rewrite used to be charged to us unconditionally, and that hid the whole rep 21
+ * finding: a rewrite that preserved 99.86% of the prompt still read back as ours, so
+ * our own metrics reported a negligible divergence and a total cache loss and never
+ * put the two side by side. Attribution now asks how much of the previous prompt the
+ * rewrite actually kept. If we preserved nearly all of it and the provider still
+ * served nothing, our divergence cannot account for the loss and the miss is theirs.
+ * That is a claim about ATTRIBUTION, not about cost: a preserved-share miss is still
+ * a full rebuild, and it is still worth not causing.
  */
+export const PROVIDER_SIDE_MISS_PRESERVED_SHARE = 0.99;
+
 export function observeCacheUsage(
   ledger: InstrumentationLedger,
-  input: { usage: unknown; change: ProjectionChange },
+  input: { usage: unknown; change: ProjectionChange; preservedShare?: number | null },
 ): CacheObservation | null {
   const usage = input.usage;
   const inputTokens = ownValue(usage, "input");
@@ -290,12 +301,16 @@ export function observeCacheUsage(
       typeof cacheReadTokens !== "number" || !Number.isFinite(cacheReadTokens) ||
       cacheReadTokens < 0) return null;
   const missed = cacheReadTokens === 0;
+  const preserved = typeof input.preservedShare === "number" && Number.isFinite(input.preservedShare)
+    ? input.preservedShare
+    : null;
   const observation: CacheObservation = {
     ordinal: ledger.projections,
     change: input.change,
     inputTokens,
     cacheReadTokens,
-    providerSideMiss: missed && input.change !== "rewrite",
+    providerSideMiss: missed && (input.change !== "rewrite" ||
+      (preserved !== null && preserved >= PROVIDER_SIDE_MISS_PRESERVED_SHARE)),
   };
   if (missed) ledger.observedMisses += 1;
   if (observation.providerSideMiss) ledger.providerSideMisses += 1;

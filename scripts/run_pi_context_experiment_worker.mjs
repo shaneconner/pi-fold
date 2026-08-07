@@ -15,7 +15,6 @@ import {
   EXPERIMENT_BEHAVIORAL_MODE,
   EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS,
   EXPERIMENT_DEFAULT_FOLD_SCHEDULING,
-  EXPERIMENT_DEFAULT_GUIDED_CURATION,
   EXPERIMENT_MARKER_ENTRY,
   EXPERIMENT_PIFOLD_EXTRA_TOOLS,
   EXPERIMENT_RUNNER_MODE,
@@ -348,12 +347,10 @@ try {
     campaignId: config.campaignId,
     arm: config.arm,
     mode: config.mode,
-    guidance: config.guidance,
     // The second condition dial travels with the run: config -> manifest -> extension's
     // active-context registration, so the sealed manifest states which scheduler ran.
     foldScheduling: config.foldScheduling ?? EXPERIMENT_DEFAULT_FOLD_SCHEDULING,
     foldPeekResults: config.foldPeekResults ?? EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS,
-    guidedCuration: config.guidedCuration ?? EXPERIMENT_DEFAULT_GUIDED_CURATION,
     // The deployment fact travels config -> manifest -> registration, so the sealed
     // manifest states which serving budget the run's thresholds were measured against.
     ...(config.providerTotalWindow === undefined ? {} : { providerTotalWindow: config.providerTotalWindow }),

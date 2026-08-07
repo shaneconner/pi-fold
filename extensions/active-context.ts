@@ -6,15 +6,6 @@ import {
   stableStringify,
 } from "./json.ts";
 import {
-  advisorySchedule,
-  advisoryState,
-  clearArmedAdvisory,
-  liveAdvisoryText,
-  milestoneText,
-  normalizeGuidanceProfile,
-  recordAdvisoryDelivery,
-  surfacingText,
-  updateAdvisoryMilestone,
 } from "./lib/advisory.ts";
 import {
   bytes,
@@ -97,7 +88,6 @@ import type { MaterializedStatePersistence } from "./lib/persistence.ts";
 import {
   activeContextSource,
   ACTIVE_CONTEXT_POLICY,
-  ACTIVE_CONTEXT_STATUS_KEY,
   ACTIVE_CONTEXT_TOOL_ACTIONS,
   contextBrand,
   DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
@@ -106,18 +96,13 @@ import {
   DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   COMMIT_RECLAIM_FLOOR_SHARE,
-  CONTEXT_RECEIPT_BLOCK_BYTES,
-  CURATION_GATE_MAX_ROUNDS,
-  CURATION_TARGET_OCCUPANCY_SHARE,
   CURATION_OCCUPANCY_SHARE,
-  CURATION_REMINDER_SHARES,
   CURATION_STALE_TOOL_SHARE,
-  EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD,
+  CONTEXT_RECEIPT_BLOCK_BYTES,
+  CURATION_TARGET_OCCUPANCY_SHARE,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_FOLD_SCHEDULING,
-  DEFAULT_GUIDED_CURATION,
   ESTIMATED_BYTES_PER_TOKEN,
-  DEFAULT_SURFACING_ENABLED,
   entryTypeNamespace,
   EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS,
   EPOCH_COMMIT_TARGET_WINDOW_SHARE,
@@ -136,34 +121,26 @@ import type {
   ActiveContextSnapshot,
   ActiveContextState,
   ActiveContextToolAction,
-  AdvisoryMilestone,
   FoldCandidate,
   FoldKind,
   FoldRecordEntry,
   FoldSchedulingMode,
-  GuidanceProfile,
   PreparedFold,
   SuggestionSource,
-  SurfacingSuggestion,
 } from "./lib/policy.ts";
 import {
   absorbWedgeMarks,
 } from "./lib/scheduling.ts";
 import {
-  advanceCurationGate,
   contextReceipt,
-  curationNoticeText,
-  curationReminderText,
   curationSignals,
   curationTriggerFires,
   markAwarenessText,
-  dueReminderIndex,
   receiptBlockText,
   withReceipt,
 } from "./lib/curation.ts";
 import type {
   ContextReceipt,
-  CurationGate,
   CurationSignals,
 } from "./lib/curation.ts";
 import {
@@ -204,9 +181,7 @@ import {
 import type { SpanCorrection } from "./lib/selection.ts";
 import {
   acceptSurfacingSuggestion,
-  FOLD_BRIEF_SUGGESTION_SOURCE,
   surfacingOrdinal,
-  updateSurfacing,
 } from "./lib/surfacing.ts";
 import {
   compareProjections,
@@ -292,7 +267,6 @@ export function registerActiveContext(pi: any, options: {
   summarizeContextSpan?: (request: Record<string, unknown>, ctx: unknown) => Promise<Record<string, unknown>>;
   setProjectionProvider?: (provider: (ctx: any) => Array<Record<string, unknown>>) => void;
   setSuggestionSourceRegistrar?: (register: SuggestionSourceRegistrar) => void;
-  surfacing?: boolean;
   toolActions?: readonly ActiveContextToolAction[];
   toolName?: string;
   toolLabel?: string;
@@ -302,10 +276,8 @@ export function registerActiveContext(pi: any, options: {
   commandNames?: { status?: string; fold?: string };
   readOnlyTools?: ReadonlySet<string>;
   blockingTools?: readonly string[];
-  guidance?: GuidanceProfile;
   foldScheduling?: FoldSchedulingMode;
   foldPeekResults?: boolean;
-  guidedCuration?: boolean;
   providerTotalWindow?: number;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
@@ -317,11 +289,6 @@ export function registerActiveContext(pi: any, options: {
   const entryTypePrefix = options.entryTypePrefix ?? DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX;
   const commandPrefix = options.commandPrefix ?? "";
   const readOnlyTools = options.readOnlyTools ?? READ_ONLY_TOOLS_DEFAULT;
-  const guidance = normalizeGuidanceProfile(options.guidance);
-  if (options.surfacing !== undefined && typeof options.surfacing !== "boolean") {
-    throw new Error("surfacing must be a boolean");
-  }
-  const surfacingEnabled = options.surfacing ?? DEFAULT_SURFACING_ENABLED;
   const foldScheduling = options.foldScheduling ?? DEFAULT_FOLD_SCHEDULING;
   if (!FOLD_SCHEDULING_MODES.includes(foldScheduling)) {
     throw new Error(`foldScheduling must be one of ${FOLD_SCHEDULING_MODES.join(", ")}`);
@@ -335,15 +302,6 @@ export function registerActiveContext(pi: any, options: {
   // one unless the deployment opts in, because a peek copies a fold's stored source
   // back into the window and a window that cannot reclaim it grows without bound.
   const foldPeekResults = options.foldPeekResults ?? epochScheduling;
-  if (options.guidedCuration !== undefined && typeof options.guidedCuration !== "boolean") {
-    throw new Error("guidedCuration must be a boolean");
-  }
-  if (options.guidedCuration && !epochScheduling) {
-    throw new Error("guidedCuration requires epoch fold scheduling; immediate mode has no commit to announce");
-  }
-  // Announce the commit instead of performing it silently, and give the agent a
-  // bounded last call to curate what is about to fold.
-  const guidedCuration = options.guidedCuration ?? DEFAULT_GUIDED_CURATION;
   if (options.providerTotalWindow !== undefined &&
       (!Number.isSafeInteger(options.providerTotalWindow) || options.providerTotalWindow <= 0)) {
     throw new Error("providerTotalWindow must be a positive integer");
@@ -494,6 +452,8 @@ export function registerActiveContext(pi: any, options: {
     /** The previous TRANSMITTED projection, for the byte-level prefix comparison. */
     previousText: null as string | null,
     lastChange: "append" as ProjectionChange,
+    /** Share of the PREVIOUS prompt the last projection kept, for miss attribution. */
+    lastPreservedShare: null as number | null,
     /** Events emitted since the last handoff, which is the attribution candidate set. */
     sinceHandoff: [] as Array<{ seq: number; kind: string }>,
     /** Structural mutations emitted since the last handoff. The per-generation budget. */
@@ -544,22 +504,20 @@ export function registerActiveContext(pi: any, options: {
   // this process did to the live window, and the durable copy is the appended
   // instrumentation entry, which is what an external adjudicator reads.
   const curation = {
-    gate: null as CurationGate | null,
-    lastSignals: null as CurationSignals | null,
     receipts: [] as ContextReceipt[],
-    /** Reminders already spent this window cycle; a commit re-arms them. */
-    remindersFired: 0,
-    /** Every context-management tool call this session, the gate's engagement signal. */
+    /** Every context-management tool call this session. */
     contextCalls: 0,
-    marksAtGateOpen: 0,
+    /** The last measurement the commit trigger took, reported by status. */
+    lastSignals: null as CurationSignals | null,
     /**
-     * GATE REOPEN HYSTERESIS. The eligible foldable share measured just after the last
-     * gated commit, or null when the gate is free to open. Measured 2026-08-07 (rep 17):
-     * occupancy plateaued at 0.85-0.92 of the truthful budget for the final third of the
-     * run and the last-call gate reopened ten times over a window whose foldable mass had
-     * not changed, announcing a commit that had nothing new to fold. A plateau is not an
-     * event. The gate reopens only once occupancy falls back under the trigger and
-     * crosses it again, or once a reclaim floor's worth of eligible mass is NEW.
+     * COMMIT REOPEN HYSTERESIS. The eligible foldable share measured just after the last
+     * triggered commit, or null when the trigger is free to fire. Measured 2026-08-07
+     * (rep 17): occupancy plateaued at 0.85-0.92 of the truthful budget for the final
+     * third of the run, and the trigger fired ten times over a window whose foldable mass
+     * had not changed. A plateau is not an event. The trigger re-arms only once occupancy
+     * falls back under it and crosses again, or once a reclaim floor of eligible mass is
+     * NEW. This outlived the announcement it was built beside: it bounds how often the
+     * runtime rewrites the projection, which is the whole cost model.
      */
     reopenBaselineShare: null as number | null,
     /** Recovery attempts spent on the CURRENT inflow; reset by any accepted request. */
@@ -572,20 +530,19 @@ export function registerActiveContext(pi: any, options: {
 
   // Owns advisory arming and hard-fence delivery; durable effects use persistenceQueue.
   const advisory = {
-    historicalGuidanceEntries: 0,
-    armedMilestone: null as AdvisoryMilestone | null,
-    advisoryScheduleKey: null as string | null,
     hardFenceNoticeKey: null as string | null,
     hardFenceReleaseSessionId: null as string | null,
     hardFenceReleasedProjectionKeys: new Set<string>(),
   };
 
-  // Owns the suggestion sources feeding the ephemeral surfacing carrier plus the slate
-  // rendered on the current context event. Nothing here is durable: the carrier is
-  // rebuilt from state on every projection, and only the log lives in session state.
+  // Registered suggestion sources. RETRIEVAL IS UNWIRED FROM THE PROJECTION as of this
+  // build: the slate that rendered these was a per-pass tail carrier, and a tail carrier
+  // is displaced by every append, so it diverged the prefix on every single pass. The
+  // selector in lib/surfacing.ts is kept and still gated, because proactive retrieval is
+  // the right idea in the wrong place: when it returns it must ride a commit like every
+  // other carrier. Until then nothing renders a suggestion, so nothing selects one.
   const surfacing = {
     sources: [] as SuggestionSource[],
-    suggestions: [] as SurfacingSuggestion[],
   };
 
   // Owns native-compaction decisions and completion retry state; nativeReceiptQueue serializes it.
@@ -844,20 +801,16 @@ export function registerActiveContext(pi: any, options: {
     instrumentation.lastMutationRequest = 0;
     instrumentation.lastMutationTokens = null;
     instrumentation.lastChange = "append";
+    instrumentation.lastPreservedShare = null;
     instrumentation.sinceHandoff = [];
     instrumentation.mutationsSinceHandoff = 0;
-    curation.gate = null;
-    curation.lastSignals = null;
     curation.receipts = [];
-    curation.remindersFired = 0;
     curation.contextCalls = 0;
-    curation.marksAtGateOpen = 0;
+    curation.lastSignals = null;
+    curation.reopenBaselineShare = null;
     curation.recoveryAttempts = 0;
     curation.pendingRejection = null;
     curation.lastRecovery = null;
-    advisory.historicalGuidanceEntries = 0;
-    advisory.armedMilestone = null;
-    advisory.advisoryScheduleKey = null;
     ladder.lastAutomaticAction = null;
     ladder.automaticFailure = null;
     advisory.hardFenceNoticeKey = null;
@@ -889,13 +842,6 @@ export function registerActiveContext(pi: any, options: {
     }
     for (const entry of branchEntries) {
       if (entry?.type !== "custom") continue;
-      if (typeof entry.customType === "string" && [
-        `${entryTypePrefix}-guidance-`,
-        `${ACTIVE_CONTEXT_STATUS_KEY}-guidance-`,
-      ].some((prefix) => entry.customType.startsWith(prefix))) {
-        advisory.historicalGuidanceEntries += 1;
-        continue;
-      }
       if (entry.customType !== providerMeasurementEntryType) continue;
       try {
         const receipt = parseProviderContextMeasurementReceipt(entry.data, sessionId);
@@ -928,7 +874,6 @@ export function registerActiveContext(pi: any, options: {
     }
     const durableRestored = restored ?? emptyActiveContextState(sessionId);
     persistence.state = durableRestored.prepared ? clearPrepared(durableRestored) : clone(durableRestored);
-    advisory.armedMilestone = advisoryState(persistence.state).armed?.milestone ?? null;
     persistence.persistedWireVersion = restoredPersistence?.wireVersion ?? 0;
     persistence.persistedFoldRecords = restoredPersistence?.records ?? new Map<string, FoldRecordEntry>();
     persistence.persistedStateSha256 = restoredPersistence?.stateSha256 ?? semanticStateSha256(durableRestored);
@@ -1216,14 +1161,10 @@ export function registerActiveContext(pi: any, options: {
     }
   };
 
-  const markManual = (
-    next: ActiveContextState,
-    action: Exclude<ActiveContextToolAction, "status">,
-  ): void => {
+  const markManual = (next: ActiveContextState): void => {
     cancelPreparation();
     persistence.state = clearPrepared(next);
     ladder.pendingManual = true;
-    if (action === "fold") advisory.armedMilestone = null;
     ladder.boundaryFailure = null;
   };
 
@@ -1235,7 +1176,7 @@ export function registerActiveContext(pi: any, options: {
     const stateAtEntry = persistence.state ? clone(persistence.state) : null;
     const persistedAtEntry = persistence.persisted;
     const transientAtEntry = captureTransient();
-    markManual(next, action);
+    markManual(next);
     try {
       await persist(ctx);
       ladder.pendingManual = false;
@@ -1256,7 +1197,6 @@ export function registerActiveContext(pi: any, options: {
     pendingManual: ladder.pendingManual,
     preparing: ladder.preparing,
     pendingContextNote: ladder.pendingContextNote,
-    armedMilestone: advisory.armedMilestone,
     lastAutomaticAction: ladder.lastAutomaticAction,
     automaticFailure: ladder.automaticFailure ? clone(ladder.automaticFailure) : null,
     boundaryFailure: ladder.boundaryFailure,
@@ -1265,7 +1205,6 @@ export function registerActiveContext(pi: any, options: {
     ladder.pendingManual = saved.pendingManual;
     ladder.preparing = saved.preparing?.controller.signal.aborted ? null : saved.preparing;
     ladder.pendingContextNote = saved.pendingContextNote;
-    advisory.armedMilestone = saved.armedMilestone;
     ladder.lastAutomaticAction = saved.lastAutomaticAction;
     ladder.automaticFailure = saved.automaticFailure;
     ladder.boundaryFailure = saved.boundaryFailure;
@@ -1779,10 +1718,13 @@ export function registerActiveContext(pi: any, options: {
   // invalidates a cached prefix and never becomes durable transcript.
   /**
    * The receipt block: what the runtime did to this window, as status rather than as
-   * advice. Appended at the TAIL after the stable prefix, exactly like the advisory and
-   * suggestion carriers, so reporting an action never costs a cached prefix. It is
-   * hard-bounded and its ring evicts the oldest entry, because a report about bloat
-   * that becomes bloat has argued against itself.
+   * advice. It is the only carrier this runtime builds.
+   *
+   * It is free because it is RETROSPECTIVE. A receipt exists only after a commit has
+   * already rewritten the projection, so it rides a cache break the runtime had to pay
+   * for regardless, and the freeze then closes over it so it is never paid for again.
+   * It is hard-bounded and its ring evicts the oldest entry, because a report about
+   * bloat that becomes bloat has argued against itself.
    */
   const appendReceipts = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
     const content = receiptBlockText({ receipts: curation.receipts, toolName, brandNoun });
@@ -1807,145 +1749,32 @@ export function registerActiveContext(pi: any, options: {
   };
 
   /**
-   * The sparse reminders: exactly two one-line notices per window cycle, on the same
-   * tail carrier as everything else here.
+   * Whatever this pass ended up sending becomes the frozen surface for the next one, in
+   * full. Nothing rides after the frozen region.
    *
-   * They are the ONLY pre-gate guidance guided curation delivers. A recurring nag is
-   * how rep 15's agent learned to skim context messages; two lines per cycle, keyed to
-   * occupancy and re-armed by every commit, are cheap enough to read every time.
-   */
-  const appendCurationReminder = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
-    if (!guidedCuration || curation.gate || !persistence.state) return projected;
-    const signals = measuredCurationSignals(snapshot);
-    const index = dueReminderIndex(signals.occupancy, curation.remindersFired);
-    if (index === null) return projected;
-    if (!carrierAdmitted(`reminder:${index}`)) return projected;
-    curation.remindersFired = index + 1;
-    emit("context.reminder", {
-      reminder_index: index,
-      reminder_share: CURATION_REMINDER_SHARES[index],
-      occupancy: signals.occupancy,
-      occupancy_tokens: signals.occupancyTokens,
-      budget_tokens: signals.budgetTokens,
-      window_tokens: signals.window,
-      pending_marks: pendingMarks(persistence.state).length,
-    });
-    projected.push({
-      role: "custom",
-      customType: curationProjectionType,
-      content: curationReminderText({ signals, toolName, brandNoun }),
-      display: false,
-      details: {
-        source: activeContextSource(entryTypePrefix),
-        ephemeral: true,
-        reminder: index,
-        reminderShare: CURATION_REMINDER_SHARES[index],
-        signals: { ...signals },
-      },
-      timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
-        ? ownValue(snapshot.messages.at(-1), "timestamp")
-        : 0,
-    });
-    return projected;
-  };
-
-  /** The last-call notice, on the same carrier and under the same rules. */
-  const appendCurationNotice = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
-    if (!curation.gate || !curation.lastSignals) return projected;
-    // Keyed on the gate, not on the round: the round counter was a per-pass rewrite of
-    // an already-cached block, which is the exact cost this build removed.
-    if (!carrierAdmitted(`notice:${curation.gate.openedOrdinal}`)) return projected;
-    projected.push({
-      role: "custom",
-      customType: curationProjectionType,
-      content: curationNoticeText({
-        signals: curation.lastSignals,
-        roundsUsed: curation.gate.roundsUsed,
-        toolName,
-        brandNoun,
-      }),
-      display: false,
-      details: {
-        source: activeContextSource(entryTypePrefix),
-        ephemeral: true,
-        roundsUsed: curation.gate.roundsUsed,
-        maxRounds: CURATION_GATE_MAX_ROUNDS,
-        signals: { ...curation.lastSignals },
-      },
-      timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
-        ? ownValue(snapshot.messages.at(-1), "timestamp")
-        : 0,
-    });
-    return projected;
-  };
-
-  const appendSurfacing = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
-    const content = surfacingText({ suggestions: surfacing.suggestions, brandNoun });
-    if (!content) return projected;
-    projected.push({
-      role: "custom",
-      customType: surfacingProjectionType,
-      content,
-      display: false,
-      details: {
-        source: activeContextSource(entryTypePrefix),
-        ephemeral: true,
-        suggestions: surfacing.suggestions.map((suggestion) => ({
-          source: suggestion.source,
-          id: suggestion.id,
-          score: suggestion.score,
-        })),
-      },
-      timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
-        ? ownValue(snapshot.messages.at(-1), "timestamp")
-        : 0,
-    });
-    return projected;
-  };
-  /**
-   * What the advisory says, keyed on what the agent can act on: how much room is
-   * actually left, how much of what it is paying for no pending decision reclaims, and
-   * how many TOKENS the marks it already has would free. A percentage is not a
-   * quantity anyone can budget against.
-   */
-  const advisoryCuration = (snapshot: ActiveContextSnapshot) => {
-    const accounting = markAccounting(snapshot, persistence.state!);
-    const capacity = servingCapacity(snapshot.contextWindow);
-    const used = capacity.usedTokens;
-    const budgetTokens = capacity.budgetTokens;
-    return {
-      headroomTokens: capacity.headroomTokens,
-      budgetTokens,
-      pendingMarks: accounting.pending,
-      eligibleMarks: accounting.eligibleMarks,
-      freedTokens: accounting.freedTokens,
-      eligibleFreedTokens: accounting.eligibleFreedTokens,
-      unmarkedShare: used && used > 0
-        ? Math.max(0, Math.min(1, 1 - accounting.freedTokens / used))
-        : 1,
-    };
-  };
-
-  /**
-   * Whatever this pass ended up sending becomes the frozen surface for the next one,
-   * MINUS the suggestion slate.
+   * The earlier build kept a live suggestion slate outside the freeze, reasoning that
+   * advice goes stale and that a re-rendered block "only diverges the prefix when its
+   * own content changes". That reasoning is wrong, and rep 21 measured the cost. A
+   * positional cache compares bytes from the start: this pass sends [frozen][slate] and
+   * the next sends [frozen][new messages][slate], so at the offset where the slate sat
+   * the next pass has new messages instead. The slate diverges the prefix EVERY pass
+   * whatever it says, because appending anything displaces it. There is no stable
+   * position at a moving tail.
    *
-   * Receipts, reminders and notices are statements about what already happened: they
-   * never go stale, so once one lands it stays landed and is never paid for twice.
-   * Suggestions are live advice, and advice does go stale -- a source withdraws, or the
-   * fence turns urgent and the only useful next action is the fold. Advice that cannot
-   * be withdrawn is worse than advice re-rendered, so the slate rides AFTER the frozen
-   * region and is rebuilt every pass. It only diverges the prefix when its own content
-   * changes, which is exactly when withdrawing it is the point.
+   * Measured on rep 21: a 1503-character slate against a 1.5M-character prompt, 99.86%
+   * of the projection preserved by our own accounting, and 16 full cache rebuilds
+   * costing 3.71M tokens -- 21.9% of every input token in the run. Prefix caching is a
+   * step function, not a gradient: mutation cost has no relation to mutation size.
+   *
+   * So the rule this build enforces: the runtime adds to the window only at a moment it
+   * is already rewriting the window, which means at a commit. A carrier landed there is
+   * free, because the break is already paid for, and it stays landed forever because
+   * the freeze closes over it.
    */
-  const holdFrozen = (
-    projected: unknown[],
-    snapshot: ActiveContextSnapshot,
-    fenced = false,
-  ): unknown[] => {
+  const holdFrozen = (projected: unknown[]): unknown[] => {
     freeze.projection = [...projected];
     freeze.active = false;
-    return fenced ? projected : appendSurfacing(projected, snapshot);
+    return projected;
   };
 
   const projectWithAdvisory = (snapshot: ActiveContextSnapshot): unknown[] => {
@@ -1967,66 +1796,19 @@ export function registerActiveContext(pi: any, options: {
     if (!freeze.active) freeze.keys.clear();
     freeze.body = body;
     freeze.bodyText = stableStringify(body);
+    // The one carrier left, and the only one that can ever be free: a statement of what
+    // the runtime just did. It is built only when a commit produced a receipt, it lands
+    // inside the freeze, and it is never rendered twice.
+    //
+    // Everything that used to stand here was ANTICIPATORY -- pressure milestones, the
+    // live advisory, curation reminders, the last-call notice. Anticipatory guidance has
+    // to arrive BEFORE the event it warns about, so it can never ride a break the
+    // runtime was already paying for; it has to create one. Anticipatory guidance and an
+    // append-only projection are mutually exclusive, and eleven runs say the warning
+    // bought nothing anyway: voluntary fold share was 0.00, and the three runs built
+    // specifically to invite curation produced 0, 1 and 0 voluntary folds.
     appendReceipts(projected, snapshot);
-    appendCurationNotice(projected, snapshot);
-    // Guided curation carries exactly two reminders and the last-call notice. The
-    // milestone and live-advisory carriers are the recurring pressure nag they replace,
-    // so under this mode they are not built at all.
-    if (guidedCuration) return holdFrozen(appendCurationReminder(projected, snapshot), snapshot);
-    const armed = advisoryState(persistence.state!).armed;
-    if (!armed || armed.milestone !== advisory.armedMilestone || measurements.latestRatio === null ||
-        measurements.latestRatio < 0.85 * armed.threshold) return holdFrozen(projected, snapshot);
-    // Keyed on the DELIVERY, not the rung: a rung that genuinely re-armed is a new
-    // block and appends, while the same delivery is never rendered twice.
-    if (!carrierAdmitted(
-      `milestone:${armed.milestone}:${advisoryState(persistence.state!).delivered[armed.milestone] ?? 0}`,
-    )) return holdFrozen(projected, snapshot);
-    const status = activeContextStatus(snapshot, persistence.state!, 0, 1, snapshot.policy.maxFoldSourceRefs);
-    const eligible = ownValue(status, "eligibleChapter");
-    const startId = ownValue(eligible, "startId");
-    const endId = ownValue(eligible, "endId");
-    const chapterEndpoints = typeof startId === "string" && typeof endId === "string"
-      ? [startId, endId]
-      : [];
-    const toolEndpoints = selectAutomaticToolBatch(snapshot, persistence.state!, 1)
-      .flatMap((candidate) => candidate.sourceRefs.at(-1)?.entryId ?? [])
-      .slice(0, 3);
-    const remediationCount = advisoryState(persistence.state!).delivered[armed.milestone] ?? 0;
-    projected.push({
-      role: "custom",
-      customType: milestoneProjectionType,
-      content: milestoneText(
-        armed.milestone, persistence.state!.sessionId, armed.threshold, toolName, brandNoun, guidance,
-      ),
-      display: false,
-      details: { source: activeContextSource(entryTypePrefix), ephemeral: true, milestone: armed.milestone },
-      timestamp: 0,
-    });
-    projected.push({
-      role: "custom",
-      customType: advisoryProjectionType,
-      content: liveAdvisoryText({
-        milestone: armed.milestone,
-        ratio: measurements.latestRatio,
-        toolEndpoints,
-        chapterEndpoints,
-        remediationCount,
-        brandNoun,
-        curation: advisoryCuration(snapshot),
-      }),
-      display: false,
-      details: { source: activeContextSource(entryTypePrefix), ephemeral: true, milestone: armed.milestone },
-      timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
-        ? ownValue(snapshot.messages.at(-1), "timestamp")
-        : 0,
-    });
-    // The budget is spent HERE, where the advisory actually reaches the agent, and the
-    // arm is released only once it has spoken.
-    persistence.state = recordAdvisoryDelivery(persistence.state!, armed.milestone);
-    advisory.armedMilestone = null;
-    // A suggestion never shares an advisory with urgent fence text: at the fence the
-    // only useful next action is the fold that keeps the request transmissible.
-    return holdFrozen(projected, snapshot, armed.milestone === "urgent");
+    return holdFrozen(projected);
   };
   /**
    * Classify the projection we are about to send against the one before it. A rewrite
@@ -2041,6 +1823,13 @@ export function registerActiveContext(pi: any, options: {
     instrumentation.lastChange = comparison.change;
     const text = stableStringify(projected);
     const divergence = prefixDivergence(instrumentation.previousText, text);
+    const previousChars = instrumentation.previousText?.length ?? 0;
+    // How much of the PREVIOUS prompt this projection still opens with. identicalShare
+    // measures the new projection instead, which grows every pass and would call a
+    // total rewrite "preserved" as soon as enough fresh content landed after it.
+    instrumentation.lastPreservedShare = previousChars > 0
+      ? divergence.identicalChars / previousChars
+      : null;
     const charsPerToken = projectionCharsPerToken();
     const causes = instrumentation.sinceHandoff.filter((event) =>
       PREFIX_MUTATING_KINDS.has(event.kind));
@@ -2360,9 +2149,18 @@ export function registerActiveContext(pi: any, options: {
       ratio: waiverRatio,
       guardedMarks: pendingMarks(state).filter((mark) =>
         markTouchesCurrentTurn(state, mark, guarded)).length,
+      // Against commitSnapshot, NOT snapshot. The starvation test decides whether the
+      // guard may be waived, so it has to ask the same question the commit will: does
+      // this epoch have work that does not touch the open turn? A DEEPENED epoch tops
+      // up marks that the un-deepened freshness policy still calls protected, so
+      // weighing them under the shallow snapshot reported zero applicable marks while
+      // the commit went on to apply two. The waiver then fired on a false starvation
+      // reading and released eight open-turn marks, six of which folded evidence the
+      // turn was still using. Two snapshots, two answers, and the one that decides the
+      // commit was not the one being asked.
       otherApplicableMarks: pendingMarks(state).filter((mark) =>
         !markTouchesCurrentTurn(state, mark, guarded) &&
-        markEligibility(snapshot, state, mark) === "eligible").length,
+        markEligibility(commitSnapshot, state, mark) === "eligible").length,
     });
     const result = await commitPendingMarks({
       snapshot: commitSnapshot,
@@ -2416,9 +2214,6 @@ export function registerActiveContext(pi: any, options: {
       window_tokens: snapshot.contextWindow,
     });
     instrumentation.mutationsSinceHandoff += 1;
-    // A commit closes the window cycle: the reminders re-arm and fire again as
-    // occupancy re-climbs, which is the only thing that makes them recurrent.
-    curation.remindersFired = 0;
     instrumentation.lastMutationRequest = instrumentation.requests;
     instrumentation.lastMutationTokens = usedTokens;
     let foldedToolResults = 0;
@@ -2502,7 +2297,7 @@ export function registerActiveContext(pi: any, options: {
   /** The two curation signals, measured against the ONE serving budget. */
   const measuredCurationSignals = (snapshot: ActiveContextSnapshot): CurationSignals => {
     const capacity = servingCapacity(snapshot.contextWindow);
-    return curationSignals({
+    curation.lastSignals = curationSignals({
       snapshot,
       state: persistence.state!,
       usedTokens: capacity.usedTokens,
@@ -2511,92 +2306,38 @@ export function registerActiveContext(pi: any, options: {
       charsPerToken: projectionCharsPerToken(),
       eligibleFolds: markAccounting(snapshot, persistence.state!).eligibleMarks,
     });
-  };
-
-  const recordGateEvent = (
-    event: "opened" | "held" | "proceeded",
-    signals: CurationSignals,
-    roundsUsed: number,
-    proceededBy: string | null,
-  ): void => {
-    emit("context.gate", {
-      gate_event: event,
-      occupancy: signals.occupancy,
-      occupancy_tokens: signals.occupancyTokens,
-      budget_tokens: signals.budgetTokens,
-      window_tokens: signals.window,
-      stale_tool_share: signals.staleToolShare,
-      stale_tool_tokens: signals.staleToolTokens,
-      stale_tool_results: signals.staleToolResults,
-      eligible_folds: signals.eligibleFolds,
-      rounds_used: roundsUsed,
-      max_rounds: CURATION_GATE_MAX_ROUNDS,
-      marks_added: persistence.state
-        ? Math.max(0, pendingMarks(persistence.state).length - curation.marksAtGateOpen)
-        : 0,
-      proceeded_by: proceededBy,
-    });
+    return curation.lastSignals;
   };
 
   /**
-   * The last-call gate.
-   *
-   * The backstop and the fence are UNCHANGED and never wait on this: when window
-   * pressure or eligible marked mass says commit, the commit happens. The gate sits in
-   * front of the EARLY curation trigger only, where there is still room to react, and
-   * it is bounded so that it cannot stall a run under any agent behaviour.
+   * The silent early commit. The two signals decide, the reclaim floor stops a commit
+   * that would free nothing, and the hysteresis stops a plateau from reading as a
+   * stream of events. What is gone is only the announcement in front of it.
    */
-  const curationCommitVerdict = (
-    snapshot: ActiveContextSnapshot,
-    backstopDue: boolean,
-    /**
-     * The gate is arbitrated on CONTEXT passes only, because that is the pass that
-     * builds the projection carrying the notice. Opening it on a measurement callback
-     * would announce a commit into a projection nobody was about to receive, and the
-     * very next context pass would close it as an unanswered round.
-     */
-    announcing: boolean,
-  ): { due: boolean; trigger: string | null } => {
-    if (!guidedCuration || !announcing) return { due: backstopDue, trigger: null };
-    const signals = measuredCurationSignals(snapshot);
-    curation.lastSignals = signals;
-    if (backstopDue) {
-      if (curation.gate) {
-        recordGateEvent("proceeded", signals, curation.gate.roundsUsed, "backstop");
-        curation.gate = null;
-      }
-      return { due: true, trigger: null };
-    }
-    if (!curationTriggerFires(signals)) {
-      // The signals fell back below the trigger; the announcement is withdrawn rather
-      // than left standing over a commit that is no longer coming.
-      curation.gate = null;
-      return { due: false, trigger: null };
-    }
-    const pending = pendingMarks(persistence.state!).length;
-    if (!curation.gate && curation.reopenBaselineShare !== null) {
-      // Condition (b): a reclaim floor's worth of eligible mass has NEWLY appeared since
-      // the last gated commit. Below that the announcement would be about the same
-      // window the last one already adjudicated, so the gate stays shut and silent.
-      const eligibleShare = markAccounting(snapshot, persistence.state!).eligibleFreedWindowShare;
-      if (eligibleShare - curation.reopenBaselineShare < COMMIT_RECLAIM_FLOOR_SHARE) {
-        return { due: false, trigger: null };
-      }
+  const curationCommitDue = (snapshot: ActiveContextSnapshot): boolean => {
+    if (!persistence.state) return false;
+    if (!curationTriggerFires(measuredCurationSignals(snapshot))) return false;
+    if (curation.reopenBaselineShare !== null) {
+      const eligibleShare = markAccounting(snapshot, persistence.state).eligibleFreedWindowShare;
+      if (eligibleShare - curation.reopenBaselineShare < COMMIT_RECLAIM_FLOOR_SHARE) return false;
       curation.reopenBaselineShare = null;
     }
-    const verdict = advanceCurationGate({
-      gate: curation.gate,
-      ordinal: currentOrdinal(),
-      signals,
-      contextCalls: curation.contextCalls,
-      pendingMarks: pending,
-    });
-    if (verdict.event === "opened") curation.marksAtGateOpen = pending;
-    recordGateEvent(verdict.event, signals, verdict.roundsUsed, verdict.proceededBy);
-    curation.gate = verdict.gate;
-    return verdict.proceed
-      ? { due: true, trigger: `guided-curation:${verdict.proceededBy}` }
-      : { due: false, trigger: null };
+    return true;
+  };
+
+  /**
+   * Condition (a) of the reopen hysteresis, evaluated on EVERY context pass. A window
+   * that fell back under the trigger has ended its cycle, and the next crossing is a
+   * fresh event. This cannot live inside the trigger: the quiet passes that matter are
+   * exactly the ones too far below it to evaluate it.
+   */
+  const clearCommitLatchBelowTrigger = (): void => {
+    if (curation.reopenBaselineShare === null) return;
+    const capacity = servingCapacity(lifecycle.latestSnapshot?.contextWindow ?? null);
+    if (capacity.usedTokens === null || capacity.budgetTokens <= 0) return;
+    if (capacity.usedTokens / capacity.budgetTokens < CURATION_OCCUPANCY_SHARE) {
+      curation.reopenBaselineShare = null;
+    }
   };
 
   /**
@@ -2696,34 +2437,39 @@ export function registerActiveContext(pi: any, options: {
     let epoch: Record<string, unknown> | null = null;
     let inlineRungs = true;
     if (epochScheduling) {
-      const eligibleShare = markAccounting(snapshot, persistence.state).eligibleFreedWindowShare;
-      // QUIET RUNTIME (guided curation). The eligible-share cadence trigger is DELETED
-      // here: it is an economic trigger with no announcement in front of it, and under
-      // guided curation it fired 164 commits from ordinal 17 in rep 15, every one of
-      // them bypassing the gate the mode exists to run. What remains is the announced
-      // trigger and, underneath it, the pressure backstop plus the fence and the
-      // recovery lane -- the safety net, which is never gated. Plain epoch scheduling
-      // keeps the cadence trigger; it has no announcement to bypass.
-      const backstopDue = guidedCuration
-        ? epochCommitDue(snapshot, ratio)
-        : epochCommitDue(snapshot, ratio, eligibleShare);
-      const verdict = curationCommitVerdict(snapshot, backstopDue, rungOptions.announcing === true);
-      if (verdict.due) {
+      // QUIET RUNTIME. A commit is an epoch transition: it rewrites the projection, and
+      // every rewrite risks the whole prefix cache, so the cadence has to be the fewest
+      // commits that still keep the window inside its budget.
+      //
+      // The economic eligible-share trigger is DELETED: it fired 164 commits from
+      // ordinal 17 in rep 15, each a fresh cache rebuild bought with marks that had not
+      // yet earned one. What remains is the two-signal curation trigger, which fired 10
+      // to 17 times across reps 17 and 20, over the pressure backstop.
+      //
+      // The trigger stays; only its ANNOUNCEMENT is gone. Nothing warns that a commit
+      // is coming and nothing waits for the agent to react, because a warning has to
+      // arrive before the event it warns about and therefore has to break a prefix
+      // nothing else was breaking. Deleting the trigger with the announcement was the
+      // wrong cut: it left the raw backstop alone in front of the window, and gate 58
+      // caught the projection overrunning its budget before anything reclaimed -- the
+      // rep 13 death. The runtime still decides early. It just no longer says so.
+      const backstopDue = epochCommitDue(snapshot, ratio);
+      // The trigger is evaluated on CONTEXT passes only. A commit is an epoch
+      // transition, and it belongs on the pass that builds the next projection rather
+      // than in the middle of a tool batch: firing it mid-batch makes a MARK rewrite
+      // the window, which is precisely the thing marking is supposed never to do.
+      const curationDue = !backstopDue && rungOptions.announcing === true &&
+        curationCommitDue(snapshot);
+      if (backstopDue || curationDue) {
         epoch = await runCommitEpoch(
           snapshot,
-          verdict.trigger ??
-            (!guidedCuration && eligibleShare >= EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD
-              ? "eligible-share"
-              : "window-pressure"),
+          backstopDue ? "window-pressure" : "curation-trigger",
           true,
           rungOptions.waiverRatio ?? ratio,
         );
-        // A gated commit has now been adjudicated against this window, whether it landed
-        // or deferred. Latch the eligible share it left behind: the gate stays shut until
-        // that share grows by a reclaim floor or occupancy re-crosses the trigger. While
-        // the latch is armed the backstop's own commits move it too, because "new since
-        // the last commit" means the last commit of ANY kind.
-        if (persistence.state && (verdict.trigger || curation.reopenBaselineShare !== null)) {
+        // Latch the eligible share this commit left behind, so the next one waits for
+        // genuinely new foldable mass rather than for the same window to still be full.
+        if (persistence.state && (curationDue || curation.reopenBaselineShare !== null)) {
           curation.reopenBaselineShare =
             markAccounting(snapshot, persistence.state).eligibleFreedWindowShare;
         }
@@ -2748,11 +2494,23 @@ export function registerActiveContext(pi: any, options: {
     // Evidence a pending mark already covers is not the inline rung's to fold: a mark
     // the commit RETAINED (the open turn's own reads) would otherwise be folded here
     // by the very pass that just protected it.
+    //
+    // The open turn's keys are excluded DIRECTLY, not just via the marks that claim
+    // them. Claiming is not protection: once a commit applies every pending mark the
+    // claim set is empty, and the inline rung then folds the open turn's oldest read
+    // with nothing left to stop it. That is the rep-8 shape, and byte freshness does
+    // not reach it -- the first read of a long excursion sits outside the fresh tail
+    // while the turn that gathered it is still running. It became reachable when the
+    // quiet cadence started landing a commit on the same context pass, which is what
+    // turns the inline rung on in the first place.
     const selection = inlineRungs
       ? selectAutomaticRung(snapshot, persistence.state, ratio, epochScheduling
         ? {
           ...rungSelectionOptions,
-          claimed: claimedRefKeys(persistence.state),
+          claimed: new Set([
+            ...claimedRefKeys(persistence.state),
+            ...currentTurnRefKeys(snapshot),
+          ]),
           claimedFoldIds: markedFoldIds(persistence.state),
         }
         : rungSelectionOptions)
@@ -2977,36 +2735,7 @@ export function registerActiveContext(pi: any, options: {
       },
     };
   };
-  if (surfacingEnabled) registerSuggestionSource(FOLD_BRIEF_SUGGESTION_SOURCE);
   options.setSuggestionSourceRegistrar?.(registerSuggestionSource);
-
-  /**
-   * Selects this context event's slate and logs what will be shown. Selection is
-   * deterministic and model-free, and a selector fault costs the session nothing but
-   * its suggestions: the projection itself is never at risk.
-   *
-   * Returns whether the log now differs from the DURABLE one rather than merely from
-   * the pre-selection value: an outcome marked by an ephemeral peek carries no
-   * persistence of its own and would otherwise never reach the session file.
-   */
-  const refreshSurfacing = (snapshot: ActiveContextSnapshot): boolean => {
-    surfacing.suggestions = [];
-    if (!surfacingEnabled || !surfacing.sources.length || !persistence.state) return false;
-    try {
-      const update = updateSurfacing({
-        state: persistence.state,
-        snapshot,
-        sources: surfacing.sources,
-        toolName,
-      });
-      surfacing.suggestions = update.suggestions;
-      persistence.state = update.state;
-    } catch {
-      surfacing.suggestions = [];
-    }
-    return stableStringify(persistence.state.surfacing ?? null) !==
-      stableStringify(persistence.persisted?.surfacing ?? null);
-  };
 
   // A same-session start/tree reload is a projection-generation mutation.
   // Queue it behind every context authority → preparation → commit →
@@ -3052,9 +2781,6 @@ export function registerActiveContext(pi: any, options: {
       budget_tokens: capacity.budgetTokens,
       output_reservation: capacity.outputReservation,
       descriptor_window: capacity.descriptorWindow,
-      guided_curation: guidedCuration,
-      curation_occupancy_share: CURATION_OCCUPANCY_SHARE,
-      reminder_shares: CURATION_REMINDER_SHARES.join(","),
     });
   };
 
@@ -3111,44 +2837,11 @@ export function registerActiveContext(pi: any, options: {
     if (persistence.state?.prepared) persistence.state = clearPrepared(persistence.state);
     measurements.latestRatio = null;
     measurements.lastProviderMeasurement = null;
-    advisory.armedMilestone = persistence.state ? advisoryState(persistence.state).armed?.milestone ?? null : null;
-    advisory.advisoryScheduleKey = "pending-reseed";
     nativeCompaction.lastThresholdDecision = null;
     updateStatus(ctx);
   };
   pi.on("model_select", attributionChanged);
   pi.on("thinking_level_select", attributionChanged);
-
-  const armMilestoneForMeasurement = (
-    snapshot: ActiveContextSnapshot,
-    measurement: ProviderContextMeasurement,
-  ): boolean => {
-    if (!persistence.state) return false;
-    const ratio = contextUsageRatio(measurement);
-    if (ratio === null) return false;
-    const schedule = advisorySchedule(snapshot, guidance);
-    const scheduleKey = sha256Value({
-      schedule: schedule.key,
-      provider: measurement.provider,
-      model: measurement.model,
-      contextWindow: measurement.contextWindow,
-    });
-    const scheduleChanged = advisory.advisoryScheduleKey !== null && advisory.advisoryScheduleKey !== scheduleKey;
-    advisory.advisoryScheduleKey = scheduleKey;
-    const advisoryBefore = stableStringify(advisoryState(persistence.state));
-    const advisoryUpdate = updateAdvisoryMilestone(
-      persistence.state, ratio, schedule, scheduleChanged, scheduleKey, true,
-    );
-    persistence.state = advisoryUpdate.state;
-    const armed = advisoryState(persistence.state).armed;
-    if (armed && ratio < 0.85 * armed.threshold) {
-      persistence.state = clearArmedAdvisory(persistence.state);
-      advisory.armedMilestone = null;
-    } else {
-      advisory.armedMilestone = armed?.milestone ?? null;
-    }
-    return advisoryBefore !== stableStringify(advisoryState(persistence.state));
-  };
 
   const accountAnchoredMeasurement = (measurement: ProviderContextMeasurement): boolean => {
     if (!persistence.state) return false;
@@ -3168,25 +2861,10 @@ export function registerActiveContext(pi: any, options: {
     return changed;
   };
 
-  /**
-   * Condition (a) of the gate reopen hysteresis, evaluated on EVERY context pass. A
-   * window that fell back under the curation trigger has ended its cycle, and the next
-   * crossing is a fresh event. This cannot live inside the gate arbitration: the quiet
-   * passes that matter are exactly the ones too far below the trigger to run it.
-   */
-  const clearGateLatchBelowTrigger = (): void => {
-    if (curation.reopenBaselineShare === null) return;
-    const capacity = servingCapacity(lifecycle.latestSnapshot?.contextWindow ?? null);
-    if (capacity.usedTokens === null || capacity.budgetTokens <= 0) return;
-    if (capacity.usedTokens / capacity.budgetTokens < CURATION_OCCUPANCY_SHARE) {
-      curation.reopenBaselineShare = null;
-    }
-  };
-
   const handleContext = async (event: { messages: unknown[] }, ctx: any) => {
     if (lifecycle.shuttingDown) return { messages: event.messages };
     beginMutationPass();
-    clearGateLatchBelowTrigger();
+    clearCommitLatchBelowTrigger();
     if (!persistence.state) persistence.state = emptyActiveContextState(ctx.sessionManager.getSessionId());
     lifecycle.latestSnapshot = null;
     lifecycle.latestSnapshotError = null;
@@ -3213,7 +2891,6 @@ export function registerActiveContext(pi: any, options: {
       if (observedMeasurement && providerMeasurementBranchIndex(ctx, observedMeasurement) < 0) {
         observedMeasurement = null;
       }
-      let advisoryChanged = false;
       let measurementStateChanged = false;
       if (observedMeasurement) {
         const boundRevision = measurements.providerMeasurementRevisionByMessageSha.get(
@@ -3231,7 +2908,6 @@ export function registerActiveContext(pi: any, options: {
           // step is the difference between them.
           noteProjectionCalibration(observedMeasurement);
           measurements.lastProviderMeasurement = observedMeasurement;
-          advisoryChanged = armMilestoneForMeasurement(snapshot, observedMeasurement);
           startPreparation(snapshot, measurements.latestRatio, ctx);
           if (!ladder.automaticFailure && measurements.latestRatio >= hardFenceRatio(snapshot) && ladder.preparing) {
             mutationAttempted = true;
@@ -3247,14 +2923,12 @@ export function registerActiveContext(pi: any, options: {
           if (action) {
             mutationAttempted = true;
             persistedSucceeded = true;
-            advisoryChanged = false;
           }
         } else measurements.lastProviderMeasurement = observedMeasurement;
       } else {
         measurements.latestRatio = contextUsageRatio(measurements.lastProviderMeasurement);
       }
-      const surfacingChanged = refreshSurfacing(snapshot);
-      if ((advisoryChanged || measurementStateChanged || surfacingChanged) && persistence.state &&
+      if (measurementStateChanged && persistence.state &&
           persistence.persisted && !sameStateProjection(persistence.state, persistence.persisted)) {
         mutationAttempted = true;
         await persistThroughActionQueue(ctx);
@@ -3352,7 +3026,6 @@ export function registerActiveContext(pi: any, options: {
       updateStatus(ctx);
       return;
     }
-    const advisoryChanged = armMilestoneForMeasurement(snapshot, measurement);
     startPreparation(snapshot, measurements.latestRatio, ctx);
     if (measurements.latestRatio >= hardFenceRatio(measurement, ctx) && ladder.preparing) await ladder.preparing.promise;
     if (!sessionIdentityStillValid(ctx, capturedSessionId, capturedGeneration) ||
@@ -3363,7 +3036,7 @@ export function registerActiveContext(pi: any, options: {
       ctx,
       "message-end",
     );
-    if (!action && (advisoryChanged || measurementStateChanged) && persistence.state && persistence.persisted &&
+    if (!action && measurementStateChanged && persistence.state && persistence.persisted &&
         !sameStateProjection(persistence.state, persistence.persisted)) {
       await persistThroughActionQueue(ctx);
     }
@@ -3379,6 +3052,7 @@ export function registerActiveContext(pi: any, options: {
       const observation = observeCacheUsage(instrumentation.ledger, {
         usage: ownValue(message, "usage"),
         change: instrumentation.lastChange,
+        preservedShare: instrumentation.lastPreservedShare,
       });
       if (observation) {
         // The join key: this is where the stream meets provider-side telemetry.
@@ -3609,7 +3283,6 @@ export function registerActiveContext(pi: any, options: {
       if (detail !== undefined && !details.includes(String(detail))) {
         throw new Error(`status detail must be one of ${details.map((name) => `'${name}'`).join(", ")}`);
       }
-      const schedule = advisorySchedule(snapshot, guidance);
       const statusOffset = boundedInteger(params.offset, 0, 0, 1_000_000, "offset");
       const statusLimit = boundedInteger(params.limit, 40, 1, 100, "limit");
       // Paging is explicit and agent-driven: the full tree is reachable, it just
@@ -3635,23 +3308,11 @@ export function registerActiveContext(pi: any, options: {
         available: true,
         automatic: {
           pressureRatio: measurements.latestRatio,
-          milestones: Object.fromEntries(schedule.rungs.map((rung) => [
-            rung.milestone,
-            { threshold: rung.threshold, budget: rung.budget },
-          ])),
-          armedMilestone: advisory.armedMilestone,
-          advisory: advisoryState(persistence.state),
           surfacing: {
-            enabled: surfacingEnabled,
+            rendered: false,
             sources: surfacing.sources.map((source) => source.id),
-            shown: surfacing.suggestions.map((suggestion) => ({
-              source: suggestion.source,
-              id: suggestion.id,
-              score: suggestion.score,
-            })),
             log: clone(persistence.state.surfacing ?? []),
           },
-          historicalGuidanceEntries: advisory.historicalGuidanceEntries,
           warningRatio: snapshot.policy.warningRatio,
           toolFoldRatio: snapshot.policy.toolFoldRatio,
           refoldRatio: snapshot.policy.refoldRatio,
@@ -3688,14 +3349,9 @@ export function registerActiveContext(pi: any, options: {
           lastAutomaticAction: ladder.lastAutomaticAction,
           overBudgetReduction: ladder.overBudgetReduction ? clone(ladder.overBudgetReduction) : null,
           curation: {
-            guided: guidedCuration,
             occupancyThreshold: CURATION_OCCUPANCY_SHARE,
             staleToolThreshold: CURATION_STALE_TOOL_SHARE,
-            maxRounds: CURATION_GATE_MAX_ROUNDS,
             signals: curation.lastSignals ? { ...curation.lastSignals } : null,
-            gate: curation.gate
-              ? { roundsUsed: curation.gate.roundsUsed, openedOrdinal: curation.gate.openedOrdinal }
-              : null,
             contextCalls: curation.contextCalls,
             receipts: curation.receipts.map((receipt) => ({ ...receipt })),
           },
@@ -3768,10 +3424,11 @@ export function registerActiveContext(pi: any, options: {
         ...(detail === "tree" ? { tree: foldTreeDetail(snapshot, persistence.state).slice(statusOffset) } : {}),
       }, typeof detail === "string" ? detail : null, statusOffset));
     }
-    // Peeking or expanding a suggested fold is the accept signal. Peek stays
-    // ephemeral: the mark rides the next persisted state, never an entry of its own.
+    // Peeking or expanding a suggested fold is the accept signal, recorded for the
+    // retrieval build even though nothing suggests anything today. It stays ephemeral:
+    // the mark rides the next persisted state, never an entry of its own.
     const noteSurfacingAccept = (id: string): void => {
-      if (!surfacingEnabled || !persistence.state) return;
+      if (!persistence.state) return;
       persistence.state = acceptSurfacingSuggestion(persistence.state, id, surfacingOrdinal(snapshot));
     };
     if (action === "peek") {
@@ -4097,10 +3754,21 @@ export function registerActiveContext(pi: any, options: {
           // the mark is a standing decision, it is recorded now, and it folds at the
           // first commit after the span ages out. Refusal is reserved for a mark that
           // cannot be constructed at all.
+          // A REPEATED DECISION IS INERT. The fold id is derived from the span, so a
+          // span the ladder already prepared carries that exact id in the forest
+          // already, and preparing it a second time throws "Prepared fold already
+          // exists" out of the tool call. Under the old cadence commits were frequent
+          // enough to drain prepared folds before a second decision could land on one;
+          // the quiet runtime commits far less often, so the collision became reachable
+          // in ordinary use -- the ladder marks a span, the agent then folds the same
+          // span, and the agent's call fails. Marking is a standing decision about a
+          // span, and deciding the same thing twice has to be a no-op.
+          const alreadyPrepared = staged.folds.some((fold) =>
+            fold.id === foldIdFor(candidate.kind, candidate.parts));
           const deferred = refsProtected(candidate.sourceRefs, staged, snapshot) ||
             (candidate.kind === "tool-result" &&
               toolRefsProtected(candidate.sourceRefs, staged, snapshot));
-          const briefed = !deferred
+          const briefed = !deferred && !alreadyPrepared
             ? await prepareFold({
               candidate,
               snapshot,
@@ -4217,8 +3885,7 @@ export function registerActiveContext(pi: any, options: {
           expand: { action: "expand", id: preparedFold.id },
         });
       }
-      advisory.armedMilestone = null;
-      await persistManual(clearArmedAdvisory(persistence.state), "fold", ctx);
+      await persistManual(persistence.state, "fold", ctx);
       updateStatus(ctx);
       const single = applied.length === 1 ? applied[0] : null;
       return toolPayload({
@@ -4350,8 +4017,7 @@ export function registerActiveContext(pi: any, options: {
       if (!sessionIdentityStillValid(ctx, stateBefore.sessionId, generationBefore)) {
         throw new Error("Active-context session changed before rescue persistence");
       }
-      persistence.state = clearArmedAdvisory(nextState);
-      advisory.armedMilestone = null;
+      persistence.state = nextState;
       try { await persist(ctx); }
       catch (error) {
         if (sessionIdentityStillValid(ctx, stateBefore.sessionId, generationBefore)) {
@@ -4362,7 +4028,6 @@ export function registerActiveContext(pi: any, options: {
       }
       ladder.pendingManual = false;
       ladder.automaticFailure = null;
-      advisory.armedMilestone = null;
       ladder.pendingContextNote =
         `User rescue folded stale context under ${preparedFold.id}; exact source remains expandable.`;
       ladder.lastAutomaticAction = {
@@ -4413,9 +4078,6 @@ export function registerActiveContext(pi: any, options: {
     persistence.state = null;
     persistence.persisted = null;
     lifecycle.latestSnapshot = null;
-    advisory.armedMilestone = null;
-    surfacing.suggestions = [];
-    curation.gate = null;
     curation.receipts = [];
     try { ctx.ui?.setStatus?.(entryTypePrefix, undefined); } catch { /* Shutdown cannot be blocked by UI. */ }
   });

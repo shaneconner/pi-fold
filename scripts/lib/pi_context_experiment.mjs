@@ -37,12 +37,13 @@ export const EXPERIMENT_FOLD_SCHEDULING = Object.freeze(["immediate", "epoch"]);
 // back without moving any ladder threshold.
 export const EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS = false;
 export const EXPERIMENT_DEFAULT_FOLD_SCHEDULING = "immediate";
-// The fourth condition dial is pi-fold's `guidedCuration`: announce the pending epoch
-// commit and give the agent a bounded last call to curate what is about to fold, instead
-// of folding silently. It is only meaningful when there is a commit to announce, so the
-// package REQUIRES epoch fold scheduling and throws at registration otherwise. The
-// validators below refuse the combination at config time, so a run can never reach the
-// worker holding a registration that will throw.
+// `guidedCuration` was the fourth condition dial: announce the pending epoch commit and
+// give the agent a bounded last call to curate what is about to fold. It is RETIRED as of
+// the append-only build and tolerated on read only, exactly like `reliabilityLevers`:
+// reps 15-21 recorded it and their run configs are immutable data, so they must keep
+// adjudicating. Nothing emits it any more. The announcement it named is gone because a
+// warning has to arrive before the event it warns about, which means breaking a prefix
+// nothing else was breaking; the commit trigger it gated survives and now fires silently.
 // (This replaced the iteration-2 reliability-lever set, which pi-fold collapsed into
 // unconditional defaults: those option keys no longer exist in the runtime.)
 export const EXPERIMENT_DEFAULT_GUIDED_CURATION = false;
@@ -502,9 +503,9 @@ export function validateExperimentManifest(manifest) {
   // `reliabilityLevers` is a RETIRED condition key, tolerated on read only: sealed run
   // manifests are immutable data and runs 10-14 recorded it. Nothing emits it any more.
   assertExperiment(keysWithin(manifest, [
-    "version", "runId", "campaignId", "arm", "mode", "guidance", "ordinal", "repetition",
+    "version", "runId", "campaignId", "arm", "mode", "ordinal", "repetition",
     "seed", "model", "runtime", "target", "plan", "pacing", "createdWallMs",
-  ], ["foldScheduling", "foldPeekResults", "guidedCuration", "providerTotalWindow", "transport", "reliabilityLevers"]),
+  ], ["guidance", "foldScheduling", "foldPeekResults", "guidedCuration", "providerTotalWindow", "transport", "reliabilityLevers"]),
   "Invalid experiment manifest shape");
   assertExperiment(manifest.foldScheduling === undefined ||
     EXPERIMENT_FOLD_SCHEDULING.includes(manifest.foldScheduling),
@@ -515,9 +516,6 @@ export function validateExperimentManifest(manifest) {
   assertExperiment(manifest.guidedCuration === undefined ||
     typeof manifest.guidedCuration === "boolean",
   "Manifest guided-curation condition is not a boolean");
-  assertExperiment(manifest.guidedCuration !== true ||
-    (manifest.foldScheduling ?? EXPERIMENT_DEFAULT_FOLD_SCHEDULING) === "epoch",
-  "Manifest guided curation requires epoch fold scheduling");
   assertExperiment(manifest.providerTotalWindow === undefined ||
     (Number.isSafeInteger(manifest.providerTotalWindow) && manifest.providerTotalWindow > 0),
   "Manifest provider total window is invalid");
@@ -526,8 +524,9 @@ export function validateExperimentManifest(manifest) {
   assertExperiment(manifest.version === EXPERIMENT_PROTOCOL_VERSION, "Manifest protocol version drifted");
   assertExperiment(EXPERIMENT_ARMS.includes(manifest.arm), "Manifest arm is not one of the three arms");
   assertExperiment(EXPERIMENT_MODES.includes(manifest.mode), "Manifest mode is invalid");
-  assertExperiment(EXPERIMENT_GUIDANCE_PROFILES.includes(manifest.guidance),
-    "Manifest guidance profile is not a shipped package option");
+  assertExperiment(manifest.guidance === undefined ||
+    EXPERIMENT_GUIDANCE_PROFILES.includes(manifest.guidance),
+  "Manifest guidance profile is not a shipped package option");
   assertExperiment(Number.isSafeInteger(manifest.ordinal) && manifest.ordinal > 0 &&
     Number.isSafeInteger(manifest.repetition) && manifest.repetition > 0,
   "Manifest ordinal/repetition are invalid");
@@ -579,7 +578,7 @@ export function validateExperimentManifest(manifest) {
 // Run config: the supervisor -> worker contract, revalidated on both sides.
 // ---------------------------------------------------------------------------
 export const EXPERIMENT_RUN_CONFIG_KEYS = Object.freeze([
-  "version", "runId", "runDir", "campaignId", "arm", "mode", "guidance", "repetition",
+  "version", "runId", "runDir", "campaignId", "arm", "mode", "repetition",
   "ordinal", "seed", "unit", "invocationId", "supervisorPid", "supervisorStartTicks",
   "bootId", "codeCommit", "codeTree", "firstChallenge", "stageCount", "stageIntervalMs",
   "watchdogMs", "heartbeatMs", "createdWallMs", "createdMonotonicMs", "sourceHashes",
@@ -591,7 +590,7 @@ export const EXPERIMENT_RUN_CONFIG_KEYS = Object.freeze([
 // foldScheduling key and adjudicate as EXPERIMENT_DEFAULT_FOLD_SCHEDULING. `reliabilityLevers`
 // is retired and tolerated on read only, so sealed runs 10-14 still adjudicate.
 export const EXPERIMENT_RUN_CONFIG_OPTIONAL_KEYS = Object.freeze([
-  "foldScheduling", "foldPeekResults", "guidedCuration", "providerTotalWindow", "transport", "reliabilityLevers",
+  "guidance", "foldScheduling", "foldPeekResults", "guidedCuration", "providerTotalWindow", "transport", "reliabilityLevers",
 ]);
 
 export function validateExperimentRunConfig(value) {
@@ -604,11 +603,6 @@ export function validateExperimentRunConfig(value) {
     "Run config peek-fold condition is invalid");
   assertExperiment(value.guidedCuration === undefined || typeof value.guidedCuration === "boolean",
     "Run config guided-curation condition is invalid");
-  // pi-fold throws at registerActiveContext when guided curation has no commit to
-  // announce; refusing it here fails the run at config time instead of at worker start.
-  assertExperiment(value.guidedCuration !== true ||
-    (value.foldScheduling ?? EXPERIMENT_DEFAULT_FOLD_SCHEDULING) === "epoch",
-  "Run config guided curation requires epoch fold scheduling");
   assertExperiment(value.providerTotalWindow === undefined ||
     (Number.isSafeInteger(value.providerTotalWindow) && value.providerTotalWindow > 0),
   "Run config provider total window is invalid");
@@ -617,8 +611,9 @@ export function validateExperimentRunConfig(value) {
   assertExperiment(value.version === EXPERIMENT_PROTOCOL_VERSION, "Run config protocol version drifted");
   assertExperiment(EXPERIMENT_ARMS.includes(value.arm), "Run config arm is invalid");
   assertExperiment(EXPERIMENT_MODES.includes(value.mode), "Run config mode is invalid");
-  assertExperiment(EXPERIMENT_GUIDANCE_PROFILES.includes(value.guidance),
-    "Run config guidance profile is invalid");
+  assertExperiment(value.guidance === undefined ||
+    EXPERIMENT_GUIDANCE_PROFILES.includes(value.guidance),
+  "Run config guidance profile is invalid");
   const modePlan = EXPERIMENT_MODE_PLANS[value.mode];
   assertExperiment(value.stageCount === modePlan.stageCount &&
     value.stageIntervalMs === modePlan.stageIntervalMs &&

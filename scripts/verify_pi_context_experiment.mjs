@@ -486,9 +486,16 @@ const staging = source("scripts/stage_pi_context_experiment.mjs");
 
 assert(extension.includes("const pifold = config.arm === \"pifold\"") &&
   extension.includes("registerActiveContext(pi, {") &&
-  extension.includes("guidance: config.guidance,") &&
   extension.includes("if (pifold) {"),
-"the extension must register the active-context runtime only for the pifold arm, with the run's guidance profile");
+"the extension must register the active-context runtime only for the pifold arm");
+// The guidance profile is RETIRED. It shaped the milestone and live-advisory copy, and
+// both carriers are deleted, so a run that recorded a profile would be attesting to a
+// condition that changed nothing. The key stays readable for reps 15-21; no producer
+// may emit it, and the runtime no longer accepts it.
+for (const [name, text] of [["extension", extension], ["worker", worker], ["supervisor", supervisor]]) {
+  assert(!/guidance: config\.guidance|--guidance/.test(text),
+    `${name} still carries the retired guidance profile condition`);
+}
 assert(extension.includes('pi.on("session_before_compact"') &&
   extension.includes("openStopTheWorld(\"native-compaction\"") &&
   extension.includes("if (config.arm !== \"native\")"),
@@ -932,40 +939,33 @@ try {
     /guided-curation condition is invalid/);
   assert.throws(() => validateExperimentRunConfig({ ...runConfig, guidedCurated: true }),
     /run config shape/);
-  // pi-fold throws at registration when guided curation has no commit to announce, so the
-  // combination must be refused at config time, on both the default and the explicit
-  // immediate scheduler.
-  assert.throws(() => validateExperimentRunConfig({ ...runConfig, guidedCuration: true }),
-    /guided curation requires epoch fold scheduling/);
-  assert.throws(() => validateExperimentRunConfig({
-    ...runConfig, foldScheduling: "immediate", guidedCuration: true,
-  }), /guided curation requires epoch fold scheduling/);
-  validateExperimentManifest({ ...manifest, foldScheduling: "epoch", guidedCuration: true });
   assert.throws(() => validateExperimentManifest({ ...manifest, guidedCuration: "true" }),
     /guided-curation condition is not a boolean/);
-  assert.throws(() => validateExperimentManifest({ ...manifest, guidedCuration: true }),
-    /guided curation requires epoch fold scheduling/);
   assert.throws(() => validateExperimentManifest({ ...manifest, guidedCurated: true }),
     /manifest shape/);
-  // Sealed run directories are immutable data: runs 10-14 recorded the retired condition
-  // key, so reading them must still validate. Nothing emits it any more.
+  // Sealed run directories are immutable data: runs 10-14 recorded reliabilityLevers and
+  // runs 15-21 recorded guidedCuration and guidance, so reading them must still validate.
   validateExperimentRunConfig({ ...runConfig, reliabilityLevers: true });
   validateExperimentManifest({ ...manifest, reliabilityLevers: true });
-  assert(supervisor.includes('argumentValue("--guided-curation"') &&
-    supervisor.includes('["true", "false"].includes(guidedCurationArgument)') &&
-    supervisor.includes('!guidedCuration || foldScheduling === "epoch"') &&
-    supervisor.includes("guidedCuration,"),
-  "the supervisor must accept --guided-curation, refuse it without epoch scheduling, and record it in the run config");
-  assert(worker.includes("guidedCuration: config.guidedCuration ?? EXPERIMENT_DEFAULT_GUIDED_CURATION"),
-    "the worker must record the run's guided-curation condition in the sealed manifest");
-  assert(adjudicator.includes("guidedCuration: config.guidedCuration ?? EXPERIMENT_DEFAULT_GUIDED_CURATION"),
-    "the adjudicator must echo the run's guided-curation condition into the evidence");
-  assert(extension.includes("guidedCuration: config.guidedCuration ?? EXPERIMENT_DEFAULT_GUIDED_CURATION"),
-    "the extension must pass guided curation into the active-context registration");
-  assert(launcher.includes("--guided-curation") &&
-    launcher.includes('case "$GUIDED_CURATION" in true|false)') &&
-    launcher.includes('[ "$FOLD_SCHEDULING" = epoch ]'),
-  "the shell launcher must accept, validate and epoch-couple --guided-curation");
+  validateExperimentRunConfig({ ...runConfig, guidedCuration: true, guidance: "curation" });
+  validateExperimentManifest({ ...manifest, guidedCuration: true, guidance: "curation" });
+
+  // RETIRED CONDITION DIALS. `guidedCuration` announced a pending commit and gave the
+  // agent a bounded last call; `guidance` chose between milestone/advisory copy sets.
+  // Both are gone from the runtime, because an announcement has to arrive BEFORE the
+  // event it announces and therefore has to break a prefix nothing else was breaking.
+  // A producer that still emitted either would attest to a condition that changed
+  // nothing, which is worse than not recording it at all: the run config is the
+  // experiment's claim about what varied.
+  for (const [name, text] of [
+    ["extension", extension], ["worker", worker],
+    ["supervisor", supervisor], ["adjudicator", adjudicator],
+  ]) {
+    assert(!/guidedCuration:|guidance: config\.guidance/.test(text),
+      `${name} still emits a retired condition dial`);
+  }
+  assert(!/--guided-curation|--guidance|GUIDED_CURATION|GUIDANCE=/.test(launcher),
+    "the shell launcher still accepts a retired condition dial");
   // Removal-and-debt: the retired option set must not survive anywhere in scripts/ as
   // callable code — an anti-pattern left callable gets recomposed. The needle is
   // assembled so this gate does not match itself.
@@ -974,7 +974,7 @@ try {
     { encoding: "utf8" });
   assert.equal(survivors.status, 1,
     `${retiredOptions} must be purged from scripts/; still present in:\n${survivors.stdout}`);
-  checks.guidedCurationThreadedFromLauncherToRegistration = true;
+  checks.retiredConditionDialsEmittedByNobody = true;
 }
 
 // ---------------------------------------------------------------------------

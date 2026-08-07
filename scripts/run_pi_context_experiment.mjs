@@ -10,9 +10,7 @@
 //
 //   node scripts/run_pi_context_experiment.mjs --run-dir <dir> --unit <unit> \
 //        --campaign-dir <dir> --plan <stages.json> --arm pifold|native|unmanaged \
-//        --guidance pressure|curation|minimal --repetition 1 --ordinal 1 \
 //        [--fold-scheduling immediate|epoch] [--fold-peek-results true|false] \
-//        [--guided-curation true|false] \
 //        [--model-provider openai-codex] [--model-id gpt-5.6-sol] [--effort xhigh]
 
 import { execFileSync, spawn } from "node:child_process";
@@ -24,7 +22,6 @@ import {
   EXPERIMENT_BEHAVIORAL_MODE,
   EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS,
   EXPERIMENT_DEFAULT_FOLD_SCHEDULING,
-  EXPERIMENT_DEFAULT_GUIDED_CURATION,
   EXPERIMENT_DEPENDENCY_KEYS,
   EXPERIMENT_PROVIDER_TOTAL_WINDOWS,
   EXPERIMENT_TRANSPORT,
@@ -291,12 +288,9 @@ async function run() {
   const campaignDir = argumentValue("--campaign-dir");
   const planPath = argumentValue("--plan");
   const arm = argumentValue("--arm");
-  const guidance = argumentValue("--guidance", "pressure");
   const foldScheduling = argumentValue("--fold-scheduling", EXPERIMENT_DEFAULT_FOLD_SCHEDULING);
   const foldPeekResultsArgument = argumentValue("--fold-peek-results",
     String(EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS));
-  const guidedCurationArgument = argumentValue("--guided-curation",
-    String(EXPERIMENT_DEFAULT_GUIDED_CURATION));
   const repetition = Number(argumentValue("--repetition", "1"));
   const ordinal = Number(argumentValue("--ordinal", "1"));
   const modelProvider = argumentValue("--model-provider", "openai-codex");
@@ -304,19 +298,13 @@ async function run() {
   const effort = argumentValue("--effort", "xhigh");
   assertExperiment(requestedRunDir && unit && campaignDir && planPath, "Experiment run requires --run-dir, --unit, --campaign-dir and --plan");
   assertExperiment(EXPERIMENT_ARMS.includes(arm), "Experiment run requires --arm pifold|native|unmanaged");
-  assertExperiment(EXPERIMENT_GUIDANCE_PROFILES.includes(guidance), "Invalid --guidance profile");
   assertExperiment(EXPERIMENT_FOLD_SCHEDULING.includes(foldScheduling),
     "Invalid --fold-scheduling: immediate|epoch");
   assertExperiment(["true", "false"].includes(foldPeekResultsArgument),
     "Invalid --fold-peek-results: true|false");
   const foldPeekResults = foldPeekResultsArgument === "true";
-  assertExperiment(["true", "false"].includes(guidedCurationArgument),
-    "Invalid --guided-curation: true|false");
-  const guidedCuration = guidedCurationArgument === "true";
   // pi-fold's registerActiveContext throws when guided curation has no commit to announce.
   // Refuse the combination here so it fails at config time, not at worker start.
-  assertExperiment(!guidedCuration || foldScheduling === "epoch",
-    "--guided-curation true requires --fold-scheduling epoch");
   // Deployment fact resolved from the model pin, never a flag: rep 16 aborted after the
   // curation thresholds ran against the 255,616-token descriptor budget because this
   // fact never reached the registration. Unlisted models run in descriptor mode.
@@ -368,10 +356,8 @@ async function run() {
     campaignId: basename(resolve(campaignDir)),
     arm,
     mode: plan.mode,
-    guidance,
     foldScheduling,
     foldPeekResults,
-    guidedCuration,
     ...(providerTotalWindow === null ? {} : { providerTotalWindow }),
     transport: EXPERIMENT_TRANSPORT,
     repetition,
@@ -587,10 +573,8 @@ async function run() {
     runDir,
     campaignId: config.campaignId,
     arm,
-    guidance,
     foldScheduling,
     foldPeekResults,
-    guidedCuration,
     repetition,
     ordinal,
     mode: config.mode,
