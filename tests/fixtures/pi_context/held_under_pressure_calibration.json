@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "source": {
+    "reportSha256": "4047bbbdfffc44f235b7c2c518e7dc71a84fd370494891ed569ff317b8f5ffab",
+    "sessionSha256": "fb5525809d0b4455580e4992e49976d9a632c4a356fd2a97ed97c3ea787f9517"
+  },
+  "seedChars": 465000,
+  "chainFiles": 12,
+  "firstProviderTokens": 79259,
+  "finalProviderTokens": 127778,
+  "guidanceTokens": 136000,
+  "checkpoints": [
+    { "tokens": 79259, "timestamp": 1785548262986 },
+    { "tokens": 82889, "timestamp": 1785548270957 },
+    { "tokens": 86540, "timestamp": 1785548275701 },
+    { "tokens": 86659, "timestamp": 1785548284131 },
+    { "tokens": 90272, "timestamp": 1785548289274 },
+    { "tokens": 90391, "timestamp": 1785548297596 },
+    { "tokens": 94002, "timestamp": 1785548306508 },
+    { "tokens": 94163, "timestamp": 1785548315216 },
+    { "tokens": 94323, "timestamp": 1785548322670 },
+    { "tokens": 94454, "timestamp": 1785548330721 },
+    { "tokens": 98023, "timestamp": 1785548335711 },
+    { "tokens": 98144, "timestamp": 1785548340944 },
+    { "tokens": 101721, "timestamp": 1785548344868 },
+    { "tokens": 101841, "timestamp": 1785548348603 },
+    { "tokens": 105414, "timestamp": 1785548355532 },
+    { "tokens": 105533, "timestamp": 1785548362973 },
+    { "tokens": 109107, "timestamp": 1785548367164 },
+    { "tokens": 109226, "timestamp": 1785548374353 },
+    { "tokens": 112781, "timestamp": 1785548378521 },
+    { "tokens": 112902, "timestamp": 1785548382581 },
+    { "tokens": 116474, "timestamp": 1785548387095 },
+    { "tokens": 116595, "timestamp": 1785548394561 },
+    { "tokens": 120088, "timestamp": 1785548398562 },
+    { "tokens": 120214, "timestamp": 1785548406810 },
+    { "tokens": 123712, "timestamp": 1785548411393 },
+    { "tokens": 123839, "timestamp": 1785548415412 },
+    { "tokens": 127325, "timestamp": 1785548419685 },
+    { "tokens": 127778, "timestamp": 1785548428967 }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "source": {
+    "reportSha256": "0c6594b13c7b46bc68d7682e62049b7cc520ca55c9a2c692b00416811a2f6c84",
+    "sessionSha256": "16be121de20dda1d3627c6b8f75ce74963f420d84babeaeb253705261829444e",
+    "sessionId": "019fbea4-e2fc-73d0-a31e-8c3b901b9171"
+  },
+  "policy": {
+    "provider": "openai-codex",
+    "model": "gpt-5.6-sol",
+    "contextWindow": 272000,
+    "awarenessTokens": 136000,
+    "automaticToolTokens": 204000,
+    "requiredAgentFolds": 2,
+    "chainFiles": 17
+  },
+  "observed": {
+    "runEntries": 167,
+    "providerCheckpoints": 48,
+    "firstProviderTokens": 116290,
+    "highWaterTokens": 145250,
+    "finalProviderTokens": 135262,
+    "terminalEntryId": "ec6fee7d",
+    "readCalls": 35,
+    "statusCalls": 6,
+    "foldCalls": 6,
+    "stateEvents": 6,
+    "foldRecords": 6,
+    "guidanceActions": 5
+  }
+}

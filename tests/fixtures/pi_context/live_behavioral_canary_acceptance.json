@@ -1,0 +1,82 @@
+{
+  "causalFolds": [
+    {
+      "afterMeasurementSha256": "31a6249460ca7f946e4dcc501e95a30f3274c0bf66d024b4d7157145e5a3fc12",
+      "afterTokens": 124725,
+      "beforeTokens": 142544,
+      "callEntryId": "6a1f5fc2",
+      "foldId": "fold_e0a6e0acf198263154b41432",
+      "guidanceReceiptKey": "1ddca324ce68cb633a564cd3f8d303f87aca1a25dd13ad06cedf99637ffe8206",
+      "milestone": "awareness",
+      "projectionRevision": 1,
+      "receiptKey": "b2e3fdc5b357aae7a5c0916f671c17b0f932cf06c19f871ffb653d2da7a7d9fd",
+      "recoveredSha256": "4832f035c1b85d4d0901a3d7bcef4be8b7f22add7788dad69ed398f35343daa4",
+      "resultEntryId": "197764a6"
+    },
+    {
+      "afterMeasurementSha256": "33ebd6615aa1ac8561f6863e41dd8c94e292163fbb55d604379882ece5c55de3",
+      "afterTokens": 126546,
+      "beforeTokens": 184771,
+      "callEntryId": "e9037638",
+      "foldId": "fold_a2030bb139b3e5d87c891727",
+      "guidanceReceiptKey": "1fa5f0a26ca1de6f6ff83d53b6b339d63f867acf108054701c6f51014c845101",
+      "milestone": "action",
+      "projectionRevision": 2,
+      "receiptKey": "3e856013aac2ba03098cd3df3427d5f987b65656453d004ce52ba2704a39dcf7",
+      "recoveredSha256": "53d19e35276df077a8950a83f9b308815f4593c3f1e110af2f568813f513652d",
+      "resultEntryId": "1715f7c8"
+    }
+  ],
+  "independentRecovery": [
+    {
+      "foldId": "fold_e0a6e0acf198263154b41432",
+      "receiptKey": "b2e3fdc5b357aae7a5c0916f671c17b0f932cf06c19f871ffb653d2da7a7d9fd",
+      "recoveredSha256": "4832f035c1b85d4d0901a3d7bcef4be8b7f22add7788dad69ed398f35343daa4"
+    },
+    {
+      "foldId": "fold_a2030bb139b3e5d87c891727",
+      "receiptKey": "3e856013aac2ba03098cd3df3427d5f987b65656453d004ce52ba2704a39dcf7",
+      "recoveredSha256": "53d19e35276df077a8950a83f9b308815f4593c3f1e110af2f568813f513652d"
+    }
+  ],
+  "observed": {
+    "automaticFallbacks": 0,
+    "compactionEvents": 0,
+    "completedChainFiles": 20,
+    "finalTokens": 130496,
+    "firstProviderTokens": 116518,
+    "foldCalls": 2,
+    "guidanceActions": 2,
+    "guidanceReceipts": 3,
+    "highWaterTokens": 184771,
+    "nativeCompactions": 0,
+    "nativeDecisions": 0,
+    "nativeReceipts": 0,
+    "providerCheckpoints": 46,
+    "readCalls": 42,
+    "statusCalls": 2,
+    "terminalStopReason": "stop"
+  },
+  "policy": {
+    "automaticToolTokens": 204000,
+    "behavioralMode": "extension-guidance-only-blind-workload",
+    "contextWindow": 272000,
+    "requiredAgentFolds": 2,
+    "stockAutomaticCompactionEnabled": false
+  },
+  "source": {
+    "codeCommit": "d11d060e3b3090fcaaa9d2902d765d6c9e477d51",
+    "reportSha256": "9d4405733d49b47feb25195cf7f665c22f1918544c3f76715ebfaffe141b784e",
+    "sessionId": "019fc096-40f1-7307-8eb6-9dd1b56c0640",
+    "sessionSha256": "9c412ba511ec586518b157b99f22a562e6bdd81b0cd2b19dc02b206647fdb87e"
+  },
+  "version": 1,
+  "workload": {
+    "behaviorPromptSource": "runtime-extension-guidance-only",
+    "evidenceFiles": 30,
+    "hiddenCriteriaTermsAbsent": true,
+    "promptSha256": "de3756a359f1838d70ecaddf77a1a5186efdf67d7e01c51d15b3f2ae1ae1d8a7",
+    "seedMessages": 6,
+    "visibleCorpusSha256": "dbdf70678b71b053753ff77f0f8a2303a08dbc51e418695eddfd01090688cf36"
+  }
+}
