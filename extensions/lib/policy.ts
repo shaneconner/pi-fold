@@ -47,12 +47,17 @@ export const ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
   "rebrief", "reboundary",
 ] as const);
 /**
- * The epoch surface: the immediate actions plus the commit verb, plus `unmark`.
- * A mark is a standing decision rather than a one-shot attempt, so withdrawing one
- * needs a verb of its own.
+ * The epoch surface: the immediate actions plus `unmark`. A mark is a standing decision
+ * rather than a one-shot attempt, so withdrawing one needs a verb of its own.
+ *
+ * There is deliberately NO agent-callable commit verb. Marking is the agent's job and
+ * folding is the runtime's, and a verb the runtime is entitled to overrule is surface
+ * without function: measured 2026-08-07 (rep 17), the agent called commit twice and the
+ * runtime correctly held it both times. The internal commit paths -- the epoch commit,
+ * the gated commit, the fence and the recovery lane -- are unchanged and unexposed.
  */
 export const EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
-  ...ACTIVE_CONTEXT_TOOL_ACTIONS, "commit", "unmark",
+  ...ACTIVE_CONTEXT_TOOL_ACTIONS, "unmark",
 ] as const);
 export type ActiveContextToolAction = typeof EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS[number];
 export const USER_RESCUE_MAX_SOURCE_CHARS = 512_000;

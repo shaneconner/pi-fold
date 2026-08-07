@@ -513,6 +513,16 @@ export function registerActiveContext(pi: any, options: {
     /** Every context-management tool call this session, the gate's engagement signal. */
     contextCalls: 0,
     marksAtGateOpen: 0,
+    /**
+     * GATE REOPEN HYSTERESIS. The eligible foldable share measured just after the last
+     * gated commit, or null when the gate is free to open. Measured 2026-08-07 (rep 17):
+     * occupancy plateaued at 0.85-0.92 of the truthful budget for the final third of the
+     * run and the last-call gate reopened ten times over a window whose foldable mass had
+     * not changed, announcing a commit that had nothing new to fold. A plateau is not an
+     * event. The gate reopens only once occupancy falls back under the trigger and
+     * crosses it again, or once a reclaim floor's worth of eligible mass is NEW.
+     */
+    reopenBaselineShare: null as number | null,
     /** Recovery attempts spent on the CURRENT inflow; reset by any accepted request. */
     recoveryAttempts: 0,
     /** A provider rejection observed but not yet recovered from. */
@@ -2137,6 +2147,23 @@ export function registerActiveContext(pi: any, options: {
     // exact moment reduction is the only thing keeping the request sendable.
     const fenceLevel = typeof waiverRatio === "number" && Number.isFinite(waiverRatio) &&
       waiverRatio >= hardFenceRatio(snapshot);
+    // The thermostat. Firing at the trigger line and folding down to the target line is
+    // what makes event SPACING structural rather than hoped for.
+    const capacity = servingCapacity(snapshot.contextWindow);
+    const usedTokens = capacity.usedTokens;
+    const budgetTokens = capacity.budgetTokens;
+    // THE SAFETY EXEMPTION, NARROWED.
+    //
+    // The hard fence is a RATIO prediction. Standing near it is not the same as being
+    // unable to send, and treating the two alike handed the fence path a standing
+    // waiver from both economy guards. Measured 2026-08-07 (rep 17): fence-path
+    // window-pressure commits fired at eligible-freed shares as low as 0.018, under the
+    // 0.02 floor the guided path honors, and re-fired inside a single ordinal. So only
+    // two states outrank the economy: the overflow recovery lane, which runs because a
+    // request already did not fit, and an occupancy genuinely past the serving budget,
+    // where the next request aborts unless something moves. Everything else defers.
+    const overflowExempt = curation.recoveryAttempts > 0 ||
+      (usedTokens !== null && budgetTokens > 0 && usedTokens > budgetTokens);
     // ONE STRUCTURAL MUTATION PER HANDOFF.
     //
     // Measured 2026-08-06 (rep 15): two context.commit records 50ms apart inside one
@@ -2147,7 +2174,7 @@ export function registerActiveContext(pi: any, options: {
     // whole second prefix rewrite. So a second commit in the same handoff defers unless
     // the request is genuinely untransmittable: the fence and the recovery lane are
     // safety, and safety outranks the budget.
-    if (instrumentation.mutationsSinceHandoff > 0 && !fenceLevel && curation.recoveryAttempts === 0) {
+    if (instrumentation.mutationsSinceHandoff > 0 && !overflowExempt) {
       emit("context.commit", {
         trigger,
         deferred: true,
@@ -2158,11 +2185,6 @@ export function registerActiveContext(pi: any, options: {
       });
       return null;
     }
-    // The thermostat. Firing at the trigger line and folding down to the target line is
-    // what makes event SPACING structural rather than hoped for.
-    const capacity = servingCapacity(snapshot.contextWindow);
-    const usedTokens = capacity.usedTokens;
-    const budgetTokens = capacity.budgetTokens;
     const hysteresisShare = usedTokens === null || snapshot.contextWindow <= 0
       ? 0
       : Math.max(0, (usedTokens - CURATION_TARGET_OCCUPANCY_SHARE * budgetTokens) /
@@ -2228,9 +2250,10 @@ export function registerActiveContext(pi: any, options: {
     if (!accounting.pending) return null;
     // The reclaim floor. One structural mutation per model call is the budget, so a
     // commit that would free crumbs spends the whole budget on nothing: it defers and
-    // the marks accumulate. Safety outranks economics, so the fence and the overflow
-    // recovery lane fire regardless of what they free.
-    if (!fenceLevel && curation.recoveryAttempts === 0 &&
+    // the marks accumulate. Safety outranks economics, so genuine overflow -- the
+    // recovery lane, or an occupancy already past the serving budget -- fires
+    // regardless of what it frees. Standing at the fence RATIO does not.
+    if (!overflowExempt &&
         accounting.eligibleFreedWindowShare < COMMIT_RECLAIM_FLOOR_SHARE) {
       persistence.state = state;
       emit("context.commit", {
@@ -2325,6 +2348,9 @@ export function registerActiveContext(pi: any, options: {
       emit("context.fold", {
         commit_seq: commitEvent.seq,
         fold_id: applied.foldId,
+        // The MARK this fold came from. The stream is now the only account of what a
+        // commit applied, so it has to name both ends of that mapping.
+        mark_id: applied.id,
         fold_kind: fold?.kind ?? applied.mark,
         origin: applied.origin,
         source_chars: fold?.sourceChars ?? 0,
@@ -2466,6 +2492,16 @@ export function registerActiveContext(pi: any, options: {
       return { due: false, trigger: null };
     }
     const pending = pendingMarks(persistence.state!).length;
+    if (!curation.gate && curation.reopenBaselineShare !== null) {
+      // Condition (b): a reclaim floor's worth of eligible mass has NEWLY appeared since
+      // the last gated commit. Below that the announcement would be about the same
+      // window the last one already adjudicated, so the gate stays shut and silent.
+      const eligibleShare = markAccounting(snapshot, persistence.state!).eligibleFreedWindowShare;
+      if (eligibleShare - curation.reopenBaselineShare < COMMIT_RECLAIM_FLOOR_SHARE) {
+        return { due: false, trigger: null };
+      }
+      curation.reopenBaselineShare = null;
+    }
     const verdict = advanceCurationGate({
       gate: curation.gate,
       ordinal: currentOrdinal(),
@@ -2600,6 +2636,15 @@ export function registerActiveContext(pi: any, options: {
           true,
           rungOptions.waiverRatio ?? ratio,
         );
+        // A gated commit has now been adjudicated against this window, whether it landed
+        // or deferred. Latch the eligible share it left behind: the gate stays shut until
+        // that share grows by a reclaim floor or occupancy re-crosses the trigger. While
+        // the latch is armed the backstop's own commits move it too, because "new since
+        // the last commit" means the last commit of ANY kind.
+        if (persistence.state && (verdict.trigger || curation.reopenBaselineShare !== null)) {
+          curation.reopenBaselineShare =
+            markAccounting(snapshot, persistence.state).eligibleFreedWindowShare;
+        }
       }
       // An inline rung is free only INSIDE a rewrite the epoch already paid for. Below
       // the threshold no commit ran, and an epoch that applied NOTHING -- every mark
@@ -3041,9 +3086,25 @@ export function registerActiveContext(pi: any, options: {
     return changed;
   };
 
+  /**
+   * Condition (a) of the gate reopen hysteresis, evaluated on EVERY context pass. A
+   * window that fell back under the curation trigger has ended its cycle, and the next
+   * crossing is a fresh event. This cannot live inside the gate arbitration: the quiet
+   * passes that matter are exactly the ones too far below the trigger to run it.
+   */
+  const clearGateLatchBelowTrigger = (): void => {
+    if (curation.reopenBaselineShare === null) return;
+    const capacity = servingCapacity(lifecycle.latestSnapshot?.contextWindow ?? null);
+    if (capacity.usedTokens === null || capacity.budgetTokens <= 0) return;
+    if (capacity.usedTokens / capacity.budgetTokens < CURATION_OCCUPANCY_SHARE) {
+      curation.reopenBaselineShare = null;
+    }
+  };
+
   const handleContext = async (event: { messages: unknown[] }, ctx: any) => {
     if (lifecycle.shuttingDown) return { messages: event.messages };
     beginMutationPass();
+    clearGateLatchBelowTrigger();
     if (!persistence.state) persistence.state = emptyActiveContextState(ctx.sessionManager.getSessionId());
     lifecycle.latestSnapshot = null;
     lifecycle.latestSnapshotError = null;
@@ -3415,7 +3476,6 @@ export function registerActiveContext(pi: any, options: {
       bytesPerToken: ESTIMATED_BYTES_PER_TOKEN,
     });
     if (verdict.admitted) return;
-    const pending = pendingMarks(persistence.state!).length;
     const sliceBytes = Math.max(
       PEEK_MIN_SLICE_BYTES,
       Math.floor(verdict.affordableBytes * 0.9),
@@ -3427,7 +3487,6 @@ export function registerActiveContext(pi: any, options: {
     for (const child of input.children.slice(0, 3)) {
       alternatives.push({ action: "peek", id: child });
     }
-    if (epochScheduling && pending) alternatives.push({ action: "commit" });
     if (!alternatives.length) {
       // The floor: folding is always available, and it is the action that creates
       // the room this read needs.
@@ -3814,76 +3873,6 @@ export function registerActiveContext(pi: any, options: {
           "fold the endpoints you meant, or two sub-spans to split it. No evidence moved.",
       });
     }
-    if (action === "commit") {
-      if (!epochScheduling) {
-        return toolPayload({
-          version: 1,
-          action,
-          mode: foldScheduling,
-          applied: [],
-          refused: [],
-          note: "Fold scheduling is immediate; every fold already applied when it was made.",
-        });
-      }
-      // An explicit commit is the agent saying go: the announced epoch happens now,
-      // and the gate closes having been answered rather than timed out.
-      if (curation.gate && curation.lastSignals) {
-        recordGateEvent("proceeded", curation.lastSignals, curation.gate.roundsUsed, "go");
-        curation.gate = null;
-      }
-      // The agent's own commit closes the window cycle exactly as an automatic one does.
-      curation.remindersFired = 0;
-      const ordinal = markOrdinal(snapshot);
-      let staged = persistence.state;
-      let peekMarks = 0;
-      for (const mark of ephemeralPeekMarks({ snapshot, state: staged, ordinal })) {
-        const addition = addPendingMark(staged, mark);
-        if (addition.added) { staged = addition.state; peekMarks += 1; }
-      }
-      const pending = pendingMarks(staged).length;
-      const accounting = markAccounting(snapshot, staged);
-      const result = await commitPendingMarks({
-        snapshot,
-        state: staged,
-        generation: lifecycle.generation,
-        retainIneligible: true,
-      });
-      if (result.applied.length) {
-        advisory.armedMilestone = null;
-        await persistManual(clearArmedAdvisory(result.state), action, ctx);
-      } else if (pending) {
-        await persistManual(result.state, action, ctx);
-      }
-      updateStatus(ctx);
-      return toolPayload({
-        version: 1,
-        action,
-        mode: foldScheduling,
-        pending,
-        applied: result.applied,
-        refused: result.refused,
-        agentMarks: accounting.agentMarks,
-        ladderMarks: accounting.ladderMarks,
-        peekMarks,
-        // An explicit commit never tops up: the agent asked for exactly its marks.
-        topUpMarks: 0,
-        appliedMarks: result.applied.length,
-        // Refusal is TERMINAL; a mark whose span is still fresh is DEFERRED and held.
-        refusedMarks: result.refused.filter((mark) => !mark.retained).length,
-        deferredMarks: result.retained.length,
-        retainedMarks: result.retained.length,
-        eligibleMarks: accounting.eligibleMarks,
-        estimatedRewriteTokens: accounting.rewriteTokens,
-        estimatedFreedTokens: accounting.freedTokens,
-        estimatedEligibleFreedTokens: accounting.eligibleFreedTokens,
-        freedWindowShare: accounting.freedWindowShare,
-        durableRevision: persistence.state.revision,
-        instrumentation: ledgerSummary(instrumentation.ledger),
-        activation: pending
-          ? "one batched projection rewrite; durable immediately and projected on the next model call"
-          : "no pending marks; nothing was rewritten",
-      });
-    }
     if (action === "expand" || action === "refold") {
       const id = String(params.id ?? "").trim();
       if (!id) throw new Error(`${action} requires id`);
@@ -4105,10 +4094,9 @@ export function registerActiveContext(pi: any, options: {
           estimatedEligibleWindowShare: accounting.eligibleFreedWindowShare,
           estimatedRewriteTokens: accounting.rewriteTokens,
           activation: "accepted as pending marks; no context bytes moved. They apply together at the " +
-            "next commit epoch, which you can open with the commit action or leave to the fold event. " +
+            "next commit epoch, which the runtime opens at the fold event. " +
             "A mark over a still-fresh span is held, not refused: it is scheduled, and it folds at the " +
             "first commit after that span ages out of the fresh window.",
-          commit: { action: "commit" },
         });
       }
       const applied: Array<Record<string, unknown>> = [];

@@ -353,6 +353,65 @@ async function project(runtime) {
   return runtime.handlers.get("context")({ messages: runtime.messages }, runtime.ctx);
 }
 
+function contextEvents(runtime, from = 0) {
+  return runtime.appended
+    .slice(from)
+    .filter((entry) => entry.customType === "pi-fold-context-event")
+    .map((entry) => entry.data);
+}
+
+/**
+ * THE COMMIT EPOCH, REACHED THROUGH ITS REAL TRIGGER.
+ *
+ * There is no agent-callable commit verb: marking is the agent's job and folding is the
+ * runtime's. A fixture that needs the epoch to run therefore drives window pressure and
+ * reads the epoch back out of the canonical event stream, which is where an external
+ * adjudicator reads it from too. The returned shape mirrors the fields the old commit
+ * payload carried, so the assertions that used to read a tool result read this instead.
+ */
+async function runtimeCommit(runtime, {
+  tokens,
+  contextWindow,
+  suffix,
+  stopReason = "toolUse",
+  measured = true,
+} = {}) {
+  const window = contextWindow ?? runtime.usage.contextWindow;
+  const from = runtime.appended.length;
+  if (measured) {
+    await measure(runtime, tokens ?? Math.ceil(window * 0.95), window, suffix, stopReason);
+  }
+  await project(runtime);
+  await settle();
+  const records = contextEvents(runtime, from);
+  const commits = records.filter((record) => record.kind === "context.commit");
+  // One pass can carry more than one epoch (the handoff and the projection each run
+  // the ladder), so the fixture reads the epoch that FIRED, and the folds of them all.
+  const commit = commits.find((record) => record.deferred === false) ?? commits.at(-1) ?? null;
+  const folds = records.filter((record) => record.kind === "context.fold");
+  const total = (field) => commits.reduce((sum, record) => sum + (record[field] ?? 0), 0);
+  return {
+    records,
+    commits,
+    commit,
+    fired: Boolean(commit) && commit.deferred === false,
+    deferred: commit ? commit.deferred : null,
+    reason: commit ? commit.reason : null,
+    applied: folds.map((record) => ({
+      id: record.mark_id,
+      foldId: record.fold_id,
+      kind: record.fold_kind,
+      origin: record.origin,
+    })),
+    appliedMarks: total("applied_marks"),
+    refusedMarks: total("refused_marks"),
+    deferredMarks: commit?.deferred_marks ?? 0,
+    pending: commit?.pending_marks ?? 0,
+    eligibleMarks: commit?.eligible_marks ?? null,
+    freedTokens: total("freed_tokens"),
+  };
+}
+
 async function toolStatus(runtime, toolName = "active_context", detail) {
   return runtime.tools.get(toolName).execute(
     "status-call",
@@ -2754,12 +2813,14 @@ async function gateEpochMarkCommit() {
   assert(scheduling.rewriteTokens > 0);
   assert.equal(scheduling.commitDue, false);
 
-  const committed = await toolCall(runtime, { action: "commit" });
-  assert(committed.details.applied.length >= 1);
-  assert.deepEqual(committed.details.refused, []);
+  // The epoch runs on window pressure, not on an agent verb: there is no commit action
+  // to call. The invariants are unchanged, read off the canonical stream instead.
+  const committed = await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  assert(committed.applied.length >= 1, "The pressure commit applied nothing");
+  assert.equal(committed.refusedMarks, 0);
   const after = materialized(runtime);
   assert.equal(after.pendingMarks, undefined);
-  assert.equal(after.folds.length, committed.details.applied.length);
+  assert.equal(after.folds.length, committed.applied.length);
   const committedProjection = await project(runtime);
   assert(bytesOf(committedProjection.messages) < rawBytes,
     "The commit epoch did not shrink the projection");
@@ -2770,11 +2831,16 @@ async function gateEpochMarkCommit() {
   const pending = materialized(blocked).pendingMarks[0];
   const sourceIds = pending.parts.map((part) => part.ref.entryId);
   await toolCall(blocked, { action: "protect", ids: sourceIds });
-  const refusal = await toolCall(blocked, { action: "commit" });
-  assert.deepEqual(refusal.details.applied, []);
-  assert.equal(refusal.details.refused.length, 1);
-  assert.match(refusal.details.refused[0].reason, /still fresh or protected/);
-  assert.equal(materialized(blocked).folds.length, 0);
+  const refusal = await runtimeCommit(blocked, { tokens: 88_000, contextWindow: 100_000 });
+  // Protection is adjudicated BEFORE the fold is prepared, so the mark is held rather
+  // than terminally refused: it never folds, and it is never silently dropped either.
+  assert.equal(refusal.applied.some((mark) => mark.id === pending.id), false,
+    "A protected span folded");
+  assert(refusal.deferredMarks >= 1, "The protected mark was neither folded nor held");
+  assert((materialized(blocked).pendingMarks ?? []).some((mark) => mark.id === pending.id),
+    "The protected mark was dropped by the commit that refused to apply it");
+  assert.equal(materialized(blocked).folds.some((fold) => fold.id === pending.id), false,
+    "A protected span produced a fold record");
 
   return {
     toolActions: context.EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS.length,
@@ -2783,7 +2849,7 @@ async function gateEpochMarkCommit() {
     projectionUnchangedByMark: true,
     committedFolds: after.folds.length,
     pendingAfterCommit: 0,
-    protectedRefusals: refusal.details.refused.length,
+    protectedHeld: refusal.deferredMarks,
   };
 }
 
@@ -2818,8 +2884,11 @@ async function gateImmediateByteIdentity() {
     [...context.ACTIVE_CONTEXT_TOOL_ACTIONS],
   );
   assert.equal([...runtime.tools.values()][0].description.includes("epoch mode"), false);
+  // The commit verb is gone from EVERY surface now, epoch mode included.
   const immediateCommit = await toolCall(runtime, { action: "commit" }).catch((error) => error);
   assert.match(String(immediateCommit), /'commit' is not enabled/);
+  assert.equal(context.EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS.includes("commit"), false,
+    "The epoch surface still exposes an agent-callable commit verb");
 
   // The same scripted session in epoch mode reaches a DIFFERENT state, which is the
   // whole point; immediate mode is what must not move.
@@ -2981,14 +3050,21 @@ async function gateMarkAlwaysMeansMark() {
   const scheduling = (await toolStatus(runtime)).details.automatic.scheduling;
   assert.equal(Object.hasOwn(scheduling, "tailAdjacentMessages"), false);
 
-  const committed = await toolCall(runtime, { action: "commit" });
-  assert.equal(committed.details.applied.length, 2, "One commit did not apply both marks");
-  assert.equal(materialized(runtime).pendingMarks, undefined);
+  const committed = await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  const appliedIds = new Set(committed.applied.map((mark) => mark.id));
+  assert(appliedIds.has(distant.details.id), "The distant mark was not applied");
+  assert.equal(committed.records.filter((record) => record.kind === "context.commit").length, 1,
+    "Both marks needed more than one commit");
+  // Both marks are consumed by that one commit: applied outright, or merged into an
+  // adjacent fold by the wedge absorber, which rides the same rewrite.
+  assert.equal(materialized(runtime).pendingMarks, undefined,
+    "A mark survived the commit that should have consumed it");
+  assert(materialized(runtime).folds.length >= 2, "The tail-adjacent span never folded");
   return {
     distantMarked: true,
     tailAdjacentMarked: true,
     foldsBeforeCommit: state.folds.length,
-    appliedInOneCommit: committed.details.applied.length,
+    appliedInOneCommit: committed.applied.length,
   };
 }
 
@@ -3128,21 +3204,20 @@ async function gateEphemeralPeekMark() {
   // End to end: the commit epoch folds the peek read without being asked.
   const runtime = makeRuntime(built, { foldScheduling: "epoch" });
   await startRuntime(runtime);
-  const committed = await toolCall(runtime, { action: "commit" });
-  assert.equal(committed.details.applied.length, 1);
-  assert.equal(committed.details.applied[0].origin, "agent");
-  assert.equal(committed.details.agentMarks, 1);
-  assert.equal(committed.details.ladderMarks, 0);
-  assert.equal(committed.details.peekMarks, 1);
+  const committed = await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  assert.equal(committed.commit.peek_marks, 1, "The peek read was not auto-marked by the epoch");
+  assert.equal(committed.commit.agent_marks, 1);
+  const peekFold = committed.applied.find((mark) => mark.origin === "agent");
+  assert(peekFold, "The auto-marked peek read was not applied");
   const folded = materialized(runtime);
-  assert.equal(folded.folds.length, 1);
-  assert.equal(folded.folds[0].kind, "tool-result");
+  assert(folded.folds.some((fold) => fold.id === peekFold.foldId && fold.kind === "tool-result"),
+    "The peek read did not become a tool-result fold");
   return {
     peekMarks: marks.length,
     peekMarkOrigin: marks[0].origin,
     expandedPeekExempt: true,
     immediateModePeekMarks: 0,
-    autoFoldedOnCommit: committed.details.applied.length,
+    autoFoldedOnCommit: committed.applied.length,
   };
 }
 
@@ -3269,10 +3344,11 @@ async function gateProjectionInstrumentation() {
   await startRuntime(epoch);
   await measure(epoch, 78_000, 100_000);
   await project(epoch);
-  const committed = await toolCall(epoch, { action: "commit" });
-  assert.equal(typeof committed.details.estimatedFreedTokens, "number");
-  assert.equal(typeof committed.details.instrumentation.projectionRewrites, "number");
-  assert.equal(typeof committed.details.instrumentation.providerSideCacheMisses, "number");
+  const committed = await runtimeCommit(epoch, { tokens: 88_000, contextWindow: 100_000 });
+  assert.equal(typeof committed.commit.freed_tokens, "number");
+  const epochLedger = (await toolStatus(epoch)).details.automatic.instrumentation;
+  assert.equal(typeof epochLedger.projectionRewrites, "number");
+  assert.equal(typeof epochLedger.providerSideCacheMisses, "number");
 
   // The context-event stream rides the same ledger and lands durably, which is what
   // an external adjudicator reads: an attempt record for every call, accepted or not.
@@ -3521,18 +3597,22 @@ async function gateEligibleShareCommitTrigger() {
   await project(anchor);
   assert(materialized(anchor).folds.length >= 1, "The pressure backstop stopped committing");
 
-  const manual = makeRuntime(makeFixture({ turns: 12, resultChars: 10_000, contextWindow: 100_000 }), {
+  // Below the ROI threshold and below the backstop NOTHING commits: there is no agent
+  // verb to force one, and the runtime declines. The status block still reports why.
+  const quiet = makeRuntime(makeFixture({ turns: 12, resultChars: 10_000, contextWindow: 100_000 }), {
     foldScheduling: "epoch",
   });
-  await startRuntime(manual);
-  await measure(manual, 76_000, 100_000);
-  await project(manual);
-  const manualStatus = (await toolStatus(manual)).details.automatic.scheduling;
-  assert.equal(manualStatus.commitTrigger.eligibleShareThreshold, 0.30);
-  assert.equal(manualStatus.commitTrigger.roiDue, false);
-  const committed = await toolCall(manual, { action: "commit" });
-  assert(committed.details.applied.length >= 1,
-    "The agent's own commit was not authoritative below the ROI threshold");
+  await startRuntime(quiet);
+  await measure(quiet, 76_000, 100_000);
+  await project(quiet);
+  const quietStatus = (await toolStatus(quiet)).details.automatic.scheduling;
+  assert.equal(quietStatus.commitTrigger.eligibleShareThreshold, 0.30);
+  assert.equal(quietStatus.commitTrigger.roiDue, false);
+  assert.equal(quietStatus.commitTrigger.pressureDue, false);
+  assert.equal(Object.hasOwn(quietStatus, "actions"), false,
+    "The scheduling block still advertises an agent-callable commit");
+  assert.equal(materialized(quiet).folds.length, 0,
+    "Something committed below both the ROI threshold and the backstop");
 
   // guidedCuration is the one iteration-4 condition, and it needs a commit to announce.
   assert.throws(
@@ -3541,13 +3621,13 @@ async function gateEligibleShareCommitTrigger() {
   );
 
   return {
-    roiThreshold: manualStatus.commitTrigger.eligibleShareThreshold,
+    roiThreshold: quietStatus.commitTrigger.eligibleShareThreshold,
     roiEligibleShare: roiStatus.commitTrigger.eligibleShare,
     roiFolds: materialized(roi).folds.length,
     anchorFoldsAtSamePressure: 0,
     anchorPendingMarks: anchorStatus.pending,
     pressureBackstopIntact: true,
-    manualCommitApplied: committed.details.applied.length,
+    quietFolds: materialized(quiet).folds.length,
   };
 }
 
@@ -3598,18 +3678,13 @@ async function gateRetainedPendingMarks() {
   assert(scheduling.marks.every((mark) => ["eligible", "protected"].includes(mark.eligibility)));
 
   // The commit applies what it can and KEEPS the rest, with the reason stated.
-  const committed = await toolCall(runtime, { action: "commit" });
-  assert(committed.details.retainedMarks >= 1, "An ineligible mark was dropped by the commit");
-  assert(committed.details.applied.length >= 1, "The eligible mark was not applied");
-  assert.equal(
-    committed.details.applied.length + committed.details.retainedMarks,
-    committed.details.pending,
-  );
+  const committed = await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  assert(committed.deferredMarks >= 1, "An ineligible mark was dropped by the commit");
+  assert(committed.applied.length >= 1, "The eligible mark was not applied");
+  assert.equal(committed.applied.length + committed.deferredMarks, committed.pending);
+  assert.equal(committed.refusedMarks, 0, "A held mark was counted as a terminal refusal");
   const survivors = materialized(runtime).pendingMarks;
   assert(survivors.some((mark) => mark.id === pendingId), "The retained mark did not survive the commit");
-  const retainedRefusal = committed.details.refused.find((item) => item.id === pendingId);
-  assert.equal(retainedRefusal.retained, true);
-  assert.match(retainedRefusal.reason, /stays pending until it is eligible/);
 
   // Retention is not a leak: the agent can withdraw a standing decision.
   const withdrawn = await toolCall(runtime, { action: "unmark", ids: [pendingId] });
@@ -3635,8 +3710,8 @@ async function gateRetainedPendingMarks() {
     freshSpanMarkedNow: true,
     tailAdjacentSpecialCaseDissolved: true,
     pendingAfterCommit: survivors.length,
-    retainedAtCommit: committed.details.retainedMarks,
-    appliedAtCommit: committed.details.applied.length,
+    retainedAtCommit: committed.deferredMarks,
+    appliedAtCommit: committed.applied.length,
     unmarked: withdrawn.details.unmarked.length,
   };
 }
@@ -3927,14 +4002,32 @@ async function gateCommitOnThreshold() {
 
   // An expand with marks pending opens the epoch, so the restore plus the batch of
   // folds cost one rewrite rather than two.
-  const rider = await epochToolRuntime({ turns: 12 });
+  const rider = await epochToolRuntime({ turns: 40 });
   await measure(rider, 78_000, 100_000);
   const pendingId = materialized(rider).pendingMarks[0].id;
-  await toolCall(rider, { action: "commit" });
-  const target = materialized(rider).folds[0].id;
-  await toolCall(rider, { action: "fold", ids: [rider.built.turnEntries[1][2]],
+  await runtimeCommit(rider, { tokens: 88_000, contextWindow: 100_000 });
+  const riderState = materialized(rider);
+  const target = riderState.folds[0].id;
+  // A span the pressure commit left raw: the epoch reaches further than the single mark
+  // the agent path used to apply, so the second mark has to be chosen, not assumed.
+  const covered = new Set();
+  const walk = (parts) => {
+    for (const part of parts) {
+      if (part.kind === "raw") covered.add(part.ref.entryId);
+      else walk(riderState.folds.find((fold) => fold.id === part.foldId)?.parts ?? []);
+    }
+  };
+  for (const fold of riderState.folds) walk(fold.parts);
+  const freeEntry = rider.built.turnEntries
+    .slice(1, -3)
+    .map((entries) => entries[2])
+    .find((id) => !covered.has(id));
+  assert(freeEntry, "The pressure commit left the rider fixture nothing to mark");
+  await toolCall(rider, { action: "fold", ids: [freeEntry],
     brief: "A second completed inspection is stale and its exact output stays recoverable." });
   assert.equal(materialized(rider).pendingMarks.length, 1);
+  // The commit left the window near the fence; the restore needs room to land in.
+  await measure(rider, 55_000, 100_000);
   const expanded = await toolCall(rider, { action: "expand", id: target });
   assert.equal(expanded.details.committedMarks.length, 1);
   assert.equal(materialized(rider).pendingMarks, undefined);
@@ -5426,7 +5519,9 @@ async function gateCurationLastCall() {
   assert.match(text, /"action":"fold","marks"/);
   assert.match(text, /"action":"rebrief"/);
   assert.match(text, /"action":"reboundary"/);
-  assert.match(text, /"action":"commit"/);
+  // The notice offers only verbs that exist. Folding is the runtime's to schedule.
+  assert.equal(/"action":"commit"/.test(text), false,
+    "The last-call notice offers a commit verb the tool no longer has");
   const gateState = (await toolStatus(runtime)).details.automatic.curation.gate;
   assert(gateState, "The gate did not stay open after announcing");
 
@@ -5579,8 +5674,12 @@ async function gateAutoSnapAndCorrections() {
   assert.equal(new Set(batched.details.marks.map((mark) => mark.id)).size, 3);
   assert.deepEqual(batched.details.corrections, []);
   assert.equal(materialized(runtime).pendingMarks.length, 3);
-  const committed = await toolCall(runtime, { action: "commit" });
-  assert.equal(committed.details.applied.length, 3, "The batch did not commit together");
+  const committed = await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  const batchIds = new Set(batched.details.marks.map((mark) => mark.id));
+  assert.equal(committed.records.filter((record) => record.kind === "context.commit").length, 1,
+    "The batch did not commit together");
+  assert.equal((materialized(runtime).pendingMarks ?? []).filter((mark) => batchIds.has(mark.id)).length, 0,
+    "The batch did not commit together");
 
   // A span that starts strictly INSIDE an existing fold snaps to that fold's boundary,
   // and the correction is reported by name rather than silently reinterpreted.
@@ -5589,7 +5688,7 @@ async function gateAutoSnapAndCorrections() {
     ids: [built.turnEntries[4][0], built.turnEntries[4].at(-1)],
     brief: "A whole closed turn whose exact evidence stays recoverable behind this fold.",
   });
-  await toolCall(runtime, { action: "commit" });
+  await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
   const existing = materialized(runtime).folds.find((fold) => fold.kind === "chapter");
   assert(existing && existing.parts.length >= 2, "The fixture built no multi-entry fold to cut into");
   const inside = existing.parts[1].kind === "raw"
@@ -5602,11 +5701,13 @@ async function gateAutoSnapAndCorrections() {
     brief: "A corrected span whose exact evidence stays recoverable behind this fold.",
   });
   assert(snapped.details.corrections.length >= 1, "A crossing span was accepted uncorrected");
-  const correction = snapped.details.corrections[0];
+  const correction = snapped.details.corrections.find((item) =>
+    json.stableStringify(item.from) === json.stableStringify([inside, later])) ??
+    snapped.details.corrections[0];
   assert(correction.reason.includes(existing.id),
     `The correction did not name the fold it crossed: ${correction.reason}`);
-  assert.match(correction.reason, /corrected to/);
-  assert.deepEqual(correction.from, [inside, later]);
+  assert.match(correction.reason, /corrected (to|outward)/);
+  assert.deepEqual([...correction.from].sort(), [inside, later].sort());
   assert.equal(correction.to.length, 2);
   assert.notDeepEqual(correction.to, correction.from);
 
@@ -5695,7 +5796,7 @@ async function gateAutoSnapAndCorrections() {
 
   return {
     batchedMarks: batched.details.marks.length,
-    appliedTogether: committed.details.applied.length,
+    appliedTogether: committed.applied.length,
     correctionsReported: snapped.details.corrections.length,
     snapAccepted,
     snapCorrected,
@@ -6111,6 +6212,7 @@ async function gateContextEventStream() {
     .map((entry) => entry.data);
 
   await toolCall(runtime, { action: "status" });
+  await toolCall(runtime, { action: "status", detail: "fold_candidates" });
   await toolCall(runtime, { action: "fold", ids: ["no-such-entry"] }).catch(() => undefined);
   await toolCall(runtime, { action: "fold", marks: [{ ids: ["also-missing"] }] }).catch(() => undefined);
   await toolCall(runtime, {
@@ -6120,7 +6222,6 @@ async function gateContextEventStream() {
       brief: `Stale inspection ${turn}: the exact output stays recoverable behind this fold.`,
     })),
   });
-  await toolCall(runtime, { action: "commit" });
   for (const tokens of [78_000, 84_000, 88_000, 92_000]) {
     await measure(runtime, tokens, 100_000);
     await project(runtime);
@@ -6171,7 +6272,7 @@ async function gateContextEventStream() {
     ids: [built.turnEntries[4][0], built.turnEntries[4].at(-1)],
     brief: "A whole closed turn whose exact evidence stays recoverable behind this fold.",
   });
-  await toolCall(runtime, { action: "commit" });
+  await runtimeCommit(runtime, { tokens: 94_000, contextWindow: 100_000 });
   const chapter = materialized(runtime).folds.find((fold) => fold.kind === "chapter");
   const insideId = chapter.parts[1].kind === "raw" ? chapter.parts[1].ref.entryId : chapter.parts[1].foldId;
   await toolCall(runtime, {
@@ -6557,24 +6658,34 @@ async function gateSparseReminders() {
     message.customType === "pi-fold-active-context-milestone"), false,
   "Guided curation still delivers the recurring pressure nag");
 
-  // A commit re-arms them, so a window that climbs twice is reminded twice.
-  await toolCall(runtime, { action: "commit" });
-  await measure(runtime, 50_000, 100_000, undefined, "toolUse");
-  const rearmed = reminders(await project(runtime));
-  assert.equal(rearmed.length, 1, "The reminders did not re-arm after a commit");
-  await settle();
-  const records = runtime.appended
+  // A commit re-arms them, so a window that climbs twice is reminded twice. The commit
+  // is the runtime's own now, and the pass that carries it is already crowded enough to
+  // spend the first reminder of the new cycle, so the second climb spends the second.
+  const reminderRecords = () => runtime.appended
     .filter((entry) => entry.customType === "pi-fold-context-event")
     .map((entry) => entry.data)
     .filter((record) => record.kind === "context.reminder");
-  assert.equal(records.length, 3);
+  const spentBeforeCommit = reminderRecords().length;
+  const rearmCommit = await runtimeCommit(runtime, {
+    tokens: 88_000, contextWindow: 100_000, stopReason: "toolUse",
+  });
+  assert(rearmCommit.fired, "The re-arming commit never fired");
+  await measure(runtime, 60_000, 100_000, undefined, "toolUse");
+  const rearmed = reminders(await project(runtime));
+  assert.equal(rearmed.length, 1, "The reminders did not re-arm after a commit");
+  await settle();
+  const records = reminderRecords();
+  assert.equal(spentBeforeCommit, 2, "The first cycle did not spend exactly two reminders");
+  assert.equal(records.length, 4, "The second cycle did not spend exactly two reminders");
   assert.equal(records[0].reminder_share, 0.45);
   assert.equal(records[1].reminder_share, 0.65);
+  assert.equal(records[2].reminder_share, 0.45);
+  assert.equal(records[3].reminder_share, 0.65);
 
   return {
     shares: [...context.CURATION_REMINDER_SHARES],
     remindersPerCycle: 2,
-    rearmedAfterCommit: rearmed.length,
+    rearmedAfterCommit: records.length - spentBeforeCommit,
     streamRecords: records.length,
   };
 }
@@ -6611,12 +6722,12 @@ async function gateAcceptAndHold() {
 
   // The commit while the span is still fresh: it applies the stale mark and HOLDS the
   // fresh one, and the stream says deferred rather than refused.
-  const committed = await toolCall(runtime, { action: "commit" });
-  assert(committed.details.applied.length >= 1);
-  assert.equal(committed.details.applied.some((mark) => mark.id === heldId), false,
+  const committed = await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  assert(committed.applied.length >= 1);
+  assert.equal(committed.applied.some((mark) => mark.id === heldId), false,
     "A fresh span was folded by the commit that should have held it");
-  assert.equal(committed.details.deferredMarks >= 1, true);
-  assert.equal(committed.details.refusedMarks, 0, "A held mark was counted as a refusal");
+  assert.equal(committed.deferredMarks >= 1, true);
+  assert.equal(committed.refusedMarks, 0, "A held mark was counted as a refusal");
   assert((materialized(runtime).pendingMarks ?? []).some((mark) => mark.id === heldId),
     "The held mark did not survive its commit");
 
@@ -6625,18 +6736,21 @@ async function gateAcceptAndHold() {
   for (const entry of aged.entries.slice(built.entries.length)) runtime.branch.push(entry);
   runtime.messages.length = 0;
   runtime.messages.push(...aged.messages);
-  await project(runtime);
-  const later = await toolCall(runtime, { action: "commit" });
-  assert(later.details.applied.some((mark) => mark.id === heldId),
+  const later = await runtimeCommit(runtime, { tokens: 92_000, contextWindow: 100_000 });
+  // It folds under its own id, or merged into the adjacent fold the absorber rode into
+  // the same rewrite. Either way it is no longer a standing decision, and never refused.
+  assert.equal((materialized(runtime).pendingMarks ?? []).some((mark) => mark.id === heldId), false,
     "The held mark never folded after its span aged out");
-  assert.equal(later.details.refusedMarks, 0, "The aged mark was refused rather than folded");
+  assert(later.applied.some((mark) => mark.origin === "agent"),
+    "The aged span folded as something other than the agent's own curation");
+  assert.equal(later.refusedMarks, 0, "The aged mark was refused rather than folded");
 
   return {
     heldAccepted: held.details.ok,
     heldDeferred: held.details.deferred,
     foldedWhileFresh: false,
     foldedLater: true,
-    deferredAtFirstCommit: committed.details.deferredMarks,
+    deferredAtFirstCommit: committed.deferredMarks,
   };
 }
 
@@ -6760,6 +6874,214 @@ async function gateMutationBudgetPerHandoff() {
   };
 }
 
+/**
+ * MARKING IS THE AGENT'S, FOLDING IS THE RUNTIME'S.
+ *
+ * There is no agent-callable commit verb on any surface: not in the action enum, not in
+ * the schema, not in the tool description, not in the curation notice, not in the
+ * scheduling status block, and not in a refusal's suggested alternatives. What the verb
+ * used to reach is untouched: the marks it would have applied still fold, driven by the
+ * runtime's own trigger.
+ */
+async function gateNoAgentCommitVerb() {
+  assert.equal(context.EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS.includes("commit"), false,
+    "The epoch action surface still carries the commit verb");
+  for (const kept of ["fold", "unmark", "status", "expand", "peek", "refold", "rebrief", "reboundary"]) {
+    assert(context.EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS.includes(kept),
+      `The deletion took ${kept} with it`);
+  }
+
+  const runtime = await epochToolRuntime({ turns: 14, resultChars: 8_000 });
+  const tool = [...runtime.tools.values()][0];
+  assert.deepEqual([...tool.parameters.properties.action.enum],
+    [...context.EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS]);
+  assert.equal(tool.parameters.properties.action.enum.includes("commit"), false);
+  assert.equal(/\bcommit\b/.test(tool.description), false,
+    `The tool description still teaches a commit verb: ${tool.description}`);
+  assert(tool.description.includes("epoch mode"), "The epoch guidance went with the verb");
+  await assert.rejects(() => toolCall(runtime, { action: "commit" }), /'commit' is not enabled/);
+
+  // The status block advertises no commit action either.
+  const scheduling = (await toolStatus(runtime)).details.automatic.scheduling;
+  assert.equal(Object.hasOwn(scheduling, "actions"), false,
+    "The scheduling status block still hands back a commit action");
+  const marked = await toolCall(runtime, {
+    action: "fold",
+    ids: [runtime.built.turnEntries[1][0], runtime.built.turnEntries[1].at(-1)],
+    brief: "An early completed task stays exactly recoverable behind this fold.",
+  });
+  assert.equal(marked.details.ok, true);
+  assert.equal(/\bcommit action\b/.test(json.stableStringify(marked.details)), false,
+    "A fold reply still points the agent at a commit action");
+
+  // The curation notice offers the correction verbs and nothing that no longer exists.
+  const notice = context.curationNoticeText({
+    signals: {
+      occupancy: 0.86, occupancyTokens: 86_000, budgetTokens: 100_000, window: 100_000,
+      staleToolShare: 0.3, staleToolTokens: 30_000, staleToolResults: 6, eligibleFolds: 4,
+    },
+    roundsUsed: 1, pendingMarks: 4, toolName: "active_context",
+  });
+  assert.equal(/"action":"commit"/.test(notice), false,
+    "The last-call notice still offers a commit verb");
+  assert(notice.includes('"action":"fold"') && notice.includes('"action":"rebrief"'),
+    "The notice lost the verbs that do exist");
+
+  // And the machinery is intact: the marks still fold, on the runtime's own trigger.
+  const committed = await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  assert(committed.fired, "The internal commit stopped firing with the verb");
+  assert(committed.applied.length >= 1, "The internal commit applied nothing");
+  assert.equal(materialized(runtime).pendingMarks, undefined);
+  assert(materialized(runtime).folds.length >= 1);
+
+  return {
+    epochActions: context.EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS.length,
+    commitInSurface: false,
+    internalCommitApplied: committed.applied.length,
+  };
+}
+
+/**
+ * NO COMMIT THAT FREES CRUMBS, ON ANY PATH.
+ *
+ * The reclaim floor used to be waived by standing at the fence RATIO, which is a
+ * prediction and not an inability to send: measured rep 17, fence-path commits fired at
+ * eligible-freed shares as low as 0.018. Now only genuine overflow is exempt, and a
+ * below-floor commit is a true no-op that says so in the stream.
+ */
+async function gateNoYieldCommitGuard() {
+  assert.equal(context.COMMIT_RECLAIM_FLOOR_SHARE, 0.02);
+
+  // A crowded window whose foldable mass is already spent: every commit path measures
+  // below the floor, so nothing fires and nothing is rewritten.
+  const runtime = await epochToolRuntime({ turns: 10, resultChars: 1_400, contextWindow: 400_000 });
+  const stream = () => runtime.appended
+    .filter((entry) => entry.customType === "pi-fold-context-event")
+    .map((entry) => entry.data);
+
+  // One real decision to commit, whose whole mass is crumbs against this window.
+  const marked = await toolCall(runtime, {
+    action: "fold",
+    ids: [runtime.built.turnEntries[1][0], runtime.built.turnEntries[1].at(-1)],
+    brief: "An early completed task stays exactly recoverable behind this fold.",
+  });
+  assert.equal(marked.details.ok, true);
+
+  // Climb past the pressure backstop and up to the fence RATIO, but stay under the
+  // serving budget: crowded and predicted-unsafe, yet perfectly able to send.
+  for (const tokens of [345_000, 355_000, 365_000, 375_000]) {
+    await measure(runtime, tokens, 400_000, undefined, "toolUse");
+    await project(runtime).catch(() => undefined);
+    await settle();
+  }
+  const commits = stream().filter((record) => record.kind === "context.commit");
+  const belowFloor = commits.filter((record) =>
+    typeof record.eligible_freed_share === "number" &&
+    record.eligible_freed_share < context.COMMIT_RECLAIM_FLOOR_SHARE &&
+    record.deferred === false);
+  assert.deepEqual(belowFloor.map((record) => record.trigger), [],
+    "A commit fired below the reclaim floor");
+  const deferrals = commits.filter((record) => record.reason === "below-reclaim-floor");
+  assert(deferrals.length >= 1, "The fixture never reached the guard");
+  for (const deferral of deferrals) {
+    assert.equal(deferral.deferred, true);
+    assert.equal(deferral.applied_marks, 0, "A deferred commit still applied marks");
+    assert.equal(deferral.reclaim_floor_share, context.COMMIT_RECLAIM_FLOOR_SHARE);
+    assert(deferral.eligible_freed_share < context.COMMIT_RECLAIM_FLOOR_SHARE);
+    // A true no-op: no fold record is joined to a deferred commit.
+    assert.equal(stream().some((record) =>
+      record.kind === "context.fold" && record.commit_seq === deferral.seq), false,
+    "A deferred commit rewrote the projection anyway");
+  }
+
+  // Safety still outranks economy: a projection past the serving budget recovers,
+  // whatever it frees.
+  const overflow = makeRuntime(
+    makeFixture({ turns: 16, resultChars: 12_000, contextWindow: 60_000 }),
+    { foldScheduling: "epoch" },
+  );
+  await startRuntime(overflow);
+  await measure(overflow, 55_000, 60_000, undefined, "toolUse");
+  await project(overflow).catch(() => undefined);
+  await settle();
+  const recovery = overflow.appended
+    .filter((entry) => entry.customType === "pi-fold-context-event")
+    .map((entry) => entry.data)
+    .filter((record) => record.kind === "context.recovery" || record.kind === "context.commit");
+  assert(recovery.some((record) => record.deferred === false || record.kind === "context.recovery"),
+    "Genuine overflow was held back by the economy guard");
+
+  return {
+    reclaimFloorShare: context.COMMIT_RECLAIM_FLOOR_SHARE,
+    commits: commits.length,
+    belowFloorCommits: belowFloor.length,
+    floorDeferrals: deferrals.length,
+  };
+}
+
+/**
+ * GATE REOPEN HYSTERESIS.
+ *
+ * A plateau is not an event. Once a last-call gate has proceeded and its commit has been
+ * adjudicated, the gate stays shut over a window whose foldable mass has not changed. It
+ * reopens on fresh eligible mass worth at least the reclaim floor, or on occupancy
+ * falling under the trigger and crossing it again.
+ */
+async function gateReopenHysteresis() {
+  const fixture = { turns: 30, resultChars: 11_000, contextWindow: 100_000 };
+  const built = makeFixture(fixture);
+  const runtime = makeRuntime(built, { ...SEALED_SPINE, guidedCuration: true });
+  await startRuntime(runtime);
+  const opens = () => runtime.appended
+    .filter((entry) => entry.customType === "pi-fold-context-event")
+    .map((entry) => entry.data)
+    .filter((record) => record.kind === "context.gate" && record.gate_event === "opened");
+
+  // Announce, proceed, commit. Every measurement here sits in the band the gate owns:
+  // above the curation trigger, below the pressure backstop that never waits on a gate.
+  for (const tokens of [78_000, 80_000, 82_000]) {
+    await measure(runtime, tokens, 100_000, undefined, "toolUse");
+    await project(runtime);
+    await settle();
+  }
+  const afterFirst = opens().length;
+  assert(afterFirst >= 1, "The gate never opened at all");
+
+  // THE PLATEAU. Occupancy stays crowded, above the trigger the whole way, and no new
+  // foldable mass appears. The gate must not reopen.
+  for (const tokens of [82_000, 83_000, 82_500, 83_500, 84_000, 83_000]) {
+    await measure(runtime, tokens, 100_000, undefined, "toolUse");
+    await project(runtime);
+    await settle();
+  }
+  const onPlateau = opens().length;
+  assert.equal(onPlateau, afterFirst,
+    `The gate reopened ${onPlateau - afterFirst} time(s) on a static crowded plateau`);
+
+  // FRESH MASS, with occupancy never leaving the crowded band: new turns arrive, and
+  // the reclaim floor's worth of new foldable evidence is what reopens the gate.
+  const grown = makeFixture({ ...fixture, turns: 44, sessionId: built.sessionId });
+  for (const entry of grown.entries.slice(built.entries.length)) runtime.branch.push(entry);
+  runtime.messages.length = 0;
+  runtime.messages.push(...grown.messages);
+  const beforeMass = opens().length;
+  for (const tokens of [83_000, 84_000]) {
+    await measure(runtime, tokens, 100_000, undefined, "toolUse");
+    await project(runtime);
+    await settle();
+  }
+  assert(opens().length > beforeMass,
+    "The gate stayed shut even though a reclaim floor of new foldable mass appeared");
+
+  return {
+    occupancyTrigger: context.CURATION_OCCUPANCY_SHARE,
+    reclaimFloorShare: context.COMMIT_RECLAIM_FLOOR_SHARE,
+    opensAfterFirst: afterFirst,
+    opensOnPlateau: onPlateau,
+    opensAfterFreshMass: opens().length,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -6834,6 +7156,9 @@ const gates = [
   [72, "Accept-and-hold marks", gateAcceptAndHold],
   [73, "Curation copy & receipt impact", gateCurationCopyAndReceipts],
   [74, "One structural mutation per handoff", gateMutationBudgetPerHandoff],
+  [75, "No agent-callable commit verb", gateNoAgentCommitVerb],
+  [76, "No-yield commit guard on every path", gateNoYieldCommitGuard],
+  [77, "Gate reopen hysteresis", gateReopenHysteresis],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

@@ -270,7 +270,7 @@ export function curationNoticeText(input: {
       "batches several spans with briefs in one call; " +
       "{\"action\":\"rebrief\",\"id\":\"<fold-id>\",\"brief\":\"<factual brief>\"} corrects an existing " +
       "brief; {\"action\":\"reboundary\",\"id\":\"<fold-id>\"} returns a mis-cut fold to raw so you can " +
-      "re-fold it; {\"action\":\"commit\"} proceeds immediately.",
+      "re-fold it.",
     "Continuing the task is the default: this commit proceeds on the next pass unless the next thing you do " +
       `is a ${input.toolName} call, and it proceeds regardless after ${remaining} more curation round(s).`,
   ].join("\n"), 2_048, `[${brand} curation] A commit epoch is due; details are unavailable this pass.`);

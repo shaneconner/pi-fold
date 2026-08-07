@@ -871,6 +871,5 @@ export function schedulingStatus(input: {
       eligibility: markEligibility(input.snapshot, input.state, mark),
       ...(mark.mark === "fold" ? { kind: mark.kind, brief: mark.brief } : {}),
     })),
-    actions: { commit: { action: "commit" } },
   };
 }
