@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -16,6 +17,7 @@ const context = await jiti.import(join(projectRoot, "extensions", "active-contex
 const json = await jiti.import(join(projectRoot, "extensions", "json.ts"));
 const piFold = await jiti.import(join(projectRoot, "extensions", "index.js"));
 const summarizerFactory = await jiti.import(join(projectRoot, "extensions", "summarizer.js"));
+const evidenceModule = await jiti.import(join(projectRoot, "extensions", "evidence.js"));
 
 const LEGACY_REPRODUCTION_FIXTURE = Object.freeze({
   originName: "Quorum",
@@ -2571,6 +2573,77 @@ async function gateSurfacingHysteresis() {
     expandedNeverSuggested: true,
     protectedNeverSuggested: true,
   };
+}
+
+/**
+ * extensions/evidence.js ships to npm, and until now its primitives were covered only
+ * by a harness script that could not load in this repo at all. The properties that
+ * matter are the ones the fold lattice leans on: a projection may replace a payload in
+ * the window only because the payload itself is still recoverable byte for byte, so an
+ * artifact must be addressed by its content, written once, and never writable again.
+ */
+async function gateEvidencePrimitives() {
+  const {
+    AGENT_RESULT_PROJECTION_BYTES, TOOL_RESULT_PROJECTION_BYTES,
+    pinEvidenceFile, utf8Head, utf8Tail, writeEvidenceArtifact,
+  } = evidenceModule;
+  assert(Number.isInteger(TOOL_RESULT_PROJECTION_BYTES) && TOOL_RESULT_PROJECTION_BYTES > 0);
+  assert(AGENT_RESULT_PROJECTION_BYTES >= TOOL_RESULT_PROJECTION_BYTES,
+    "An agent result projects less generously than a tool result");
+
+  // A byte budget cut through a multi-byte codepoint would put U+FFFD in the window and
+  // silently corrupt the very evidence the projection points at.
+  const unicode = `${"é🙂漢字".repeat(8000)}END`;
+  const head = utf8Head(unicode, 4097);
+  const tail = utf8Tail(unicode, 4097);
+  assert(Buffer.byteLength(head, "utf8") <= 4097 && Buffer.byteLength(tail, "utf8") <= 4097);
+  assert(!head.includes("�") && !tail.includes("�"), "A budget split a codepoint");
+  assert(unicode.startsWith(head) && unicode.endsWith(tail) && tail.endsWith("END"));
+
+  const root = await mkdtemp(join(tmpdir(), "pi-fold-evidence-"));
+  try {
+    const sessionFile = join(root, "session.jsonl");
+    await writeFile(sessionFile, "", "utf8");
+    const owner = { sessionFile, ownerKind: "pi-session", ownerId: "evidence-session" };
+
+    // Content addressing, proved by racing two writes of identical bytes: one artifact.
+    const payload = Buffer.from("immutable payload\n", "utf8");
+    const [first, second] = await Promise.all([
+      writeEvidenceArtifact({ ...owner, bytes: payload, mediaType: "text/plain", encoding: "utf-8",
+        source: { toolName: "read", toolCallId: "dedup-a", artifactKind: "test" } }),
+      writeEvidenceArtifact({ ...owner, bytes: payload, mediaType: "text/plain", encoding: "utf-8",
+        source: { toolName: "read", toolCallId: "dedup-b", artifactKind: "test" } }),
+    ]);
+    assert.equal(first.path, second.path, "Identical bytes wrote two artifacts");
+    assert.equal(first.sha256, createHash("sha256").update(payload).digest("hex"));
+    assert.deepEqual(await readFile(first.path), payload);
+    assert.equal((await stat(first.path)).mode & 0o777, 0o444, "An artifact stayed writable");
+
+    // Pinning copies rather than references: the source may still churn afterwards.
+    const mutable = join(root, "pi-bash-output.log");
+    const full = `${"early\n".repeat(5000)}FINAL\n`;
+    await writeFile(mutable, full, "utf8");
+    const pinned = await pinEvidenceFile({ ...owner, sourcePath: mutable,
+      source: { toolName: "bash", toolCallId: "bash-pin", artifactKind: "bash-full-output" } });
+    assert.notEqual(pinned.path, mutable);
+    assert.equal(pinned.bytes, Buffer.byteLength(full));
+    const [sourceStat, pinnedStat] = await Promise.all([stat(mutable), stat(pinned.path)]);
+    assert(sourceStat.dev !== pinnedStat.dev || sourceStat.ino !== pinnedStat.ino,
+      "The pin is a hardlink, so mutating the source would rewrite the evidence");
+    assert.equal(pinnedStat.mode & 0o777, 0o444);
+    await writeFile(mutable, "mutated", "utf8");
+    assert.equal(await readFile(pinned.path, "utf8"), full, "A source rewrite reached the pin");
+
+    return {
+      toolProjectionBytes: TOOL_RESULT_PROJECTION_BYTES,
+      agentProjectionBytes: AGENT_RESULT_PROJECTION_BYTES,
+      contentAddressed: true,
+      artifactMode: "0444",
+      pinSurvivedSourceRewrite: true,
+    };
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 async function gateSurfacingCarrier() {
@@ -7902,6 +7975,7 @@ const gates = [
   [47, "Eligible-share commit trigger", gateEligibleShareCommitTrigger],
   [48, "Status index diet", gateStatusIndexDiet],
   [49, "Advisory delivery accounting", gateAdvisoryDelivery],
+  [85, "Evidence artifacts are content-addressed and immutable", gateEvidencePrimitives],
   [50, "Projection instrumentation", gateProjectionInstrumentation],
   [51, "Stage-identified fold briefs", gateStageIdentifiedBriefs],
   [52, "Current-turn commit guard", gateCurrentTurnCommitGuard],
