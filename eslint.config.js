@@ -14,10 +14,10 @@ export default [
       // npm, since package.json `files` is [extensions, README.md, LICENSE].
       // Ignored rather than conformed so the move stayed verbatim: `npm run
       // lint` keeps meaning "the package is clean" instead of going red on
-      // 18 pre-existing unused-variable findings in imported code. Drop these
-      // entries once the harness is conformed.
+      // 18 pre-existing unused-variable findings in imported code. Drop this
+      // entry once the harness is conformed. tests/ is deliberately NOT here:
+      // verify.mjs is the contract, it predates the adoption, and it lints clean.
       "scripts/**",
-      "tests/**",
     ],
   },
   js.configs.recommended,

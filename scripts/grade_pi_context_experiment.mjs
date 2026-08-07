@@ -79,6 +79,16 @@ function collectRunEvidence(campaignDir) {
     evidence.push(readJson(path));
   }
   assertExperiment(evidence.length > 0, "Campaign has no adjudicated runs to grade");
+  // Same rule as the stage plan below: a pooled number is only meaningful if every run
+  // behind it was measured the same way. Sidecar selection falls back to the sealed
+  // original whenever this checkout's adjudicator never re-ran a rep, and an older
+  // adjudicator can be missing whole metrics, so a mixed set grades a headline out of
+  // fields that do not all exist. Fail loudly rather than pool across versions.
+  const adjudicators = new Set(evidence.map((run) => run.evidence.adjudicatorSourceSha256));
+  assertExperiment(adjudicators.size === 1,
+    `Campaign mixes adjudicator versions (${[...adjudicators]
+      .map((sha) => String(sha).slice(0, 8)).sort().join(", ")}); re-adjudicate every run ` +
+    "under one adjudicator before grading");
   return evidence;
 }
 

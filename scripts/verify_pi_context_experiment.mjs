@@ -532,6 +532,10 @@ assert(grader.includes("assertBlindPacket(packet)") &&
   grader.includes("adjudicatorSourceSha8()") &&
   grader.includes("--regrade"),
 "the grader must build a blind packet, keep the arm mapping in a separate directory, prefer re-adjudication sidecars, and pool regrades into hash-suffixed directories");
+assert(grader.includes("Campaign mixes adjudicator versions") &&
+  grader.includes("new Set(evidence.map((run) => run.evidence.adjudicatorSourceSha256))") &&
+  grader.includes("adjudicators.size === 1"),
+"the grader must refuse a campaign whose runs were adjudicated by different adjudicator versions");
 assert(launcher.startsWith("#!/bin/bash -p") &&
   launcher.includes("--setenv=QUORUM_CONTEXT_SOAK_SANITIZED=1") &&
   launcher.includes("UnsetEnvironment=QUORUM_PI_ROOT NODE_OPTIONS") &&
