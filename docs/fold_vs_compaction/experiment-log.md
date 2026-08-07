@@ -2,7 +2,7 @@
 
 Running log of the pi-fold measurement campaign. This is the groundwork document for the public write-up (Zenodo record plus articles); style rules for anything lifted from here: no em dashes, agent-first framing (self-governance is the product, the automatic ladder is the fallback).
 
-- Package under test: [pi-fold](https://github.com/shaneconner/pi-fold) 0.1.1, 84 gates in `tests/verify.mjs`. Quorum is a consumer: its deployment is synced verbatim and checked by `scripts/verify_pi_context_service.mjs`.
+- Package under test: [pi-fold](https://github.com/shaneconner/pi-fold), 85 gates in `tests/verify.mjs`. There is one copy of the runtime on the measurement machine, in this repo. The interactive deployment at `~/.pi/agent/extensions/pi-fold` imports it rather than holding a copy, and the experiment pins every file under `extensions/`, so what runs, what is attested and what is gated are the same bytes.
 - Harness: `scripts/*pi_context_experiment*` in the pi-fold repo (moved out of quorum on 2026-08-07), derived from the soak lineage (external pacing, one real Pi session per run, one user message, hash-chained ledgers, artifact-only adjudication, blind grading with separated key). 26 offline verification gates.
 - Campaign state: `~/pi-fold-runs/state/ops/pi-context-experiment/` for runs from 2026-08-07 onward. Every rep sealed before that date lives in the frozen quorum-era corpus and pins a quorum `codeCommit`; the two are not one series, and the boundary is recorded below.
 

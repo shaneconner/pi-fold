@@ -26,11 +26,10 @@ const evidenceModule = await jiti.import(join(projectRoot, "extensions", "eviden
 // entry types, commands and rendered strings, and this fixture proves that parameter
 // actually reaches every surface.
 //
-// The brand is deliberately neither pi-fold nor any real consumer. The neutrality gate
+// The brand is deliberately neither pi-fold nor any real deployment. The neutrality gate
 // asserts this brand appears NOWHERE in the default surface, and the defaults are
 // themselves pi-fold-branded, so naming the fixture after this package would make that
-// assertion vacuous. Real consumers are checked against their own deployed copies by
-// scripts/verify_pi_context_service.mjs.
+// assertion vacuous.
 const DEPLOYMENT_IDENTITY_FIXTURE = Object.freeze({
   originName: "Acme",
   registration: Object.freeze({
