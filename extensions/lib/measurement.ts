@@ -329,13 +329,9 @@ export function persistenceProjection(state: ActiveContextState, snapshot: Activ
       : retained.has(part.foldId)));
   if (survivingMarks.length) projected.pendingMarks = clone(survivingMarks);
   else delete projected.pendingMarks;
-  // A pin names a fold; once that fold is gone the pin is unfulfillable, exactly like
-  // a mark whose source left the branch.
-  const survivingPins = (state.pinnedPeeks ?? []).filter((id) => retained.has(id));
-  if (survivingPins.length) projected.pinnedPeeks = clone(survivingPins);
-  else delete projected.pinnedPeeks;
+  delete projected.pinnedPeeks;
   // A brief correction names a fold; once that fold is gone the correction has
-  // nothing to present, exactly like a pin whose fold left the branch.
+  // nothing to present, exactly like a mark whose source left the branch.
   const survivingBriefs = Object.entries(state.briefs ?? {}).filter(([id]) => retained.has(id));
   if (survivingBriefs.length) projected.briefs = Object.fromEntries(clone(survivingBriefs));
   else delete projected.briefs;

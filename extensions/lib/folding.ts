@@ -53,7 +53,6 @@ import {
   EXPAND_LEASE_GENERATIONS,
   MAX_EXPAND_LEASES,
   MAX_FOLD_SPAN_CHARS,
-  MAX_PINNED_PEEKS,
   PEEK_DEFAULT_MAX_BYTES,
   PEEK_HEAD_SHARE,
   STATUS_DIET_SUGGESTIONS,
@@ -830,58 +829,16 @@ export function assertProjectionPreservesToolLinkage(source: unknown[], projecte
 }
 
 /**
- * Pin or unpin one fold's peek result. Property ORDER is load-bearing: the state
- * digest is a stable stringify, so the optional tail is rebuilt in exactly the order
- * `parseActiveContextState` produces it.
- */
-export function withPinnedPeek(
-  state: ActiveContextState,
-  foldId: string,
-  pinned: boolean,
-): ActiveContextState {
-  const current = new Set(state.pinnedPeeks ?? []);
-  if (pinned === current.has(foldId)) return state;
-  if (pinned) {
-    if (current.size >= MAX_PINNED_PEEKS) {
-      throw new Error(`At most ${MAX_PINNED_PEEKS} peek results may be pinned; unpin one first`);
-    }
-    current.add(foldId);
-  } else current.delete(foldId);
-  const next = [...current].sort();
-  const head = { ...state };
-  delete head.pendingMarks;
-  delete head.pinnedPeeks;
-  delete head.advisory;
-  delete head.prepared;
-  return {
-    ...head,
-    revision: state.revision + 1,
-    ...(state.pendingMarks?.length ? { pendingMarks: clone(state.pendingMarks) } : {}),
-    ...(next.length ? { pinnedPeeks: next } : {}),
-    ...(state.advisory ? { advisory: clone(state.advisory) } : {}),
-  };
-}
-
-/** One consumed peek result whose duplicate source bytes the next projection drops. */
-export interface ReclaimedPeek {
-  toolCallId: string;
-  foldId: string;
-  index: number;
-  sourceBytes: number;
-}
-
-/**
- * Peek mass no reclamation can take: results whose fold the agent pinned with
- * retain, or whose evidence it protected outright. This is the number that made
- * rep 7's starvation invisible. The mass sat raw in the window, the ROI trigger's
- * eligibility arithmetic could never reach its threshold over it, and no accounting
- * field said so while the window grew to 235k tokens.
+ * Peek mass the ladder cannot take: results whose evidence the agent protected
+ * outright. This is the number that made rep 7's starvation invisible. The mass sat
+ * raw in the window, the ROI trigger's eligibility arithmetic could never reach its
+ * threshold over it, and no accounting field said so while the window grew to 235k
+ * tokens.
  */
 export function pinnedPeekMass(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
 ): { bytes: number; results: number } {
-  const pinned = new Set(state.pinnedPeeks ?? []);
   const explicitProtected = explicitProtectedKeys(state);
   const folded = new Set<string>();
   for (const fold of state.folds) {
@@ -908,106 +865,11 @@ export function pinnedPeekMass(
     const toolCallId = ownValue(item.message, "toolCallId");
     const foldId = typeof toolCallId === "string" ? peekCalls.get(toolCallId) : undefined;
     if (!foldId) continue;
-    if (!pinned.has(foldId) && !explicitProtected.has(objectRefKey(item.ref))) continue;
+    if (!explicitProtected.has(objectRefKey(item.ref))) continue;
     total += bytes(item.message);
     results += 1;
   }
   return { bytes: total, results };
-}
-
-export function peekReclaimText(
-  foldId: string,
-  snapshot: ActiveContextSnapshot,
-): string {
-  return [
-    `[${activeContextBrand(snapshot.brandNoun)} peek reclaimed ${foldId}]`,
-    `This peek returned fold ${foldId}'s exact source to an earlier model call. Those bytes were a ` +
-      "duplicate of evidence the fold store still holds losslessly, so they were dropped from this " +
-      "projection; nothing was lost and the fold is unchanged.",
-    `Read it again exactly: ${snapshot.toolName} {"action":"peek","id":"${foldId}"}`,
-    `Read a bounded slice: ${snapshot.toolName} {"action":"peek","id":"${foldId}","offset":0,"bytes":8192}`,
-    `Keep the next read in the window: ${snapshot.toolName} {"action":"peek","id":"${foldId}","retain":true}`,
-  ].join("\n");
-}
-
-/**
- * The lifetime a single peek actually has: the deployment default unless the call
- * said otherwise. An `ephemeral` argument is only honoured where per-peek lifetimes
- * are enabled, so a deployment that never opted in cannot be steered by an argument.
- */
-/**
- * Peek lifetime. Ephemeral is the default -- a peek copies a fold's stored source back
- * into the window and the fold store still holds it losslessly -- and the caller may
- * override that for one read in either direction, because only the caller knows
- * whether THIS read is a glance or a fact it is about to work from.
- */
-export function peekLifetimeIsEphemeral(requested: unknown): boolean {
-  return typeof requested === "boolean" ? requested : true;
-}
-
-/**
- * Peek results the agent has already had a model call to act on. A peek is the
- * ephemeral read by construction: look, decide, discard. The newest peek is never
- * reclaimed (no model call has seen it yet), a peek whose fold the agent expanded or
- * whose read it pinned is never reclaimed, and neither is one already inside a fold.
- * Deterministic in transcript positions; no wall clock and no randomness.
- */
-export function reclaimedPeeks(
-  snapshot: ActiveContextSnapshot,
-  state: ActiveContextState,
-): ReclaimedPeek[] {
-  // With per-peek lifetimes the deployment default is only a default: a call that
-  // carried an explicit `ephemeral` decides for itself, in either direction.
-  const pinned = new Set(state.pinnedPeeks ?? []);
-  const expanded = new Set(state.expanded);
-  const explicitProtected = explicitProtectedKeys(state);
-  const folded = new Set<string>();
-  for (const fold of state.folds) {
-    for (const ref of flattenFoldRefs(fold, state)) folded.add(objectRefKey(ref));
-  }
-  // Deliberately independent of the read-only batch index: whether a peek result may
-  // be FOLDED is a scheduling question, but whether its bytes are a duplicate is not,
-  // and immediate mode does not classify peek as a foldable read at all.
-  let lastAssistant = -1;
-  const peekCalls = new Map<string, { foldId: string; ephemeral: boolean }>();
-  for (let index = 0; index < snapshot.messages.length; index += 1) {
-    const message = snapshot.messages[index];
-    if (messageRole(message) !== "assistant") continue;
-    lastAssistant = index;
-    for (const part of denseOwnArrayValues(ownValue(message, "content")) ?? []) {
-      if (ownValue(part, "type") !== "toolCall" || ownValue(part, "name") !== snapshot.toolName) continue;
-      const callId = ownValue(part, "id");
-      const args = ownValue(part, "arguments");
-      const foldId = ownValue(args, "id");
-      if (typeof callId !== "string" || !callId || ownValue(args, "action") !== "peek" ||
-          typeof foldId !== "string" || !foldId) continue;
-      peekCalls.set(callId, { foldId, ephemeral: peekLifetimeIsEphemeral(ownValue(args, "ephemeral")) });
-    }
-  }
-  const reclaimed: ReclaimedPeek[] = [];
-  for (const item of snapshot.mapped) {
-    if (item.index >= lastAssistant || messageRole(item.message) !== "toolResult" || !item.ref) continue;
-    if (folded.has(objectRefKey(item.ref))) continue;
-    const toolCallId = ownValue(item.message, "toolCallId");
-    const call = typeof toolCallId === "string" ? peekCalls.get(toolCallId) : undefined;
-    if (!call || !call.ephemeral || ownValue(item.message, "isError") !== false) continue;
-    const foldId = call.foldId;
-    if (pinned.has(foldId) || expanded.has(foldId)) continue;
-    // EXPLICIT protection only. The fresh-tail set exists to keep recent context
-    // unfolded for the prefix cache, but a consumed peek is precisely the tail-local
-    // edit this lever is for: honouring freshness here would forbid reclamation for
-    // the whole burst that makes it worth having, and leave the duplicate bytes to
-    // age into the fence. An agent that wants a specific read kept says so, with
-    // retain or protect.
-    if (explicitProtected.has(objectRefKey(item.ref))) continue;
-    reclaimed.push({
-      toolCallId: toolCallId as string,
-      foldId,
-      index: item.index,
-      sourceBytes: bytes(item.message),
-    });
-  }
-  return reclaimed;
 }
 
 export function projectActiveContext(
@@ -1031,22 +893,15 @@ export function projectActiveContext(
       index += 1;
     }
   }
-  // Tail-local by construction: every reclaimed peek keeps its message, its role and
-  // its toolCallId, so linkage is untouched and only the duplicate payload shrinks.
-  const reclaim = new Map(reclaimedPeeks(snapshot, state).map((item) => [item.toolCallId, item.foldId]));
-  const projected = reclaim.size
-    ? output.map((message) => {
-      const toolCallId = ownValue(message, "toolCallId");
-      const foldId = typeof toolCallId === "string" ? reclaim.get(toolCallId) : undefined;
-      if (!foldId || messageRole(message) !== "toolResult") return message;
-      return {
-        ...clone(message as Record<string, unknown>),
-        content: [{ type: "text", text: peekReclaimText(foldId, snapshot) }],
-      };
-    })
-    : output;
-  assertProjectionPreservesToolLinkage(snapshot.messages, projected);
-  return projected;
+  // A peek result is APPEND-ONLY. It used to be rewritten in place once a model call
+  // had seen it, on the theory that the edit was tail-local; rep 22 disproved that.
+  // The result is only tail-local when it ARRIVES, and reclamation deliberately waits
+  // until a later assistant message exists, by which point the window has grown over
+  // it and the edit lands mid-prefix. Two peeks cost 100k fresh tokens that way. The
+  // duplicate bytes are still reclaimed, by the tool-fold rung at the next commit,
+  // which is the one moment a rewrite is already being paid for.
+  assertProjectionPreservesToolLinkage(snapshot.messages, output);
+  return output;
 }
 
 export function foldStatusRow(fold: ActiveFold, state: ActiveContextState, snapshot: ActiveContextSnapshot): Record<string, unknown> {
@@ -1461,10 +1316,6 @@ export function peekFoldSource(input: {
   maximumBytes?: number;
   /** Byte offset into the exact stored source; the narrowing half of admission control. */
   offset?: number;
-  /** Whether this read is pinned against ephemeral reclamation, for the envelope only. */
-  retained?: boolean;
-  /** Whether this read's duplicate bytes are reclaimed after one model call. */
-  ephemeral?: boolean;
   toolName?: string;
   projectEntry?: (entry: Record<string, unknown>) => unknown[];
 }): Record<string, unknown> {
@@ -1527,16 +1378,8 @@ export function peekFoldSource(input: {
     ...(truncated
       ? { wider: { action: "peek", id: fold.id, bytes: Math.min(sourceBytes, ACTIVE_CONTEXT_POLICY.maxChapterChars) } }
       : {}),
-    retained: input.retained === true,
-    lifetime: input.retained === true
-      ? "pinned: these bytes stay in the window until you refold or unpin the fold."
-      : (input.ephemeral === false
-        ? "durable: these bytes stay in the window like any other tool result until the ladder " +
-          `folds them. Release them after one read with ${toolName} ` +
-          `{"action":"peek","id":"${fold.id}","ephemeral":true}.`
-        : "one model call: once the next model call that reads this result has run, these duplicate bytes are dropped " +
-          `from the projection and the fold keeps the exact source. Pin it with ${toolName} ` +
-          `{"action":"peek","id":"${fold.id}","retain":true}.`),
+    lifetime: "these bytes stay in the window exactly as returned, like any other tool " +
+      "result, until the ladder folds them at a commit. Nothing rewrites this result in place.",
     note: truncated
       ? `Bounded read: ${returnedBytes} of ${sourceBytes} exact source bytes, ${view.omittedBytes} omitted ` +
         `from the middle. Widen with bytes, page with offset, or expand ${fold.id} to restore it in place.`

@@ -24,7 +24,6 @@ import {
   foldCandidatesDetail,
   foldTreeDetail,
   peekFoldSource,
-  peekLifetimeIsEphemeral,
   prepareFold,
   preparedFoldError,
   projectActiveContext,
@@ -33,10 +32,8 @@ import {
   requireActiveFold,
   selectAutomaticChapter,
   selectAutomaticRung,
-  reclaimedPeeks,
   setFoldProjectionState,
   withExpandLease,
-  withPinnedPeek,
 } from "./lib/folding.ts";
 import {
   admissionVerdict,
@@ -3396,14 +3393,7 @@ export function registerActiveContext(pi: any, options: {
           foldPeekResults,
           peek: {
             defaultMaxBytes: PEEK_DEFAULT_MAX_BYTES,
-            pinned: clone(persistence.state.pinnedPeeks ?? []),
-            reclaimed: reclaimedPeeks(snapshot, persistence.state).map((item) => ({
-              id: item.foldId,
-              toolCallId: item.toolCallId,
-              sourceBytes: item.sourceBytes,
-            })),
-            reclaimedBytes: reclaimedPeeks(snapshot, persistence.state)
-              .reduce((total, item) => total + item.sourceBytes, 0),
+            lifetime: "append-only",
           },
           freeHarvest: blockingTools.size === 0 ? "disabled" : "enabled",
           pressureSource: "last-successful-provider-response-only",
@@ -3434,12 +3424,6 @@ export function registerActiveContext(pi: any, options: {
     if (action === "peek") {
       const id = String(params.id ?? "").trim();
       if (!id) throw new Error("peek requires id");
-      if (params.retain !== undefined && typeof params.retain !== "boolean") {
-        throw new Error("peek retain must be a boolean");
-      }
-      if (params.ephemeral !== undefined && typeof params.ephemeral !== "boolean") {
-        throw new Error("peek ephemeral must be a boolean");
-      }
       const offset = boundedInteger(params.offset, 0, 0, 1_000_000_000, "offset");
       // The DEFAULT is the bounded index view. Widening is an explicit argument, so
       // the default path cannot overfill a window: measured 2026-08-06, 14 raw peek
@@ -3451,8 +3435,6 @@ export function registerActiveContext(pi: any, options: {
         snapshot.policy.maxChapterChars,
         "bytes",
       );
-      const effectiveEphemeral = peekLifetimeIsEphemeral(params.ephemeral);
-      const retain = params.retain === true;
       const target = persistence.state.folds.find((item) => item.id === id);
       if (!target) throw new Error(`Unknown active-context fold ${id}`);
       admit({
@@ -3469,16 +3451,8 @@ export function registerActiveContext(pi: any, options: {
         sessionId: ctx.sessionManager.getSessionId(),
         maximumBytes: sliceBytes,
         offset,
-        retained: retain,
-        ephemeral: effectiveEphemeral,
         toolName,
       }));
-      // Pinning is the informed choice the envelope names, so it is durable state:
-      // a read the agent decided to keep must survive the next projection rebuild.
-      if (params.retain !== undefined) {
-        const next = withPinnedPeek(persistence.state, id, retain);
-        if (next !== persistence.state) await persistManual(next, "peek", ctx);
-      }
       noteSurfacingAccept(id);
       return payload;
     }

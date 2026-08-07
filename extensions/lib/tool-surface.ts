@@ -29,7 +29,7 @@ export function buildActiveContextTool(input: {
   handler: ToolHandler;
 }) {
   const peekGuidance = input.allowedActions.includes("peek")
-    ? ` Peek is the ephemeral point read: it returns one fold's index view -- every nested fold's brief in full, plus the head and tail of the raw source with the omitted middle stated -- at any depth, ancestors still collapsed, changing nothing. It returns at most ${input.defaultPeekBytes} bytes unless you widen it with bytes, and it lives for one model call unless you pass ephemeral false or retain true. Expand is the durable in-place restoration.`
+    ? ` Peek is the point read: it returns one fold's index view -- every nested fold's brief in full, plus the head and tail of the raw source with the omitted middle stated -- at any depth, ancestors still collapsed, changing nothing. It returns at most ${input.defaultPeekBytes} bytes unless you widen it with bytes, and it stays in the window like any other tool result. Expand is the durable in-place restoration.`
     : "";
   const correctionGuidance = input.allowedActions.includes("rebrief")
     ? " Curation is correctable: rebrief replaces a fold's brief, and reboundary with ids re-cuts a span into exactly one fold, which merges adjacent folds when the span covers several and splits one when the span sits inside it. Reboundary with a single id returns that fold's span to raw."
@@ -85,14 +85,6 @@ export function buildActiveContextTool(input: {
           type: "integer",
           minimum: input.minPeekSliceBytes,
           description: `Peek only: bytes of exact source to return, widening or narrowing the ${input.defaultPeekBytes}-byte default.`,
-        },
-        retain: {
-          type: "boolean",
-          description: "Peek only: keep this result in the window instead of letting it be reclaimed after one model call.",
-        },
-        ephemeral: {
-          type: "boolean",
-          description: "Peek only: decide this read's lifetime yourself. True, the default, releases its duplicate bytes once a model call has read them; false keeps them for as long as any other tool result.",
         },
         limit: { type: "integer", minimum: 1, maximum: 100 },
         detail: { type: "string", enum: [...input.statusDetails] },

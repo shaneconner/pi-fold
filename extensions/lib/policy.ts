@@ -482,8 +482,8 @@ export interface ActiveContextState {
   surfacing?: SurfacingRecord[];
   /** Epoch scheduling only; omitted when empty so immediate-mode state digests never move. */
   pendingMarks?: PendingMark[];
-  /** Fold ids whose peek result the agent asked to keep raw. Omitted when empty. */
-  pinnedPeeks?: string[];
+  /** Retired with peek reclamation; carried only so pre-cut state still parses. */
+  pinnedPeeks?: never;
   /**
    * Agent-corrected fold briefs, by fold id. A fold RECORD is content-addressed and
    * immutable -- rewriting its brief in place would report a conflicting durable fold
