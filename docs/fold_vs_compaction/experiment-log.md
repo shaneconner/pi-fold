@@ -6,6 +6,26 @@ Running log of the pi-fold measurement campaign. This is the groundwork document
 - Harness: `scripts/*pi_context_experiment*` in the pi-fold repo (moved out of quorum on 2026-08-07), derived from the soak lineage (external pacing, one real Pi session per run, one user message, hash-chained ledgers, artifact-only adjudication, blind grading with separated key). 26 offline verification gates.
 - Campaign state: `~/pi-fold-runs/state/ops/pi-context-experiment/` for runs from 2026-08-07 onward. Every rep sealed before that date lives in the frozen quorum-era corpus and pins a quorum `codeCommit`; the two are not one series, and the boundary is recorded below.
 
+## Sealed corpus: extracted, archived, and taken offline (2026-08-07)
+
+The quorum-era corpus could not be moved. Its run configs carry absolute plan paths, its worker reports carry absolute session files, and `run-config.json` is itself hash-sealed inside the candidate artifacts, so no path rewrite survives its own seal. It was therefore read where it stood and reduced in two steps.
+
+First, uniformity. The corpus had been adjudicated by four different adjudicator versions, with only two of nine luna runs on the current one, so a pooled number across it would have been pooling measurements that were not taken the same way. All 17 sealed runs were re-adjudicated under one adjudicator (`ce184531`), non-destructively, as sidecars beside untouched originals. `scripts/grade_pi_context_experiment.mjs` now refuses a campaign that mixes adjudicator versions, so this cannot silently recur.
+
+Second, extraction. `scripts/extract_campaign_metrics.mjs` lifted every metric into `campaign-metrics.json` (17 runs, 3 campaigns, both metric lenses per run, no absolute paths). That file, not the trees, is what the write-up cites.
+
+The four state trees were then archived and removed from the machine's shared run directory. Verified restorable before deletion.
+
+| Archive | Runs | SHA-256 |
+| --- | --- | --- |
+| `pi-context-experiment.tar.zst` | 17 sealed reps, 3 campaigns | `7a5ad39e3e8d25bb20c4735caecfa4f783a62f464ee23be35528e588c276d5c8` |
+| `pi-context-clean-canary.tar.zst` | blind behavioral canary | `d6d6e6791c9a233ef7da92261fbcdd7e6f4d8b3e7e7ec42cf7fb8720301e75c1` |
+| `pi-context-hours-soak.tar.zst` | hours-long acceptance soak | `b5734b94a2d45a506b1aa86e944e0eb739c0bcf6f0a50d6a44c2a8bc6da9c09d` |
+| `pi-context-postmortem.tar.zst` | production rollout audit | `3030391883136488a9e40025992388fa5b44f62be5078928bfbd04282af88517` |
+| `pi-context-scratch.tar.zst` | demo capture, extraction and release staging | `bae6f82b9b0da5677d66081b6699211fe41f1c7c7e84248c5b9fd617e1360813` |
+
+192,955 files, 1.6 GB, compressed to 187 MB. The postmortem's findings are carried forward in `production-postmortem.md`; the rest is answerable only from the archive, which is why the hashes are recorded here rather than the archive being discarded.
+
 ## Hypothesis
 
 On long-running work that keeps returning to the same material, agent-governed lossless folding beats stop-the-world compaction on recall and total cost, and locates the window wall that an unmanaged session hits. Headline claim shape: savings at equal or better accuracy.
