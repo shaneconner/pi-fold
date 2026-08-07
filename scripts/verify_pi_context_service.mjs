@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -26,7 +26,15 @@ const jiti = createJiti(import.meta.url, {
     ),
   },
 });
-const extensionRoot = join(projectRoot, ".pi", "extensions", "quorum");
+// This verifier checks a CONSUMER's deployed copy, which no longer lives in the same
+// repo as the verifier. The deployment root is therefore an argument, defaulting to the
+// sibling checkout the package is synced into.
+const extensionRoot = process.argv[2]
+  ? resolve(process.argv[2])
+  : join(projectRoot, "..", "quorum", ".pi", "extensions", "quorum");
+if (!existsSync(extensionRoot)) {
+  throw new Error(`No deployed extension at ${extensionRoot}; pass the deployment root as the first argument`);
+}
 const context = await jiti.import(join(extensionRoot, "active-context.ts"));
 const json = await jiti.import(join(extensionRoot, "json.ts"));
 const evidence = await jiti.import(join(extensionRoot, "evidence.js"));
@@ -6832,7 +6840,16 @@ async function gateSparseReminders() {
   assert(rearmCommit.fired, "The re-arming commit never fired");
   await measure(runtime, 60_000, 100_000, undefined, "toolUse");
   const rearmed = reminders(await project(runtime));
-  assert.equal(rearmed.length, 1, "The reminders did not re-arm after a commit");
+  // RESTATED at the frozen surface, on the same rule as the carry above. The commit's
+  // body rewrite IS the sanctioned break, so the first cycle's carriers leave with it
+  // and the second cycle's land on a clean surface and then stay landed. Re-arming is
+  // therefore proved by what is present AND by what the break took away, which is the
+  // stronger claim: the old bytes are gone, not merely outnumbered.
+  assert.deepEqual(rearmed.map((message) => message.details.reminder), [0, 1],
+    "The reminders did not re-arm after a commit");
+  assert.equal(rearmed.some((message) =>
+    json.stableStringify(message) === json.stableStringify(first[0])), false,
+  "The first cycle's reminder survived the commit that re-armed it");
   await settle();
   const records = reminderRecords();
   assert.equal(spentBeforeCommit, 2, "The first cycle did not spend exactly two reminders");
@@ -7331,6 +7348,20 @@ async function gateFrozenSurface() {
   assert(after.includes(materialized(runtime).folds[0].id),
     "The committed fold never reached the projection");
 
+  // MECHANISM 3, and the pass this gate was missing. The fold event is allowed ONE
+  // rewrite; the freeze then has to re-arm. A surface that never freezes again pays a
+  // rewrite on every later request, and no check that stops at the fold can see it --
+  // which is how a latched freeze survived a green suite while the runtime paid it on
+  // most of a run. Append once more and demand the post-fold projection back verbatim.
+  await measure(runtime, 52_000, 100_000, undefined, "toolUse");
+  const rearmed = (await project(runtime)).messages;
+  assert(rearmed.length > rewritten.length,
+    "The projection did not grow with the message that followed the fold event");
+  const divergence = rewritten.findIndex((message, index) =>
+    json.stableStringify(message) !== json.stableStringify(rearmed[index]));
+  assert.equal(divergence, -1,
+    `The freeze never re-armed: the post-fold prefix diverged at index ${divergence}`);
+
   return {
     markFrozen: true,
     statusFrozen: true,
@@ -7339,6 +7370,8 @@ async function gateFrozenSurface() {
     tailAppends: grown.length - held.length,
     foldEventRewrites: true,
     committedFolds: materialized(runtime).folds.length,
+    reArmedAfterFold: true,
+    postFoldAppends: rearmed.length - rewritten.length,
   };
 }
 
