@@ -25,6 +25,7 @@ import {
   EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS,
   EXPERIMENT_DEFAULT_FOLD_SCHEDULING,
   EXPERIMENT_DEFAULT_GUIDED_CURATION,
+  EXPERIMENT_DEPENDENCY_KEYS,
   EXPERIMENT_PROVIDER_TOTAL_WINDOWS,
   EXPERIMENT_TRANSPORT,
   EXPERIMENT_FOLD_SCHEDULING,
@@ -127,12 +128,17 @@ function experimentSourceHashes(foldScheduling) {
 }
 
 function dependencyHashes() {
-  return {
+  const hashes = {
     piPackageJson: fileSha256(join(PI_ROOT, "package.json")),
     piDistTree: directoryTreeSha256(join(PI_ROOT, "dist")),
     piNodeModulesTree: directoryTreeSha256(join(PI_ROOT, "node_modules")),
     nodeExecutable: fileSha256(process.execPath),
   };
+  // Checked here, against the same list the run-config validator uses, so a mismatch is a
+  // refusal to launch rather than a run that dies minutes later inside its own supervisor.
+  assertExperiment(exactKeys(hashes, EXPERIMENT_DEPENDENCY_KEYS),
+    "Supervisor dependency hashes disagree with EXPERIMENT_DEPENDENCY_KEYS");
+  return hashes;
 }
 
 function gitExec(gitArgs, options = {}) {

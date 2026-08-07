@@ -72,6 +72,16 @@ export const EXPERIMENT_SCHEDULING_SOURCE = "extensions/lib/scheduling.ts";
 export const EXPERIMENT_RUN_ROOT = join(RUNTIME_HOME, "pi-fold-runs");
 export const EXPERIMENT_STATE_ROOT = join(EXPERIMENT_RUN_ROOT, "state", "ops", "pi-context-experiment");
 export const EXPERIMENT_TMP_ROOT = join(EXPERIMENT_RUN_ROOT, "tmp");
+// The exact environment a run attests, named ONCE. The supervisor builds this object and
+// the run-config validator checks it; when the two each carried their own copy of the list
+// they drifted, and the drift only surfaced when a launched run died at validation. The
+// pi-subagents pins left with the deployment that used to load them: this harness registers
+// the runtime itself and never imports that package, so pinning it attested a dependency no
+// run actually had.
+export const EXPERIMENT_DEPENDENCY_KEYS = Object.freeze([
+  "piPackageJson", "piDistTree", "piNodeModulesTree", "nodeExecutable",
+]);
+
 export const EXPERIMENT_TOOL_NAME = "repo_stage";
 export const EXPERIMENT_MARKER_ENTRY = "pi-fold-context-experiment-marker-v1";
 export const EXPERIMENT_RUNNER_MODE = "systemd-supervised-single-session";
@@ -635,10 +645,8 @@ export function validateExperimentRunConfig(value) {
   assertExperiment(value.sourceHashes && typeof value.sourceHashes === "object" &&
     Object.values(value.sourceHashes).every((hash) => HEX_64.test(hash)) &&
     Object.keys(value.sourceHashes).length >= 6, "Run config source hashes are invalid");
-  assertExperiment(exactKeys(value.dependencyHashes, [
-    "piPackageJson", "piDistTree", "piNodeModulesTree", "piSubagentsPackageJson",
-    "piSubagentsSrcTree", "nodeExecutable",
-  ]) && Object.values(value.dependencyHashes).every((hash) => HEX_64.test(hash)),
+  assertExperiment(exactKeys(value.dependencyHashes, EXPERIMENT_DEPENDENCY_KEYS) &&
+    Object.values(value.dependencyHashes).every((hash) => HEX_64.test(hash)),
   "Run config dependency hashes are invalid");
   return structuredClone(value);
 }

@@ -355,7 +355,6 @@ const runConfig = {
     [`scripts/file-${index}.mjs`, String(index + 1).repeat(64).slice(0, 64)])),
   dependencyHashes: {
     piPackageJson: "a".repeat(64), piDistTree: "b".repeat(64), piNodeModulesTree: "c".repeat(64),
-    piSubagentsPackageJson: "d".repeat(64), piSubagentsSrcTree: "e".repeat(64),
     nodeExecutable: "f".repeat(64),
   },
   planPath: "/nonexistent/pi-fold-runs/state/ops/pi-context-experiment/c1/stages-smoke.json",
