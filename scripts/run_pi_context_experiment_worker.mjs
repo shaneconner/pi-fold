@@ -2,7 +2,8 @@
 
 // One fold-vs-compaction run of one arm: a single real Pi session, one user message,
 // externally paced stages, artifact-only evidence. Derived from
-// scripts/run_pi_context_soak_worker.mjs; the session-driving machinery is unchanged and
+// the retired soak worker (in git history through 09a4ea5); the session-driving
+// machinery is unchanged and
 // the archive stages are replaced by the staged repo-comprehension workload.
 
 import { closeSync, existsSync, fsyncSync, openSync, readFileSync, writeSync } from "node:fs";

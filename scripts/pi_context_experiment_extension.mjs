@@ -1,6 +1,7 @@
 // Pi extension for one fold-vs-compaction experiment run.
 //
-// Derived from scripts/pi_context_soak_extension.mjs. Same shape: an externally paced,
+// Derived from the retired soak extension (in git history through 09a4ea5). Same shape:
+// an externally paced,
 // nonce-chained stage tool, hash-chained ledgers, artifact-only evidence. Differences are
 // the ones the experiment needs:
 //   - the active-context runtime is registered ONLY for the pifold arm, and with the run's

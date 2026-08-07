@@ -57,7 +57,7 @@ import {
   validateExperimentRunConfig,
   validateStagePlan,
 } from "./lib/pi_context_experiment.mjs";
-import { sha256Text } from "./lib/pi_context_soak_attestation.mjs";
+import { directoryTreeSha256, sha256Text, verifySourceHashes } from "./lib/pi_context_soak_attestation.mjs";
 
 const PROJECT = dirname(dirname(fileURLToPath(import.meta.url)));
 const source = (relative) => readFileSync(join(PROJECT, relative), "utf8");
@@ -1089,6 +1089,28 @@ try {
     adjudicator.includes('headlineMutationMetric: "contextEvents.prefixRewrites"'),
   "the adjudicator must compute event-stream metrics, echo the pooled wire share, and name the stream as the headline mutation metric");
   checks.eventStreamMutationsAndCounterfactualAdjudicated = true;
+}
+
+// Ported from the retired soak verifier, which was this primitive's only executable
+// coverage anywhere. verifySourceHashes stays LIVE on the experiment path: the worker
+// checks the attested tree before a run and the supervisor re-checks it after, so a
+// runtime that changed mid-campaign is caught rather than measured. The gate proves the
+// REJECTION, not the happy path: a drifted byte must throw.
+{
+  const scratch = mkdtempSync(join(tmpdir(), "pi-context-source-hashes-"));
+  try {
+    writeFileSync(join(scratch, "source.txt"), "one");
+    const treeBefore = directoryTreeSha256(scratch);
+    verifySourceHashes(scratch, { "source.txt": sha256Text("one") });
+    writeFileSync(join(scratch, "source.txt"), "two");
+    assert.notEqual(directoryTreeSha256(scratch), treeBefore,
+      "a rewritten file left the directory tree hash unmoved");
+    assert.throws(() => verifySourceHashes(scratch, { "source.txt": sha256Text("one") }),
+      /source hash drifted/);
+    checks.sourceHashDriftRejected = true;
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

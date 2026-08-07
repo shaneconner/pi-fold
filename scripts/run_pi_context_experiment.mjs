@@ -2,7 +2,8 @@
 
 // Supervisor for ONE fold-vs-compaction run of ONE arm.
 //
-// Derived from scripts/run_pi_context_soak.mjs: the supervisor owns stage release (the
+// Derived from the retired soak supervisor (in git history through 09a4ea5): the
+// supervisor owns stage release (the
 // worker can never self-serve its own workload), maintains the hash-chained pace and
 // heartbeat ledgers, and seals a non-authorizing candidate report that a separate
 // adjudicator turns into evidence.
