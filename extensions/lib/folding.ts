@@ -3,6 +3,7 @@ import {
   denseOwnArrayValues,
   evidenceRef,
   evidenceSha256,
+  isPlainRecord,
   objectRefKey,
   sha256Text,
   sha256Value,
@@ -48,6 +49,7 @@ import {
   activeContextBrand,
   activeContextSource,
   CONSOLIDATION_WIDTH_THRESHOLD,
+  CONTEXT_STATUS_RESPONSE_BYTES,
   EXPAND_LEASE_GENERATIONS,
   MAX_EXPAND_LEASES,
   MAX_FOLD_SPAN_CHARS,
@@ -105,7 +107,10 @@ export function selectAutomaticChapter(
       if (claimed.size && refs.some((ref) => claimed.has(objectRefKey(ref)))) continue;
       if (refsProtected(refs, state, snapshot)) continue;
       const size = bytes(encodedFoldSource(snapshot, state, parts, "chapter"));
-      if (size > snapshot.policy.maxChapterChars) break;
+      // The chapter cap bounds what the rung COMPOSES, never what it may reclaim: a
+      // single closed unit that alone exceeds it is still accepted (rep 19: six status
+      // results, each above the cap, were exactly the mass nothing could fold).
+      if (size > snapshot.policy.maxChapterChars && endIndex > unitIndex) break;
       // Bite-sized by construction. A multi-unit chapter never grows past the cap, so
       // the ladder cannot build the 60kB fold whose tail hid the answer (rep 6); a
       // SINGLE unit that alone exceeds it is still accepted, because there is no
@@ -1227,9 +1232,10 @@ export function activeContextStatus(
         sourceMapTotal: sourceMap!.total,
         sourceMapTruncated: sourceMap!.truncated,
         paging: {
+          note: "Results are delivered in bounded pages.",
           folds: { action: "status", detail: "folds", offset: 0, limit: 40 },
           objects: { action: "status", detail: "objects", offset: 0, limit: 40 },
-          tree: { action: "status", detail: "tree" },
+          tree: { action: "status", detail: "tree", offset: 0 },
         },
       }
       : {
@@ -1261,6 +1267,91 @@ export function activeContextStatus(
       protect: { action: "protect", ids: ["<source-or-fold-id>"] },
     },
   };
+}
+
+/** Room reserved for the one-line continuation marker a truncated page carries. */
+const STATUS_CONTINUATION_RESERVE_BYTES = 400;
+
+/**
+ * Enforce the hard status page cap on one fully assembled status payload.
+ *
+ * Measured 2026-08-07 (rep 19): one status answer serialized to 526KB, 6.2x the
+ * remaining headroom, and aborted the request. The paging affordance existed;
+ * nothing forced it. This function is the force: every listing in the payload is
+ * truncated at a unit boundary (whole rows, never mid-unit) until the serialized
+ * page fits, and a one-line continuation marker names the next offset. Trim order
+ * spends the diagnostics first and the listing the caller asked for last, and the
+ * requested listing always keeps at least one unit so paging always progresses.
+ */
+export function boundStatusPayload(
+  payload: Record<string, unknown>,
+  detail: string | null,
+  offset: number,
+  cap: number = CONTEXT_STATUS_RESPONSE_BYTES,
+): Record<string, unknown> {
+  const size = (): number => Buffer.byteLength(JSON.stringify(payload, null, 2), "utf8");
+  if (size() <= cap) return payload;
+  const target = cap - STATUS_CONTINUATION_RESERVE_BYTES;
+  const fits = (): boolean => size() <= target;
+  const omitted: string[] = [];
+  // keepEnd keeps the NEWEST units of a time-ordered ledger; a paged listing keeps
+  // its head so the continuation offset is the next unread unit. Binary search for
+  // the largest keep that fits; a stage that cannot fit alone trims to its floor.
+  const shrink = (owner: unknown, key: string, label: string, keepEnd = false, minKeep = 0): number => {
+    if (!isPlainRecord(owner) || fits()) return 0;
+    const original = ownValue(owner, key);
+    if (!Array.isArray(original) || original.length <= minKeep) return 0;
+    const container = owner as Record<string, unknown>;
+    const apply = (keep: number): void => {
+      container[key] = keepEnd ? original.slice(original.length - keep) : original.slice(0, keep);
+    };
+    let low = minKeep;
+    let high = original.length - 1;
+    let keep = minKeep;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      apply(mid);
+      if (fits()) { keep = mid; low = mid + 1; } else { high = mid - 1; }
+    }
+    apply(keep);
+    const dropped = original.length - keep;
+    if (dropped > 0) omitted.push(`${dropped} ${label}`);
+    return dropped;
+  };
+  const automatic = ownValue(payload, "automatic");
+  const instrumentation = isPlainRecord(automatic) ? ownValue(automatic, "instrumentation") : undefined;
+  const surfacing = isPlainRecord(automatic) ? ownValue(automatic, "surfacing") : undefined;
+  shrink(instrumentation, "projectionRecords", "projection record(s)", true);
+  shrink(instrumentation, "cacheObservations", "cache observation(s)", true);
+  shrink(instrumentation, "events", "context event(s)", true);
+  shrink(surfacing, "log", "surfacing log row(s)", true);
+  if (shrink(payload, "sourceMap", "source map row(s)") > 0) payload.sourceMapTruncated = true;
+  shrink(payload, "topFolds", "top fold row(s)");
+  const rowLabel = (key: string): string => key === "folds" ? "fold row(s)" : key === "objects" ? "object row(s)" : "tree row(s)";
+  // The listing the caller asked for goes last and never below one unit. Its
+  // machine-readable next offset moves back to the first unit the page dropped.
+  let continueAt: number | null = null;
+  if (detail === "folds" || detail === "objects") {
+    const rideKey = detail === "folds" ? "objects" : "folds";
+    if (shrink(payload, rideKey, rowLabel(rideKey)) > 0) {
+      const rideKept = (payload[rideKey] as unknown[]).length;
+      if (rideKey === "folds") payload.nextOffset = offset + rideKept;
+      else payload.nextObjectOffset = offset + rideKept;
+    }
+  }
+  const primaryKey = detail === "objects" ? "objects" : detail === "tree" ? "tree" : detail === "folds" ? "folds" : null;
+  if (primaryKey && shrink(payload, primaryKey, rowLabel(primaryKey), false, 1) > 0) {
+    continueAt = offset + (payload[primaryKey] as unknown[]).length;
+    if (primaryKey === "objects") payload.nextObjectOffset = continueAt;
+    else payload.nextOffset = continueAt;
+  }
+  if (!omitted.length) return payload;
+  const resume = continueAt === null
+    ? "the full lists stay reachable through the paged status details"
+    : `continue at ${JSON.stringify({ action: "status", detail, offset: continueAt })}`;
+  payload.continuation =
+    `Status pages are bounded to ${cap} bytes; omitted ${omitted.join(", ")}; ${resume}.`;
+  return payload;
 }
 
 export function visibleCollapsedFolds(

@@ -261,6 +261,15 @@ export const MAX_CONTEXT_ATTEMPT_RECORDS = 128;
 
 /** Hard byte cap on the rendered awareness block a mark call answers with. */
 export const CONTEXT_MARK_RESPONSE_BYTES = 900;
+/**
+ * Hard byte cap on one serialized status payload, every detail variant included.
+ * Measured 2026-08-07 (rep 19): six paged status results accumulated to ~254k tokens
+ * and the seventh answered with 526KB, 6.2x the remaining headroom, aborting the
+ * request. Paging already existed; nothing FORCED it. Above the cap the listing is
+ * truncated at a unit boundary and a continuation names the next offset, so the
+ * biggest possible status answer is about 6k tokens and the rest is another page.
+ */
+export const CONTEXT_STATUS_RESPONSE_BYTES = 24_000;
 /** How many unmarked candidates the awareness block names; the remainder is an aggregate. */
 export const MAX_UNMARKED_CANDIDATES = 3;
 

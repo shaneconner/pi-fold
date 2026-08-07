@@ -76,7 +76,7 @@ export function leadingCompactionContinuation(messages: unknown[]): CompleteTurn
  * outside this surface is not classified read-only, so its batch never folds.
  */
 export const READ_ONLY_CONTEXT_ACTION_ARGUMENTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  status: Object.freeze(["action", "offset", "limit"]),
+  status: Object.freeze(["action", "detail", "offset", "limit"]),
   peek: Object.freeze(["action", "id"]),
 });
 

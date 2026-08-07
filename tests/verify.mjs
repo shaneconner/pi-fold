@@ -422,6 +422,41 @@ async function toolStatus(runtime, toolName = "active_context", detail) {
   );
 }
 
+/**
+ * Collect one paged status listing COMPLETELY, through bounded pages. A truncated
+ * page names the next offset in its continuation marker; an untruncated folds or
+ * objects page still advances through the ordinary limit-paging offsets; an
+ * untruncated tree page carries everything from its offset and ends the walk.
+ */
+async function pagedStatusRows(runtime, detail, toolName = "active_context") {
+  const rows = [];
+  const pages = [];
+  let offset = 0;
+  for (let page = 0; page < 128; page += 1) {
+    const result = await runtime.tools.get(toolName).execute(
+      `paged-${detail}-${page}`,
+      { action: "status", detail, ...(offset ? { offset } : {}) },
+      new AbortController().signal,
+      undefined,
+      runtime.ctx,
+    );
+    const payload = result.details;
+    rows.push(...payload[detail]);
+    pages.push({ bytes: Buffer.byteLength(result.content[0].text, "utf8"), payload });
+    let next = null;
+    if (typeof payload.continuation === "string") {
+      const named = payload.continuation.match(/continue at (\{[^}]*\})/);
+      if (named) next = JSON.parse(named[1]).offset;
+    }
+    if (next === null && detail !== "tree") {
+      next = detail === "objects" ? payload.nextObjectOffset : payload.nextOffset;
+    }
+    if (typeof next !== "number" || next <= offset) break;
+    offset = next;
+  }
+  return { rows, pages };
+}
+
 function materialized(runtime, sessionId = runtime.built.sessionId) {
   return context.materializeActiveContextState(runtime.branch, sessionId);
 }
@@ -3306,6 +3341,26 @@ async function gateProjectionInstrumentation() {
   assert.equal(ledger.providerSideMisses, 1);
   assert.equal(context.observeCacheUsage(ledger, { usage: null, change: "append" }), null);
 
+  // The record ring itself: every record keys on a prefix digest, and the ring is
+  // bounded. Restated at iteration 8 against the ring's own constructor: the status
+  // page now delivers a bounded tail of these records, so the page is no longer the
+  // place to prove ring-construction properties.
+  const recordLedger = context.emptyLedger();
+  context.recordProjection(recordLedger, context.compareProjections(null, ["a", "b"]), ["da", "db"]);
+  context.recordProjection(recordLedger, context.compareProjections(["a", "b"], ["a", "z"]), ["da", "dz"]);
+  assert(recordLedger.records.every((record) => /^[a-f0-9]{64}$/.test(record.prefixSha256)),
+    "A projection record carries no prefix digest");
+  assert.equal(recordLedger.records.at(-1).firstDivergentIndex, 1);
+  for (let index = 0; index < 70; index += 1) {
+    context.recordProjection(
+      recordLedger,
+      context.compareProjections(["a"], ["a", `x${index}`]),
+      ["da", `dx${index}`],
+    );
+  }
+  assert.equal(recordLedger.records.length, context.MAX_PROJECTION_HASH_RECORDS,
+    "The record ring is unbounded");
+
   // End to end. The same session reports rewrites it caused separately from misses it
   // merely observed, and the per-message digests make the append case provable.
   const runtime = makeRuntime(
@@ -3336,23 +3391,36 @@ async function gateProjectionInstrumentation() {
   assert(ledgerNow.observedCacheMisses >= 1);
   assert(ledgerNow.providerSideCacheMisses <= ledgerNow.observedCacheMisses);
   // The split is exhaustive and is exactly the rewrite/append classification.
-  const misses = ledgerNow.cacheObservations.filter((item) => item.cacheReadTokens === 0);
-  assert.equal(misses.length, ledgerNow.observedCacheMisses);
+  // Restated at iteration 8: the per-observation content is read from the DURABLE
+  // context.usage and context.projection events, the same ledger records on the
+  // carrier an external adjudicator reads. The status page now delivers a bounded
+  // newest-kept tail of these arrays, so it stops being the completeness witness.
+  const usageEvents = contextEvents(runtime).filter((event) => event.kind === "context.usage");
   assert.equal(
-    misses.filter((item) => item.change !== "rewrite").length,
+    usageEvents.filter((event) => event.cache_read_tokens === 0).length,
+    ledgerNow.observedCacheMisses,
+  );
+  assert.equal(
+    usageEvents.filter((event) => event.provider_side_miss).length,
+    ledgerNow.providerSideCacheMisses,
+  );
+  assert.equal(
+    usageEvents.filter((event) =>
+      event.cache_read_tokens === 0 && event.projection_change !== "rewrite").length,
     ledgerNow.providerSideCacheMisses,
   );
 
-  const rewrite = ledgerNow.projectionRecords.find((record) => record.change === "rewrite");
-  assert.equal(typeof rewrite.firstDivergentIndex, "number",
+  const projectionEvents = contextEvents(runtime)
+    .filter((event) => event.kind === "context.projection");
+  const rewrite = projectionEvents.find((event) => event.change === "rewrite");
+  assert.equal(typeof rewrite.first_divergent_index, "number",
     "A rewrite recorded no divergence point");
-  const appended = ledgerNow.projectionRecords.filter((record) => record.change === "append");
-  assert(appended.every((record) => record.firstDivergentIndex === null),
+  const appended = projectionEvents.filter((event) => event.change === "append");
+  assert(appended.every((event) => event.first_divergent_index === null),
     "An append recorded a prefix divergence");
-  assert(ledgerNow.projectionRecords.every((record) => /^[a-f0-9]{64}$/.test(record.prefixSha256)));
   assert(ledgerNow.projectionRecords.length <= 64, "The record ring is unbounded");
-  assert(ledgerNow.cacheObservations.every((item) =>
-    typeof item.inputTokens === "number" && typeof item.cacheReadTokens === "number"));
+  assert(usageEvents.every((event) =>
+    typeof event.input_tokens === "number" && typeof event.cache_read_tokens === "number"));
 
   // It reaches the envelope the harness reads alongside the existing accounting.
   const epoch = makeRuntime(
@@ -3370,10 +3438,11 @@ async function gateProjectionInstrumentation() {
 
   // The context-event stream rides the same ledger and lands durably, which is what
   // an external adjudicator reads: an attempt record for every call, accepted or not.
+  // Restated at iteration 8: read from the durable stream itself; the status page
+  // carries a bounded tail of it.
   await toolCall(epoch, { action: "status" });
   await toolCall(epoch, { action: "peek", id: "no-such-fold" }).catch(() => undefined);
-  const events = (await toolStatus(epoch)).details.automatic.instrumentation.events;
-  const attempts = events.filter((event) => event.kind === "context.attempt");
+  const attempts = contextEvents(epoch).filter((event) => event.kind === "context.attempt");
   assert(attempts.some((event) => event.ok === true && event.action === "status"));
   const refused = attempts.find((event) => event.ok === false);
   assert(refused, "A refused context call was not recorded");
@@ -3486,8 +3555,10 @@ async function gateStatusIndexDiet() {
     await measure(lean, tokens, 100_000);
     await project(lean);
   }
-  const leanStatus = (await toolStatus(lean)).details;
-  const pagedFolds = (await toolStatus(lean, "active_context", "folds")).details;
+  const leanResult = await toolStatus(lean);
+  const pagedFoldsResult = await toolStatus(lean, "active_context", "folds");
+  const leanStatus = leanResult.details;
+  const pagedFolds = pagedFoldsResult.details;
   const pagedObjects = (await toolStatus(lean, "active_context", "objects")).details;
   assert(leanStatus.totalFolds >= 3, "The fixture built too small an index to measure");
 
@@ -3497,7 +3568,13 @@ async function gateStatusIndexDiet() {
   assert.equal(Object.hasOwn(leanStatus, "folds"), false);
   assert.equal(Object.hasOwn(leanStatus, "objects"), false);
   assert(Array.isArray(pagedFolds.folds) && Array.isArray(pagedObjects.objects));
-  assert(bytesOf(leanStatus) < bytesOf(pagedFolds), "The diet payload was not smaller");
+  // Restated at iteration 8: the diet's relative claim (smaller than the paged
+  // payload) became an absolute one. Every status page, diet and paged alike, now
+  // fits the hard byte cap, so "smaller than a 92KB page" is subsumed by "bounded".
+  for (const result of [leanResult, pagedFoldsResult]) {
+    assert(Buffer.byteLength(result.content[0].text, "utf8") <= context.CONTEXT_STATUS_RESPONSE_BYTES,
+      "A status page exceeded the hard byte cap");
+  }
   const fatStatus = pagedFolds;
 
   // What replaces them answers the question the peeks were asking: which fold has X.
@@ -3528,7 +3605,8 @@ async function gateStatusIndexDiet() {
   );
   // A paged row must carry the brief, or paging the tree returns opaque ids and the
   // agent is pushed straight back into the whole-fold peek the diet exists to avoid.
-  const tree = (await toolStatus(lean, "active_context", "tree")).details.tree;
+  // The tree is read through its bounded pages, which is how an agent now reads it.
+  const tree = (await pagedStatusRows(lean, "tree")).rows;
   const treeBriefs = new Map(tree.map((row) => [row.id, row.brief]));
   assert(pagedFolds.folds.every((row) => typeof row.brief === "string" && row.brief.length >= 1),
     "A paged fold row carries no brief");
@@ -3551,9 +3629,9 @@ async function gateStatusIndexDiet() {
 
   return {
     folds: leanStatus.totalFolds,
-    fatStatusBytes: bytesOf(fatStatus),
-    dietStatusBytes: bytesOf(leanStatus),
-    savedBytes: bytesOf(fatStatus) - bytesOf(leanStatus),
+    pagedStatusBytes: Buffer.byteLength(pagedFoldsResult.content[0].text, "utf8"),
+    dietStatusBytes: Buffer.byteLength(leanResult.content[0].text, "utf8"),
+    statusByteCap: context.CONTEXT_STATUS_RESPONSE_BYTES,
     pagedBriefs: pagedFolds.folds.length,
     topFolds: leanStatus.topFolds.length,
     sourceMapEntries: leanStatus.sourceMap.length,
@@ -5578,8 +5656,9 @@ async function gateCurationLastCall() {
   assert(materialized(runtime).folds.length > foldsAtAnnounce);
   assert.equal(status.curation.gate, null, "The gate stayed open after proceeding");
 
-  // Every gate event is adjudicable from the durable stream.
-  const events = status.instrumentation.events.filter((event) => event.kind === "context.gate");
+  // Every gate event is adjudicable from the durable stream. Restated at iteration 8:
+  // read the durable stream directly; the status page carries a bounded tail of it.
+  const events = contextEvents(runtime).filter((event) => event.kind === "context.gate");
   assert(events.some((event) => event.gate_event === "opened"));
   const proceeded = events.find((event) => event.gate_event === "proceeded");
   assert(proceeded, "No gate event recorded the commit proceeding");
@@ -5648,8 +5727,9 @@ async function gateContextReceipts() {
   assert(live.length >= 1 && live.length <= context.MAX_CONTEXT_RECEIPTS);
 
   // And it is adjudicable: every delivery lands in the durable event stream.
-  const events = (await toolStatus(runtime)).details.automatic.instrumentation.events
-    .filter((event) => event.kind === "context.receipt");
+  // Restated at iteration 8: read the durable stream directly; the status page
+  // carries a bounded tail of it.
+  const events = contextEvents(runtime).filter((event) => event.kind === "context.receipt");
   assert(events.length >= 1, "No receipt delivery reached the durable stream");
   assert(typeof events.at(-1).receipt_kind === "string");
   assert(runtime.appended.some((entry) =>
@@ -5805,7 +5885,9 @@ async function gateAutoSnapAndCorrections() {
   });
   assert(context.foldPlaceholder(target, materialized(runtime), snapshotNow).includes("Corrected:"),
     "The placeholder did not carry the corrected brief");
-  const paged = (await toolStatus(runtime, "active_context", "folds")).details.folds;
+  // Restated at iteration 8: the row is found by walking the bounded pages, which is
+  // how an agent reaches any fold row now that one page never exceeds the byte cap.
+  const paged = (await pagedStatusRows(runtime, "folds")).rows;
   assert(paged.find((row) => row.id === target.id).brief.startsWith("Corrected:"));
   await assert.rejects(
     () => toolCall(runtime, { action: "rebrief", id: target.id, brief: "  " }),
@@ -7327,6 +7409,425 @@ async function gateBatchedMarkCopy() {
   return { description: true, reminder: true, notice: true, activation: true };
 }
 
+/**
+ * The rep-19 window shape: paged active_context status calls whose results pile up
+ * as stale mass, followed by fresh work. Each status call carries the detail
+ * argument the runtime's own paging block advertises.
+ */
+function makeStatusResultFixture({
+  sessionId = "status-mass",
+  statusTurns = 6,
+  statusChars = 40_000,
+  trailingTurns = 4,
+  trailingChars = 0,
+  contextWindow = 100_000,
+  policy = {},
+} = {}) {
+  const entries = [];
+  const messages = [];
+  const statusResultIds = [];
+  let parentId = null;
+  let sequence = 0;
+  const add = (message) => {
+    const id = `${sessionId}-entry-${String(++sequence).padStart(3, "0")}`;
+    entries.push({ type: "message", id, parentId, message });
+    messages.push(message);
+    parentId = id;
+    return id;
+  };
+  for (let turn = 0; turn < statusTurns; turn += 1) {
+    add({
+      role: "user",
+      content: [{ type: "text", text: `Page ${turn}: check the context state.` }],
+      timestamp: sequence,
+    });
+    add({
+      role: "assistant",
+      content: [{
+        type: "toolCall",
+        id: `status-${turn}`,
+        name: "active_context",
+        arguments: { action: "status", detail: "folds", offset: turn * 40, limit: 40 },
+      }],
+      stopReason: "toolUse",
+      timestamp: sequence,
+    });
+    statusResultIds.push(add({
+      role: "toolResult",
+      toolCallId: `status-${turn}`,
+      toolName: "active_context",
+      content: [{ type: "text", text: `Status page ${turn}: ${"s".repeat(statusChars)}` }],
+      isError: false,
+      timestamp: sequence,
+    }));
+    add({
+      role: "assistant",
+      content: [{ type: "text", text: `Reviewed status page ${turn}.` }],
+      stopReason: "stop",
+      timestamp: sequence,
+    });
+  }
+  for (let turn = 0; turn < trailingTurns; turn += 1) {
+    add({
+      role: "user",
+      content: [{ type: "text", text: `Task ${turn}: continue the work.${" t".repeat(trailingChars)}` }],
+      timestamp: sequence,
+    });
+    add({
+      role: "assistant",
+      content: [{ type: "text", text: `Completed task ${turn}.` }],
+      stopReason: "stop",
+      timestamp: sequence,
+    });
+  }
+  const snapshot = context.mapActiveContext({
+    sessionId,
+    eventMessages: messages,
+    contextEntries: entries,
+    policy,
+    contextWindow,
+  });
+  return { sessionId, entries, messages, snapshot, statusResultIds, contextWindow };
+}
+
+async function gateStatusPagesAreBounded() {
+  assert.equal(context.CONTEXT_STATUS_RESPONSE_BYTES, 24_000);
+
+  // A session with many folds, so every listing variant has real mass to page.
+  const built = makeFixture({ turns: 24, resultChars: 12_000, contextWindow: 100_000 });
+  const runtime = makeRuntime(built, { foldScheduling: "epoch" });
+  await startRuntime(runtime);
+  for (const tokens of [76_000, 80_000, 84_000, 88_000, 92_000]) {
+    await measure(runtime, tokens, 100_000);
+    await project(runtime);
+  }
+  const allFoldIds = materialized(runtime).folds.map((fold) => fold.id).sort();
+  assert(allFoldIds.length >= 10, "The fixture built too few folds to force paging");
+
+  // Every detail variant fits the cap, and the marker appears on every truncated page.
+  const measured = {};
+  for (const detail of [undefined, "fold_candidates", "tree", "folds", "objects"]) {
+    const result = await toolStatus(runtime, "active_context", detail);
+    const delivered = Buffer.byteLength(result.content[0].text, "utf8");
+    assert(delivered <= context.CONTEXT_STATUS_RESPONSE_BYTES,
+      `status detail=${detail ?? "default"} delivered ${delivered} bytes over the cap`);
+    assert.equal(typeof result.details.continuation, "string",
+      `status detail=${detail ?? "default"} truncated without a continuation marker`);
+    assert.equal(result.details.continuation.includes("\n"), false,
+      "The continuation marker is not one line");
+    measured[detail ?? "default"] = delivered;
+  }
+
+  // Paging through the continuation offsets yields every fold id exactly once, for
+  // both fold listings; the object listing pages completely the same way.
+  for (const detail of ["folds", "tree"]) {
+    const { rows, pages } = await pagedStatusRows(runtime, detail);
+    assert(pages.length >= 2, `detail=${detail} never needed a second page`);
+    assert(pages.every((page) => page.bytes <= context.CONTEXT_STATUS_RESPONSE_BYTES));
+    const ids = rows.map((row) => row.id);
+    assert.equal(ids.length, new Set(ids).size, `detail=${detail} paged a fold id twice`);
+    assert.deepEqual([...ids].sort(), allFoldIds, `detail=${detail} paging lost a fold id`);
+  }
+  const objectsWalk = await pagedStatusRows(runtime, "objects");
+  const objectIds = objectsWalk.rows.map((row) => row.id);
+  assert.equal(objectIds.length, new Set(objectIds).size, "objects paging repeated a row");
+  assert.equal(objectIds.length, objectsWalk.pages[0].payload.totalObjects,
+    "objects paging lost a row");
+
+  // The marker appears EXACTLY when truncation happened: a small session's page is
+  // whole and unmarked.
+  const small = makeRuntime(makeFixture({ turns: 2, resultChars: 400, contextWindow: 100_000 }));
+  await startRuntime(small);
+  for (const detail of [undefined, "fold_candidates", "tree", "folds", "objects"]) {
+    const result = await toolStatus(small, "active_context", detail);
+    assert(Buffer.byteLength(result.content[0].text, "utf8") <= context.CONTEXT_STATUS_RESPONSE_BYTES);
+    assert.equal(result.details.continuation, undefined,
+      `An untruncated status page (detail=${detail ?? "default"}) carried a continuation marker`);
+  }
+
+  // The diet paging block says pages are bounded, without a question or an em dash.
+  const diet = (await toolStatus(runtime)).details;
+  assert.equal(diet.paging.note, "Results are delivered in bounded pages.");
+  assert.equal(/—/.test(JSON.stringify(diet)), false, "An em dash reached the status surface");
+
+  return {
+    cap: context.CONTEXT_STATUS_RESPONSE_BYTES,
+    folds: allFoldIds.length,
+    pageBytes: measured,
+    foldPages: (await pagedStatusRows(runtime, "folds")).pages.length,
+    treePages: (await pagedStatusRows(runtime, "tree")).pages.length,
+  };
+}
+
+async function gateStatusResultsAreLadderFood() {
+  // The classifier's allowlist, pinned. Before this build the status surface was
+  // ['action', 'offset', 'limit']: the exact paged call the runtime's own paging
+  // block advertises carries detail, so every paged status batch classified unsafe
+  // and no automatic rung could reclaim it. Rep 19 died with six such results
+  // holding 66% of a 383,616-token budget.
+  assert.deepEqual(
+    {
+      status: [...context.READ_ONLY_CONTEXT_ACTION_ARGUMENTS.status],
+      peek: [...context.READ_ONLY_CONTEXT_ACTION_ARGUMENTS.peek],
+    },
+    { status: ["action", "detail", "offset", "limit"], peek: ["action", "id"] },
+  );
+  const pagedShape = { action: "status", detail: "folds", offset: 40, limit: 40 };
+  assert.equal(context.isReadOnlyContextTool("active_context", pagedShape), true,
+    "The advertised paged status call still classifies unsafe");
+  assert.equal(context.isReadOnlyContextTool("active_context", { action: "status", detail: "tree" }), true);
+  // Classification is allowlist-driven: one argument outside the surface and the
+  // batch is unsafe, which is exactly how the detail-carrying shape was rejected
+  // before 'detail' joined the list above.
+  assert.equal(context.isReadOnlyContextTool("active_context", { ...pagedShape, verbose: true }), false);
+
+  // The batch scanner agrees end to end: the status-with-detail batch is validated.
+  // The trailing turns carry real mass so the fresh-byte tail ends inside them and
+  // the status result is genuinely stale.
+  const built = makeStatusResultFixture({
+    statusTurns: 1,
+    statusChars: 30_000,
+    trailingTurns: 4,
+    trailingChars: 4_000,
+    contextWindow: 100_000,
+  });
+  const scanned = context.scanTurnToolBatches(built.messages, { start: 0, end: 4 });
+  assert(scanned && scanned.calls.length === 1 && scanned.unsafeIndices.size === 0,
+    "The status-with-detail batch did not validate read-only-safe");
+
+  // Once stale, the automatic tool rung selects and folds it.
+  const state = context.emptyActiveContextState(built.sessionId);
+  const candidate = context.selectAutomaticToolForRung(built.snapshot, state, 0.80);
+  assert(candidate, "The stale status batch was not selected by the tool rung");
+  assert.equal(candidate.kind, "tool-result");
+  assert.deepEqual(candidate.sourceRefs.map((ref) => ref.entryId), [built.statusResultIds[0]]);
+  const committed = await commitCandidate(state, built.snapshot, candidate);
+  const fold = committed.state.folds.at(-1);
+  assert.equal(fold.kind, "tool-result");
+  assert.deepEqual(fold.parts.map((part) => part.ref.entryId), [built.statusResultIds[0]]);
+  const before = bytesOf(context.projectActiveContext(built.snapshot, state));
+  const after = bytesOf(context.projectActiveContext(built.snapshot, committed.state));
+  assert(before - after >= 30_000 * 0.9,
+    `Folding the status result freed only ${before - after} bytes`);
+
+  // And in the running ladder: the rung folds it without any agent action.
+  const runtime = makeRuntime(makeStatusResultFixture({
+    statusTurns: 1,
+    statusChars: 30_000,
+    trailingTurns: 4,
+    trailingChars: 4_000,
+    contextWindow: 100_000,
+  }));
+  await startRuntime(runtime);
+  await measure(runtime, 80_000, 100_000);
+  await project(runtime);
+  await settle();
+  const folds = materialized(runtime).folds;
+  const statusFold = folds.find((item) => item.kind === "tool-result" &&
+    item.parts.some((part) => part.kind === "raw" && part.ref.entryId === runtime.built.statusResultIds[0]));
+  assert(statusFold, "The running ladder never folded the stale status result");
+  assert(runtime.appended.some((entry) =>
+    entry.customType === "pi-fold-active-context-fold-record" && entry.data.foldId === statusFold.id),
+  "No durable fold record named the status fold");
+
+  return {
+    statusArguments: [...context.READ_ONLY_CONTEXT_ACTION_ARGUMENTS.status],
+    scannerValidated: true,
+    rungSelected: true,
+    freedBytes: before - after,
+    ladderFoldId: statusFold.id,
+  };
+}
+
+/**
+ * Turns whose tool is NOT read-only, so the chapter encoding must inline the whole
+ * result: this is the shape whose closed unit can exceed maxChapterChars, exactly
+ * how rep 19's status units encoded to 146k-331k chars before this build.
+ */
+function makeOpaqueToolFixture({ sessionId, resultSizes, contextWindow = 400_000 }) {
+  const entries = [];
+  const messages = [];
+  let parentId = null;
+  let sequence = 0;
+  const add = (message) => {
+    const id = `${sessionId}-entry-${String(++sequence).padStart(3, "0")}`;
+    entries.push({ type: "message", id, parentId, message });
+    messages.push(message);
+    parentId = id;
+    return id;
+  };
+  resultSizes.forEach((size, turn) => {
+    add({
+      role: "user",
+      content: [{ type: "text", text: `Step ${turn}: run the build stage.` }],
+      timestamp: sequence,
+    });
+    add({
+      role: "assistant",
+      content: [{
+        type: "toolCall", id: `bash-${turn}`, name: "bash", arguments: { command: `stage-${turn}` },
+      }],
+      stopReason: "toolUse",
+      timestamp: sequence,
+    });
+    add({
+      role: "toolResult",
+      toolCallId: `bash-${turn}`,
+      toolName: "bash",
+      content: [{ type: "text", text: `Stage ${turn} log: ${"b".repeat(size)}` }],
+      isError: false,
+      timestamp: sequence,
+    });
+    add({
+      role: "assistant",
+      content: [{ type: "text", text: `Stage ${turn} done.` }],
+      stopReason: "stop",
+      timestamp: sequence,
+    });
+  });
+  for (let turn = 0; turn < 4; turn += 1) {
+    add({
+      role: "user",
+      content: [{ type: "text", text: `Task ${turn}: continue.${" t".repeat(4_000)}` }],
+      timestamp: sequence,
+    });
+    add({
+      role: "assistant",
+      content: [{ type: "text", text: `Completed task ${turn}.` }],
+      stopReason: "stop",
+      timestamp: sequence,
+    });
+  }
+  const snapshot = context.mapActiveContext({
+    sessionId, eventMessages: messages, contextEntries: entries, policy: {}, contextWindow,
+  });
+  return { sessionId, entries, messages, snapshot };
+}
+
+async function gateNoPermanentlyUnfoldableUnit() {
+  // One closed unit bigger than the whole chapter cap. Before this build the
+  // selector broke on the cap BEFORE its single-unit acceptance, so the biggest
+  // span in the window was exactly the one thing no automatic rung could reclaim.
+  const giant = makeOpaqueToolFixture({ sessionId: "giant-unit", resultSizes: [140_000] });
+  assert.equal(giant.snapshot.policy.maxChapterChars, 128_000);
+  const units = context.chapterUnits(giant.snapshot);
+  const state = context.emptyActiveContextState(giant.sessionId);
+  const candidate = context.selectAutomaticChapter(giant.snapshot, state);
+  assert(candidate, "The oversized unit left the chapter rung with nothing to select");
+  const encoded = context.encodedFoldSource(giant.snapshot, state, candidate.parts, "chapter");
+  assert(Buffer.byteLength(encoded, "utf8") > giant.snapshot.policy.maxChapterChars,
+    "The fixture unit is not actually above the chapter cap");
+  // A single unit, exactly: every source ref lies inside one closed unit's range.
+  const indices = candidate.sourceRefs.map((ref) =>
+    giant.snapshot.mapped.findIndex((item) => item.ref?.entryId === ref.entryId));
+  const unit = units.find((item) => indices.every((index) =>
+    index >= item.start && index < item.end));
+  assert(unit, "The oversized candidate spans more than one closed unit");
+  // No interior boundary exists, so the splitter returns it whole and it folds.
+  assert.equal(context.splitCandidateBySize(giant.snapshot, state, candidate).length, 1);
+  const committed = await commitCandidate(state, giant.snapshot, candidate);
+  assert.equal(committed.state.folds.length, 1);
+  assert.equal(committed.state.folds[0].kind, "chapter");
+  const before = bytesOf(context.projectActiveContext(giant.snapshot, state));
+  const after = bytesOf(context.projectActiveContext(giant.snapshot, committed.state));
+  assert(before - after >= 140_000 * 0.9,
+    `Folding the oversized unit freed only ${before - after} bytes`);
+
+  // Composition keeps its caps: over inline units the selector still builds
+  // multi-unit chapters, and a composed chapter never exceeds the bite-size bound,
+  // let alone maxChapterChars. Only the single closed unit may exceed them.
+  const multi = makeOpaqueToolFixture({
+    sessionId: "multi-unit",
+    resultSizes: [5_000, 5_000, 5_000, 5_000],
+  });
+  const multiState = context.emptyActiveContextState(multi.sessionId);
+  const multiCandidate = context.selectAutomaticChapter(multi.snapshot, multiState);
+  assert(multiCandidate, "The multi-unit fixture selected nothing");
+  const multiEncoded = context.encodedFoldSource(
+    multi.snapshot, multiState, multiCandidate.parts, "chapter",
+  );
+  assert(multiCandidate.sourceRefs.length > candidate.sourceRefs.length,
+    "The cap exception collapsed ordinary composition to single units");
+  assert(Buffer.byteLength(multiEncoded, "utf8") <= context.MAX_FOLD_SPAN_CHARS,
+    "A composed multi-unit chapter exceeded the bite-size bound");
+  assert(Buffer.byteLength(multiEncoded, "utf8") <= multi.snapshot.policy.maxChapterChars,
+    "A composed multi-unit chapter exceeded maxChapterChars");
+  const multiIndices = multiCandidate.sourceRefs.map((ref) =>
+    multi.snapshot.mapped.findIndex((item) => item.ref?.entryId === ref.entryId));
+  const multiUnits = context.chapterUnits(multi.snapshot).filter((item) =>
+    multiIndices.some((index) => index >= item.start && index < item.end));
+  assert(multiUnits.length >= 2, "The cap check collapsed composition to single units");
+
+  return {
+    maxChapterChars: giant.snapshot.policy.maxChapterChars,
+    oversizedUnitBytes: Buffer.byteLength(encoded, "utf8"),
+    freedBytes: before - after,
+    multiUnitChapterBytes: Buffer.byteLength(multiEncoded, "utf8"),
+    multiUnitCount: multiUnits.length,
+  };
+}
+
+async function gateRep19ShapeResolves() {
+  // The death pattern, replayed at scale: six large stale paged-status results
+  // holding about two thirds of the serving budget (rep 19: ~254k of 383,616
+  // tokens) at high occupancy, then a window-pressure commit. In rep 19 this mass
+  // was immortal and the runtime aborted the request.
+  const built = makeStatusResultFixture({
+    statusTurns: 6,
+    statusChars: 41_000,
+    trailingTurns: 4,
+    trailingChars: 4_500,
+    contextWindow: 100_000,
+  });
+  const runtime = makeRuntime(built, { foldScheduling: "epoch" });
+  await startRuntime(runtime);
+  const committed = await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  assert(committed.fired, "The window-pressure commit never fired");
+  assert.equal(committed.commit.trigger, "window-pressure");
+
+  // The eligible share is an order of magnitude over the reclaim floor: the status
+  // mass is ladder food now, not immortal weight.
+  assert.equal(committed.commit.reclaim_floor_share, context.COMMIT_RECLAIM_FLOOR_SHARE);
+  assert(committed.commit.eligible_freed_share >= 10 * context.COMMIT_RECLAIM_FLOOR_SHARE,
+    `Eligible share ${committed.commit.eligible_freed_share} is not an order of magnitude over the floor`);
+
+  // The commit reclaims the status mass itself, oldest first, until the thermostat's
+  // freeing target is met; the remainder stays eligible for the next event rather
+  // than immortal, which is the rep-19 inversion.
+  const folded = new Set(materialized(runtime).folds.flatMap((fold) =>
+    fold.parts.flatMap((part) => part.kind === "raw" ? [part.ref.entryId] : [])));
+  const foldedStatusResults = built.statusResultIds.filter((id) => folded.has(id));
+  assert(foldedStatusResults.length >= 4,
+    `Only ${foldedStatusResults.length} of ${built.statusResultIds.length} status results folded`);
+  assert(committed.freedTokens >= 50_000,
+    `The commit freed only ${committed.freedTokens} tokens of ~96k of status mass`);
+
+  // The projection lands under budget without recourse to the recovery lane.
+  await project(runtime);
+  await settle();
+  const automatic = (await toolStatus(runtime)).details.automatic;
+  assert(typeof automatic.projectionEstimatedTokens === "number" &&
+    automatic.projectionEstimatedTokens < automatic.projectionBudgetTokens,
+    `The projection still estimates ${automatic.projectionEstimatedTokens} tokens against ` +
+    `a ${automatic.projectionBudgetTokens}-token budget`);
+  assert.equal(contextEvents(runtime).filter((event) => event.kind === "context.recovery").length, 0,
+    "The reclaim needed the recovery lane");
+  assert.equal(automatic.recovery.attempts, 0);
+  assert.equal(runtime.aborts, 0, "A request was aborted at the fence");
+
+  return {
+    trigger: committed.commit.trigger,
+    eligibleFreedShare: committed.commit.eligible_freed_share,
+    reclaimFloorShare: context.COMMIT_RECLAIM_FLOOR_SHARE,
+    statusResultsFolded: foldedStatusResults.length,
+    statusResultsInWindow: built.statusResultIds.length,
+    freedTokens: committed.freedTokens,
+    projectionEstimatedTokens: automatic.projectionEstimatedTokens,
+    projectionBudgetTokens: automatic.projectionBudgetTokens,
+    recoveryAttempts: 0,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -7407,6 +7908,10 @@ const gates = [
   [78, "Frozen surface & invisible marks", gateFrozenSurface],
   [79, "Mark response awareness", gateMarkResponseAwareness],
   [80, "Batched-mark copy", gateBatchedMarkCopy],
+  [81, "Status pages are bounded", gateStatusPagesAreBounded],
+  [82, "Status results are ladder food", gateStatusResultsAreLadderFood],
+  [83, "No permanently unfoldable unit", gateNoPermanentlyUnfoldableUnit],
+  [84, "The rep-19 shape resolves", gateRep19ShapeResolves],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

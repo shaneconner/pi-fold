@@ -26,6 +26,7 @@ import {
 import {
   activeContextStatus,
   automaticPreparationId,
+  boundStatusPayload,
   commitPreparedFold,
   descendantIds,
   encodedFoldSource,
@@ -3601,7 +3602,7 @@ export function registerActiveContext(pi: any, options: {
       // stops riding along on every request that wanted a count.
       const paged = detail === "folds" || detail === "objects";
       const accounting = markAccounting(snapshot, persistence.state);
-      return toolPayload({
+      return toolPayload(boundStatusPayload({
         ...activeContextStatus(
           snapshot,
           persistence.state,
@@ -3750,8 +3751,8 @@ export function registerActiveContext(pi: any, options: {
             failedPreparationIds: ladder.failedPreparations,
           }),
         } : {}),
-        ...(detail === "tree" ? { tree: foldTreeDetail(snapshot, persistence.state) } : {}),
-      });
+        ...(detail === "tree" ? { tree: foldTreeDetail(snapshot, persistence.state).slice(statusOffset) } : {}),
+      }, typeof detail === "string" ? detail : null, statusOffset));
     }
     // Peeking or expanding a suggested fold is the accept signal. Peek stays
     // ephemeral: the mark rides the next persisted state, never an entry of its own.
