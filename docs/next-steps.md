@@ -45,6 +45,22 @@ Expose a small set of window thresholds that either the user or the agent can se
   changing underneath it, which likely means the marks live outside the window and land at a fold
   event.
 
+## Fold interiors
+
+- **Auto-fold what a folded span contains.** (Shane, 2026-08-08.) When a span folds, the tool
+  results and any unpinned folds inside it should collapse too, so that expanding the outer fold
+  one level returns structure (briefs of the units inside) rather than every raw byte the span
+  ever held. Expand is already outside-in one level at a time; this makes the levels real at fold
+  time instead of only at consolidation time. The natural default is tool results always, since
+  they are the mass (see the peek-mass finding), with sub-span briefs only where a unit boundary
+  already exists. Marking gives this for free: when a span is marked, mark its interior tool
+  results too, and the whole structure lands in the same commit, so it costs zero extra rewrites.
+  Not an argument surface (Shane, 2026-08-08): every fold already carries an ID, and peek on an
+  ID returns just that fold's source as a tool result at any depth, which stays the deep-read
+  path. Expand stays limited to briefs present in the current window. The open design question
+  is deep expand in place: expanding a nested fold's ID directly at its own depth, with
+  everything above it staying folded. Needs thinking out before it becomes a build.
+
 ## Measurement
 
 - **A new experiment design for transcript recall.** The current probes ask about repository facts,
