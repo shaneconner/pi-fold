@@ -1346,7 +1346,6 @@ export function peekFoldSource(input: {
     : null;
   const truncated = view.omittedBytes > 0 || nextOffset !== null;
   const children = childFoldIds(fold);
-  const toolName = input.toolName ?? "active_context";
   // The index view: every nested fold's brief in FULL. A brief is the navigable unit,
   // so truncating it is the one economy that costs the read its purpose.
   const index = descendantIndexRows(fold, input.state);

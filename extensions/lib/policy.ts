@@ -166,10 +166,17 @@ export const ESTIMATED_PLACEHOLDER_OVERHEAD_BYTES = 240;
 // deployment fact (`providerTotalWindow`) or an experiment condition (`guidance`,
 // `foldScheduling`, `foldPeekResults`, `guidedCuration`).
 //
-// Sealed unconditional: ephemeral peek (with the per-call `ephemeral` override),
-// admission control, retained pending marks, the eligible-share commit trigger,
-// stage-identified briefs, the current-turn commit guard, the pinned-mass backstop,
-// the status index diet, delivery-counted advisories, and projection instrumentation.
+// Sealed unconditional: admission control, retained pending marks, the eligible-share
+// commit trigger, stage-identified briefs, the current-turn commit guard, the
+// pinned-mass backstop, the status index diet, delivery-counted advisories, and
+// projection instrumentation.
+//
+// NOT sealed, deleted: ephemeral peek and its per-call `ephemeral` override. It rewrote
+// a consumed peek result in place on the theory the edit was tail-local. It is not: the
+// rewrite waits for a later assistant message to exist, by which point the window has
+// grown over it and the edit lands mid-prefix. Rep 22 measured two of them costing 100k
+// fresh tokens. A peek is append-only; the tool-fold rung reclaims the duplicate bytes
+// at the next commit, which is the one moment a rewrite is already being paid for.
 // ---------------------------------------------------------------------------
 
 /**
@@ -189,7 +196,6 @@ export const PEEK_MIN_SLICE_BYTES = 1_024;
 export const STATUS_DIET_SUGGESTIONS = 5;
 
 export const MAX_PROJECTION_HASH_RECORDS = 64;
-export const MAX_PINNED_PEEKS = 64;
 
 // ---------------------------------------------------------------------------
 // Guided curation. The one iteration-4 experiment condition: the two-signal

@@ -3409,7 +3409,6 @@ async function gateTruthfulCapacityAdmission() {
   };
 }
 
-
 async function gateCommitOnThreshold() {
   const runtime = await epochToolRuntime({ turns: 12 });
   await measure(runtime, 78_000, 100_000);
@@ -4010,7 +4009,6 @@ async function gatePinnedMassBackstop() {
     backstopAppliedMarks: epoch.appliedMarks,
   };
 }
-
 
 /**
  * The sealed spine, as a deployment now writes it. Every reliability lever rep 14

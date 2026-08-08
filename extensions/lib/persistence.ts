@@ -149,7 +149,6 @@ export function foldBrief(
   return state.briefs?.[fold.id] ?? fold.brief;
 }
 
-
 export function parsePendingMarks(value: unknown): PendingMark[] {
   const marks = denseOwnArrayValues(value);
   if (!marks || marks.length > MAX_PENDING_MARKS || !marks.every(validPendingMark) ||
