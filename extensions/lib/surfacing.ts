@@ -195,7 +195,7 @@ export function surfacingLog(state: Pick<ActiveContextState, "surfacing">): Surf
 }
 
 /**
- * Property ORDER is load-bearing: the state digest is a stable stringify, so a
+ * Property ORDER matters here: the state digest is a stable stringify, so a
  * `surfacing` key assigned onto a state that did not already carry one would land
  * after `pendingMarks`/`advisory`/`prepared` and replay as digest drift. Rebuild the
  * tail of the record in the same order `parseActiveContextState` produces.

@@ -28,7 +28,7 @@ Everything else follows from one invariant, and it is the reason several otherwi
 
 **So the runtime may move a byte in the window only at a moment it is already rewriting the window**, which is a commit or a fold. Everything else is a pure append at the tail, and an appended byte is never later altered, shortened, removed, or repositioned. Stated plainly: never mutate the window, and never show something and then take it back. The second half is the one that costs features. Anything that displays state and then updates it in place is out, however useful the display was, because updating in place is a mid-prefix write with better manners.
 
-**Marks are free, because a mark moves nothing.** Under `foldScheduling: "epoch"` a `fold` action records a pending mark and returns immediately. The mark lives in durable session state, outside the window; the projection stays byte-identical and the cached prefix survives. The agent can therefore mark as it works, the moment a span stops being load bearing, without weighing each fold against a cache invalidation.
+**Marks are free, because a mark moves nothing.** Under `foldScheduling: "epoch"` a `fold` action records a pending mark and returns immediately. The mark lives in durable session state, outside the window; the projection stays byte-identical and the cached prefix survives. The agent can therefore mark as it works, the moment a span stops mattering, without weighing each fold against a cache invalidation.
 
 **A commit is the one moment bytes move, and every accumulated decision lands at once.** It goes through the same preparation and commit machinery an immediate fold uses, so a committed mark and an immediate fold produce the identical fold record. Committing is the runtime's call, not a verb the agent can spend: measured 2026-08-07, an agent given the verb called it twice and the runtime correctly held it both times, which is surface without function.
 
@@ -90,7 +90,7 @@ There is one run per arm, and native did not finish: it ended its turn at stage 
 
 **Where the cost numbers come from.** Cost is Pi's own per-request ledger accounting, not a rate card chosen for the writeup. Every billed record's cost equals that record's own usage priced at the tier Pi applied: base rates of $5.00/M input, $0.50/M cache read and $30.00/M output, and a long-context tier of $10.00/M, $1.00/M and $45.00/M on any request whose context exceeds the model's 272,000-token window. That reproduces the ledger to the cent on both arms, including pi-fold's complete-run total of $13.89. Reasoning tokens sit inside output and are not billed separately. Native's three compaction summarizations are themselves billed calls, $0.58 at stage 56 and $0.54 on the complete run.
 
-**Caveats, because they are load bearing.**
+**Caveats, because the numbers rest on them.**
 
 - **Fresh input is essentially identical.** 0.95x at stage 56 and 1.06x on the complete pairing: neither runtime consistently reads less new material. The 6.4 million token gap at stage 56 is re-sent accumulated context, 6.29 million of it cache read alone, not a difference in how much material was consumed.
 - **No wall-clock claim on the complete pairing.** pi-fold was 5.6% slower there, 34.2 minutes against 32.4. The wall-clock win belongs to the stage-56 pairing only.

@@ -77,7 +77,7 @@ export function pendingMarks(state: Pick<ActiveContextState, "pendingMarks">): P
 }
 
 /**
- * Property ORDER is load-bearing: the state digest is a stable stringify, so an
+ * Property ORDER matters here: the state digest is a stable stringify, so an
  * appended key would replay as digest drift. Rebuild the tail of the record in the
  * same order `parseActiveContextState` produces.
  */

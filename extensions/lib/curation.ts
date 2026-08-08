@@ -272,7 +272,7 @@ export function advanceCurationGate(input: {
 /**
  * The last-call notice.
  *
- * Shape rule, load-bearing: operational status plus available actions, with continuing
+ * Shape rule, chosen deliberately: operational status plus available actions, with continuing
  * work as the stated default. A message shaped like a question inviting a chat-style
  * reply can make a single-turn agent emit a final answer and end its own run, so this
  * never asks anything and never implies a reply is expected.

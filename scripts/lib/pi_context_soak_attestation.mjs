@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 /**
  * The launch identity, read from the password database rather than from $HOME.
  *
- * This is deliberate and load-bearing. The sanitized-environment check below asserts that
+ * This is deliberate rather than an oversight. The sanitized-environment check below asserts that
  * HOME is pinned to an expected value; deriving that expectation from process.env.HOME
  * would compare the variable under test against itself and assert nothing at all. userInfo()
  * reads the passwd entry for the real uid, so the pin still means what it says on any
