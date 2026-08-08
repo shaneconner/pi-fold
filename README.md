@@ -2,9 +2,11 @@
 
 Agent-governed lossless context folding for Pi. A session folds its own transcript instead of losing it: the stale end collapses into short briefs while the exact originals stay on disk, addressed and verified by SHA-256, one tool call away.
 
-![pi-fold folding a session in place, expanding a brief back to its exact messages, and collapsing it again](https://raw.githubusercontent.com/shaneconner/pi-fold/main/media/fold-demo.gif)
+The full write-up, with interactive versions of every mechanism on this page and the complete measurement story, is at [shaneconner.com/projects/pi-fold](https://shaneconner.com/projects/pi-fold/).
 
-*The mechanism, drawn. A transcript grows until occupancy crosses the window budget; a fold lands in place, six turns collapsing into one brief with older messages still open above it; the brief opens and those six messages come back from disk byte for byte, with the window the size it was a moment ago; the fold closes and the session carries on. The second expansion opens an archive fold holding 21 folds and 126 turns. Illustrative animation, not a screen capture; the measured numbers are further down. A 1.5 MB mp4 of the same clip is at [media/fold-demo.mp4](https://github.com/shaneconner/pi-fold/blob/main/media/fold-demo.mp4).*
+![pi-fold folding a session in place: the agent marks spans as it works, the marks commit together at a fold event, and a mark inside the protected fresh tail is held until it ages out](https://raw.githubusercontent.com/shaneconner/pi-fold/main/media/fold-demo.gif)
+
+*The mechanism, drawn. One session runs as the transcript it is, user messages in cream, the agent's replies in green, tool results a quieter shade of the same green. The agent calls `pi_fold_context mark` on spans it has finished with: each mark outlines the span it names and moves nothing, and the next fold event commits every standing mark in one rewrite, two outlined spans collapsing to two briefs at once while the ladder takes the unmarked stale end on its own. A dotted rule rides over the newest turns, the protected fresh tail: a mark that lands inside it is held at the fold event, so nothing folds out from under the turn still using it, and it commits a few turns later once it has aged out. The exact messages stay on disk, addressed and verified by SHA-256, and expanding a brief brings them back byte for byte. Illustrative animation, not a screen capture; the measured numbers are further down. A 6 MB mp4 of the same clip is at [media/fold-demo.mp4](https://github.com/shaneconner/pi-fold/blob/main/media/fold-demo.mp4).*
 
 ## Install
 
@@ -42,7 +44,9 @@ Folding keeps the turn. Occupancy crosses a threshold, spans fold in place, and 
 
 ## Measured results
 
-One 64-stage staged assignment over the curl C repository: one Pi session per run, one user message, and the agent calls a `repo_stage` tool 64 times inside a single agentic turn. Model gpt-5.6-sol at xhigh effort, 272,000-token context window. One arm runs pi-fold, the other runs Pi's native compaction.
+The campaign behind these tables is two experiments. The first, here, is pi-fold against Pi's native compaction. The second, further down under [epoch fold scheduling](#epoch-fold-scheduling), is pi-fold against itself with fold scheduling as the only variable.
+
+One 64-stage staged assignment over the curl C repository: one Pi session per run, one user message, and the agent calls a `repo_stage` tool 64 times inside a single agentic turn. Model gpt-5.6-sol at xhigh effort, provider openai-codex. The 272,000-token figure in these tables is the transport's per-request input descriptor, which is what pi-fold budgeted against; the Codex catalog actually serves gpt-5.6 at a 372,000-token cap, which is where the native arm lived, peaking at 369.0k before each compaction. One arm runs pi-fold, the other runs Pi's native compaction.
 
 There is one run per arm, and native did not finish: it ended its turn at stage 56 of 64. That leaves two pairings, and both are reported here rather than the flattering one.
 
@@ -122,7 +126,7 @@ Folding is cheap to decide and expensive to apply, and the expense has nothing t
 
 `foldScheduling: "epoch"` splits folding into the two phases described above: a `fold` action records a free pending mark, `unmark` withdraws a standing decision, and a commit applies every pending mark in one projection rewrite. `"immediate"` remains the default, writing no pending-marks key and leaving existing state digests where they are.
 
-Two runs from the campaign, both on gpt-5.6-luna, same plan, same seed, same configuration with fold scheduling as the only variable, put a number on the difference. Applying folds immediately spent 19,623,502 fresh input tokens across 105 requests at a pooled cache share of 0.119. Recording marks and landing them together spent 3,603,440 across 99 requests at 0.756: a 5.4x reduction in the tokens the provider had to read for the first time, carrying the total from 22,316,589 tokens down to 14,818,833. Epoch was slower in wall clock on that pairing, 33.5 minutes against 26.7, so the trade bought tokens and not time, and it is one run per arm rather than a rate.
+Two runs from the campaign put a number on the difference. This is the second of the two experiments: pi-fold against itself, both runs on gpt-5.6-luna, same plan, same seed, same configuration with fold scheduling as the only variable. It is internally controlled, and its numbers are not comparable across to the gpt-5.6-sol pairings above. Applying folds immediately spent 19,623,502 fresh input tokens across 105 requests at a pooled cache share of 0.119. Recording marks and landing them together spent 3,603,440 across 99 requests at 0.756: a 5.4x reduction in the tokens the provider had to read for the first time, carrying the total from 22,316,589 tokens down to 14,818,833. Epoch was slower in wall clock on that pairing, 33.5 minutes against 26.7, so the trade bought tokens and not time, and it is one run per arm rather than a rate.
 
 The agent is meant to lead here: mark as you work, and let the runtime pick the seam. The ladder is the fallback, exactly as it is for folding itself. Its own rung decisions become marks instead of folds, and it commits the epoch when its two signals agree, occupancy at 80% of the serving budget and enough stale tool mass outside the fresh tail for a commit to have something to work with, or under the pressure backstop. Each automatic commit carries a target: if the agent's marks would free less than a fifth of the window, the ladder tops the epoch up with the stalest unprotected completed tool batches until they do, and the commit result records which marks were the agent's and which were the top-up.
 

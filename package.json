@@ -1,6 +1,6 @@
 {
   "name": "pi-fold",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Lossless, agent-governed context folding for the Pi coding agent: only the oldest context changes; the fresh window stays untouched.",
   "keywords": [
     "pi-package",
