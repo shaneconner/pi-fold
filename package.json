@@ -16,7 +16,10 @@
     "./package.json": "./package.json"
   },
   "private": false,
-  "repository": "https://github.com/shaneconner/pi-fold",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shaneconner/pi-fold.git"
+  },
   "bugs": "https://github.com/shaneconner/pi-fold/issues",
   "homepage": "https://github.com/shaneconner/pi-fold#readme",
   "author": "Shane Conner",
