@@ -10,7 +10,7 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { dirname, join, normalize, relative } from "node:path";
 import {
   RUNTIME_HOME,
   assertSoak,
@@ -19,11 +19,13 @@ import {
   sha256Text,
 } from "./pi_context_soak_attestation.mjs";
 
-// Version 2 (2026-08-09): recall-first probes. Conversation-class probe kinds
-// (stage-fact, stage-binding) with per-stage audit code words, file-line-count
-// retired, wc -l line semantics, whole-checkout symbol uniqueness. Version-1 plans
-// and manifests are a different protocol and do not revalidate under this code.
-export const EXPERIMENT_PROTOCOL_VERSION = 2;
+// Version 3 (2026-08-09): audit traces. Chains over the delivery history (hop
+// alphabet SOF/FIN/INC, forced cycle, no repeated nodes) woven into ordinary stage
+// instructions as labelled steps, each consuming the previous step's recorded value.
+// Version 2 (2026-08-09) added the recall-first conversation probes (stage-fact,
+// stage-binding) with per-stage audit code words. Earlier-version plans and
+// manifests are a different protocol and do not revalidate under this code.
+export const EXPERIMENT_PROTOCOL_VERSION = 3;
 
 // (a) pifold: active-context runtime ON, native auto-compaction OFF.
 // (b) native: pi-fold OFF, Pi native auto-compaction ON.
@@ -132,6 +134,12 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
     ]),
     deliverableEvery: 8,
     revisitEvery: 3,
+    // Audit traces: 4 chains x 6 links, anchored progressively deeper into the run.
+    // The early law guarantees wave 16 has aged links to probe; measured headroom on
+    // the pinned curl corpus is 3-7 links at stage <= 8 across 12 seeds.
+    chainLength: 6,
+    chainStartAfters: Object.freeze([1, 8, 16, 24]),
+    chainEarlyLaw: Object.freeze({ maxStage: 8, minLinks: 3 }),
   }),
   smoke: Object.freeze({
     stageCount: 8,
@@ -152,6 +160,14 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
     ]),
     deliverableEvery: 3,
     revisitEvery: 2,
+    // One chain of 3 links exercises every hop evaluator, the step renderer, and the
+    // chain laws inside an 8-stage run: a broken chain must not first appear in a
+    // 5-hour full run. Roughly half of seeds are unconstructible on the real corpus
+    // (few delivered files to hop between), which the stager absorbs by redrawing
+    // its seed; an explicitly pinned seed still refuses rather than shortening.
+    chainLength: 3,
+    chainStartAfters: Object.freeze([1]),
+    chainEarlyLaw: Object.freeze({ maxStage: 2, minLinks: 1 }),
   }),
 });
 
@@ -460,6 +476,234 @@ export function buildConversationProbes({ stages, probeOrdinal, seed, kinds, use
 }
 
 // ---------------------------------------------------------------------------
+// Audit traces: chains over the DELIVERY HISTORY, woven into ordinary stage
+// instructions as labelled steps. Each step consumes the value the previous step
+// recorded, so the trace is live task state, not an audit artifact. The hop
+// alphabet is frozen: SOF and FIN answers exist only in the transcript (the
+// seeded stage-to-file shuffle is harness-owned and absent from disk); INC has a
+// legal disk path costing one file read, GIVEN the predecessor. The cycle
+// SOF -> FIN -> INC is forced from an SOF anchor step, so 2 of 3 links are
+// unre-derivable at any price and 1 of 3 prices the internal cost gradient.
+// ---------------------------------------------------------------------------
+export const AUDIT_TRACE_IDS = Object.freeze(["trace-a", "trace-b", "trace-c", "trace-d"]);
+export const AUDIT_HOP_CYCLE = Object.freeze(["SOF", "FIN", "INC"]);
+export const AUDIT_INCLUDE_MAX_INDEX = 8;
+// The declared counting rule, exactly as the step text states it: every line whose
+// first non-space characters are #include (whitespace after # allowed) followed by
+// a double-quoted path, in file order, including lines inside #if blocks. curl's
+// lib/ + src/ carry 95 spaced "#  include" lines, so the whitespace allowance is
+// required by the corpus, not a stylistic choice.
+const AUDIT_INCLUDE_PATTERN = /^\s*#\s*include[ \t]+"([^"]+)"/;
+
+export function quotedIncludeSpecs(text) {
+  const specs = [];
+  for (const line of text.split("\n")) {
+    const match = AUDIT_INCLUDE_PATTERN.exec(line);
+    if (match) specs.push(match[1]);
+  }
+  return specs;
+}
+
+// Resolution rule, declared in the step text: dir-relative against the including
+// file first, otherwise the unique file with that basename, otherwise refused
+// (null). The index spans the WHOLE checkout, because that is the universe the
+// agent resolves against when it opens the file.
+export function buildIncludeResolver(paths) {
+  const all = new Set(paths);
+  const byBase = new Map();
+  for (const path of all) {
+    const base = path.split("/").pop();
+    if (!byBase.has(base)) byBase.set(base, []);
+    byBase.get(base).push(path);
+  }
+  return (fromPath, spec) => {
+    const direct = normalize(join(dirname(fromPath), spec)).replaceAll("\\", "/");
+    if (all.has(direct)) return direct;
+    const hits = byBase.get(spec.split("/").pop()) ?? [];
+    return hits.length === 1 ? hits[0] : null;
+  };
+}
+
+export function auditDelivery(stages) {
+  const stageOfPath = new Map();
+  const filesOfStage = new Map();
+  for (const stage of stages) {
+    const paths = stage.files.map((file) => file.path);
+    filesOfStage.set(stage.ordinal, paths);
+    for (const path of paths) if (!stageOfPath.has(path)) stageOfPath.set(path, stage.ordinal);
+  }
+  return { stageOfPath, filesOfStage };
+}
+
+// ONE evaluator. The stager computes expected answers through it at construction
+// and the adjudicator re-evaluates agent hops through it at grading; two
+// implementations would let the instrument disagree with its own ground truth.
+export function evaluateAuditHop({ hop, hopIndex, input, delivery, includeTargets }) {
+  assertExperiment(AUDIT_HOP_CYCLE.includes(hop), `Unknown audit hop ${hop}`);
+  if (hop === "SOF") {
+    const stage = delivery.stageOfPath.get(input);
+    assertExperiment(Number.isSafeInteger(stage), `SOF hop input ${input} was never delivered`);
+    return stage;
+  }
+  if (hop === "FIN") {
+    const files = delivery.filesOfStage.get(input) ?? [];
+    assertExperiment(Number.isSafeInteger(hopIndex) && hopIndex >= 1 && hopIndex <= files.length,
+      `FIN hop needs file ${hopIndex} of stage ${input}`);
+    return files[hopIndex - 1];
+  }
+  const targets = includeTargets(input);
+  assertExperiment(Number.isSafeInteger(hopIndex) && hopIndex >= 1 &&
+    hopIndex <= AUDIT_INCLUDE_MAX_INDEX && typeof targets[hopIndex - 1] === "string",
+  `INC hop needs resolvable quoted include ${hopIndex} of ${input}`);
+  return targets[hopIndex - 1];
+}
+
+export function auditStepId(chainId, index) {
+  return `${chainId}-${String(index).padStart(2, "0")}`;
+}
+
+function ordinalWord(value) {
+  const tens = value % 100;
+  const suffix = tens >= 11 && tens <= 13 ? "th" : ({ 1: "st", 2: "nd", 3: "rd" }[value % 10] ?? "th");
+  return `${value}${suffix}`;
+}
+
+// The step sentence is a pure function of the VISIBLE step fields: it names the
+// previous step's label (or the literal anchor for step 01), never a value, and it
+// declares its counting and resolution rules in full. No "remember", no "you will
+// be asked": the trace is framed as the work itself.
+export function auditStepSentence(step) {
+  const id = auditStepId(step.chainId, step.index);
+  const label = `AUDIT TRACE ${step.chainId}, step ${String(step.index).padStart(2, "0")}:`;
+  const subject = step.index === 1
+    ? `the file ${step.anchor}`
+    : `the file you recorded as ${auditStepId(step.chainId, step.index - 1)}`;
+  if (step.hop === "SOF") {
+    return `${label} which stage of this session delivered ${subject}? ` +
+      `Record it on its own line as \`${id}: <stage number>\`.`;
+  }
+  if (step.hop === "FIN") {
+    return `${label} name the ${ordinalWord(step.hopIndex)} file delivered in the stage you ` +
+      `recorded as ${auditStepId(step.chainId, step.index - 1)}, counting files in the order ` +
+      `that stage delivered them. Record it on its own line as \`${id}: <repository-relative path>\`.`;
+  }
+  return `${label} open ${subject} and name the target of its ` +
+    `${ordinalWord(step.hopIndex)} quoted include. Count every line whose first non-space ` +
+    "characters are `#include` (whitespace after `#` allowed) followed by a double-quoted " +
+    "path, in file order, including lines inside `#if` blocks. Give the target " +
+    "repository-relative: resolve it against the including file's directory first, and " +
+    "otherwise as the unique file in the checkout with that basename. " +
+    `Record it on its own line as \`${id}: <repository-relative path>\`.`;
+}
+
+// Node keys are typed so a path can never collide with a stage ordinal.
+const fileNode = (path) => `F:${path}`;
+const stageNode = (ordinal) => `S:${ordinal}`;
+
+// Seeded DFS with backtracking. Each step sits at the earliest legal payload stage
+// after the previous step and after every input it needs is knowable; options are
+// ordered by that earliest stage, ties broken by seed. Laws enforced during search:
+// no node repeats inside a chain, no file node is shared between chains, at most
+// one chain step per stage, step stages strictly increase, INC index <= 8, and a
+// non-final INC target must already be delivered (the next SOF hop needs its
+// stage; the final link has no successor, so any resolvable target is legal).
+// Exhaustion REFUSES, never shortens: a variable-length chain would make the wave
+// schedule non-uniform across seeds.
+export function buildAuditTraces({ stages, seed, chainLength, startAfters, earlyLaw, includeTargets }) {
+  assertExperiment(Array.isArray(stages) && stages.length > 0 &&
+    Number.isSafeInteger(chainLength) && chainLength >= 2 &&
+    Array.isArray(startAfters) && startAfters.length >= 1 &&
+    startAfters.length <= AUDIT_TRACE_IDS.length &&
+    typeof includeTargets === "function",
+  "Audit traces need the delivery skeleton, a seed, and an include reader");
+  const delivery = auditDelivery(stages);
+  const payloadOrdinals = stages.filter((stage) => stage.files.length > 0)
+    .map((stage) => stage.ordinal);
+  const bannedFiles = new Set();
+  const occupiedStages = new Set();
+  const chains = [];
+  const nextStage = (after, minStage) =>
+    payloadOrdinals.find((ordinal) => ordinal > after && ordinal >= minStage &&
+      !occupiedStages.has(ordinal)) ?? null;
+  for (const [chainIndex, startAfter] of startAfters.entries()) {
+    const id = AUDIT_TRACE_IDS[chainIndex];
+    const anchorPool = [];
+    for (const stage of stages) {
+      if (stage.ordinal > startAfter) break;
+      for (const file of stage.files) {
+        if (!bannedFiles.has(fileNode(file.path))) anchorPool.push(file.path);
+      }
+    }
+    let built = null;
+    const dfs = (index, value, previousStage, seen, links) => {
+      if (index > chainLength) {
+        built = links.map((link) => ({ ...link }));
+        return true;
+      }
+      const hop = AUDIT_HOP_CYCLE[(index - 1) % 3];
+      const options = [];
+      const consider = (hopIndex, answer, key, minStage) => {
+        if (seen.has(key) || bannedFiles.has(key)) return;
+        options.push({ hopIndex, answer, key, minStage });
+      };
+      if (hop === "SOF") {
+        const answer = delivery.stageOfPath.get(value);
+        if (answer !== undefined) consider(null, answer, stageNode(answer), answer + 1);
+      } else if (hop === "FIN") {
+        (delivery.filesOfStage.get(value) ?? []).forEach((path, position) => {
+          consider(position + 1, path, fileNode(path), value + 1);
+        });
+      } else {
+        const finalLink = index === chainLength;
+        includeTargets(value).slice(0, AUDIT_INCLUDE_MAX_INDEX).forEach((target, position) => {
+          if (typeof target !== "string") return;
+          const deliveredAt = delivery.stageOfPath.get(target);
+          if (!finalLink && deliveredAt === undefined) return;
+          consider(position + 1, target, fileNode(target),
+            deliveredAt === undefined ? 1 : deliveredAt + 1);
+        });
+      }
+      const ranks = seededShuffle(options.map((_, position) => position),
+        `${seed}:${id}:${index}:rank`);
+      for (const [position, option] of options.entries()) option.rank = ranks.indexOf(position);
+      options.sort((left, right) => left.minStage - right.minStage || left.rank - right.rank);
+      for (const option of options) {
+        const stage = nextStage(previousStage, option.minStage);
+        if (stage === null) continue;
+        seen.add(option.key);
+        occupiedStages.add(stage);
+        links.push({
+          index, stage, hop, hopIndex: option.hopIndex, input: value,
+          expectedAnswer: option.answer,
+        });
+        if (dfs(index + 1, option.answer, stage, seen, links)) return true;
+        links.pop();
+        occupiedStages.delete(stage);
+        seen.delete(option.key);
+      }
+      return false;
+    };
+    for (const anchor of seededShuffle(anchorPool, `${seed}:${id}:anchors`)) {
+      const seen = new Set([fileNode(anchor)]);
+      if (dfs(1, anchor, delivery.stageOfPath.get(anchor), seen, [])) break;
+    }
+    assertExperiment(built !== null,
+      `Audit trace ${id} is unconstructible; stage the campaign with a different seed`);
+    chains.push({ id, links: built });
+    bannedFiles.add(fileNode(built[0].input));
+    for (const link of built) {
+      if (typeof link.expectedAnswer === "string") bannedFiles.add(fileNode(link.expectedAnswer));
+    }
+  }
+  const earlyLinks = chains.flatMap((chain) => chain.links)
+    .filter((link) => link.stage <= earlyLaw.maxStage);
+  assertExperiment(earlyLinks.length >= earlyLaw.minLinks,
+    `Only ${earlyLinks.length} chain links landed at stage <= ${earlyLaw.maxStage}, ` +
+    `need ${earlyLaw.minLinks}; stage the campaign with a different seed`);
+  return chains;
+}
+
+// ---------------------------------------------------------------------------
 // Stage plan: DATA, hashed. The hash is pinned into every run manifest.
 // ---------------------------------------------------------------------------
 export function stagePlanSha256(plan) {
@@ -484,6 +728,11 @@ export function stagePayloadText(stage) {
   assertExperiment((stage.probes ?? []).every((probe) =>
     HIDDEN_PROBE_KEYS.every((key) => !Object.hasOwn(probe, key))),
   `Stage ${stage.ordinal} payload still carries probe ground truth`);
+  // A chain step is visible BY DESIGN: it names labels and rules, never values, so
+  // it has no hidden keys to strip. Any key beyond the declared surface is drift.
+  assertExperiment(stage.chainStep == null ||
+    exactKeys(stage.chainStep, ["id", "chainId", "index", "hop", "hopIndex", "anchor"]),
+  `Stage ${stage.ordinal} chain step carries keys beyond the visible surface`);
   const header = [
     `STAGE ${String(stage.ordinal).padStart(2, "0")} / ${stage.kind}`,
     stage.instructions,
@@ -501,7 +750,7 @@ export function stagePayloadText(stage) {
 export function validateStagePlan(plan) {
   assertExperiment(exactKeys(plan, [
     "version", "mode", "repo", "seed", "stageCount", "stageIntervalMs", "watchdogMs",
-    "heartbeatMs", "corpus", "stages", "probeCount", "deliverableCount", "planSha256",
+    "heartbeatMs", "corpus", "stages", "chains", "probeCount", "deliverableCount", "planSha256",
   ]), "Invalid stage plan shape");
   assertExperiment(plan.version === EXPERIMENT_PROTOCOL_VERSION, "Stage plan protocol version drifted");
   assertExperiment(EXPERIMENT_MODES.includes(plan.mode), "Invalid stage plan mode");
@@ -525,7 +774,7 @@ export function validateStagePlan(plan) {
   for (const [index, stage] of plan.stages.entries()) {
     assertExperiment(exactKeys(stage, [
       "ordinal", "kind", "instructions", "files", "probes", "deliverable", "payloadChars",
-      "payloadSha256", "codeWord",
+      "payloadSha256", "codeWord", "chainStep",
     ]) && stage.ordinal === index + 1 &&
       ["read", "revisit", "probe"].includes(stage.kind) &&
       typeof stage.instructions === "string" && stage.instructions.length > 0 &&
@@ -612,6 +861,110 @@ export function validateStagePlan(plan) {
   // so an id repeated across waves would leave the grader joining by position.
   const probeIds = plan.stages.flatMap((stage) => stage.probes.map((probe) => probe.id));
   assertExperiment(new Set(probeIds).size === probeIds.length, "Stage plan repeats a probe id");
+  // -------------------------------------------------------------------------
+  // Audit trace laws. Everything but INC file content is re-derivable from the
+  // plan itself, so a tampered or drifted chain is refused at load; INC content
+  // is verified at construction and re-verified by the gate suite against a
+  // real checkout.
+  // -------------------------------------------------------------------------
+  const delivery = auditDelivery(plan.stages);
+  assertExperiment(Array.isArray(plan.chains) &&
+    plan.chains.length === modePlan.chainStartAfters.length,
+  "Stage plan chain count disagrees with its mode plan");
+  const chainFileNodes = new Set();
+  const chainStageNodes = new Set();
+  const linkByStage = new Map();
+  for (const [chainIndex, chain] of plan.chains.entries()) {
+    assertExperiment(exactKeys(chain, ["id", "links"]) &&
+      chain.id === AUDIT_TRACE_IDS[chainIndex] &&
+      Array.isArray(chain.links) && chain.links.length === modePlan.chainLength,
+    `Invalid audit trace shape at chain ${chainIndex + 1}`);
+    const seenNodes = new Set();
+    const claimNode = (node) => {
+      assertExperiment(!seenNodes.has(node), `${chain.id} repeats node ${node}`);
+      seenNodes.add(node);
+      if (node.startsWith("F:")) {
+        assertExperiment(!chainFileNodes.has(node), `Chains share file node ${node}`);
+        chainFileNodes.add(node);
+      } else {
+        chainStageNodes.add(Number(node.slice(2)));
+      }
+    };
+    let previousStage = 0;
+    for (const [linkIndex, link] of chain.links.entries()) {
+      assertExperiment(exactKeys(link, [
+        "index", "stage", "hop", "hopIndex", "input", "expectedAnswer",
+      ]) && link.index === linkIndex + 1 && link.hop === AUDIT_HOP_CYCLE[linkIndex % 3],
+      `Invalid link shape at ${chain.id} link ${linkIndex + 1}`);
+      const carrier = plan.stages[link.stage - 1];
+      assertExperiment(carrier && carrier.kind !== "probe" && link.stage > previousStage,
+        `${chain.id} link ${link.index} is not on a strictly later payload stage`);
+      previousStage = link.stage;
+      assertExperiment(!linkByStage.has(link.stage),
+        `Stage ${link.stage} carries two chain steps`);
+      linkByStage.set(link.stage, { chainId: chain.id, link });
+      if (linkIndex === 0) {
+        claimNode(fileNode(link.input));
+      } else {
+        assertExperiment(link.input === chain.links[linkIndex - 1].expectedAnswer,
+          `${chain.id} link ${link.index} does not consume the previous answer`);
+      }
+      if (link.hop === "SOF") {
+        assertExperiment(link.hopIndex === null &&
+          delivery.stageOfPath.get(link.input) === link.expectedAnswer &&
+          link.expectedAnswer < link.stage,
+        `${chain.id} link ${link.index} disagrees with the delivery map`);
+        claimNode(stageNode(link.expectedAnswer));
+      } else if (link.hop === "FIN") {
+        const files = delivery.filesOfStage.get(link.input) ?? [];
+        assertExperiment(Number.isSafeInteger(link.hopIndex) && link.hopIndex >= 1 &&
+          files[link.hopIndex - 1] === link.expectedAnswer && link.input < link.stage,
+        `${chain.id} link ${link.index} disagrees with the delivery map`);
+        claimNode(fileNode(link.expectedAnswer));
+      } else {
+        const deliveredAt = delivery.stageOfPath.get(link.expectedAnswer);
+        assertExperiment(Number.isSafeInteger(link.hopIndex) && link.hopIndex >= 1 &&
+          link.hopIndex <= AUDIT_INCLUDE_MAX_INDEX &&
+          typeof link.expectedAnswer === "string" && link.expectedAnswer.length > 0 &&
+          (link.index === modePlan.chainLength ||
+            (Number.isSafeInteger(deliveredAt) && deliveredAt < link.stage)),
+        `${chain.id} link ${link.index} INC target is not knowable at its step stage`);
+        claimNode(fileNode(link.expectedAnswer));
+      }
+    }
+  }
+  // Steps and links are a bijection, and every step sentence is woven into its
+  // carrier's instructions exactly as the renderer would speak it.
+  for (const stage of plan.stages) {
+    const bound = linkByStage.get(stage.ordinal);
+    if (!bound) {
+      assertExperiment(stage.chainStep === null,
+        `Stage ${stage.ordinal} carries a chain step no chain claims`);
+      continue;
+    }
+    const { chainId, link } = bound;
+    assertExperiment(stage.chainStep !== null &&
+      exactKeys(stage.chainStep, ["id", "chainId", "index", "hop", "hopIndex", "anchor"]) &&
+      stage.chainStep.id === auditStepId(chainId, link.index) &&
+      stage.chainStep.chainId === chainId && stage.chainStep.index === link.index &&
+      stage.chainStep.hop === link.hop && stage.chainStep.hopIndex === link.hopIndex &&
+      stage.chainStep.anchor === (link.index === 1 ? link.input : null) &&
+      stage.instructions.includes(auditStepSentence(stage.chainStep)),
+    `Stage ${stage.ordinal} chain step disagrees with ${chainId} link ${link.index}`);
+  }
+  const earlyLinks = plan.chains.flatMap((chain) => chain.links)
+    .filter((link) => link.stage <= modePlan.chainEarlyLaw.maxStage);
+  assertExperiment(earlyLinks.length >= modePlan.chainEarlyLaw.minLinks,
+    "Stage plan has too few early chain links for its first probe wave");
+  // A revisit instruction names an earlier stage together with its full path list,
+  // which would hand over both hop answers for any stage a chain resolves to. The
+  // check binds to the template phrase; the broader anti-leak scan is a gate.
+  for (const stage of plan.stages) {
+    if (stage.kind !== "revisit") continue;
+    const named = /specifically stage (\d+)/.exec(stage.instructions);
+    assertExperiment(named === null || !chainStageNodes.has(Number(named[1])),
+      `Revisit stage ${stage.ordinal} names a chain stage node`);
+  }
   assertExperiment(plan.planSha256 === stagePlanSha256(plan), "Stage plan hash does not cover its own body");
   return plan;
 }
@@ -633,9 +986,21 @@ export function visibleStage(stage) {
   };
 }
 
+// Chain links carry the trace ground truth: the input is the previous step's
+// answer and the expected answer is this step's, so both strip together.
+export const HIDDEN_TRACE_LINK_KEYS = Object.freeze(["input", "expectedAnswer"]);
+
 export function stagePlanForRun(plan) {
   validateStagePlan(plan);
-  return { ...plan, stages: plan.stages.map(visibleStage) };
+  return {
+    ...plan,
+    stages: plan.stages.map(visibleStage),
+    chains: plan.chains.map((chain) => ({
+      ...chain,
+      links: chain.links.map((link) => Object.fromEntries(
+        Object.entries(link).filter(([key]) => !HIDDEN_TRACE_LINK_KEYS.includes(key)))),
+    })),
+  };
 }
 
 // ---------------------------------------------------------------------------

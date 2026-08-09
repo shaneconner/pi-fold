@@ -18,12 +18,17 @@ import {
   EXPERIMENT_PROTOCOL_VERSION,
   EXPERIMENT_REPOS,
   assertExperiment,
+  auditStepId,
+  auditStepSentence,
+  buildAuditTraces,
   buildConversationProbes,
+  buildIncludeResolver,
   buildProbes,
   codeWordSentence,
   corpusManifestSha256,
   extractDefinitions,
   fileFacts,
+  quotedIncludeSpecs,
   seededShuffle,
   stageCodeWords,
   stagePayloadText,
@@ -112,6 +117,10 @@ const MAX_DEFINITION_SCAN_BYTES = 2_000_000;
 function collectCheckoutDefinitions(checkoutDir, codeWords) {
   const codeWordSet = new Set(codeWords);
   const entries = [];
+  // EVERY file votes in include resolution (paths), because that is the universe
+  // the agent resolves a quoted include against; only text files small enough to
+  // scan vote in the symbol index (entries).
+  const paths = [];
   const walk = (directory) => {
     for (const name of readdirSync(directory).sort()) {
       if (name === ".git") continue;
@@ -121,7 +130,9 @@ function collectCheckoutDefinitions(checkoutDir, codeWords) {
         walk(path);
         continue;
       }
-      if (!stat.isFile() || stat.size > MAX_DEFINITION_SCAN_BYTES) continue;
+      if (!stat.isFile()) continue;
+      paths.push(relative(checkoutDir, path));
+      if (stat.size > MAX_DEFINITION_SCAN_BYTES) continue;
       const raw = readFileSync(path);
       if (raw.subarray(0, 8192).includes(0)) continue;
       const text = raw.toString("utf8");
@@ -133,7 +144,7 @@ function collectCheckoutDefinitions(checkoutDir, codeWords) {
   };
   walk(checkoutDir);
   assertExperiment(entries.length > 0, "Pinned checkout yielded no text files for the symbol index");
-  return entries;
+  return { entries, paths };
 }
 
 function readInstruction(stage, files) {
@@ -175,7 +186,7 @@ function deliverableInstruction(ordinal, referencesStages) {
   ].join(" ");
 }
 
-function buildPlan({ repo, mode, seed, facts, codeWords, uniqueIdentifiers }) {
+function buildPlan({ repo, mode, seed, facts, codeWords, uniqueIdentifiers, checkoutPaths }) {
   const modePlan = EXPERIMENT_MODE_PLANS[mode];
   assertExperiment(codeWords.length === modePlan.stageCount,
     "Stage code words must cover every stage");
@@ -184,8 +195,6 @@ function buildPlan({ repo, mode, seed, facts, codeWords, uniqueIdentifiers }) {
     `Pinned corpus has ${eligible.length} eligible files, fewer than ${modePlan.stageCount} stages`);
   const order = seededShuffle(eligible.map((fact) => fact.path), `${seed}:reading-order`);
   const byPath = new Map(eligible.map((fact) => [fact.path, fact]));
-  const usedCarrierStages = new Set();
-  const stages = [];
   let cursor = 0;
   const takeFiles = (targetChars) => {
     const taken = [];
@@ -201,9 +210,66 @@ function buildPlan({ repo, mode, seed, facts, codeWords, uniqueIdentifiers }) {
     return taken;
   };
 
+  // Pass 1: the delivery map alone. File assignment is untouched from protocol v2
+  // (takeFiles runs in the same ordinal order), so the corpus workload is
+  // unchanged; chains need the FINISHED map before any instruction is written.
+  const skeletons = [];
   for (let ordinal = 1; ordinal <= modePlan.stageCount; ordinal += 1) {
     const isProbe = modePlan.probeStages.includes(ordinal);
     const isRevisit = !isProbe && ordinal > modePlan.revisitEvery && ordinal % modePlan.revisitEvery === 0;
+    // The code word rides inside the instructions exactly once; the field is the
+    // ground-truth copy the run-visible plan keeps only via that woven sentence.
+    const codeWord = isProbe ? null : codeWords[ordinal - 1];
+    skeletons.push({
+      ordinal,
+      kind: isProbe ? "probe" : isRevisit ? "revisit" : "read",
+      files: isProbe ? [] : takeFiles(modePlan.payloadTargetChars),
+      codeWord,
+    });
+  }
+
+  // Pass 2: audit traces over the finished map. Quoted includes resolve against
+  // the WHOLE checkout, the same universe the agent resolves against.
+  const resolveInclude = buildIncludeResolver(checkoutPaths);
+  const includeTargetCache = new Map();
+  const includeTargets = (path) => {
+    if (!includeTargetCache.has(path)) {
+      const fact = byPath.get(path);
+      assertExperiment(fact, `Include reader asked for the undelivered file ${path}`);
+      includeTargetCache.set(path,
+        quotedIncludeSpecs(fact.text).map((spec) => resolveInclude(path, spec)));
+    }
+    return includeTargetCache.get(path);
+  };
+  const chains = buildAuditTraces({
+    stages: skeletons,
+    seed,
+    chainLength: modePlan.chainLength,
+    startAfters: modePlan.chainStartAfters,
+    earlyLaw: modePlan.chainEarlyLaw,
+    includeTargets,
+  });
+  const chainStepByStage = new Map();
+  const chainStageNodes = new Set();
+  for (const chain of chains) {
+    for (const link of chain.links) {
+      chainStepByStage.set(link.stage, {
+        id: auditStepId(chain.id, link.index),
+        chainId: chain.id,
+        index: link.index,
+        hop: link.hop,
+        hopIndex: link.hopIndex,
+        anchor: link.index === 1 ? link.input : null,
+      });
+      if (link.hop === "SOF") chainStageNodes.add(link.expectedAnswer);
+    }
+  }
+
+  // Pass 3: instructions, probes, payload hashes.
+  const usedCarrierStages = new Set();
+  const stages = [];
+  for (const { ordinal, kind, files: takenFacts, codeWord } of skeletons) {
+    const isProbe = kind === "probe";
     const deliverable = ordinal % modePlan.deliverableEvery === 0 && !isProbe
       ? {
         id: `deliverable-${String(ordinal).padStart(2, "0")}`,
@@ -218,7 +284,7 @@ function buildPlan({ repo, mode, seed, facts, codeWords, uniqueIdentifiers }) {
       deliverable.instructions = deliverableInstruction(ordinal, deliverable.referencesStages);
     }
 
-    let files = [];
+    const files = takenFacts;
     let instructions;
     let probes = [];
     if (isProbe) {
@@ -254,29 +320,35 @@ function buildPlan({ repo, mode, seed, facts, codeWords, uniqueIdentifiers }) {
         id: `probe-${String(ordinal).padStart(2, "0")}-${String(index + 1).padStart(2, "0")}`,
       }));
       instructions = probeInstruction();
-    } else if (isRevisit) {
-      files = takeFiles(modePlan.payloadTargetChars);
+    } else if (kind === "revisit") {
+      // A revisit names an earlier stage together with its full path list, which
+      // would hand over both hop answers for any stage a chain resolves to, so
+      // chain stage nodes are never revisit targets.
       const earlierStage = stages.find((stage) => stage.files.length > 0 &&
-        stage.ordinal >= Math.max(1, Math.floor(ordinal / 3)) && stage.ordinal < ordinal) ?? stages[0];
+        stage.ordinal >= Math.max(1, Math.floor(ordinal / 3)) && stage.ordinal < ordinal &&
+        !chainStageNodes.has(stage.ordinal)) ??
+        stages.find((stage) => stage.files.length > 0 && !chainStageNodes.has(stage.ordinal));
+      assertExperiment(earlierStage, `Revisit stage ${ordinal} has no chain-free earlier stage`);
       instructions = revisitInstruction({ repoKey: repo.key }, files, {
         ordinal: earlierStage.ordinal,
         paths: earlierStage.files.map((file) => file.path),
       });
     } else {
-      files = takeFiles(modePlan.payloadTargetChars);
       instructions = readInstruction({ repoKey: repo.key }, files);
     }
 
-    // The code word rides inside the instructions exactly once; the field is the
-    // ground-truth copy the run-visible plan keeps only via that woven sentence.
-    const codeWord = isProbe ? null : codeWords[ordinal - 1];
+    // Weave order is a law: base instructions, then the audit step (task state the
+    // next step consumes), then the code word sentence LAST.
+    const chainStep = chainStepByStage.get(ordinal) ?? null;
+    if (chainStep !== null) instructions = `${instructions} ${auditStepSentence(chainStep)}`;
     if (codeWord !== null) instructions = `${instructions} ${codeWordSentence(ordinal, codeWord)}`;
 
     const stage = {
       ordinal,
-      kind: isProbe ? "probe" : isRevisit ? "revisit" : "read",
+      kind,
       instructions,
       codeWord,
+      chainStep,
       files: files.map((fact) => ({
         path: fact.path, sha256: fact.sha256, lines: fact.lines, chars: fact.chars, bytes: fact.bytes,
       })),
@@ -319,6 +391,7 @@ function buildPlan({ repo, mode, seed, facts, codeWords, uniqueIdentifiers }) {
       chars: facts.reduce((total, fact) => total + fact.chars, 0),
     },
     stages,
+    chains,
     probeCount: stages.reduce((total, stage) => total + stage.probes.length, 0),
     deliverableCount: stages.filter((stage) => stage.deliverable).length,
     planSha256: "0".repeat(64),
@@ -336,20 +409,38 @@ try {
   assertExperiment(EXPERIMENT_MODES.includes(mode), "Staging requires --mode smoke|full");
   assertExperiment(Object.hasOwn(EXPERIMENT_REPOS, repoKey), `Unregistered target repo ${repoKey}`);
   const repo = EXPERIMENT_REPOS[repoKey];
-  const seed = argumentValue("--seed", freshChallenge().slice(0, 32));
-  assertExperiment(/^[0-9a-f]{16,64}$/.test(seed), "Staging seed must be 16-64 lowercase hex characters");
+  const seedArgument = argumentValue("--seed");
+  assertExperiment(seedArgument === null || /^[0-9a-f]{16,64}$/.test(seedArgument),
+    "Staging seed must be 16-64 lowercase hex characters");
 
   mkdirSync(campaignDir, { recursive: true, mode: 0o700 });
   const checkoutDir = join(campaignDir, "repo");
   const mirrorDir = join(campaignDir, "repo.git");
   cloneAtCommit(repo, mirrorDir, checkoutDir);
-  const codeWords = stageCodeWords(seed, EXPERIMENT_MODE_PLANS[mode].stageCount);
-  const checkoutDefinitions = collectCheckoutDefinitions(checkoutDir, codeWords);
   const facts = collectSourceFiles(repo, checkoutDir).map((path) => fileFacts(checkoutDir, path));
-  const plan = buildPlan({
-    repo, mode, seed, facts, codeWords,
-    uniqueIdentifiers: uniqueIdentifierIndex(checkoutDefinitions),
-  });
+  // Chain construction and the code-word collision scan both refuse on bad seeds
+  // (roughly half of smoke seeds are chain-unconstructible on the real corpus). An
+  // undrawn seed is redrawn up to a bound and every refusal is recorded; a pinned
+  // --seed makes ONE attempt, so a published seed reproduces exactly or refuses.
+  let plan = null;
+  let seed = seedArgument ?? freshChallenge().slice(0, 32);
+  const refusedSeeds = [];
+  for (;;) {
+    try {
+      const codeWords = stageCodeWords(seed, EXPERIMENT_MODE_PLANS[mode].stageCount);
+      const checkoutDefinitions = collectCheckoutDefinitions(checkoutDir, codeWords);
+      plan = buildPlan({
+        repo, mode, seed, facts, codeWords,
+        uniqueIdentifiers: uniqueIdentifierIndex(checkoutDefinitions.entries),
+        checkoutPaths: checkoutDefinitions.paths,
+      });
+      break;
+    } catch (error) {
+      if (seedArgument !== null || refusedSeeds.length >= 15) throw error;
+      refusedSeeds.push({ seed, reason: error instanceof Error ? error.message : String(error) });
+      seed = freshChallenge().slice(0, 32);
+    }
+  }
   const planPath = join(campaignDir, `stages-${mode}.json`);
   writeJsonExclusive(planPath, plan);
   result = {
@@ -359,6 +450,7 @@ try {
     mode,
     repo: { key: repo.key, commit: repo.commit, license: repo.license },
     seed,
+    refusedSeeds,
     corpus: plan.corpus,
     stageCount: plan.stageCount,
     probeCount: plan.probeCount,

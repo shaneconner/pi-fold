@@ -63,7 +63,16 @@ import {
   validateExperimentManifest,
   validateExperimentRunConfig,
   validateStagePlan,
+  AUDIT_HOP_CYCLE,
+  AUDIT_TRACE_IDS,
   HIDDEN_PROBE_KEYS,
+  HIDDEN_TRACE_LINK_KEYS,
+  auditStepId,
+  auditStepSentence,
+  buildAuditTraces,
+  buildIncludeResolver,
+  evaluateAuditHop,
+  quotedIncludeSpecs,
   visibleStage,
 } from "./lib/pi_context_experiment.mjs";
 import { directoryTreeSha256, sha256Text, verifySourceHashes } from "./lib/pi_context_soak_attestation.mjs";
@@ -255,15 +264,18 @@ try {
   writeFileSync(join(fixture, "bulk-b.rs"), `${bulk}z`);
   const bulkFacts = ["bulk-a.rs", "bulk-b.rs"].map((name) => fileFacts(fixture, join(fixture, name)));
   const fixtureWord = (ordinal) => `cw-${String(ordinal).padStart(6, "0")}`;
-  const stageOf = (ordinal, kind, files, stageProbes, deliverable) => {
+  const stageOf = (ordinal, kind, files, stageProbes, deliverable, chainStep = null) => {
     const codeWord = kind === "probe" ? null : fixtureWord(ordinal);
+    // Weave order mirrors the stager: base, then the audit step, code word LAST.
+    let instructions = `stage ${ordinal} instructions`;
+    if (chainStep !== null) instructions = `${instructions} ${auditStepSentence(chainStep)}`;
+    if (codeWord !== null) instructions = `${instructions} ${codeWordSentence(ordinal, codeWord)}`;
     const stage = {
       ordinal,
       kind,
-      instructions: codeWord === null
-        ? `stage ${ordinal} instructions`
-        : `stage ${ordinal} instructions ${codeWordSentence(ordinal, codeWord)}`,
+      instructions,
       codeWord,
+      chainStep,
       files: files.map((fact) => ({
         path: fact.path, sha256: fact.sha256, lines: fact.lines, chars: fact.chars, bytes: fact.bytes,
       })),
@@ -280,6 +292,25 @@ try {
     stage.payloadSha256 = sha256Text(payload);
     return stage;
   };
+  // The smoke chain: SOF anchors on stage 1's first file, FIN takes its second,
+  // INC lands on a later delivery. Steps sit at stages 2, 3 and 5.
+  const fixtureChain = {
+    id: "trace-a",
+    links: [
+      { index: 1, stage: 2, hop: "SOF", hopIndex: null, input: "stage-1.rs", expectedAnswer: 1 },
+      { index: 2, stage: 3, hop: "FIN", hopIndex: 2, input: 1, expectedAnswer: "stage-1-extra.rs" },
+      { index: 3, stage: 5, hop: "INC", hopIndex: 1, input: "stage-1-extra.rs", expectedAnswer: "stage-2.rs" },
+    ],
+  };
+  const fixtureStepOf = (link) => ({
+    id: auditStepId(fixtureChain.id, link.index),
+    chainId: fixtureChain.id,
+    index: link.index,
+    hop: link.hop,
+    hopIndex: link.hopIndex,
+    anchor: link.index === 1 ? link.input : null,
+  });
+  const fixtureStepByStage = new Map(fixtureChain.links.map((link) => [link.stage, fixtureStepOf(link)]));
   // Smoke waves: [stage-fact, repo] at 4, [stage-binding, repo] at 8. Conversation
   // probes are hand-built against known carriers so every cross-check is explicit.
   const waveProbes = {
@@ -326,11 +357,16 @@ try {
         return stageOf(ordinal, "probe", [], waveProbes[ordinal], null);
       }
       const files = [{ ...bulkFacts[ordinal % 2], path: `stage-${ordinal}.rs` }];
+      // Stage 1 delivers a second file so the chain's FIN hop has a target that
+      // is not its own anchor.
+      if (ordinal === 1) files.push({ ...bulkFacts[0], path: "stage-1-extra.rs" });
       const deliverable = ordinal % modePlan.deliverableEvery === 0
         ? { id: `deliverable-${ordinal}`, instructions: "write it", referencesStages: [1] }
         : null;
-      return stageOf(ordinal, ordinal % modePlan.revisitEvery === 0 ? "revisit" : "read", files, [], deliverable);
+      return stageOf(ordinal, ordinal % modePlan.revisitEvery === 0 ? "revisit" : "read", files, [], deliverable,
+        fixtureStepByStage.get(ordinal) ?? null);
     }),
+    chains: [fixtureChain],
     probeCount: 0,
     deliverableCount: 0,
     planSha256: "0".repeat(64),
@@ -391,6 +427,9 @@ try {
     !Object.hasOwn(probe, "expectedAnswer") && !Object.hasOwn(probe, "sourceLine") &&
     !Object.hasOwn(probe, "sourceStage"))),
   "run-visible plan retained probe ground truth");
+  assert(runPlan.chains.every((chain) => chain.links.every((link) =>
+    HIDDEN_TRACE_LINK_KEYS.every((key) => !Object.hasOwn(link, key)))),
+  "run-visible plan retained chain ground truth");
   // The stage-fact channel leaks its answer by DESIGN, in exactly one place: the
   // carrier's own instructions. Anywhere else and the probe stops measuring recall.
   for (const probe of plan.stages.flatMap((stage) => stage.probes)) {
@@ -1409,8 +1448,10 @@ try {
   assert(staging.includes("codeWordSentence(ordinal, codeWord)"),
     "the stager must weave the code word into the stage instructions");
   assert(staging.includes("collectCheckoutDefinitions(checkoutDir, codeWords)") &&
-    staging.includes("uniqueIdentifierIndex(checkoutDefinitions)"),
-  "symbol uniqueness and code-word collisions must be judged over the whole checkout");
+    staging.includes("uniqueIdentifierIndex(checkoutDefinitions.entries)") &&
+    staging.includes("checkoutPaths: checkoutDefinitions.paths"),
+  "symbol uniqueness, code-word collisions, and include resolution must be judged " +
+  "over the whole checkout");
   assert(staging.includes("const codeWord = isProbe ? null : codeWords[ordinal - 1];"),
     "probe stages must carry no code word");
   assert(staging.includes("usedCarrierStages"),
@@ -1473,6 +1514,176 @@ try {
   assert(!handRolled.test(staging) && !handRolled.test(supervisor),
     "a hand-rolled probe strip survives outside the shared helper");
   checks.oneStripHelperFourCallSites = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 32 - audit hop alphabet and trace construction. ONE evaluator serves the
+// stager and the adjudicator; construction is seeded, deterministic, and obeys
+// the forced cycle, strictly increasing stages, and knowability at every step.
+// ---------------------------------------------------------------------------
+{
+  // The declared counting rule: spaced "#  include" counts, #if blocks count,
+  // angle-bracket includes never count.
+  assert.deepEqual(quotedIncludeSpecs([
+    "#include \"alpha.h\"",
+    "#include <system.h>",
+    "#ifdef GUARD",
+    "  #  include \"beta.h\"",
+    "#endif",
+    "// #include \"comment.h\"",
+  ].join("\n")), ["alpha.h", "beta.h"]);
+  // Resolution: dir-relative first, then unique basename, ambiguity refused.
+  const resolve = buildIncludeResolver([
+    "lib/deep/alpha.h", "lib/alpha.h", "lib/only.h", "src/dupe.h", "lib/dupe.h",
+  ]);
+  assert.equal(resolve("lib/deep/user.c", "alpha.h"), "lib/deep/alpha.h");
+  assert.equal(resolve("src/user.c", "only.h"), "lib/only.h");
+  assert.equal(resolve("lib/x/user.c", "dupe.h"), null);
+  // Synthetic delivery: 6 payload stages of 3 files with an include web dense
+  // enough that seeds have genuine choices to diverge over.
+  const web = new Map();
+  const stages = Array.from({ length: 8 }, (_, index) => {
+    const ordinal = index + 1;
+    if ([4, 8].includes(ordinal)) return { ordinal, kind: "probe", files: [] };
+    const files = ["x", "y", "z"].map((tag) => ({ path: `s${ordinal}/${tag}.c` }));
+    return { ordinal, kind: "read", files };
+  });
+  const paths = stages.flatMap((stage) => stage.files.map((file) => file.path));
+  for (const [position, path] of paths.entries()) {
+    web.set(path, [paths[(position + 2) % paths.length], paths[(position + 5) % paths.length]]);
+  }
+  const includeTargets = (path) => web.get(path) ?? [];
+  const shape = {
+    stages, chainLength: 3, startAfters: [1],
+    earlyLaw: { maxStage: 2, minLinks: 1 }, includeTargets,
+  };
+  const chains = buildAuditTraces({ ...shape, seed: "trace-seed" });
+  assert.equal(chains.length, 1);
+  assert.equal(chains[0].id, AUDIT_TRACE_IDS[0]);
+  assert.deepEqual(chains[0].links.map((link) => link.hop), [...AUDIT_HOP_CYCLE]);
+  let previousStage = 0;
+  for (const [linkIndex, link] of chains[0].links.entries()) {
+    assert(link.stage > previousStage, "step stages must strictly increase");
+    assert(stages[link.stage - 1].kind !== "probe", "steps sit on payload stages only");
+    previousStage = link.stage;
+    // Every answer re-derives through the ONE evaluator.
+    const delivery = {
+      stageOfPath: new Map(stages.flatMap((stage) => stage.files.map((file) => [file.path, stage.ordinal]))),
+      filesOfStage: new Map(stages.map((stage) => [stage.ordinal, stage.files.map((file) => file.path)])),
+    };
+    assert.equal(evaluateAuditHop({
+      hop: link.hop, hopIndex: link.hopIndex, input: link.input, delivery, includeTargets,
+    }), link.expectedAnswer);
+    if (linkIndex > 0) assert.equal(link.input, chains[0].links[linkIndex - 1].expectedAnswer);
+  }
+  // Same seed, same chains; over a seed set, at least one construction differs.
+  assert.deepEqual(buildAuditTraces({ ...shape, seed: "trace-seed" }), chains);
+  const baseline = JSON.stringify(chains);
+  assert(["s-a", "s-b", "s-c", "s-d"].some((seed) =>
+    JSON.stringify(buildAuditTraces({ ...shape, seed })) !== baseline),
+  "audit trace construction ignores its seed");
+  // Evaluator refusals: unknown hops and out-of-range indexes throw, never guess.
+  const delivery = {
+    stageOfPath: new Map([["s1/x.c", 1]]),
+    filesOfStage: new Map([[1, ["s1/x.c"]]]),
+  };
+  assert.throws(() => evaluateAuditHop({ hop: "DEF", hopIndex: 1, input: "s1/x.c", delivery, includeTargets }),
+    /Unknown audit hop/);
+  assert.throws(() => evaluateAuditHop({ hop: "SOF", hopIndex: null, input: "ghost.c", delivery, includeTargets }),
+    /never delivered/);
+  assert.throws(() => evaluateAuditHop({ hop: "FIN", hopIndex: 2, input: 1, delivery, includeTargets }),
+    /needs file 2/);
+  assert.throws(() => evaluateAuditHop({ hop: "INC", hopIndex: 9, input: "s1/x.c", delivery, includeTargets }),
+    /resolvable quoted include/);
+  checks.auditHopEvaluatorSharedSeededAndDeterministic = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 33 - exhaustion refuses, never shortens. A corpus with no include web
+// cannot host a 3-link chain, and an unsatisfiable early law is a refusal too:
+// a variable-length chain would make the wave schedule non-uniform across seeds.
+// ---------------------------------------------------------------------------
+{
+  const stages = Array.from({ length: 8 }, (_, index) => {
+    const ordinal = index + 1;
+    if ([4, 8].includes(ordinal)) return { ordinal, kind: "probe", files: [] };
+    return { ordinal, kind: "read", files: [{ path: `s${ordinal}/only.c` }, { path: `s${ordinal}/more.c` }] };
+  });
+  assert.throws(() => buildAuditTraces({
+    stages, seed: "dry-seed", chainLength: 3, startAfters: [1],
+    earlyLaw: { maxStage: 2, minLinks: 1 }, includeTargets: () => [],
+  }), /unconstructible/);
+  // Early law: no step can ever sit at stage 1, so maxStage 1 must refuse even
+  // though the chain itself is constructible.
+  const paths = stages.flatMap((stage) => stage.files.map((file) => file.path));
+  const web = new Map(paths.map((path, position) => [path, [paths[(position + 3) % paths.length]]]));
+  assert.throws(() => buildAuditTraces({
+    stages, seed: "late-seed", chainLength: 3, startAfters: [1],
+    earlyLaw: { maxStage: 1, minLinks: 1 }, includeTargets: (path) => web.get(path) ?? [],
+  }), /chain links landed/);
+  checks.auditTraceExhaustionRefusesNeverShortens = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 34 - the chain laws bind steps to the plan and reject tamper. The step
+// sentences are pinned literally: they carry the declared counting and
+// resolution rules, and a silent rewording would change the instrument.
+// ---------------------------------------------------------------------------
+{
+  const [sofStep, finStep, incStep] = plan.stages
+    .filter((stage) => stage.chainStep !== null)
+    .map((stage) => stage.chainStep);
+  assert.equal(auditStepSentence(sofStep),
+    "AUDIT TRACE trace-a, step 01: which stage of this session delivered the file " +
+    "stage-1.rs? Record it on its own line as `trace-a-01: <stage number>`.");
+  assert.equal(auditStepSentence(finStep),
+    "AUDIT TRACE trace-a, step 02: name the 2nd file delivered in the stage you " +
+    "recorded as trace-a-01, counting files in the order that stage delivered them. " +
+    "Record it on its own line as `trace-a-02: <repository-relative path>`.");
+  assert.equal(auditStepSentence(incStep),
+    "AUDIT TRACE trace-a, step 03: open the file you recorded as trace-a-02 and name " +
+    "the target of its 1st quoted include. Count every line whose first non-space " +
+    "characters are `#include` (whitespace after `#` allowed) followed by a " +
+    "double-quoted path, in file order, including lines inside `#if` blocks. Give the " +
+    "target repository-relative: resolve it against the including file's directory " +
+    "first, and otherwise as the unique file in the checkout with that basename. " +
+    "Record it on its own line as `trace-a-03: <repository-relative path>`.");
+  // The step answer line parses with the probe parser: no new parser, no new law.
+  assert.equal(probeAnswerPattern("trace-a-02").exec("trace-a-02: stage-1-extra.rs")?.[1],
+    "stage-1-extra.rs");
+  const rehash = (mutated) => {
+    mutated.planSha256 = stagePlanSha256(mutated);
+    return mutated;
+  };
+  const noChains = rehash(structuredClone(plan));
+  noChains.chains = [];
+  assert.throws(() => validateStagePlan(rehash(noChains)), /chain count disagrees/);
+  const ontoProbe = structuredClone(plan);
+  ontoProbe.chains[0].links[2].stage = 4;
+  assert.throws(() => validateStagePlan(rehash(ontoProbe)), /strictly later payload stage/);
+  const brokenChain = structuredClone(plan);
+  brokenChain.chains[0].links[1].input = 99;
+  assert.throws(() => validateStagePlan(rehash(brokenChain)), /does not consume the previous answer/);
+  const liedSof = structuredClone(plan);
+  liedSof.chains[0].links[0].expectedAnswer = 2;
+  assert.throws(() => validateStagePlan(rehash(liedSof)), /disagrees with the delivery map/);
+  const repeatedNode = structuredClone(plan);
+  repeatedNode.chains[0].links[1].hopIndex = 1;
+  repeatedNode.chains[0].links[1].expectedAnswer = "stage-1.rs";
+  repeatedNode.chains[0].links[2].input = "stage-1.rs";
+  assert.throws(() => validateStagePlan(rehash(repeatedNode)), /repeats node/);
+  const strayStep = structuredClone(plan);
+  strayStep.stages[5].chainStep = { ...strayStep.stages[1].chainStep };
+  assert.throws(() => validateStagePlan(rehash(strayStep)), /no chain claims/);
+  const unwoven = structuredClone(plan);
+  unwoven.stages[1].instructions =
+    unwoven.stages[1].instructions.replace(auditStepSentence(sofStep), "").trim();
+  assert.throws(() => validateStagePlan(rehash(unwoven)), /chain step disagrees/);
+  const leakyRevisit = structuredClone(plan);
+  const revisit = leakyRevisit.stages.find((stage) => stage.kind === "revisit");
+  revisit.instructions += " cross-reference specifically stage 1 (stage-1.rs, stage-1-extra.rs)";
+  assert.throws(() => validateStagePlan(rehash(leakyRevisit)), /names a chain stage node/);
+  checks.auditTraceLawsBindStepsAndRejectTamper = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
