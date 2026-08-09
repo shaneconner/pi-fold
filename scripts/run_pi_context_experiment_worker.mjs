@@ -17,6 +17,7 @@ import {
   EXPERIMENT_DEFAULT_FOLD_SCHEDULING,
   EXPERIMENT_MARKER_ENTRY,
   EXPERIMENT_PIFOLD_EXTRA_TOOLS,
+  EXPERIMENT_PROTOCOL_VERSION,
   EXPERIMENT_RUNNER_MODE,
   EXPERIMENT_TERMINAL_STABILIZATION_MS,
   EXPERIMENT_TOOL_NAME,
@@ -347,7 +348,7 @@ try {
   }
 
   const manifest = validateExperimentManifest({
-    version: 1,
+    version: EXPERIMENT_PROTOCOL_VERSION,
     runId: config.runId,
     campaignId: config.campaignId,
     arm: config.arm,

@@ -1424,6 +1424,10 @@ try {
   "the grader must forward the probe class split and the carrier stage");
   assert(adjudicator.includes("probeClassSummary"),
     "the adjudicator must report per-class parse rates");
+  // The version bump found its first drift victim: the worker's sealed manifest
+  // carried a literal 1 and died at validation on every arm of the first v2 launch.
+  assert(worker.includes("version: EXPERIMENT_PROTOCOL_VERSION,"),
+    "the worker manifest version must be the protocol constant, never a literal");
   // The answer pattern accepts the wave-scoped ids the sessions will actually echo.
   const pattern = probeAnswerPattern("probe-16-01");
   assert.equal(pattern.exec("probe-16-01: cw-ab12cd")?.[1], "cw-ab12cd");
