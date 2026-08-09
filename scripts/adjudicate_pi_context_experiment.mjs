@@ -16,6 +16,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  CONTEXT_EVENT_SUFFIX,
   EXPERIMENT_ARMS,
   EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS,
   EXPERIMENT_DEFAULT_FOLD_SCHEDULING,
@@ -182,7 +183,7 @@ function median(values) {
 
 // (d) Voluntary-fold share plus expand/protect usage. Attribution is the soak's: a fold is
 // model-origin when a context tool call with action "fold" produced exactly that fold id.
-function curation({ entries, foldRecords, contextToolName }) {
+function curation({ entries, foldRecords, contextToolName, workerEvents = [], workerReport = null }) {
   const calls = entries.flatMap(messageToolCalls).filter((call) => call.name === contextToolName);
   const resultsByCallId = new Map();
   for (const entry of entries) {
@@ -204,9 +205,37 @@ function curation({ entries, foldRecords, contextToolName }) {
   }
   const allFoldIds = foldRecords.map((record) => record.data?.foldId).filter(Boolean);
   const voluntary = allFoldIds.filter((id) => modelFoldIds.has(id)).length;
+  // One logical row per model-emitted invocation. The worker log and the runtime's
+  // attempt records observe different failure surfaces (a schema-rejected call never
+  // reaches the runtime), so the join is by tool_call_id, never by order or clock.
+  const modelEmitted = workerEvents.filter((row) => row?.kind === "tool-call" &&
+    row.details?.toolName === contextToolName);
+  const attemptRows = entries
+    .filter((entry) => entry?.type === "custom" && typeof entry.customType === "string" &&
+      entry.customType.endsWith(CONTEXT_EVENT_SUFFIX) && entry.data?.kind === "context.attempt")
+    .map((entry) => entry.data);
+  const attemptCallIds = new Set(attemptRows
+    .map((row) => (typeof row.tool_call_id === "string" ? row.tool_call_id : null))
+    .filter(Boolean));
+  const emittedCallIds = new Set(modelEmitted
+    .map((row) => (typeof row.details?.toolCallId === "string" ? row.details.toolCallId : null))
+    .filter(Boolean));
   return {
     contextToolCalls: calls.length,
     byAction,
+    invocationJoin: {
+      joinKey: "tool_call_id",
+      modelEmittedCalls: modelEmitted.length,
+      runtimeAttempts: attemptRows.length,
+      attemptsWithJoinKey: attemptCallIds.size,
+      emittedWithoutAttempt: [...emittedCallIds].filter((id) => !attemptCallIds.has(id)).length,
+      attemptsWithoutEmitted: [...attemptCallIds].filter((id) => !emittedCallIds.has(id)).length,
+    },
+    endOfRun: {
+      protectedRefs: workerReport?.foldSummary?.protectedRefs ?? null,
+      pendingMarks: workerReport?.foldSummary?.pendingMarks ?? null,
+      pendingAgentMarks: workerReport?.foldSummary?.pendingAgentMarks ?? null,
+    },
     expandCalls: byAction.expand ?? 0,
     protectCalls: byAction.protect ?? 0,
     unprotectCalls: byAction.unprotect ?? 0,
@@ -327,7 +356,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   }
   const stw = stopTheWorld({ entries: runEntries, ledger, liveRecords: stopRecords, foldRecords });
   const curationSummary = armRuntime.activeContextEnabled
-    ? curation({ entries: runEntries, foldRecords, contextToolName })
+    ? curation({ entries: runEntries, foldRecords, contextToolName, workerEvents, workerReport: worker })
     : { contextToolCalls: 0, byAction: {}, totalFolds: 0, totalFoldsCounts: "fold-records",
       headlineMutationMetric: "usage.mutations", voluntaryFolds: 0, automaticFolds: 0,
       voluntaryFoldShare: null, expandCalls: 0, protectCalls: 0, unprotectCalls: 0,

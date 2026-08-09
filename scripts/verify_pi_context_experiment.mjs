@@ -1143,6 +1143,87 @@ try {
   checks.harnessIdentityMatchesRuntimeNamespace = true;
 }
 
+// ---------------------------------------------------------------------------
+// GATE 28 - tool usage is a reported number, never a hand discovery. The rep-23 run
+// (zero context-tool calls, every fold ladder-origin) was found by manually reading a
+// sealed run. contextEventMetrics must carry per-action outcomes, the zero-call flag,
+// protect no-ops, and committed curation mass by origin with the share reported
+// beside its numerator and denominator.
+// ---------------------------------------------------------------------------
+{
+  const custom = (data) => ({ type: "custom", customType: "pi-fold-context-event", data });
+  const entries = [
+    custom({ kind: "context.attempt", ordinal: 4, action: "fold", ok: true,
+      tool_call_id: "call_1", marks_requested: 2, corrections_applied: 1, error: null }),
+    custom({ kind: "context.attempt", ordinal: 6, action: "fold", ok: false,
+      tool_call_id: "call_2", marks_requested: 1, corrections_applied: 0,
+      error: "No exact source spans matched" }),
+    custom({ kind: "context.attempt", ordinal: 8, action: "protect", ok: true,
+      tool_call_id: "call_3", marks_requested: 0, corrections_applied: 0, error: null }),
+    custom({ kind: "context.protect", ordinal: 8, protect: true, ids: "fold_1",
+      id_count: 1, protected_refs_before: 0, protected_refs_after: 3 }),
+    custom({ kind: "context.protect", ordinal: 9, protect: true, ids: "fold_1",
+      id_count: 1, protected_refs_before: 3, protected_refs_after: 3 }),
+    custom({ kind: "context.commit", ordinal: 10, deferred: false, pending_marks: 2 }),
+    custom({ kind: "context.fold", ordinal: 10, fold_id: "fold_2", origin: "agent",
+      source_chars: 9_000 }),
+    custom({ kind: "context.fold", ordinal: 10, fold_id: "fold_3", origin: "ladder",
+      source_chars: 3_000 }),
+  ];
+  const metrics = contextEventMetrics(entries);
+  assert.equal(metrics.toolUsage.attempts, 3);
+  assert.equal(metrics.toolUsage.zeroContextCalls, false);
+  assert.equal(metrics.toolUsage.errors, 1);
+  assert.equal(metrics.toolUsage.corrected, 1);
+  assert.equal(metrics.toolUsage.byAction.fold.attempts, 2);
+  assert.equal(metrics.toolUsage.byAction.fold.accepted, 1);
+  assert.equal(metrics.toolUsage.byAction.fold.errors, 1);
+  assert.equal(metrics.toolUsage.byAction.fold.corrected, 1);
+  assert.equal(metrics.toolUsage.byAction.fold.marksRequested, 3);
+  assert.equal(metrics.toolUsage.byAction.fold.firstOrdinal, 4);
+  assert.equal(metrics.toolUsage.byAction.fold.lastOrdinal, 6);
+  assert.equal(metrics.toolUsage.byAction.protect.attempts, 1);
+  assert.equal(metrics.toolUsage.protectEvents, 2);
+  assert.equal(metrics.toolUsage.protectNoops, 1);
+  assert.equal(metrics.curationMass.committedFolds, 2);
+  assert.equal(metrics.curationMass.agentFoldedCount, 1);
+  assert.equal(metrics.curationMass.agentFoldedSourceChars, 9_000);
+  assert.equal(metrics.curationMass.ladderFoldedSourceChars, 3_000);
+  assert.equal(metrics.curationMass.agentMarkSourcedShare, 0.75);
+  assert.equal(metrics.curationMass.pendingMarksAtLastCommit, 2);
+  // The empty run raises the flag instead of hiding it.
+  assert.equal(contextEventMetrics([]).toolUsage.zeroContextCalls, true);
+  assert.equal(contextEventMetrics([]).curationMass.agentMarkSourcedShare, null);
+  checks.toolUsageIsAReportedNumber = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 29 - the observability capture is threaded end to end: the extension logs
+// bounded arguments on every tool call and logs FAILED context calls as rows rather
+// than anonymous errors, the runtime's attempt records carry the tool_call_id join
+// key, the worker reports pending marks at run end, and the adjudicator joins the two
+// streams by id and surfaces end-of-run curation state.
+// ---------------------------------------------------------------------------
+{
+  assert(extension.includes("argumentsJson: safeArgumentsJson(event.input)"),
+    "the extension no longer logs bounded tool-call arguments");
+  assert(!extension.includes("event.isError !== true"),
+    "the extension still skips failed context calls in the context-tool-result stream");
+  assert(extension.includes("isError: event.isError === true,") &&
+    extension.includes("? toolResultText(event.content ?? event.result?.content ?? null).slice(0, 512)"),
+  "failed context calls must land as rows with bounded error text");
+  const runtime = source("extensions/active-context.ts");
+  assert(runtime.includes("tool_call_id: toolCallId,"),
+    "context.attempt records must carry the tool_call_id join key");
+  assert(worker.includes("pendingAgentMarks: (activeState.pendingMarks ?? [])"),
+    "the worker must report pending agent marks at run end");
+  assert(adjudicator.includes('joinKey: "tool_call_id"') &&
+    adjudicator.includes("emittedWithoutAttempt") &&
+    adjudicator.includes("pendingAgentMarks: workerReport?.foldSummary?.pendingAgentMarks"),
+  "the adjudicator must join model-emitted calls to runtime attempts by id and surface end-of-run state");
+  checks.observabilityThreadedEndToEnd = true;
+}
+
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
 assert.deepEqual([...EXPERIMENT_MODES], ["smoke", "full"]);
 assert(plan, "stage plan fixture did not survive gate 4");

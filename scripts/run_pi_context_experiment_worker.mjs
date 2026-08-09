@@ -330,6 +330,11 @@ try {
       foldCount: activeState.folds.length,
       expanded: [...(activeState.expanded ?? [])],
       protectedRefs: (activeState.protected ?? []).length,
+      // Decisions the run ended still owing: marks the agent placed that no fold
+      // event paid for. Attempted curation the committed-mass share cannot see.
+      pendingMarks: (activeState.pendingMarks ?? []).length,
+      pendingAgentMarks: (activeState.pendingMarks ?? [])
+        .filter((mark) => mark?.origin === "agent").length,
       advisory: activeState.advisory ?? { highWater: 0, delivered: {} },
       foldRecoveries: activeState.folds.map((fold) => ({
         foldId: fold.id,

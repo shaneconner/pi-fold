@@ -996,6 +996,43 @@ export function contextEventMetrics(entries) {
   const prefixes = events.filter((event) => event.kind === "context.prefix");
   const commits = events.filter((event) => event.kind === "context.commit");
 
+  // Tool usage, per action, from the runtime's own attempt records. The rep-23
+  // finding (the agent never called the context tool at all) was discovered by hand
+  // after the run; every question of that class must be a reported number here.
+  const attempts = events.filter((event) => event.kind === "context.attempt");
+  const protects = events.filter((event) => event.kind === "context.protect");
+  const foldEvents = events.filter((event) => event.kind === "context.fold");
+  const byActionUsage = {};
+  for (const attempt of attempts) {
+    const action = typeof attempt.action === "string" && attempt.action ? attempt.action : "unknown";
+    const bucket = byActionUsage[action] ?? (byActionUsage[action] = {
+      attempts: 0, accepted: 0, errors: 0, corrected: 0,
+      marksRequested: 0, firstOrdinal: null, lastOrdinal: null,
+    });
+    bucket.attempts += 1;
+    if (attempt.ok === true) bucket.accepted += 1;
+    else bucket.errors += 1;
+    if (Number(attempt.corrections_applied) > 0) bucket.corrected += 1;
+    bucket.marksRequested += Number.isFinite(attempt.marks_requested) ? attempt.marks_requested : 0;
+    if (Number.isFinite(attempt.ordinal)) {
+      bucket.firstOrdinal = bucket.firstOrdinal === null
+        ? attempt.ordinal : Math.min(bucket.firstOrdinal, attempt.ordinal);
+      bucket.lastOrdinal = bucket.lastOrdinal === null
+        ? attempt.ordinal : Math.max(bucket.lastOrdinal, attempt.ordinal);
+    }
+  }
+  // Committed curation mass by origin. A share alone can rise because the denominator
+  // fell, so the absolute masses always travel with it.
+  let agentFoldedSourceChars = 0;
+  let ladderFoldedSourceChars = 0;
+  let agentFoldedCount = 0;
+  for (const fold of foldEvents) {
+    const chars = Number.isFinite(fold.source_chars) ? fold.source_chars : 0;
+    if (fold.origin === "agent") { agentFoldedSourceChars += chars; agentFoldedCount += 1; }
+    else ladderFoldedSourceChars += chars;
+  }
+  const lastCommit = commits.length ? commits[commits.length - 1] : null;
+
   let prefixRewrites = 0;
   let structuralRewrites = 0;
   let surfaceRewrites = 0;
@@ -1047,6 +1084,33 @@ export function contextEventMetrics(entries) {
     commits: commits.filter((event) => event.deferred !== true).length,
     commitsDeferred: commits.filter((event) => event.deferred === true).length,
     folds: byKind["context.fold"] ?? 0,
+    toolUsage: {
+      attempts: attempts.length,
+      zeroContextCalls: attempts.length === 0,
+      errors: attempts.filter((event) => event.ok !== true).length,
+      corrected: attempts.filter((event) => Number(event.corrections_applied) > 0).length,
+      byAction: byActionUsage,
+      protectEvents: protects.length,
+      protectNoops: protects.filter((event) =>
+        event.protected_refs_after === event.protected_refs_before).length,
+      definition: "attempts are the runtime's context.attempt records; zeroContextCalls is the " +
+        "rep-23 flag; corrected counts attempts whose spans were auto-snapped; protectNoops " +
+        "are pins that changed no refs",
+    },
+    curationMass: {
+      committedFolds: foldEvents.length,
+      agentFoldedCount,
+      agentFoldedSourceChars,
+      ladderFoldedSourceChars,
+      agentMarkSourcedShare: agentFoldedSourceChars + ladderFoldedSourceChars > 0
+        ? agentFoldedSourceChars / (agentFoldedSourceChars + ladderFoldedSourceChars)
+        : null,
+      pendingMarksAtLastCommit: lastCommit && Number.isFinite(lastCommit.pending_marks)
+        ? lastCommit.pending_marks : null,
+      definition: "mass is fold-event source_chars split by mark origin; the share is " +
+        "agent-mark-sourced, not causal agent contribution, and always travels with its " +
+        "numerator and denominator",
+    },
     counterfactual: {
       definition: "ideal cached = shared prefix tokens with the previous projection: " +
         "divergent_tokens where recorded, the full previous projection on an append",

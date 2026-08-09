@@ -141,6 +141,11 @@ export function createPiContextExperimentExtension(config) {
   const toolResultLog = join(config.runDir, "tool-results.jsonl");
   const stopTheWorldLog = join(config.runDir, "stop-the-world.jsonl");
 
+  const safeArgumentsJson = (input) => {
+    try { return JSON.stringify(input ?? null).slice(0, 2_048); }
+    catch { return null; }
+  };
+
   const appendEvent = (kind, details = {}) => {
     const identity = {
       version: 1,
@@ -389,6 +394,9 @@ export function createPiContextExperimentExtension(config) {
           toolName: event.toolName,
           toolCallId: event.toolCallId,
           action: event.input?.action ?? null,
+          // Bounded arguments. A failed call whose arguments are gone cannot be told
+          // apart as model misunderstanding versus runtime refusal.
+          argumentsJson: safeArgumentsJson(event.input),
         });
         return undefined;
       });
@@ -400,9 +408,15 @@ export function createPiContextExperimentExtension(config) {
           content: event.content ?? event.result?.content ?? null,
           isError: event.isError,
         });
-        if (event.toolName === PI_FOLD_ACTIVE_CONTEXT_REGISTRATION.toolName && event.isError !== true) {
+        if (event.toolName === PI_FOLD_ACTIVE_CONTEXT_REGISTRATION.toolName) {
+          // Errors are rows too: a failed context call used to survive only as an
+          // anonymous isError line in tool-results.jsonl (the rep-23 class of misses).
           appendEvent("context-tool-result", {
             toolCallId: event.toolCallId ?? null,
+            isError: event.isError === true,
+            error: event.isError === true
+              ? toolResultText(event.content ?? event.result?.content ?? null).slice(0, 512)
+              : null,
             action: event.details?.action ?? null,
             foldId: event.details?.id ?? null,
             automaticSuspended: event.details?.automatic?.automaticSuspended ?? null,
