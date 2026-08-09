@@ -30,6 +30,7 @@ import {
   stagePlanSha256,
   uniqueIdentifierIndex,
   validateStagePlan,
+  visibleStage,
 } from "./lib/pi_context_experiment.mjs";
 import { freshChallenge, sha256Text, writeJsonExclusive } from "./lib/pi_context_soak_attestation.mjs";
 
@@ -286,9 +287,8 @@ function buildPlan({ repo, mode, seed, facts, codeWords, uniqueIdentifiers }) {
     };
     // Hash the payload the SESSION will see: ground truth stripped, supervisor nonce elided.
     const visible = {
-      ...stage,
+      ...visibleStage(stage),
       files: files.map((fact) => ({ ...fact })),
-      probes: probes.map(({ expectedAnswer: _a, sourcePath: _p, sourceLine: _l, sourceStage: _s, ...rest }) => rest),
     };
     const payload = stagePayloadText(visible);
     stage.payloadChars = payload.length;

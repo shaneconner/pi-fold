@@ -39,6 +39,7 @@ import {
   stagePayloadText,
   validateExperimentRunConfig,
   validateStagePlan,
+  visibleStage,
 } from "./lib/pi_context_experiment.mjs";
 import {
   SOAK_MAX_HEARTBEAT_GAP_MS,
@@ -271,9 +272,8 @@ function renderStage(plan, stage, repoDir, nextChallenge) {
   assertExperiment(files.every((file) => sha256Text(file.text) === file.sha256),
     `Stage ${stage.ordinal} checkout bytes drifted from the plan`);
   const visible = {
-    ...stage,
+    ...visibleStage(stage),
     files,
-    probes: stage.probes.map(({ expectedAnswer: _a, sourcePath: _p, sourceLine: _l, ...rest }) => rest),
   };
   const pinned = stagePayloadText(visible);
   assertExperiment(sha256Text(pinned) === stage.payloadSha256,

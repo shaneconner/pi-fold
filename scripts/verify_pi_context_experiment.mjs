@@ -63,6 +63,8 @@ import {
   validateExperimentManifest,
   validateExperimentRunConfig,
   validateStagePlan,
+  HIDDEN_PROBE_KEYS,
+  visibleStage,
 } from "./lib/pi_context_experiment.mjs";
 import { directoryTreeSha256, sha256Text, verifySourceHashes } from "./lib/pi_context_soak_attestation.mjs";
 
@@ -271,10 +273,8 @@ try {
       payloadSha256: "0".repeat(64),
     };
     const payload = stagePayloadText({
-      ...stage,
+      ...visibleStage(stage),
       files: files.map((fact) => ({ ...fact })),
-      probes: stageProbes.map(
-        ({ expectedAnswer: _a, sourcePath: _p, sourceLine: _l, sourceStage: _s, ...rest }) => rest),
     });
     stage.payloadChars = payload.length;
     stage.payloadSha256 = sha256Text(payload);
@@ -1417,8 +1417,8 @@ try {
     "the carrier no-reuse set must span the whole plan, not one wave");
   assert(staging.includes("id: `probe-${String(ordinal).padStart(2, \"0\")}-${String(index + 1).padStart(2, \"0\")}`"),
     "probe ids must be wave-scoped so the grading join is by id, never by position");
-  assert(staging.includes("sourceStage: _s,"),
-    "the stager's payload hash must strip sourceStage exactly as stagePlanForRun does");
+  assert(staging.includes("...visibleStage(stage)"),
+    "the stager's payload hash must strip hidden keys through the shared helper");
   assert(grader.includes('class: "conversation"') && grader.includes('class: "repository"') &&
     grader.includes("sourceStage: probe.sourceStage"),
   "the grader must forward the probe class split and the carrier stage");
@@ -1434,6 +1434,45 @@ try {
   assert.equal(pattern.exec("- probe-16-01 - cw-ab12cd")?.[1], "cw-ab12cd");
   assert.equal(pattern.exec("probe-16-02: nope"), null);
   checks.conversationRecallInstrumentThreadedEndToEnd = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 31 - ONE strip helper, FOUR call sites. The supervisor's hand-rolled strip
+// kept only three hidden keys while the other three sites kept four: harmless only
+// because stagePayloadText renders id and question alone. A hidden field added
+// under protocol v3 must be strippable by changing exactly one list.
+// ---------------------------------------------------------------------------
+{
+  assert.deepEqual([...HIDDEN_PROBE_KEYS],
+    ["expectedAnswer", "sourcePath", "sourceLine", "sourceStage"]);
+  const dirty = {
+    ordinal: 5,
+    probes: [{
+      id: "probe-05-01", kind: "stage-fact", question: "q",
+      expectedAnswer: "a", sourcePath: "p", sourceLine: 3, sourceStage: 2,
+    }],
+  };
+  const clean = visibleStage(dirty);
+  assert.deepEqual(clean.probes[0], { id: "probe-05-01", kind: "stage-fact", question: "q" });
+  // The payload gate refuses EVERY hidden key, not only expectedAnswer.
+  for (const key of HIDDEN_PROBE_KEYS) {
+    assert.throws(() => stagePayloadText({
+      ordinal: 5, kind: "probe", instructions: "x", files: [],
+      probes: [{ id: "probe-05-01", kind: "stage-fact", question: "q", [key]: "leak" }],
+    }), /still carries probe ground truth/, `payload gate ignores hidden key ${key}`);
+  }
+  // Every strip site goes through the ONE helper; no hand-rolled destructuring remains.
+  for (const [name, text] of [
+    ["stager", staging], ["supervisor", supervisor],
+    ["lib", source("scripts/lib/pi_context_experiment.mjs")],
+    ["verifier", source("scripts/verify_pi_context_experiment.mjs")],
+  ]) {
+    assert(text.includes("visibleStage("), `${name} does not use the shared strip helper`);
+  }
+  const handRolled = /expectedAnswer:\s*_/;
+  assert(!handRolled.test(staging) && !handRolled.test(supervisor),
+    "a hand-rolled probe strip survives outside the shared helper");
+  checks.oneStripHelperFourCallSites = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

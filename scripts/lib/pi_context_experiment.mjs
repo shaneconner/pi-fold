@@ -480,9 +480,10 @@ export function corpusManifestSha256(entries) {
 export function stagePayloadText(stage) {
   assertExperiment(stage && typeof stage === "object", "Stage payload requires a stage");
   // Hard gate: ground truth is extracted at staging time and must never be rendered into a
-  // payload the session can see. stagePlanForRun() strips it; this refuses if it did not.
-  assertExperiment((stage.probes ?? []).every((probe) => !Object.hasOwn(probe, "expectedAnswer")),
-    `Stage ${stage.ordinal} payload still carries probe ground truth`);
+  // payload the session can see. visibleStage() strips it; this refuses if it did not.
+  assertExperiment((stage.probes ?? []).every((probe) =>
+    HIDDEN_PROBE_KEYS.every((key) => !Object.hasOwn(probe, key))),
+  `Stage ${stage.ordinal} payload still carries probe ground truth`);
   const header = [
     `STAGE ${String(stage.ordinal).padStart(2, "0")} / ${stage.kind}`,
     stage.instructions,
@@ -616,19 +617,25 @@ export function validateStagePlan(plan) {
 }
 
 // The stage plan carries expected answers; the RUN payload must never see them.
+// ONE list and ONE helper, used by every strip site (stager, supervisor, this
+// function, and the verifier fixture): four hand-rolled destructurings drifted
+// once already (the supervisor's kept only three keys), and a hidden field that
+// reaches one site but not another is how a campaign voids itself silently.
+export const HIDDEN_PROBE_KEYS = Object.freeze([
+  "expectedAnswer", "sourcePath", "sourceLine", "sourceStage",
+]);
+
+export function visibleStage(stage) {
+  return {
+    ...stage,
+    probes: stage.probes.map((probe) => Object.fromEntries(
+      Object.entries(probe).filter(([key]) => !HIDDEN_PROBE_KEYS.includes(key)))),
+  };
+}
+
 export function stagePlanForRun(plan) {
   validateStagePlan(plan);
-  return {
-    ...plan,
-    stages: plan.stages.map((stage) => ({
-      ...stage,
-      probes: stage.probes.map((probe) => {
-        const { expectedAnswer: _hidden, sourcePath: _path, sourceLine: _line,
-          sourceStage: _stage, ...visible } = probe;
-        return visible;
-      }),
-    })),
-  };
+  return { ...plan, stages: plan.stages.map(visibleStage) };
 }
 
 // ---------------------------------------------------------------------------
