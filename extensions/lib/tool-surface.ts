@@ -37,7 +37,7 @@ export function buildActiveContextTool(input: {
   // The pin. Protection predates this sentence; the sentence exists because a verb
   // nobody can discover is a verb nobody uses.
   const pinGuidance = input.allowedActions.includes("protect")
-    ? " Protect is the pin: protect with ids holds folds or entries out of automatic folding until unprotect releases them, so what you expanded and still need stays expanded. Pinning moves no context bytes, and fold receipts report the mass your pins hold out of reach."
+    ? " Protect is the pin: protect with ids holds folds or entries against automatic folding, consolidation and refolding until unprotect releases them, so an expanded span you still need stays expanded. Protect reveals nothing on its own: a folded span stays folded, just held. Pinning moves no context bytes, and fold receipts report how much mass you have pinned."
     : "";
   // Marking is yours, folding is the runtime's. The epoch guidance says how marks
   // behave and stops there: there is no agent-callable commit verb to describe.

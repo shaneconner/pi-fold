@@ -39,6 +39,7 @@ import {
   foldBrief,
   foldIdFor,
   foldMap,
+  MAX_ACTIVE_PROTECTED,
   normalizedPart,
   protectionSha256,
   topologySha256,
@@ -706,6 +707,14 @@ export function protectEvidence(
   });
   const byKey = new Map(state.protected.map((ref) => [objectRefKey(ref), ref]));
   for (const ref of refs) protect ? byKey.set(objectRefKey(ref), ref) : byKey.delete(objectRefKey(ref));
+  // Atomic: the whole resolved set pins or nothing does. A partial pin that reports
+  // success would leave part of the requested span silently reclaimable.
+  if (byKey.size > MAX_ACTIVE_PROTECTED) {
+    throw new Error(
+      `Protecting ${ids.join(", ")} would hold ${byKey.size} refs, over the ${MAX_ACTIVE_PROTECTED}-ref cap; ` +
+        "unprotect something first",
+    );
+  }
   return clearPrepared({
     ...state,
     revision: state.revision + 1,

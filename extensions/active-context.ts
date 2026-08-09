@@ -3919,7 +3919,7 @@ export function registerActiveContext(pi: any, options: {
   };
 
   const toolHandler = async (
-    _toolCallId: string,
+    toolCallId: string,
     params: Record<string, unknown>,
     signal: AbortSignal,
     _onUpdate: unknown,
@@ -3935,6 +3935,9 @@ export function registerActiveContext(pi: any, options: {
           action,
           ok,
           error,
+          // The join key against the worker's own tool-call log: one logical row per
+          // model-emitted invocation, matched by id and never by order or clock.
+          tool_call_id: toolCallId,
           marks_requested: requestedMarkCount(params),
           corrections_applied: corrections.length,
           arguments_sha256: sha256Value(params ?? {}),
