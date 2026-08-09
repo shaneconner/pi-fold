@@ -1385,7 +1385,7 @@ export function registerActiveContext(pi: any, options: {
     if (chars === null || chars < PROJECTION_CALIBRATION_MIN_CHARS) return;
     if (!Number.isFinite(measurement.tokens) || measurement.tokens < PROJECTION_CALIBRATION_MIN_TOKENS) return;
     // The signed error of the estimate we made for the projection this measurement
-    // describes. This is the only honest measure of how wrong the fence can be.
+    // describes. This is the only direct measure of how wrong the fence can be.
     // Only a CALIBRATED estimate's error belongs in the window. The bootstrap constant
     // is wrong by design -- 76% high in rep12 -- and letting that one reading set the
     // margin would keep every later request permanently inside it.

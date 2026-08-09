@@ -3318,12 +3318,12 @@ async function gateTruthfulCapacityAdmission() {
   await project(stale);
   assert(stale.aborts >= 1, "The descriptor fence did not abort at 297k against 272k");
 
-  const honest = makeRuntime(fixture(), { providerTotalWindow: 400_000 });
-  await startRuntime(honest);
-  await measure(honest, 297_000, 272_000);
-  await project(honest);
-  assert.equal(honest.aborts, 0, "The truthful budget aborted inside real headroom");
-  const capacity = (await toolStatus(honest)).details.automatic.capacity;
+  const truthfulRuntime = makeRuntime(fixture(), { providerTotalWindow: 400_000 });
+  await startRuntime(truthfulRuntime);
+  await measure(truthfulRuntime, 297_000, 272_000);
+  await project(truthfulRuntime);
+  assert.equal(truthfulRuntime.aborts, 0, "The truthful budget aborted inside real headroom");
+  const capacity = (await toolStatus(truthfulRuntime)).details.automatic.capacity;
   assert.equal(capacity.mode, "truthful");
   assert.equal(capacity.window, 400_000);
   assert.equal(capacity.descriptorWindow, 272_000);
@@ -3401,7 +3401,7 @@ async function gateTruthfulCapacityAdmission() {
     truthfulBudget: truthful.budgetTokens,
     hiddenHeadroomTokens: truthful.budgetTokens - descriptor.budgetTokens,
     descriptorAborts: stale.aborts,
-    truthfulAborts: honest.aborts,
+    truthfulAborts: truthfulRuntime.aborts,
     refusedTokens: Math.ceil(big.sourceChars / bytesPerToken),
     headroomTokens: headroom,
     alternativesOffered: alternatives.length,

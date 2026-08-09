@@ -53,7 +53,7 @@ export const EXPERIMENT_DEFAULT_GUIDED_CURATION = false;
 // descriptor, peak 342,539, all served and billed. Rep 16 then aborted after running
 // every curation threshold against the descriptor budget (255,616) because no deployment
 // passed this fact into the registration; pi-fold's runtime falls back to descriptor
-// mode when the fact is absent, which is the honest default for an unlisted model.
+// mode when the fact is absent, which is the conservative default for an unlisted model.
 export const EXPERIMENT_PROVIDER_TOTAL_WINDOWS = Object.freeze({ "gpt-5.6-luna": 400_000 });
 // Pi's default "auto" transport rides a WebSocket whose follow-ups are DELTA requests
 // against connection-scoped server state; every drop re-sends the full context, usually

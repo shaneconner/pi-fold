@@ -174,7 +174,7 @@ export function updateAdvisoryMilestone(
  * Wording rule for every dosage below: report what is HAPPENING and name the actions
  * that change it. The earlier phrasing asked the agent to fold proactively, which is
  * advice it can only act on by interrupting its own task; the runtime folds either way,
- * so the honest thing to say is what it will do and what reacting buys.
+ * so the useful thing to say is what it will do and what reacting buys.
  */
 function curationText(milestone: AdvisoryMilestone, percent: number, toolName: string): string {
   if (milestone === "orientation") {
