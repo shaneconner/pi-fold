@@ -80,6 +80,7 @@ import {
   normalizeTraceAnswer,
   probeClassOf,
   probeMechanicalVerdicts,
+  probeProvenance,
   quotedIncludeSpecs,
   traceStepTranscripts,
   traceStepVerdicts,
@@ -2032,6 +2033,102 @@ try {
     adjudicator.includes("echoes,"),
   "the adjudicator must grade echoes through the shared helper");
   checks.echoConsistencyGradedBesideTruthNeverSummed = true;
+
+  // -------------------------------------------------------------------------
+  // GATE 39 - provenance from sealed artifacts. hoardCarry reads the compressed
+  // representations symmetrically (fold briefs AND compaction summaries),
+  // selfEcho reads the agent's own messages, producedBy attributes only on
+  // deterministic links with everything else counted unattributed, and result
+  // joins are by toolCallId even when entry order lies.
+  // -------------------------------------------------------------------------
+  const provenanceEntries = [];
+  const provenancePush = (entry) => provenanceEntries.push(entry) - 1;
+  const provenanceAssistant = (text, toolCalls = []) => provenancePush({
+    type: "message",
+    message: {
+      role: "assistant",
+      content: [
+        ...(text ? [{ type: "text", text }] : []),
+        ...toolCalls.map(([id, name, args]) => ({ type: "toolCall", id, name, arguments: args })),
+      ],
+    },
+  });
+  const provenanceResult = (toolCallId, toolName, stage, text) => provenancePush({
+    type: "message",
+    message: {
+      role: "toolResult", toolName, toolCallId, isError: false,
+      content: [{ type: "text", text }],
+      ...(stage === null ? {} : { details: { stage } }),
+    },
+  });
+  for (let ordinal = 1; ordinal <= 3; ordinal += 1) {
+    provenanceAssistant("", [[`c${ordinal}`, "repo_stage", {}]]);
+    provenanceResult(`c${ordinal}`, "repo_stage", ordinal, `STAGE ${ordinal}`);
+  }
+  // Step recordings for links 1 and 2; a fold brief then CARRIES the step-2
+  // value and the stage-1 code word forward, and a note re-authors the value.
+  provenanceAssistant("trace-a-01: 1");
+  provenanceAssistant("trace-a-02: stage-1-extra.rs");
+  provenancePush({
+    type: "custom", customType: "acme-fold-record",
+    data: { fold: { brief: "folded span: cw-000001 and stage-1-extra.rs live here" } },
+  });
+  provenancePush({ type: "compaction", summary: "history condensed; nothing verbatim" });
+  provenanceAssistant("note to self: stage-1-extra.rs matters");
+  provenanceAssistant("", [["c4", "repo_stage", {}]]);
+  provenanceResult("c4", "repo_stage", 4, "STAGE 4");
+  // Recovery calls in the wave-4 window: a peek whose RESULT carries the
+  // stage-fact answer, and a read of an unrelated path. The peek result is
+  // written BEFORE the call entry to prove the join is by id, never by order.
+  provenanceResult("c-peek", "pi_fold_context", null, "peeked span says cw-000001");
+  provenanceAssistant("", [["c-peek", "pi_fold_context", { action: "peek" }]]);
+  provenanceAssistant("", [["c-read", "read", { path: "unrelated.rs" }]]);
+  provenanceResult("c-read", "read", null, "bytes of unrelated.rs");
+  provenanceAssistant("probe-04-01: 1\nprobe-04-02: cw-000001\nprobe-04-03: unknown");
+  const provenanceProbes = probeTranscripts({ entries: provenanceEntries, plan });
+  const provenanceSteps = traceStepTranscripts({ entries: provenanceEntries, plan });
+  const provenanceReport = probeProvenance({
+    entries: provenanceEntries, plan, probes: provenanceProbes, steps: provenanceSteps,
+  });
+  const rowOf = (probeId) => provenanceReport.rows.find((row) => row.probeId === probeId);
+  // chain-link probe-04-01: SOF answer "1" is numeric, so never scanned.
+  assert.deepEqual(
+    [rowOf("probe-04-01").scannable, rowOf("probe-04-01").hoardCarry, rowOf("probe-04-01").selfEcho],
+    [false, null, null]);
+  // stage-fact probe-04-02: the code word rode the fold brief (hoardCarry) but
+  // was never re-authored by the agent (no selfEcho), and the answer is
+  // attributed to the peek whose result contained it, joined by toolCallId.
+  assert.deepEqual(
+    [rowOf("probe-04-02").hoardCarry, rowOf("probe-04-02").selfEcho, rowOf("probe-04-02").producedBy],
+    [true, false, "recovered"]);
+  // repo probe-04-03: declined outranks every other attribution.
+  assert.equal(rowOf("probe-04-03").producedBy, "declined");
+  assert.deepEqual(provenanceReport.carriers.map((carrier) => carrier.kind),
+    ["fold-brief", "compaction-summary"]);
+  assert.equal(provenanceReport.waves[0].reads, 1);
+  assert.equal(provenanceReport.waves[0].contextCalls, 1);
+  // The step-2 value was hoard-carried AND self-echoed before any probe asked
+  // for it: prove both detectors against the wave-8 chain-link probe by
+  // extending the same session to wave 8 with an in-context answer.
+  for (let ordinal = 5; ordinal <= 8; ordinal += 1) {
+    provenanceAssistant("", [[`c${ordinal}`, "repo_stage", {}]]);
+    provenanceResult(`c${ordinal}`, "repo_stage", ordinal, `STAGE ${ordinal}`);
+  }
+  provenanceAssistant("probe-08-01: stage-1-extra.rs\nprobe-08-02: 1\nprobe-08-03: stage-3.rs\nprobe-08-04: whatever");
+  const extendedReport = probeProvenance({
+    entries: provenanceEntries, plan,
+    probes: probeTranscripts({ entries: provenanceEntries, plan }),
+    steps: traceStepTranscripts({ entries: provenanceEntries, plan }),
+  });
+  const chainRow = extendedReport.rows.find((row) => row.probeId === "probe-08-01");
+  assert.deepEqual(
+    [chainRow.hoardCarry, chainRow.selfEcho, chainRow.producedBy],
+    [true, true, "in-context"]);
+  assert(extendedReport.rows.every((row) => row.kind !== "echo"),
+    "echo probes have no provenance rows: their grading is consistency");
+  assert(adjudicator.includes("probeProvenance({") && adjudicator.includes("provenance,"),
+    "the adjudicator must report provenance from the shared helper");
+  checks.provenanceAttributesOnlyOnDeterministicLinks = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

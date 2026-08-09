@@ -1600,6 +1600,7 @@ export function probeTranscripts({ entries, plan }) {
     if (resultIndex === undefined) {
       return {
         stage: stage.ordinal, delivered: false, rawText: "", messagesSkipped: 0,
+        resultEntryIndex: null, answerEntryIndex: null,
         answers: stage.probes.map((probe) => ({
           probeId: probe.id, kind: probe.kind, question: probe.question,
           answerText: null, parsed: false,
@@ -1620,6 +1621,8 @@ export function probeTranscripts({ entries, plan }) {
       delivered: true,
       rawText,
       messagesSkipped: found.index >= 0 ? found.skipped : null,
+      resultEntryIndex: resultIndex,
+      answerEntryIndex: found.index >= 0 ? found.index : null,
       answers: stage.probes.map((probe) => {
         const match = probeAnswerPattern(probe.id).exec(rawText);
         return {
@@ -1651,7 +1654,10 @@ export function traceStepTranscripts({ entries, plan }) {
       };
       const resultIndex = stageIndex.get(link.stage);
       if (resultIndex === undefined) {
-        return { ...base, delivered: false, answerText: null, parsed: false, messagesSkipped: 0 };
+        return {
+          ...base, delivered: false, answerText: null, parsed: false, messagesSkipped: 0,
+          resultEntryIndex: null, answerEntryIndex: null,
+        };
       }
       const nextLink = chain.links[position + 1];
       const endIndex = (nextLink === undefined
@@ -1667,6 +1673,8 @@ export function traceStepTranscripts({ entries, plan }) {
         answerText: match ? match[1].trim() : null,
         parsed: Boolean(match),
         messagesSkipped: found.index >= 0 ? found.skipped : null,
+        resultEntryIndex: resultIndex,
+        answerEntryIndex: found.index >= 0 ? found.index : null,
       };
     }),
   }));
@@ -1856,6 +1864,164 @@ export function echoVerdicts({ plan, transcripts }) {
     }
   }
   return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Provenance: offline, from sealed artifacts only. Where did each probe answer
+// COME from? hoardCarry asks whether the answer rode the arm's compressed
+// representation (fold briefs, compaction summaries) between its origin and the
+// probe: both arms have one, so the comparison is symmetric and both rates get
+// published. selfEcho asks whether the agent re-authored the answer in its own
+// messages in between: note-taking is competent context management, detected,
+// never forbidden, and out-of-echo recall is the headline. producedBy
+// attributes only on deterministic links; everything else lands in an explicit
+// unattributed count, reported, never distributed by guess. Result joins are by
+// toolCallId, never by order or clock. Numeric answers are too common for
+// verbatim scanning, so they are marked unscannable rather than guessed at.
+// ---------------------------------------------------------------------------
+const SCANNABLE_ANSWER = /^[A-Za-z0-9_./-]{6,}$/;
+const DECLINED_ANSWER = /^(unknown|unsure|not\s+(sure|recorded|available|known)|n\/?a|none|cannot|can't|blank|-)\b/i;
+
+function wholeWordIn(text, answer) {
+  const escaped = answer.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![A-Za-z0-9_./-])${escaped}(?![A-Za-z0-9_./-])`).test(text);
+}
+
+export function probeProvenance({ entries, plan, probes, steps }) {
+  const carriers = [];
+  entries.forEach((entry, index) => {
+    if (entry?.type === "custom" && String(entry.customType ?? "").endsWith("-fold-record")) {
+      const brief = entry.data?.fold?.brief;
+      if (typeof brief === "string") carriers.push({ index, kind: "fold-brief", text: brief });
+    } else if (entry?.type === "compaction" && typeof entry.summary === "string") {
+      carriers.push({ index, kind: "compaction-summary", text: entry.summary });
+    }
+  });
+  const resultByCallId = new Map();
+  entries.forEach((entry) => {
+    const message = entry?.message;
+    if (entry?.type !== "message" || message?.role !== "toolResult") return;
+    if (typeof message.toolCallId !== "string" || resultByCallId.has(message.toolCallId)) return;
+    resultByCallId.set(message.toolCallId, {
+      toolName: message.toolName,
+      isError: message.isError === true,
+      text: (message.content ?? [])
+        .filter((part) => part?.type === "text" && typeof part.text === "string")
+        .map((part) => part.text).join("\n"),
+    });
+  });
+  const planProbes = new Map(plan.stages.flatMap((stage) =>
+    stage.probes.map((probe) => [probe.id, probe])));
+  const chainById = new Map((plan.chains ?? []).map((chain) => [chain.id, chain]));
+  const stepByStepId = new Map((steps ?? []).flatMap((chain) =>
+    chain.steps.map((step) => [step.stepId, step])));
+  const stageIndex = stageResultIndexByOrdinal(entries);
+  const rows = [];
+  const waves = [];
+  for (const [position, wave] of probes.entries()) {
+    if (!wave.delivered) continue;
+    const nextWave = probes[position + 1];
+    const windowEnd = wave.answerEntryIndex ?? nextWave?.resultEntryIndex ?? entries.length;
+    const calls = [];
+    for (let index = wave.resultEntryIndex + 1; index < windowEnd; index += 1) {
+      const message = entries[index]?.message;
+      if (entries[index]?.type !== "message" || message?.role !== "assistant") continue;
+      for (const part of message.content ?? []) {
+        if (part?.type !== "toolCall") continue;
+        calls.push({ id: part.id, name: part.name, arguments: part.arguments ?? {} });
+      }
+    }
+    const reads = calls.filter((call) => call.name === "read").map((call) => ({
+      path: typeof call.arguments.path === "string" ? call.arguments.path : null,
+      result: resultByCallId.get(call.id) ?? null,
+    }));
+    const contextCalls = calls.filter((call) => call.name !== "read" &&
+      call.name !== EXPERIMENT_TOOL_NAME).map((call) => ({
+      action: typeof call.arguments.action === "string" ? call.arguments.action : null,
+      result: resultByCallId.get(call.id) ?? null,
+    }));
+    const readChars = reads.reduce((total, read) => total + (read.result?.text.length ?? 0), 0);
+    let unattributed = 0;
+    for (const answer of wave.answers) {
+      const probe = planProbes.get(answer.probeId);
+      assertExperiment(probe !== undefined, `Provenance answer ${answer.probeId} has no plan probe`);
+      if (probe.kind === "echo") continue;
+      const normalized = normalizeTraceAnswer(answer.answerText);
+      const scannable = typeof probe.expectedAnswer === "string" &&
+        SCANNABLE_ANSWER.test(probe.expectedAnswer) && /[A-Za-z]/.test(probe.expectedAnswer);
+      // The origin is where the answer VALUE entered the transcript: the step's
+      // recording message for chain-link, the carrier's stage result for
+      // conversation probes. Repo-class answers never lived in the transcript.
+      const origin = probe.kind === "chain-link"
+        ? (stepByStepId.get(auditStepId(probe.chainId, probe.linkIndex))?.answerEntryIndex ??
+          stageIndex.get(probe.sourceStage) ?? null)
+        : CONVERSATION_PROBE_KINDS.includes(probe.kind)
+          ? stageIndex.get(probe.sourceStage) ?? null
+          : null;
+      const scanEnd = wave.resultEntryIndex;
+      const hoardCarry = !scannable || origin === null ? null
+        : carriers.some((carrier) => carrier.index > origin && carrier.index < scanEnd &&
+          wholeWordIn(carrier.text, probe.expectedAnswer));
+      let selfEcho = null;
+      if (scannable && origin !== null) {
+        selfEcho = false;
+        for (let index = origin + 1; index < scanEnd && !selfEcho; index += 1) {
+          const message = entries[index]?.message;
+          if (entries[index]?.type !== "message" || message?.role !== "assistant") continue;
+          const text = (message.content ?? [])
+            .filter((part) => part?.type === "text" && typeof part.text === "string")
+            .map((part) => part.text).join("\n");
+          if (text && wholeWordIn(text, probe.expectedAnswer)) selfEcho = true;
+        }
+      }
+      const deterministicPaths = probe.kind === "chain-link"
+        ? (() => {
+          const chain = chainById.get(probe.chainId);
+          const prefix = [chain.links[0].input];
+          for (const link of chain.links.slice(0, probe.linkIndex)) {
+            if (typeof link.expectedAnswer === "string") prefix.push(link.expectedAnswer);
+          }
+          return prefix;
+        })()
+        : probe.kind === "derivation-control" ? [probe.sourcePath] : [];
+      let producedBy = null;
+      if (answer.parsed) {
+        if (DECLINED_ANSWER.test(answer.answerText ?? "")) producedBy = "declined";
+        else if (scannable && contextCalls.some((call) =>
+          call.result !== null && !call.result.isError && wholeWordIn(call.result.text, probe.expectedAnswer))) {
+          producedBy = "recovered";
+        } else if (deterministicPaths.length > 0 &&
+          reads.some((read) => read.path !== null && deterministicPaths.includes(read.path))) {
+          producedBy = "re-derived";
+        } else if (reads.length === 0 && contextCalls.length === 0) {
+          producedBy = "in-context";
+        } else {
+          producedBy = "unsupported";
+          unattributed += 1;
+        }
+      }
+      rows.push({
+        probeId: probe.id,
+        kind: probe.kind,
+        class: probeClassOf(probe.kind),
+        wave: wave.stage,
+        scannable,
+        hoardCarry,
+        selfEcho,
+        producedBy,
+        normalizedAnswer: normalized,
+      });
+    }
+    waves.push({
+      stage: wave.stage,
+      reads: reads.length,
+      contextCalls: contextCalls.length,
+      readChars,
+      readTokensEstimated: Math.ceil(readChars / 4),
+      unattributed,
+    });
+  }
+  return { rows, waves, carriers: carriers.map(({ index, kind }) => ({ index, kind })) };
 }
 
 export function deliverableTranscripts({ entries, plan }) {

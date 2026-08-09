@@ -34,6 +34,7 @@ import {
   isWindowOverflow,
   probeClassOf,
   probeMechanicalVerdicts,
+  probeProvenance,
   probeTranscripts,
   quotedIncludeSpecs,
   thinkTimeFromPace,
@@ -472,6 +473,9 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   };
   const auditTranscripts = traceStepTranscripts({ entries: runEntries, plan });
   const auditTraces = traceStepVerdicts({ transcripts: auditTranscripts, plan, includeTargets });
+  const provenance = probeProvenance({
+    entries: runEntries, plan, probes, steps: auditTranscripts,
+  });
 
   // (g) The per-request dials the iteration comparison runs on. The ledger is the source
   // because it alone carries the request wall clock beside the response usage; it is
@@ -538,6 +542,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     probeVerdicts,
     echoes,
     auditTraces,
+    provenance,
     probes,
     deliverables,
     evidence: {
