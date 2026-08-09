@@ -19,7 +19,11 @@ import {
   sha256Text,
 } from "./pi_context_soak_attestation.mjs";
 
-export const EXPERIMENT_PROTOCOL_VERSION = 1;
+// Version 2 (2026-08-09): recall-first probes. Conversation-class probe kinds
+// (stage-fact, stage-binding) with per-stage audit code words, file-line-count
+// retired, wc -l line semantics, whole-checkout symbol uniqueness. Version-1 plans
+// and manifests are a different protocol and do not revalidate under this code.
+export const EXPERIMENT_PROTOCOL_VERSION = 2;
 
 // (a) pifold: active-context runtime ON, native auto-compaction OFF.
 // (b) native: pi-fold OFF, Pi native auto-compaction ON.
@@ -108,6 +112,17 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
     payloadTargetChars: 48_000,
     payloadFloorChars: 24_000,
     probeStages: Object.freeze([16, 32, 48, 64]),
+    // One kind list PER WAVE (probeKinds[i] belongs to probeStages[i]). Conversation-class
+    // kinds discriminate context loss (the answer exists only in the earlier conversation);
+    // the one repo-class control (alternating definition-line / symbol-file by wave) keeps
+    // continuity with iterations 1-5. Scored separately: a combined total would let the
+    // re-derivable answers mask the ones that matter.
+    probeKinds: Object.freeze([
+      Object.freeze(["stage-fact", "stage-fact", "stage-binding", "repo"]),
+      Object.freeze(["stage-fact", "stage-fact", "stage-binding", "repo"]),
+      Object.freeze(["stage-fact", "stage-fact", "stage-binding", "repo"]),
+      Object.freeze(["stage-fact", "stage-fact", "stage-binding", "repo"]),
+    ]),
     deliverableEvery: 8,
     revisitEvery: 3,
   }),
@@ -121,6 +136,13 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
     // Deliverable cadence must not collide with the probe stages, or a mode plan silently
     // produces zero deliverables and the blind grading leg has nothing to grade.
     probeStages: Object.freeze([4, 8]),
+    // Smoke has only three carrier stages under the <= ceil(ordinal/2) eligibility rule
+    // (1 and 2 by wave one, 3 by wave two), so each wave carries ONE conversation kind;
+    // both kinds still get exercised across the run.
+    probeKinds: Object.freeze([
+      Object.freeze(["stage-fact", "repo"]),
+      Object.freeze(["stage-binding", "repo"]),
+    ]),
     deliverableEvery: 3,
     revisitEvery: 2,
   }),
@@ -292,7 +314,9 @@ export function fileFacts(repoRoot, absolutePath) {
   return {
     path,
     sha256: sha256Text(text),
-    lines: text.split("\n").length,
+    // wc -l semantics: the count of newline characters. split("\n").length reads one
+    // high on newline-terminated files and gave one probe a defensible second answer.
+    lines: text.length === 0 ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0),
     chars: text.length,
     bytes: Buffer.byteLength(text, "utf8"),
     definitions: extractDefinitions(text),
@@ -300,10 +324,12 @@ export function fileFacts(repoRoot, absolutePath) {
   };
 }
 
-// Three probe kinds, all answerable ONLY from material the session saw early, all
-// extracted mechanically. `expectedAnswer` never reaches the model or the grader packet
-// until grading, and never reaches the run at all.
-export function buildProbes({ facts, seed, count, uniqueIdentifiers }) {
+// Repo-class control probes, extracted mechanically from the pinned bytes. These are
+// re-derivable by rereading the checkout, which is exactly why they are only the
+// CONTROL now: conversation-class probes (below) are the discriminating instrument.
+// file-line-count is retired: its truth semantics were ambiguous, it was noise, and
+// it invited extra file reads that moved the token comparison.
+export function buildProbes({ facts, seed, count, uniqueIdentifiers, rotationOffset = 0 }) {
   assertExperiment(Array.isArray(facts) && facts.length > 0, "Probe construction requires staged files");
   assertExperiment(Number.isSafeInteger(count) && count > 0, "Probe construction requires a count");
   const probes = [];
@@ -313,7 +339,7 @@ export function buildProbes({ facts, seed, count, uniqueIdentifiers }) {
   for (let index = 0; probes.length < count && index < ordered.length * 3; index += 1) {
     const fact = facts.find((candidate) => candidate.path === ordered[index % ordered.length]);
     if (!fact) continue;
-    const rotation = probes.length % 3;
+    const rotation = (probes.length + rotationOffset) % 2;
     if (rotation === 0 && fact.definitions.length > 0) {
       const definition = fact.definitions[draws[drawIndex++] % fact.definitions.length];
       probes.push({
@@ -323,17 +349,6 @@ export function buildProbes({ facts, seed, count, uniqueIdentifiers }) {
         expectedAnswer: definition.identifier,
         sourcePath: fact.path,
         sourceLine: definition.line,
-      });
-      continue;
-    }
-    if (rotation === 1) {
-      probes.push({
-        id: `probe-${String(probes.length + 1).padStart(2, "0")}`,
-        kind: "file-line-count",
-        question: `How many lines does the file ${fact.path} contain? Answer with the integer only.`,
-        expectedAnswer: String(fact.lines),
-        sourcePath: fact.path,
-        sourceLine: fact.lines,
       });
       continue;
     }
@@ -368,6 +383,73 @@ export function uniqueIdentifierIndex(facts) {
   }
   for (const identifier of ambiguous) seen.delete(identifier);
   return seen;
+}
+
+// ---------------------------------------------------------------------------
+// Conversation-class probes. The answer exists ONLY in the earlier conversation:
+// a code word delivered once inside a stage instruction, or the stage-to-file
+// binding the seeded shuffle created. Ground truth is derivable at staging time
+// (the harness authored it), and rereading the checkout cannot recover it.
+// ---------------------------------------------------------------------------
+export const CONVERSATION_PROBE_KINDS = Object.freeze(["stage-fact", "stage-binding"]);
+export const REPO_PROBE_KINDS = Object.freeze(["definition-line", "symbol-file"]);
+export const CODE_WORD_PATTERN = /^cw-[0-9a-f]{6}$/;
+
+export function stageCodeWords(seed, stageCount) {
+  const draws = seededSequence(`${seed}:code-words`, stageCount);
+  const words = draws.map((value) => `cw-${value.toString(16).padStart(8, "0").slice(0, 6)}`);
+  assertExperiment(new Set(words).size === words.length,
+    "Stage code words collided; stage the campaign with a different seed");
+  return words;
+}
+
+export function codeWordSentence(ordinal, codeWord) {
+  return `Audit note: the code word for stage ${String(ordinal).padStart(2, "0")} is ${codeWord}.`;
+}
+
+// One carrier stage per probe, never reused across the whole plan: a probed span,
+// once peeked or answered, is refreshed at the tail, and a second probe against it
+// would measure that refresh instead of recall.
+export function buildConversationProbes({ stages, probeOrdinal, seed, kinds, usedStages }) {
+  assertExperiment(Array.isArray(stages) && Number.isSafeInteger(probeOrdinal),
+    "Conversation probes require the stages built so far");
+  assertExperiment(Array.isArray(kinds) && kinds.every((kind) => CONVERSATION_PROBE_KINDS.includes(kind)),
+    "Conversation probe kinds must be stage-fact or stage-binding");
+  const eligible = stages.filter((stage) => stage.kind !== "probe" &&
+    stage.ordinal <= Math.ceil(probeOrdinal / 2) && !usedStages.has(stage.ordinal));
+  assertExperiment(eligible.length >= kinds.length,
+    `Probe stage ${probeOrdinal} has ${eligible.length} unused carrier stages, needs ${kinds.length}`);
+  const order = seededShuffle(eligible.map((stage) => stage.ordinal), `${seed}:carriers`);
+  const probes = [];
+  for (const [index, kind] of kinds.entries()) {
+    const ordinal = order[index];
+    const carrier = stages.find((stage) => stage.ordinal === ordinal);
+    usedStages.add(ordinal);
+    const label = String(ordinal).padStart(2, "0");
+    if (kind === "stage-fact") {
+      assertExperiment(typeof carrier.codeWord === "string" && CODE_WORD_PATTERN.test(carrier.codeWord),
+        `Carrier stage ${ordinal} has no code word`);
+      probes.push({
+        id: "",
+        kind,
+        question: `What was the audit code word given in stage ${label}'s instructions? ` +
+          "Answer with the code word only.",
+        expectedAnswer: carrier.codeWord,
+        sourceStage: ordinal,
+      });
+    } else {
+      assertExperiment(carrier.files.length > 0, `Carrier stage ${ordinal} delivered no files`);
+      probes.push({
+        id: "",
+        kind,
+        question: `Which repository-relative file was the FIRST file delivered in stage ${label}? ` +
+          "Answer with the path only.",
+        expectedAnswer: carrier.files[0].path,
+        sourceStage: ordinal,
+      });
+    }
+  }
+  return probes;
 }
 
 // ---------------------------------------------------------------------------
@@ -430,27 +512,66 @@ export function validateStagePlan(plan) {
     "Stage plan stage count drifted");
   let probeCount = 0;
   let deliverableCount = 0;
+  const carrierStages = new Set();
+  const seenCodeWords = new Set();
   for (const [index, stage] of plan.stages.entries()) {
     assertExperiment(exactKeys(stage, [
       "ordinal", "kind", "instructions", "files", "probes", "deliverable", "payloadChars",
-      "payloadSha256",
+      "payloadSha256", "codeWord",
     ]) && stage.ordinal === index + 1 &&
       ["read", "revisit", "probe"].includes(stage.kind) &&
       typeof stage.instructions === "string" && stage.instructions.length > 0 &&
       Array.isArray(stage.files) && Array.isArray(stage.probes),
     `Invalid stage shape at ${index + 1}`);
+    assertExperiment((stage.kind === "probe") === modePlan.probeStages.includes(stage.ordinal) &&
+      (stage.kind === "probe") === (stage.probes.length > 0),
+    `Stage ${index + 1} disagrees with the mode plan about being a probe wave`);
+    // The code word is the conversation-fact channel: exactly one per payload stage,
+    // woven into the instructions, absent from probe stages, never repeated.
+    if (stage.kind === "probe") {
+      assertExperiment(stage.codeWord === null, `Probe stage ${index + 1} carries a code word`);
+    } else {
+      assertExperiment(typeof stage.codeWord === "string" && CODE_WORD_PATTERN.test(stage.codeWord) &&
+        stage.instructions.includes(stage.codeWord) && !seenCodeWords.has(stage.codeWord),
+      `Stage ${index + 1} code word is missing, malformed, unwoven, or repeated`);
+      seenCodeWords.add(stage.codeWord);
+    }
     for (const file of stage.files) {
       assertExperiment(exactKeys(file, ["path", "sha256", "lines", "chars", "bytes"]) &&
         HEX_64.test(file.sha256) && Number.isSafeInteger(file.lines) && file.lines > 0,
       `Invalid staged file at stage ${index + 1}`);
     }
     for (const probe of stage.probes) {
-      assertExperiment(exactKeys(probe, [
-        "id", "kind", "question", "expectedAnswer", "sourcePath", "sourceLine",
-      ]) && ["definition-line", "file-line-count", "symbol-file"].includes(probe.kind) &&
-        typeof probe.expectedAnswer === "string" && probe.expectedAnswer.length > 0 &&
-        Number.isSafeInteger(probe.sourceLine) && probe.sourceLine > 0,
-      `Invalid probe shape at stage ${index + 1}`);
+      if (CONVERSATION_PROBE_KINDS.includes(probe.kind)) {
+        assertExperiment(exactKeys(probe, [
+          "id", "kind", "question", "expectedAnswer", "sourceStage",
+        ]) && typeof probe.expectedAnswer === "string" && probe.expectedAnswer.length > 0 &&
+          Number.isSafeInteger(probe.sourceStage) && probe.sourceStage >= 1 &&
+          probe.sourceStage < stage.ordinal,
+        `Invalid conversation probe shape at stage ${index + 1}`);
+        // One probe per carrier stage across the WHOLE plan: a probed span refreshes
+        // at the tail once answered, and a second probe would measure the refresh.
+        assertExperiment(!carrierStages.has(probe.sourceStage),
+          `Carrier stage ${probe.sourceStage} is probed twice`);
+        carrierStages.add(probe.sourceStage);
+        const carrier = plan.stages[probe.sourceStage - 1];
+        assertExperiment(carrier && carrier.kind !== "probe",
+          `Conversation probe at stage ${index + 1} targets a probe stage`);
+        if (probe.kind === "stage-fact") {
+          assertExperiment(probe.expectedAnswer === carrier.codeWord,
+            `stage-fact probe at stage ${index + 1} disagrees with carrier ${probe.sourceStage}`);
+        } else {
+          assertExperiment(carrier.files.length > 0 && probe.expectedAnswer === carrier.files[0].path,
+            `stage-binding probe at stage ${index + 1} disagrees with carrier ${probe.sourceStage}`);
+        }
+      } else {
+        assertExperiment(exactKeys(probe, [
+          "id", "kind", "question", "expectedAnswer", "sourcePath", "sourceLine",
+        ]) && REPO_PROBE_KINDS.includes(probe.kind) &&
+          typeof probe.expectedAnswer === "string" && probe.expectedAnswer.length > 0 &&
+          Number.isSafeInteger(probe.sourceLine) && probe.sourceLine > 0,
+        `Invalid probe shape at stage ${index + 1}`);
+      }
       probeCount += 1;
     }
     if (stage.deliverable) {
@@ -479,6 +600,10 @@ export function validateStagePlan(plan) {
   const stagedPaths = plan.stages.flatMap((stage) => stage.files.map((file) => file.path));
   assertExperiment(new Set(stagedPaths).size === stagedPaths.length,
     "Stage plan delivers the same file twice");
+  // Grading flattens every wave into one packet and joins answers to ground truth by id,
+  // so an id repeated across waves would leave the grader joining by position.
+  const probeIds = plan.stages.flatMap((stage) => stage.probes.map((probe) => probe.id));
+  assertExperiment(new Set(probeIds).size === probeIds.length, "Stage plan repeats a probe id");
   assertExperiment(plan.planSha256 === stagePlanSha256(plan), "Stage plan hash does not cover its own body");
   return plan;
 }
@@ -490,8 +615,11 @@ export function stagePlanForRun(plan) {
     ...plan,
     stages: plan.stages.map((stage) => ({
       ...stage,
-      probes: stage.probes.map(({ expectedAnswer: _hidden, sourcePath: _path, sourceLine: _line, ...visible }) =>
-        visible),
+      probes: stage.probes.map((probe) => {
+        const { expectedAnswer: _hidden, sourcePath: _path, sourceLine: _line,
+          sourceStage: _stage, ...visible } = probe;
+        return visible;
+      }),
     })),
   };
 }
@@ -836,8 +964,8 @@ export function probeTranscripts({ entries, plan }) {
         })),
       };
     }
-    // The answer surface runs to the NEXT PROBE WAVE, not to the next stage. Probe ids
-    // repeat across waves, so the next wave is the only bound that cannot steal an answer.
+    // The answer surface runs to the NEXT PROBE WAVE, not to the next stage: an answer
+    // can arrive many stages late, but never legitimately after the following wave.
     const nextProbeStage = probeStages[position + 1];
     const endIndex = (nextProbeStage === undefined
       ? undefined

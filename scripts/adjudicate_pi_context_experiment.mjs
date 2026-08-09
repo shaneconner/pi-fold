@@ -17,6 +17,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CONTEXT_EVENT_SUFFIX,
+  CONVERSATION_PROBE_KINDS,
   EXPERIMENT_ARMS,
   EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS,
   EXPERIMENT_DEFAULT_FOLD_SCHEDULING,
@@ -414,6 +415,18 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
 
   const probes = probeTranscripts({ entries: runEntries, plan });
   const deliverables = deliverableTranscripts({ entries: runEntries, plan });
+  // Parse rates by probe class, before grading: conversation-class probes are the
+  // recall instrument, repo-class the control, and a run that never even ANSWERED
+  // one class should be visible without opening the blind packet.
+  const probeAnswers = probes.flatMap((wave) => wave.answers);
+  const probeClassSummary = Object.fromEntries(["conversation", "repository"].map((klass) => {
+    const inClass = probeAnswers.filter((answer) =>
+      CONVERSATION_PROBE_KINDS.includes(answer.kind) === (klass === "conversation"));
+    return [klass, {
+      questions: inClass.length,
+      parsed: inClass.filter((answer) => answer.parsed).length,
+    }];
+  }));
 
   // (g) The per-request dials the iteration comparison runs on. The ledger is the source
   // because it alone carries the request wall clock beside the response usage; it is
@@ -476,6 +489,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     stopTheWorld: stw,
     curation: curationSummary,
     overflowPoint,
+    probeClassSummary,
     probes,
     deliverables,
     evidence: {

@@ -9,7 +9,7 @@
 //        [--repo ripgrep|gin|flask] [--seed <hex>]
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import {
   EXPERIMENT_DEFAULT_REPO,
@@ -18,10 +18,14 @@ import {
   EXPERIMENT_PROTOCOL_VERSION,
   EXPERIMENT_REPOS,
   assertExperiment,
+  buildConversationProbes,
   buildProbes,
+  codeWordSentence,
   corpusManifestSha256,
+  extractDefinitions,
   fileFacts,
   seededShuffle,
+  stageCodeWords,
   stagePayloadText,
   stagePlanSha256,
   uniqueIdentifierIndex,
@@ -96,6 +100,41 @@ function collectSourceFiles(repo, checkoutDir) {
   return found;
 }
 
+// symbol-file probes claim THE defining file, so uniqueness has to hold over the whole
+// checkout, not just the collected source roots: a vendored or test copy of a symbol
+// would give the probe a second defensible answer. Every text file in the tree votes.
+// The same walk asserts no staged code word already exists anywhere in the checkout,
+// since arms can read the checkout and a collision would make a conversation probe
+// answerable from disk.
+const MAX_DEFINITION_SCAN_BYTES = 2_000_000;
+
+function collectCheckoutDefinitions(checkoutDir, codeWords) {
+  const codeWordSet = new Set(codeWords);
+  const entries = [];
+  const walk = (directory) => {
+    for (const name of readdirSync(directory).sort()) {
+      if (name === ".git") continue;
+      const path = join(directory, name);
+      const stat = statSync(path);
+      if (stat.isDirectory()) {
+        walk(path);
+        continue;
+      }
+      if (!stat.isFile() || stat.size > MAX_DEFINITION_SCAN_BYTES) continue;
+      const raw = readFileSync(path);
+      if (raw.subarray(0, 8192).includes(0)) continue;
+      const text = raw.toString("utf8");
+      const collision = (text.match(/cw-[0-9a-f]{6}/g) ?? []).find((word) => codeWordSet.has(word));
+      assertExperiment(!collision,
+        `Code word ${collision} already exists in ${relative(checkoutDir, path)}; restage with a different seed`);
+      entries.push({ path: relative(checkoutDir, path), definitions: extractDefinitions(text) });
+    }
+  };
+  walk(checkoutDir);
+  assertExperiment(entries.length > 0, "Pinned checkout yielded no text files for the symbol index");
+  return entries;
+}
+
 function readInstruction(stage, files) {
   return [
     `Read every file delivered in this stage of ${stage.repoKey} and build an accurate working`,
@@ -135,13 +174,16 @@ function deliverableInstruction(ordinal, referencesStages) {
   ].join(" ");
 }
 
-function buildPlan({ repo, mode, seed, facts }) {
+function buildPlan({ repo, mode, seed, facts, codeWords, uniqueIdentifiers }) {
   const modePlan = EXPERIMENT_MODE_PLANS[mode];
+  assertExperiment(codeWords.length === modePlan.stageCount,
+    "Stage code words must cover every stage");
   const eligible = facts.filter((fact) => fact.lines >= MIN_FILE_LINES && fact.lines <= MAX_FILE_LINES);
   assertExperiment(eligible.length >= modePlan.stageCount,
     `Pinned corpus has ${eligible.length} eligible files, fewer than ${modePlan.stageCount} stages`);
   const order = seededShuffle(eligible.map((fact) => fact.path), `${seed}:reading-order`);
   const byPath = new Map(eligible.map((fact) => [fact.path, fact]));
+  const usedCarrierStages = new Set();
   const stages = [];
   let cursor = 0;
   const takeFiles = (targetChars) => {
@@ -179,17 +221,37 @@ function buildPlan({ repo, mode, seed, facts }) {
     let instructions;
     let probes = [];
     if (isProbe) {
+      // Each wave follows the mode plan's kind schedule: conversation probes ask for
+      // facts that exist only in the earlier transcript, then one repo-class control.
+      const waveIndex = modePlan.probeStages.indexOf(ordinal);
+      const waveKinds = modePlan.probeKinds[waveIndex];
+      const conversationKinds = waveKinds.filter((kind) => kind !== "repo");
+      const conversation = buildConversationProbes({
+        stages,
+        probeOrdinal: ordinal,
+        seed: `${seed}:probe:${ordinal}`,
+        kinds: conversationKinds,
+        usedStages: usedCarrierStages,
+      });
       const earlierFacts = stages.flatMap((stage) =>
         stage.ordinal <= Math.ceil(ordinal / 2)
           ? stage.files.map((file) => byPath.get(file.path)).filter(Boolean)
           : []);
       assertExperiment(earlierFacts.length > 0, `Probe stage ${ordinal} has no early corpus`);
-      probes = buildProbes({
+      const repoProbes = buildProbes({
         facts: earlierFacts,
         seed: `${seed}:probe:${ordinal}`,
-        count: 3,
-        uniqueIdentifiers: uniqueIdentifierIndex(facts),
+        count: waveKinds.length - conversationKinds.length,
+        uniqueIdentifiers,
+        rotationOffset: waveIndex,
       });
+      // Ids carry the wave ordinal so they are unique across the WHOLE plan: the
+      // grading packet flattens every wave, and a repeated id would leave the
+      // grader joining answers to ground truth by position.
+      probes = [...conversation, ...repoProbes].map((probe, index) => ({
+        ...probe,
+        id: `probe-${String(ordinal).padStart(2, "0")}-${String(index + 1).padStart(2, "0")}`,
+      }));
       instructions = probeInstruction();
     } else if (isRevisit) {
       files = takeFiles(modePlan.payloadTargetChars);
@@ -204,10 +266,16 @@ function buildPlan({ repo, mode, seed, facts }) {
       instructions = readInstruction({ repoKey: repo.key }, files);
     }
 
+    // The code word rides inside the instructions exactly once; the field is the
+    // ground-truth copy the run-visible plan keeps only via that woven sentence.
+    const codeWord = isProbe ? null : codeWords[ordinal - 1];
+    if (codeWord !== null) instructions = `${instructions} ${codeWordSentence(ordinal, codeWord)}`;
+
     const stage = {
       ordinal,
       kind: isProbe ? "probe" : isRevisit ? "revisit" : "read",
       instructions,
+      codeWord,
       files: files.map((fact) => ({
         path: fact.path, sha256: fact.sha256, lines: fact.lines, chars: fact.chars, bytes: fact.bytes,
       })),
@@ -220,7 +288,7 @@ function buildPlan({ repo, mode, seed, facts }) {
     const visible = {
       ...stage,
       files: files.map((fact) => ({ ...fact })),
-      probes: probes.map(({ expectedAnswer: _a, sourcePath: _p, sourceLine: _l, ...rest }) => rest),
+      probes: probes.map(({ expectedAnswer: _a, sourcePath: _p, sourceLine: _l, sourceStage: _s, ...rest }) => rest),
     };
     const payload = stagePayloadText(visible);
     stage.payloadChars = payload.length;
@@ -275,8 +343,13 @@ try {
   const checkoutDir = join(campaignDir, "repo");
   const mirrorDir = join(campaignDir, "repo.git");
   cloneAtCommit(repo, mirrorDir, checkoutDir);
+  const codeWords = stageCodeWords(seed, EXPERIMENT_MODE_PLANS[mode].stageCount);
+  const checkoutDefinitions = collectCheckoutDefinitions(checkoutDir, codeWords);
   const facts = collectSourceFiles(repo, checkoutDir).map((path) => fileFacts(checkoutDir, path));
-  const plan = buildPlan({ repo, mode, seed, facts });
+  const plan = buildPlan({
+    repo, mode, seed, facts, codeWords,
+    uniqueIdentifiers: uniqueIdentifierIndex(checkoutDefinitions),
+  });
   const planPath = join(campaignDir, `stages-${mode}.json`);
   writeJsonExclusive(planPath, plan);
   result = {

@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+  CONVERSATION_PROBE_KINDS,
   assertBlindPacket,
   assertExperiment,
   seededShuffle,
@@ -106,14 +107,28 @@ function groundTruthFromPlans(evidence) {
   const plan = [...plans.values()][0];
   return {
     planSha256: plan.planSha256,
-    probes: plan.stages.flatMap((stage) => stage.probes.map((probe) => ({
-      probeId: probe.id,
-      kind: probe.kind,
-      question: probe.question,
-      expectedAnswer: probe.expectedAnswer,
-      sourcePath: probe.sourcePath,
-      sourceLine: probe.sourceLine,
-    }))),
+    // Conversation probes carry the stage whose transcript held the answer; repo
+    // probes carry the file position. The class is what the analysis pools by:
+    // conversation-class scores are the recall instrument, repo-class the control.
+    probes: plan.stages.flatMap((stage) => stage.probes.map((probe) => (
+      CONVERSATION_PROBE_KINDS.includes(probe.kind)
+        ? {
+          probeId: probe.id,
+          kind: probe.kind,
+          class: "conversation",
+          question: probe.question,
+          expectedAnswer: probe.expectedAnswer,
+          sourceStage: probe.sourceStage,
+        }
+        : {
+          probeId: probe.id,
+          kind: probe.kind,
+          class: "repository",
+          question: probe.question,
+          expectedAnswer: probe.expectedAnswer,
+          sourcePath: probe.sourcePath,
+          sourceLine: probe.sourceLine,
+        }))),
     deliverables: plan.stages.flatMap((stage) => stage.deliverable
       ? [{ id: stage.deliverable.id, instructions: stage.deliverable.instructions }]
       : []),
