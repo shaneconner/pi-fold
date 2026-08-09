@@ -1154,8 +1154,9 @@ try {
 // its curation thresholds against the per-request descriptor budget again (rep 16's abort)
 // ---------------------------------------------------------------------------
 {
-  // The fact is keyed by model id, and the one proven wire is pinned to its evidence.
+  // The fact is keyed by model id, and each entry is pinned to its evidence.
   assert.equal(EXPERIMENT_PROVIDER_TOTAL_WINDOWS["gpt-5.6-luna"], 400_000);
+  assert.equal(EXPERIMENT_PROVIDER_TOTAL_WINDOWS["gpt-5.6-sol"], 400_000);
   validateExperimentRunConfig({ ...runConfig, providerTotalWindow: 400_000 });
   validateExperimentRunConfig(runConfig); // unlisted models carry no key: descriptor mode
   assert.throws(() => validateExperimentRunConfig({ ...runConfig, providerTotalWindow: 0 }),

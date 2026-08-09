@@ -58,7 +58,14 @@ export const EXPERIMENT_DEFAULT_GUIDED_CURATION = false;
 // every curation threshold against the descriptor budget (255,616) because no deployment
 // passed this fact into the registration; pi-fold's runtime falls back to descriptor
 // mode when the fact is absent, which is the conservative default for an unlisted model.
-export const EXPERIMENT_PROVIDER_TOTAL_WINDOWS = Object.freeze({ "gpt-5.6-luna": 400_000 });
+// sol shares luna's deployment: identical descriptor split (272k input + 128k output
+// = 400k total), same provider family, and rep 15 proved the 400k serving budget on
+// the wire for that family. An entry here is the difference between measuring curation
+// thresholds against the true budget and rep 16's descriptor-mode abort.
+export const EXPERIMENT_PROVIDER_TOTAL_WINDOWS = Object.freeze({
+  "gpt-5.6-luna": 400_000,
+  "gpt-5.6-sol": 400_000,
+});
 // Pi's default "auto" transport rides a WebSocket whose follow-ups are DELTA requests
 // against connection-scoped server state; every drop re-sends the full context, usually
 // onto a cold backend. Rep 17 measured the bill: raw pooled cache share 0.390 against a
