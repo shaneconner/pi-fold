@@ -416,6 +416,15 @@ export function uniqueIdentifierIndex(facts) {
 // ---------------------------------------------------------------------------
 export const CONVERSATION_PROBE_KINDS = Object.freeze(["stage-fact", "stage-binding"]);
 export const REPO_PROBE_KINDS = Object.freeze(["definition-line", "symbol-file"]);
+// Derived-class probes target audit-trace values: facts the agent COMPUTED earlier
+// rather than received, so recall and re-derivation separate cleanly in grading.
+export const DERIVED_PROBE_KINDS = Object.freeze(["chain-link", "derivation-control"]);
+
+export function probeClassOf(kind) {
+  if (CONVERSATION_PROBE_KINDS.includes(kind)) return "conversation";
+  if (DERIVED_PROBE_KINDS.includes(kind)) return "derived";
+  return "repository";
+}
 export const CODE_WORD_PATTERN = /^cw-[0-9a-f]{6}$/;
 
 export function stageCodeWords(seed, stageCount) {
@@ -1369,6 +1378,137 @@ export function probeTranscripts({ entries, plan }) {
       }),
     };
   });
+}
+
+// Trace steps grade like probes but continuously: each chain step is a
+// mechanically checkable recall event with no wave needed. A step's answer
+// surface runs from its stage result to the SAME chain's next step stage (the
+// value must exist before its consumer reads it), and to the end of the session
+// for a final link. Steps parse with the probe parser: no new parser, no new law.
+export function traceStepTranscripts({ entries, plan }) {
+  const stageIndex = stageResultIndexByOrdinal(entries);
+  return plan.chains.map((chain) => ({
+    chainId: chain.id,
+    steps: chain.links.map((link, position) => {
+      const stepId = auditStepId(chain.id, link.index);
+      const base = {
+        stepId, chainId: chain.id, index: link.index, stage: link.stage,
+        hop: link.hop, hopIndex: link.hopIndex,
+      };
+      const resultIndex = stageIndex.get(link.stage);
+      if (resultIndex === undefined) {
+        return { ...base, delivered: false, answerText: null, parsed: false, messagesSkipped: 0 };
+      }
+      const nextLink = chain.links[position + 1];
+      const endIndex = (nextLink === undefined
+        ? undefined
+        : stageIndex.get(nextLink.stage)) ?? entries.length;
+      const pattern = probeAnswerPattern(stepId);
+      const found = scanAssistantMessages(entries, resultIndex + 1, endIndex,
+        (text) => pattern.test(text));
+      const match = pattern.exec(found.text);
+      return {
+        ...base,
+        delivered: true,
+        answerText: match ? match[1].trim() : null,
+        parsed: Boolean(match),
+        messagesSkipped: found.index >= 0 ? found.skipped : null,
+      };
+    }),
+  }));
+}
+
+// The ONE normalizer, declared once for every trace verdict: trim, strip
+// surrounding backticks and quotes and trailing punctuation. Identifiers and
+// paths stay case-sensitive.
+export function normalizeTraceAnswer(text) {
+  if (typeof text !== "string") return null;
+  let value = text.trim();
+  for (;;) {
+    const next = value.replace(/^[`"']+/, "").replace(/[`"'.,;:!?]+$/, "").trim();
+    if (next === value) return value;
+    value = next;
+  }
+}
+
+// A stage answer may arrive as "7", "07" or "stage 7"; anything else is wrong.
+function stageAnswerNumber(text) {
+  const match = /^(?:stage\s+)?0*(\d+)$/i.exec(normalizeTraceAnswer(text) ?? "");
+  return match ? Number(match[1]) : null;
+}
+
+// Absolute verdict: the agent's line against the harness walk. Self verdict: the
+// hop re-evaluated through the ONE evaluator over the agent's OWN recorded
+// predecessor, which separates "cannot do the derivation" from "lost the
+// predecessor". INC self-evaluation reads the run's pinned worktree through the
+// caller's includeTargets; a pruned run reports not-evaluated, never a guess.
+export function traceStepVerdicts({ transcripts, plan, includeTargets = null }) {
+  const delivery = auditDelivery(plan.stages);
+  const linkOf = new Map();
+  for (const chain of plan.chains) {
+    for (const link of chain.links) linkOf.set(auditStepId(chain.id, link.index), link);
+  }
+  const chains = transcripts.map((chain) => {
+    let integrityPrefix = 0;
+    let integrityHeld = true;
+    const steps = chain.steps.map((step, position) => {
+      const link = linkOf.get(step.stepId);
+      assertExperiment(link !== undefined, `Transcript step ${step.stepId} has no plan link`);
+      const answersExpected = (expected) => (link.hop === "SOF"
+        ? stageAnswerNumber(step.answerText) === expected
+        : normalizeTraceAnswer(step.answerText) === expected);
+      const verdictAbsolute = !step.parsed ? "unanswered"
+        : answersExpected(link.expectedAnswer) ? "match" : "mismatch";
+      if (integrityHeld && verdictAbsolute === "match") integrityPrefix += 1;
+      else integrityHeld = false;
+      let verdictSelf;
+      if (!step.parsed) {
+        verdictSelf = "unanswered";
+      } else if (step.index === 1) {
+        // The anchor is harness-given, so self and absolute coincide.
+        verdictSelf = verdictAbsolute;
+      } else {
+        const previous = chain.steps[position - 1];
+        const previousValue = !previous.parsed ? null
+          : link.hop === "FIN" ? stageAnswerNumber(previous.answerText)
+          : normalizeTraceAnswer(previous.answerText);
+        if (previousValue === null || previousValue === "") {
+          verdictSelf = "no-predecessor";
+        } else if (link.hop === "INC" &&
+          (typeof includeTargets !== "function" || includeTargets(previousValue) == null)) {
+          verdictSelf = "not-evaluated";
+        } else {
+          let expectedFromSelf = null;
+          try {
+            expectedFromSelf = evaluateAuditHop({
+              hop: link.hop, hopIndex: link.hopIndex, input: previousValue,
+              delivery, includeTargets,
+            });
+          } catch {
+            // The agent's predecessor admits no such hop (undelivered path, no
+            // n-th file, no j-th include): nothing it answered can match.
+            expectedFromSelf = null;
+          }
+          verdictSelf = expectedFromSelf !== null && answersExpected(expectedFromSelf)
+            ? "match" : "mismatch";
+        }
+      }
+      return { ...step, verdictAbsolute, verdictSelf };
+    });
+    return {
+      chainId: chain.chainId,
+      steps,
+      compliance: { parsed: steps.filter((step) => step.parsed).length, total: steps.length },
+      integrityPrefix,
+    };
+  });
+  return {
+    chains,
+    stepCompliance: {
+      parsed: chains.reduce((total, chain) => total + chain.compliance.parsed, 0),
+      total: chains.reduce((total, chain) => total + chain.compliance.total, 0),
+    },
+  };
 }
 
 export function deliverableTranscripts({ entries, plan }) {

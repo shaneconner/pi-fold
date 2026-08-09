@@ -72,7 +72,11 @@ import {
   buildAuditTraces,
   buildIncludeResolver,
   evaluateAuditHop,
+  normalizeTraceAnswer,
+  probeClassOf,
   quotedIncludeSpecs,
+  traceStepTranscripts,
+  traceStepVerdicts,
   visibleStage,
 } from "./lib/pi_context_experiment.mjs";
 import { directoryTreeSha256, sha256Text, verifySourceHashes } from "./lib/pi_context_soak_attestation.mjs";
@@ -1684,6 +1688,113 @@ try {
   revisit.instructions += " cross-reference specifically stage 1 (stage-1.rs, stage-1-extra.rs)";
   assert.throws(() => validateStagePlan(rehash(leakyRevisit)), /names a chain stage node/);
   checks.auditTraceLawsBindStepsAndRejectTamper = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 35 - step grading, end to end through the ONE evaluator. The self
+// verdict re-runs the hop over the agent's OWN recorded predecessor, so
+// "cannot do the derivation" and "lost the predecessor" separate: an agent that
+// derives correctly from its own wrong value scores self-match on a link whose
+// absolute verdict is a mismatch.
+// ---------------------------------------------------------------------------
+{
+  assert.equal(normalizeTraceAnswer("  `lib/rand.h`. "), "lib/rand.h");
+  assert.equal(normalizeTraceAnswer("\"7\","), "7");
+  assert.equal(normalizeTraceAnswer(null), null);
+  assert.equal(probeClassOf("stage-fact"), "conversation");
+  assert.equal(probeClassOf("chain-link"), "derived");
+  assert.equal(probeClassOf("derivation-control"), "derived");
+  assert.equal(probeClassOf("definition-line"), "repository");
+  const entriesOf = (script) => {
+    const entries = [];
+    let entryId = 0;
+    for (const [text, toolCallId, stage] of script) {
+      entries.push({
+        id: `entry-${String(entryId += 1).padStart(3, "0")}`, type: "message",
+        message: {
+          role: "assistant",
+          content: [
+            ...(text ? [{ type: "text", text }] : []),
+            ...(toolCallId ? [{ type: "toolCall", id: toolCallId, name: "repo_stage", arguments: {} }] : []),
+          ],
+        },
+      });
+      if (stage !== undefined) {
+        entries.push({
+          id: `entry-${String(entryId += 1).padStart(3, "0")}`, type: "message",
+          message: {
+            role: "toolResult", toolName: "repo_stage", toolCallId, isError: false,
+            content: [{ type: "text", text: `STAGE ${stage}` }], details: { stage },
+          },
+        });
+      }
+    }
+    return entries;
+  };
+  // Steps sit at stages 2 (SOF), 3 (FIN) and 5 (INC). The agent records step 1
+  // correctly, mis-copies step 2, then derives step 3 CORRECTLY from its own
+  // wrong step-2 value.
+  const entries = entriesOf([
+    ["", "c1", 1], ["", "c2", 2],
+    ["trace-a-01: `1`.", "c3", 3],
+    ["trace-a-02: stage-1.rs", "c4", 4],
+    ["", "c5", 5],
+    ["notes\ntrace-a-03: stage-9.rs", "c6", 6],
+    ["done"],
+  ]);
+  const transcripts = traceStepTranscripts({ entries, plan });
+  assert.equal(transcripts.length, 1);
+  assert.deepEqual(transcripts[0].steps.map((step) => [step.stepId, step.parsed]),
+    [["trace-a-01", true], ["trace-a-02", true], ["trace-a-03", true]]);
+  const selfWeb = (path) => path === "stage-1.rs" ? ["stage-9.rs"] : [];
+  const verdicts = traceStepVerdicts({ transcripts, plan, includeTargets: selfWeb });
+  assert.deepEqual(verdicts.chains[0].steps.map((step) => [step.verdictAbsolute, step.verdictSelf]), [
+    ["match", "match"],
+    ["mismatch", "mismatch"],
+    ["mismatch", "match"],
+  ]);
+  assert.equal(verdicts.chains[0].integrityPrefix, 1);
+  assert.deepEqual(verdicts.stepCompliance, { parsed: 3, total: 3 });
+  // A pruned worktree reports not-evaluated for INC self, never a guess.
+  const pruned = traceStepVerdicts({ transcripts, plan, includeTargets: () => null });
+  assert.equal(pruned.chains[0].steps[2].verdictSelf, "not-evaluated");
+  // A lost predecessor is its own outcome, distinct from a failed derivation.
+  const skipped = entriesOf([
+    ["", "c1", 1], ["", "c2", 2],
+    ["trace-a-01: 1", "c3", 3],
+    ["", "c4", 4], ["", "c5", 5],
+    ["trace-a-03: stage-9.rs", "c6", 6],
+    ["done"],
+  ]);
+  const skippedVerdicts = traceStepVerdicts({
+    transcripts: traceStepTranscripts({ entries: skipped, plan }), plan, includeTargets: selfWeb,
+  });
+  assert.deepEqual(skippedVerdicts.chains[0].steps.map((step) => step.verdictSelf),
+    ["match", "unanswered", "no-predecessor"]);
+  // A step recorded after its consumer's stage is not a step: the value could
+  // not have informed the chain, so the window closes at the next step's stage.
+  const late = entriesOf([
+    ["", "c1", 1], ["", "c2", 2], ["", "c3", 3],
+    ["trace-a-01: 1"],
+  ]);
+  const lateSteps = traceStepTranscripts({ entries: late, plan }).flatMap((chain) => chain.steps);
+  assert.equal(lateSteps[0].parsed, false);
+  assert.equal(lateSteps[2].delivered, false);
+  // The adjudicator threads the SHARED machinery: same transcripts, same
+  // verdicts, the one evaluator inside them, and the derived class in the
+  // parse-rate summary.
+  assert(adjudicator.includes("traceStepTranscripts({ entries: runEntries, plan })") &&
+    adjudicator.includes("traceStepVerdicts({ transcripts: auditTranscripts, plan, includeTargets })") &&
+    adjudicator.includes("auditTraces,") &&
+    adjudicator.includes("traceStepTranscriptSha256"),
+  "the adjudicator must grade trace steps through the shared helpers");
+  assert(adjudicator.includes('["conversation", "derived", "repository"]') &&
+    adjudicator.includes("probeClassOf(answer.kind)"),
+  "the adjudicator must report parse rates for the derived class");
+  assert(source("scripts/lib/pi_context_experiment.mjs")
+    .includes("expectedFromSelf = evaluateAuditHop({"),
+  "the self verdict must re-derive through the ONE exported hop evaluator");
+  checks.traceStepGradingSeparatesDerivationFromRecall = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

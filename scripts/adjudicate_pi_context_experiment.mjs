@@ -12,12 +12,11 @@
 // experiment-evidence.<first8 of adjudicatorSourceSha256>.json ALONGSIDE the original.
 // Nothing is ever overwritten, and the file name states which adjudicator produced it.
 
-import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CONTEXT_EVENT_SUFFIX,
-  CONVERSATION_PROBE_KINDS,
   EXPERIMENT_ARMS,
   EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS,
   EXPERIMENT_DEFAULT_FOLD_SCHEDULING,
@@ -25,16 +24,21 @@ import {
   EXPERIMENT_TOOL_NAME,
   armRuntimeConfiguration,
   assertExperiment,
+  buildIncludeResolver,
   computeRereadTax,
   contextEventMetrics,
   corpusManifestSha256,
   deliverableTranscripts,
   estimateTokens,
   isWindowOverflow,
+  probeClassOf,
   probeTranscripts,
+  quotedIncludeSpecs,
   thinkTimeFromPace,
   toolResultContentSha256,
   toolResultText,
+  traceStepTranscripts,
+  traceStepVerdicts,
   usageSeriesFromLedger,
   validateExperimentManifest,
   validateExperimentRunConfig,
@@ -416,17 +420,51 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   const probes = probeTranscripts({ entries: runEntries, plan });
   const deliverables = deliverableTranscripts({ entries: runEntries, plan });
   // Parse rates by probe class, before grading: conversation-class probes are the
-  // recall instrument, repo-class the control, and a run that never even ANSWERED
-  // one class should be visible without opening the blind packet.
+  // recall instrument, derived-class the audit-trace values, repo-class the
+  // control, and a run that never even ANSWERED one class should be visible
+  // without opening the blind packet.
   const probeAnswers = probes.flatMap((wave) => wave.answers);
-  const probeClassSummary = Object.fromEntries(["conversation", "repository"].map((klass) => {
-    const inClass = probeAnswers.filter((answer) =>
-      CONVERSATION_PROBE_KINDS.includes(answer.kind) === (klass === "conversation"));
-    return [klass, {
-      questions: inClass.length,
-      parsed: inClass.filter((answer) => answer.parsed).length,
-    }];
-  }));
+  const probeClassSummary = Object.fromEntries(["conversation", "derived", "repository"]
+    .map((klass) => {
+      const inClass = probeAnswers.filter((answer) => probeClassOf(answer.kind) === klass);
+      return [klass, {
+        questions: inClass.length,
+        parsed: inClass.filter((answer) => answer.parsed).length,
+      }];
+    }));
+
+  // Audit traces: every chain step graded absolutely (against the harness walk)
+  // and against the agent's own predecessor. INC self-evaluation reads the run's
+  // pinned worktree; a pruned worktree reports not-evaluated rather than guessing.
+  const repoDir = join(runDir, "repo");
+  let resolveInclude = null;
+  const includeTargets = (path) => {
+    if (!existsSync(repoDir)) return null;
+    if (resolveInclude === null) {
+      const paths = [];
+      const walk = (directory) => {
+        for (const name of readdirSync(directory).sort()) {
+          if (name === ".git") continue;
+          const child = join(directory, name);
+          const stat = statSync(child);
+          if (stat.isDirectory()) walk(child);
+          else if (stat.isFile()) paths.push(relative(repoDir, child));
+        }
+      };
+      walk(repoDir);
+      resolveInclude = buildIncludeResolver(paths);
+    }
+    const absolute = join(repoDir, path);
+    if (!existsSync(absolute)) return [];
+    try {
+      return quotedIncludeSpecs(readFileSync(absolute, "utf8"))
+        .map((spec) => resolveInclude(path, spec));
+    } catch {
+      return [];
+    }
+  };
+  const auditTranscripts = traceStepTranscripts({ entries: runEntries, plan });
+  const auditTraces = traceStepVerdicts({ transcripts: auditTranscripts, plan, includeTargets });
 
   // (g) The per-request dials the iteration comparison runs on. The ledger is the source
   // because it alone carries the request wall clock beside the response usage; it is
@@ -490,6 +528,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     curation: curationSummary,
     overflowPoint,
     probeClassSummary,
+    auditTraces,
     probes,
     deliverables,
     evidence: {
@@ -504,6 +543,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
       adjudicatorSourceSha256: fileSha256(fileURLToPath(import.meta.url)),
       probeTranscriptSha256: sha256Text(JSON.stringify(probes)),
       deliverableTranscriptSha256: sha256Text(JSON.stringify(deliverables)),
+      traceStepTranscriptSha256: sha256Text(JSON.stringify(auditTranscripts)),
     },
   };
   assertExperiment(exactKeys(report.usage, [
