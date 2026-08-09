@@ -7125,6 +7125,132 @@ async function gateRecoveryNormAdvertised() {
   return { advertisedOnFull: true, advertisedOnConfigured: true, silentWithoutExpand: true };
 }
 
+async function gateRiderIsOneLiteralPerEpoch() {
+  // The rider is the one action-prompt carrier: composed at a fold commit, persisted
+  // as LITERAL bytes, rendered beside the receipt inside the rewrite that commit
+  // already paid for, never regenerated, replaced only by the next epoch's rider.
+  const runtime = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
+  for (const tokens of [70_000, 80_000, 86_000]) {
+    await measure(runtime, tokens, 100_000);
+    await project(runtime);
+  }
+  await settle();
+  const state = materialized(runtime);
+  assert(state.folds.length >= 1, "Pressure must have produced a committed fold");
+  assert(state.rider, "A commit must persist a rider");
+  const appliedCommits = () => contextEvents(runtime)
+    .filter((record) => record.kind === "context.commit" && record.deferred === false);
+  assert.equal(state.rider.epoch, appliedCommits().at(-1).seq,
+    "The rider's epoch is the commit event it followed");
+  const firstText = state.rider.text;
+  const firstEpoch = state.rider.epoch;
+  assert(firstText.length > 0 && firstText.length <= 4_096);
+  const riderEntries = (projection) => projection.messages.filter((message) =>
+    typeof message?.customType === "string" && message.customType.endsWith("-rider"));
+  let riders = riderEntries(await project(runtime));
+  assert.equal(riders.length, 1, "Exactly one rider entry rides the projection");
+  assert.equal(riders[0].content, firstText, "The rider renders the persisted literal bytes");
+  // Re-render with no commit in between: the SAME bytes, and still exactly one entry.
+  riders = riderEntries(await project(runtime));
+  assert.equal(riders.length, 1, "A frozen pass must not stack a second rider");
+  assert.equal(riders[0].content, firstText, "A re-render must never regenerate the rider");
+  assert.equal(materialized(runtime).rider.text, firstText);
+  // Drive a later epoch the way gate 89 does: expand a fold so the refold rung has
+  // new eligible mass, then hold pressure at the plateau until a commit applies it.
+  // The rider must be REPLACED, not stacked, and the event stream must carry at
+  // most one context.rider per epoch.
+  await toolCall(runtime, { action: "expand", id: state.folds[0].id });
+  for (let index = 0; index < 10 && materialized(runtime).rider.epoch === firstEpoch; index += 1) {
+    await measure(runtime, 86_500 + index, 100_000, `rider-epoch-${index}`);
+    await project(runtime);
+    await settle();
+  }
+  const later = materialized(runtime);
+  assert(later.rider.epoch > firstEpoch, "A later commit must open a new rider epoch");
+  assert.equal(later.rider.epoch, appliedCommits().at(-1).seq);
+  const riderEvents = contextEvents(runtime).filter((record) => record.kind === "context.rider");
+  assert(riderEvents.length >= 2, "Rider emission must land on the canonical event stream");
+  assert.equal(new Set(riderEvents.map((record) => record.epoch)).size, riderEvents.length,
+    "At most one rider per fold epoch");
+  assert.equal(riderEntries(await project(runtime)).length, 1,
+    "Later epochs replace the rider entry rather than stacking it");
+  // The rider is a projection carrier ONLY: no tool-result content anywhere in the
+  // branch or the projection may carry its header.
+  const headerMark = " notice] A fold commit just landed";
+  const projection = await project(runtime);
+  const toolResultTexts = [...runtime.branch, ...projection.messages]
+    .filter((entry) => (entry?.message ?? entry)?.role === "toolResult")
+    .map((entry) => JSON.stringify((entry?.message ?? entry).content ?? ""));
+  assert(toolResultTexts.length > 0, "The fixture must actually carry tool results");
+  assert(toolResultTexts.every((text) => !text.includes(headerMark)),
+    "The rider must never land inside tool-result content");
+  return {
+    epochs: riderEvents.length,
+    riderEvents: riderEvents.length,
+    literalBytes: firstText.length,
+    replacedNotStacked: true,
+  };
+}
+
+async function gatePinnedShareCap() {
+  // The pin ceiling: protect refuses past MAX_PINNED_SHARE of the working window,
+  // names the cap and the release valve, and pins NOTHING on refusal. Under the cap
+  // the verb works exactly as before.
+  const runtime = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
+  for (const tokens of [70_000, 80_000, 86_000]) {
+    await measure(runtime, tokens, 100_000);
+    await project(runtime);
+  }
+  await settle();
+  const folds = materialized(runtime).folds;
+  assert(folds.length >= 2, "Pressure must have produced at least two committed folds");
+  const refusal = await toolCall(runtime, { action: "protect", ids: folds.map((fold) => fold.id) })
+    .catch((error) => error);
+  assert.match(String(refusal), /pinned-share cap/,
+    "Pinning everything must refuse past the cap");
+  assert.match(String(refusal), new RegExp(`${Math.round(context.MAX_PINNED_SHARE * 100)}%`),
+    "The refusal must name the cap");
+  assert.match(String(refusal), /unprotect/, "The refusal must name the release valve");
+  assert.equal(materialized(runtime).protected.length, 0, "A refused protect must pin nothing");
+  const smallest = [...folds].sort((left, right) =>
+    (left.sourceChars ?? 0) - (right.sourceChars ?? 0))[0];
+  await toolCall(runtime, { action: "protect", ids: [smallest.id] });
+  const pinned = materialized(runtime).protected.length;
+  assert(pinned > 0, "A pin under the cap must still land");
+  return { cap: context.MAX_PINNED_SHARE, refused: true, pinnedUnderCap: pinned };
+}
+
+async function gateRiderContentLaw() {
+  // The rider carries decisions, never pressure readouts: pin verbs and the pinned
+  // share against its cap IN, raw occupancy and unmarked percentages OUT, bounded,
+  // and byte-deterministic for identical inputs.
+  const input = {
+    toolName: "active_context",
+    pendingAgentMarks: 2,
+    eligibleMarks: 3,
+    freedTokens: 1_200,
+    eligibleFreedTokens: 800,
+    anchors: ["entry-a", "entry-b", "entry-c"],
+    pinnedShare: 0.12,
+    maxPinnedShare: context.MAX_PINNED_SHARE,
+  };
+  const text = context.contextRiderText(input);
+  assert(text.includes('"action":"protect"') && text.includes("unprotect"),
+    "The rider must carry both pin verbs");
+  assert(text.includes("12%") && text.includes(`${Math.round(context.MAX_PINNED_SHARE * 100)}% cap`),
+    "The rider must state the pinned share against its cap");
+  assert(text.includes("entry-a, entry-b, entry-c"), "The rider must carry the anchors");
+  assert(text.includes("800") && text.includes("1200"),
+    "The rider must carry the eligible/freed token numbers");
+  assert(!/occupanc|unmarked|% full|distance|headroom/i.test(text),
+    "Raw pressure readouts stay out of the rider");
+  assert(Buffer.byteLength(text, "utf8") <= 2_048, "The rider is hard-bounded");
+  assert.equal(text, context.contextRiderText(input), "Identical inputs give identical bytes");
+  const empty = context.contextRiderText({ ...input, anchors: [], pinnedShare: 0 });
+  assert(empty.includes("none"), "An empty anchor list says so instead of vanishing");
+  return { bounded: true, deterministic: true, verbs: ["protect", "unprotect"] };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -7203,6 +7329,9 @@ const gates = [
   [88, "A peek never rewrites the window", gatePeekIsAppendOnly],
   [89, "Protect is a durable pin", gateProtectIsDurablePin],
   [90, "Recovery is the stated norm", gateRecoveryNormAdvertised],
+  [91, "The rider is one literal per epoch", gateRiderIsOneLiteralPerEpoch],
+  [92, "The pinned-share cap refuses", gatePinnedShareCap],
+  [93, "The rider carries decisions, not readouts", gateRiderContentLaw],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

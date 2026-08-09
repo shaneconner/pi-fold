@@ -262,6 +262,54 @@ export function surfacingText(input: {
   );
 }
 
+/**
+ * The rider: the one action-prompt carrier, composed at a fold commit and delivered
+ * INSIDE the rewrite that commit already paid for, beside the receipt. Its wording
+ * follows the curation rule (report what is happening, name the actions), its numbers
+ * are decision inputs only: pending agent marks with what they free, up to three
+ * completed-unit anchors, and the pinned share against its cap. Raw occupancy,
+ * distance-to-commit and unmarked-share percentages stay OUT: they are pressure
+ * readouts, not decisions, and they live in the run evidence instead.
+ */
+export function contextRiderText(input: {
+  toolName: string;
+  brandNoun?: string;
+  pendingAgentMarks: number;
+  eligibleMarks: number;
+  freedTokens: number;
+  eligibleFreedTokens: number;
+  /** Up to three completed-unit entry ids the agent could mark next. */
+  anchors: string[];
+  pinnedShare: number;
+  maxPinnedShare: number;
+}): string {
+  const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
+  const anchors = input.anchors.length
+    ? input.anchors.slice(0, 3).join(", ")
+    : "none";
+  const pinnedPercent = Math.round(input.pinnedShare * 100);
+  const capPercent = Math.round(input.maxPinnedShare * 100);
+  return boundReceiptText(
+    [
+      `[${brand} notice] A fold commit just landed; the next one will batch every pending mark ` +
+        "into one rewrite, and marks are free until then.",
+      "Mark FINISHED units at their clean boundaries; batches beat singles: " +
+        `${input.toolName} {"action":"fold","marks":[{"ids":["<start>","<end>"],"brief":"<factual brief>"}]} ` +
+        "carries several decisions into that single rewrite, each keeping your brief instead of a " +
+        `generated one. ${input.pendingAgentMarks} of your mark(s) pending; ` +
+        `${input.eligibleMarks} mark(s) eligible now, freeing about ${input.eligibleFreedTokens} ` +
+        `of the ${input.freedTokens} marked token(s).`,
+      `Completed units ready to mark, largest first: ${anchors}.`,
+      `Pinning: ${input.toolName} {"action":"protect","ids":["<entry-id>"]} holds entries raw through ` +
+        `every fold, and {"action":"unprotect"} releases them. Pinned context is ${pinnedPercent}% of ` +
+        `the working window against a ${capPercent}% cap; at the cap, protect refuses until ` +
+        "something is released.",
+    ].join("\n"),
+    2_048,
+    `[${brand} notice] Post-commit curation details are unavailable this pass.`,
+  );
+}
+
 export interface AdvisoryCuration {
   /** Room left before the truthful fence, in tokens. */
   headroomTokens: number | null;

@@ -150,6 +150,14 @@ export const COMMIT_RECLAIM_FLOOR_SHARE = 0.02;
  * records the shortfall rather than loosening a protection to hit a number.
  */
 export const CURATION_TARGET_OCCUPANCY_SHARE = 0.35;
+/**
+ * The pin ceiling (Shane 2026-08-09): protect may hold at most this share of the
+ * truthful serving budget raw. Protect was a per-entry promise with no mass bound,
+ * so a protect-happy agent could pin the window solid and leave every commit
+ * nothing to reclaim; past the cap, protect refuses with the cap named and
+ * unprotect is the release valve. A constant, not a knob.
+ */
+export const MAX_PINNED_SHARE = 0.25;
 export const MAX_PENDING_MARKS = 256;
 /** Enough batches to actually reach the floor on a wide window before the loop exits. */
 export const EPOCH_MAX_TOPUP_MARKS = 64;
@@ -503,6 +511,12 @@ export interface ActiveContextState {
     delivered: Record<string, number>;
     armed?: { milestone: AdvisoryMilestone; threshold: number; scheduleKey: string };
   };
+  /**
+   * The one action-prompt carrier: computed at a fold commit, persisted as LITERAL
+   * bytes so every re-render of the same epoch is byte-identical, replaced only by
+   * the next epoch's rider. Omitted when absent so pre-rider state digests never move.
+   */
+  rider?: { epoch: number; text: string };
 }
 
 export interface FoldRecordRef {
@@ -533,6 +547,7 @@ export interface ActiveContextCheckpointV2 {
   pendingMarks?: PendingMark[];
   briefs?: Record<string, string>;
   advisory?: NonNullable<ActiveContextState["advisory"]>;
+  rider?: NonNullable<ActiveContextState["rider"]>;
   stateSha256: string;
 }
 
@@ -554,6 +569,7 @@ export interface ActiveContextDeltaV2 {
   pendingMarks?: PendingMark[];
   briefs?: Record<string, string>;
   advisory?: NonNullable<ActiveContextState["advisory"]>;
+  rider?: NonNullable<ActiveContextState["rider"]>;
   stateSha256: string;
 }
 

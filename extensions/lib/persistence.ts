@@ -334,6 +334,7 @@ export function parseActiveContextState(
   // rejecting it here would suspend automatic management on upgrade.
   const hasPinnedPeeks = recordLike && Object.prototype.hasOwnProperty.call(value, "pinnedPeeks");
   const hasBriefs = recordLike && Object.prototype.hasOwnProperty.call(value, "briefs");
+  const hasRider = recordLike && Object.prototype.hasOwnProperty.call(value, "rider");
   const extraKeys = [
     ...(hasPrepared ? ["prepared"] : []),
     ...(hasAdvisory ? ["advisory"] : []),
@@ -343,6 +344,7 @@ export function parseActiveContextState(
     ...(hasPendingMarks ? ["pendingMarks"] : []),
     ...(hasPinnedPeeks ? ["pinnedPeeks"] : []),
     ...(hasBriefs ? ["briefs"] : []),
+    ...(hasRider ? ["rider"] : []),
   ];
   if (!exactRecord(value, [...ACTIVE_STATE_KEYS, ...extraKeys])) throw new Error("Invalid active-context state keys");
   const folds = denseOwnArrayValues(ownValue(value, "folds"));
@@ -363,6 +365,9 @@ export function parseActiveContextState(
   if (hasPrepared) validatePreparedShape(ownValue(value, "prepared"));
   if (hasAdvisory && !validAdvisoryState(ownValue(value, "advisory"))) {
     throw new Error("Invalid active-context advisory state");
+  }
+  if (hasRider && !validRiderState(ownValue(value, "rider"))) {
+    throw new Error("Invalid active-context rider state");
   }
   if (hasTokensSinceToolFold && !validTokensSinceToolFold(ownValue(value, "tokensSinceToolFold"))) {
     throw new Error("Invalid active-context tool-fold cadence");
@@ -397,6 +402,7 @@ export function parseActiveContextState(
     ...(hasAdvisory
       ? { advisory: clone(source.advisory!) }
       : defaultAdvisory ? { advisory: { highWater: 0, delivered: {} } } : {}),
+    ...(hasRider ? { rider: clone(source.rider!) } : {}),
     ...(hasPrepared ? { prepared: clone(source.prepared!) } : {}),
   };
 }
@@ -515,11 +521,13 @@ export function validateV2ProjectionFields(
   surfacingValue?: unknown,
   pendingMarksValue?: unknown,
   briefsValue?: unknown,
+  riderValue?: unknown,
 ): {
   expanded: string[];
   protected: EvidenceRef[];
   prepared?: PreparedFold;
   advisory?: NonNullable<ActiveContextState["advisory"]>;
+  rider?: NonNullable<ActiveContextState["rider"]>;
   tokensSinceToolFold: number;
   leases: Record<string, number>;
   surfacing: SurfacingRecord[];
@@ -538,6 +546,9 @@ export function validateV2ProjectionFields(
   if (advisoryValue !== undefined && !validAdvisoryState(advisoryValue)) {
     throw new Error("Invalid active-context v2 advisory state");
   }
+  if (riderValue !== undefined && !validRiderState(riderValue)) {
+    throw new Error("Invalid active-context v2 rider state");
+  }
   if (tokensSinceToolFoldValue !== undefined && !validTokensSinceToolFold(tokensSinceToolFoldValue)) {
     throw new Error("Invalid active-context v2 tool-fold cadence");
   }
@@ -551,6 +562,9 @@ export function validateV2ProjectionFields(
     ...(preparedValue === null ? {} : { prepared: clone(preparedValue) as PreparedFold }),
     ...(advisoryValue === undefined ? {} : {
       advisory: clone(advisoryValue) as NonNullable<ActiveContextState["advisory"]>,
+    }),
+    ...(riderValue === undefined ? {} : {
+      rider: clone(riderValue) as NonNullable<ActiveContextState["rider"]>,
     }),
     tokensSinceToolFold: tokensSinceToolFoldValue === undefined ? 0 : Number(tokensSinceToolFoldValue),
     leases,
@@ -580,6 +594,8 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     Object.prototype.hasOwnProperty.call(value, "pinnedPeeks"));
   const hasBriefs = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "briefs"));
+  const hasRider = Boolean(value && typeof value === "object" &&
+    Object.prototype.hasOwnProperty.call(value, "rider"));
   const optionalKeys = [
     ...(hasAdvisory ? ["advisory"] : []),
     ...(hasTokensSinceToolFold ? ["tokensSinceToolFold"] : []),
@@ -588,6 +604,7 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     ...(hasPendingMarks ? ["pendingMarks"] : []),
     ...(hasPinnedPeeks ? ["pinnedPeeks"] : []),
     ...(hasBriefs ? ["briefs"] : []),
+    ...(hasRider ? ["rider"] : []),
   ];
   const checkpoint = kind === "checkpoint" &&
     exactRecord(value, [...STATE_CHECKPOINT_V2_KEYS, ...optionalKeys]);
@@ -603,6 +620,7 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     ownValue(value, "expanded"), ownValue(value, "protected"), ownValue(value, "prepared"),
     ownValue(value, "advisory"), ownValue(value, "tokensSinceToolFold"), ownValue(value, "leases"),
     ownValue(value, "surfacing"), ownValue(value, "pendingMarks"), ownValue(value, "briefs"),
+    ownValue(value, "rider"),
   );
   if (checkpoint) {
     const refs = denseOwnArrayValues(ownValue(value, "foldRefs"));
@@ -667,7 +685,7 @@ export function stateFromFoldRefs(
   wire: Pick<
     ActiveContextCheckpointV2,
     "sessionId" | "revision" | "expanded" | "protected" | "prepared" | "advisory" |
-      "tokensSinceToolFold" | "leases" | "surfacing" | "pendingMarks" | "briefs"
+      "tokensSinceToolFold" | "leases" | "surfacing" | "pendingMarks" | "briefs" | "rider"
   >,
   refs: FoldRecordRef[],
   records: Map<string, FoldRecordEntry>,
@@ -691,6 +709,7 @@ export function stateFromFoldRefs(
     ...(wire.pendingMarks?.length ? { pendingMarks: clone(wire.pendingMarks) } : {}),
     ...(wire.briefs && Object.keys(wire.briefs).length ? { briefs: clone(wire.briefs) } : {}),
     ...(wire.advisory === undefined ? {} : { advisory: clone(wire.advisory) }),
+    ...(wire.rider === undefined ? {} : { rider: clone(wire.rider) }),
     ...(wire.prepared === null || wire.prepared === undefined ? {} : { prepared: clone(wire.prepared) }),
   };
   return parseActiveContextState(state, wire.sessionId, false);
@@ -843,6 +862,7 @@ export function makeStateCheckpoint(state: ActiveContextState): ActiveContextChe
     ...(state.pendingMarks?.length ? { pendingMarks: clone(state.pendingMarks) } : {}),
     ...(state.briefs && Object.keys(state.briefs).length ? { briefs: clone(state.briefs) } : {}),
     ...(state.advisory ? { advisory: clone(state.advisory) } : {}),
+    ...(state.rider ? { rider: clone(state.rider) } : {}),
     stateSha256: semanticStateSha256(state),
   }, state.sessionId) as ActiveContextCheckpointV2;
 }
@@ -880,6 +900,7 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
     ...(next.pendingMarks?.length ? { pendingMarks: clone(next.pendingMarks) } : {}),
     ...(next.briefs && Object.keys(next.briefs).length ? { briefs: clone(next.briefs) } : {}),
     ...(next.advisory ? { advisory: clone(next.advisory) } : {}),
+    ...(next.rider ? { rider: clone(next.rider) } : {}),
     stateSha256: semanticStateSha256(next),
   }, next.sessionId) as ActiveContextDeltaV2;
 }
@@ -903,6 +924,17 @@ export const ADVISORY_BUDGETS: Readonly<Record<AdvisoryMilestone, number>> = Obj
 export const ADVISORY_MILESTONES = Object.freeze(
   Object.keys(ADVISORY_BUDGETS) as AdvisoryMilestone[],
 );
+
+/** The rider is LITERAL persisted bytes, so the bound is on the stored text itself. */
+export const MAX_RIDER_TEXT_BYTES = 4_096;
+
+export function validRiderState(value: unknown): value is NonNullable<ActiveContextState["rider"]> {
+  if (!exactRecord(value, ["epoch", "text"])) return false;
+  const epoch = ownValue(value, "epoch");
+  const text = ownValue(value, "text");
+  return Number.isSafeInteger(epoch) && Number(epoch) >= 0 &&
+    typeof text === "string" && text.length > 0 && text.length <= MAX_RIDER_TEXT_BYTES;
+}
 
 export function validAdvisoryState(value: unknown): value is NonNullable<ActiveContextState["advisory"]> {
   const hasArmed = Boolean(value && typeof value === "object" &&

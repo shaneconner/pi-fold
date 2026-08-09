@@ -147,6 +147,8 @@ export type ContextEventKind =
   | "context.reminder"
   /** One receipt delivered into the window. */
   | "context.receipt"
+  /** One post-commit rider composed and persisted: at most one per fold epoch. */
+  | "context.rider"
   /** One commit epoch: the single mutation an epoch pays for. */
   | "context.commit"
   /** One fold created, by the ladder or by the agent. */

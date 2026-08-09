@@ -6,6 +6,7 @@ import {
   stableStringify,
 } from "./json.ts";
 import {
+  contextRiderText,
 } from "./lib/advisory.ts";
 import {
   bytes,
@@ -42,6 +43,7 @@ import {
   capacityAccounting,
   contextUsageRatio,
   contextWindowFor,
+  explicitProtectedMass,
   hardFenceRatio,
   latestProviderContextMeasurement,
   orderedRoots,
@@ -105,6 +107,7 @@ import {
   EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS,
   EPOCH_COMMIT_TARGET_WINDOW_SHARE,
   MAX_FOLD_SPAN_CHARS,
+  MAX_PINNED_SHARE,
   MAX_WEDGE_ABSORB_TOKENS,
   OVERFLOW_RECOVERY_MAX_ATTEMPTS,
   PEEK_DEFAULT_MAX_BYTES,
@@ -340,6 +343,7 @@ export function registerActiveContext(pi: any, options: {
   const advisoryProjectionType = `${entryTypePrefix}-advisory`;
   const surfacingProjectionType = `${entryTypePrefix}-surfacing`;
   const receiptProjectionType = `${entryTypePrefix}-receipts`;
+  const riderProjectionType = `${entryTypePrefix}-rider`;
   const curationProjectionType = `${entryTypePrefix}-curation`;
   const entryNamespace = entryTypeNamespace(entryTypePrefix);
   const providerMeasurementEntryType = `${entryNamespace}-provider-context-measurement`;
@@ -1748,6 +1752,33 @@ export function registerActiveContext(pi: any, options: {
   };
 
   /**
+   * The rider rides the SAME admission as the receipt block: it renders from the
+   * persisted literal bytes, lands once per freeze cycle, and the freeze closes over
+   * it, so it can never diverge a prefix on its own. It is never regenerated: the
+   * bytes the epoch persisted are the bytes every re-render carries.
+   */
+  const appendRider = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
+    const rider = persistence.state?.rider;
+    if (!rider) return projected;
+    if (!carrierAdmitted("rider")) return projected;
+    projected.push({
+      role: "custom",
+      customType: riderProjectionType,
+      content: rider.text,
+      display: false,
+      details: {
+        source: activeContextSource(entryTypePrefix),
+        ephemeral: true,
+        riderEpoch: rider.epoch,
+      },
+      timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
+        ? ownValue(snapshot.messages.at(-1), "timestamp")
+        : 0,
+    });
+    return projected;
+  };
+
+  /**
    * Whatever this pass ended up sending becomes the frozen surface for the next one, in
    * full. Nothing rides after the frozen region.
    *
@@ -1781,7 +1812,7 @@ export function registerActiveContext(pi: any, options: {
       const customType = ownValue(message, "customType");
       return customType !== milestoneProjectionType && customType !== advisoryProjectionType &&
         customType !== surfacingProjectionType && customType !== receiptProjectionType &&
-        customType !== curationProjectionType;
+        customType !== riderProjectionType && customType !== curationProjectionType;
     });
     // The freeze test, stated as bytes rather than as intent: if the rebuilt body still
     // OPENS with the frozen body verbatim, nothing structural moved and the previous
@@ -1807,6 +1838,7 @@ export function registerActiveContext(pi: any, options: {
     // bought nothing anyway: voluntary fold share was 0.00, and the three runs built
     // specifically to invite curation produced 0, 1 and 0 voluntary folds.
     appendReceipts(projected, snapshot);
+    appendRider(projected, snapshot);
     return holdFrozen(projected);
   };
   /**
@@ -2220,6 +2252,42 @@ export function registerActiveContext(pi: any, options: {
     instrumentation.mutationsSinceHandoff += 1;
     instrumentation.lastMutationRequest = instrumentation.requests;
     instrumentation.lastMutationTokens = usedTokens;
+    // The rider: at most ONE action prompt per fold epoch, composed from post-commit
+    // numbers, persisted as literal bytes, delivered beside the receipt inside the
+    // rewrite this commit already paid for. The epoch key is the commit event's own
+    // stream sequence: strictly monotone, one per applied commit, so refold-only
+    // epochs get their rider too and no two epochs can ever share a key. The next
+    // epoch REPLACES the text; nothing stacks.
+    const riderEpoch = commitEvent.seq;
+    if (persistence.state.rider?.epoch !== riderEpoch) {
+      const postAccounting = markAccounting(snapshot, persistence.state);
+      const remainder = unmarkedRemainder(snapshot, persistence.state, projectionCharsPerToken());
+      const pinnedMass = explicitProtectedMass(snapshot, persistence.state);
+      const pinnedShare = budgetTokens > 0
+        ? estimatedTokens(pinnedMass.bytes) / budgetTokens
+        : 0;
+      const riderText = contextRiderText({
+        toolName,
+        brandNoun,
+        pendingAgentMarks: postAccounting.agentMarks,
+        eligibleMarks: postAccounting.eligibleMarks,
+        freedTokens: postAccounting.freedTokens,
+        eligibleFreedTokens: postAccounting.eligibleFreedTokens,
+        anchors: remainder.candidates.slice(0, 3).map((candidate) => candidate.id),
+        pinnedShare,
+        maxPinnedShare: MAX_PINNED_SHARE,
+      });
+      persistence.state = { ...persistence.state, rider: { epoch: riderEpoch, text: riderText } };
+      emit("context.rider", {
+        epoch: riderEpoch,
+        chars: riderText.length,
+        anchors: Math.min(3, remainder.candidates.length),
+        pending_agent_marks: postAccounting.agentMarks,
+        eligible_marks: postAccounting.eligibleMarks,
+        pinned_share: pinnedShare,
+        max_pinned_share: MAX_PINNED_SHARE,
+      });
+    }
     let foldedToolResults = 0;
     let foldedSpans = 0;
     for (const applied of result.applied) {
@@ -3648,7 +3716,24 @@ export function registerActiveContext(pi: any, options: {
     if (action === "protect" || action === "unprotect") {
       const ids = stringIds(params.ids);
       const refsBefore = persistence.state.protected.length;
-      await persistManual(protectEvidence(snapshot, persistence.state, ids, action === "protect"), action, ctx);
+      const nextProtection = protectEvidence(snapshot, persistence.state, ids, action === "protect");
+      if (action === "protect") {
+        // The pin ceiling: protect is a promise to hold bytes raw through every fold,
+        // and a promise with no mass bound can pin the window solid. The refusal is
+        // corrective, not denial: it names the cap and the release valve.
+        const capacity = servingCapacity(snapshot.contextWindow);
+        const prospectiveShare = capacity.budgetTokens > 0
+          ? estimatedTokens(explicitProtectedMass(snapshot, nextProtection).bytes) / capacity.budgetTokens
+          : 0;
+        if (prospectiveShare > MAX_PINNED_SHARE) {
+          throw new Error(
+            `protect refused: these pins would hold ${Math.round(prospectiveShare * 100)}% of the ` +
+            `working window raw, past the ${Math.round(MAX_PINNED_SHARE * 100)}% pinned-share cap. ` +
+            'Release earlier pins with {"action":"unprotect","ids":["<entry-id>"]} first; ' +
+            "folding keeps entries exactly recoverable without pinning them.");
+        }
+      }
+      await persistManual(nextProtection, action, ctx);
       const refsAfter = persistence.state.protected.length;
       emit("context.protect", {
         protect: action === "protect",

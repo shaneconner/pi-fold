@@ -393,6 +393,28 @@ export function protectedStaleMass(
   return { bytes: total, refs };
 }
 
+/**
+ * Every byte protect currently holds raw, fresh or stale: the mass the pinned-share
+ * cap is measured against. protectedStaleMass narrows to what a commit could not
+ * reclaim TODAY; the cap has to see the whole promise, because a pin inside the
+ * fresh tail outlives the tail.
+ */
+export function explicitProtectedMass(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+): { bytes: number; refs: number } {
+  const explicit = explicitProtectedKeys(state);
+  if (!explicit.size) return { bytes: 0, refs: 0 };
+  let total = 0;
+  let refs = 0;
+  for (const item of snapshot.mapped) {
+    if (!item.ref || !explicit.has(objectRefKey(item.ref))) continue;
+    total += bytes(item.message);
+    refs += 1;
+  }
+  return { bytes: total, refs };
+}
+
 export interface AdmissionVerdict {
   admitted: boolean;
   reason: "admitted" | "unmeasured" | "would-cross-fence";
