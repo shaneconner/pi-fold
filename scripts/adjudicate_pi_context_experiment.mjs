@@ -29,6 +29,7 @@ import {
   contextEventMetrics,
   corpusManifestSha256,
   deliverableTranscripts,
+  echoVerdicts,
   estimateTokens,
   isWindowOverflow,
   probeClassOf,
@@ -434,8 +435,10 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
       }];
     }));
   // Decision (Shane 2026-08-09): mechanical exact match is the headline verdict;
-  // the blind grader is a second reader. Echo probes are graded separately.
+  // the blind grader is a second reader. Echo probes are graded separately, as
+  // consistency with the agent's OWN earlier answer beside plan truth.
   const probeVerdicts = probeMechanicalVerdicts({ plan, transcripts: probes });
+  const echoes = echoVerdicts({ plan, transcripts: probes });
 
   // Audit traces: every chain step graded absolutely (against the harness walk)
   // and against the agent's own predecessor. INC self-evaluation reads the run's
@@ -533,6 +536,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     overflowPoint,
     probeClassSummary,
     probeVerdicts,
+    echoes,
     auditTraces,
     probes,
     deliverables,

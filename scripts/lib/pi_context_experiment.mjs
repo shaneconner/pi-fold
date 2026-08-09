@@ -1804,6 +1804,60 @@ export function probeMechanicalVerdicts({ plan, transcripts }) {
   return rows;
 }
 
+// Echo grading. echoConsistent is the recall metric: does the restated value
+// equal the agent's OWN earlier answer, verbatim after the one normalizer.
+// truthMatch is reported beside it and NEVER summed with it. The informative
+// cell is consistent-and-wrong: reproducing your own error is unfakeable
+// evidence of event recall, while inconsistent-but-right is re-derivation
+// evidence. Consistency is a string comparison even for stage-valued targets:
+// numeric equivalence would blur episodic recall into re-derivation.
+// Unauthored (the target was never answered) and ambiguous (an answer that
+// normalizes to nothing) are explicit non-scored outcomes.
+export function echoVerdicts({ plan, transcripts }) {
+  const planProbes = new Map(plan.stages.flatMap((stage) =>
+    stage.probes.map((probe) => [probe.id, probe])));
+  const linkByProbe = new Map();
+  for (const chain of plan.chains ?? []) {
+    for (const link of chain.links) linkByProbe.set(`${chain.id}:${link.index}`, link);
+  }
+  const answersById = new Map(transcripts.flatMap((wave) =>
+    wave.answers.map((answer) => [answer.probeId, answer])));
+  const rows = [];
+  for (const wave of transcripts) {
+    for (const answer of wave.answers) {
+      const probe = planProbes.get(answer.probeId);
+      assertExperiment(probe !== undefined, `Transcript answer ${answer.probeId} has no plan probe`);
+      if (probe.kind !== "echo") continue;
+      const target = planProbes.get(probe.targetProbeId);
+      assertExperiment(target !== undefined && target.kind === "chain-link",
+        `Echo ${probe.id} targets no chain-link probe`);
+      const link = linkByProbe.get(`${target.chainId}:${target.linkIndex}`);
+      const truthMatches = (text) => (link.hop === "SOF"
+        ? /^(?:stage\s+)?0*(\d+)$/i.test(normalizeTraceAnswer(text) ?? "") &&
+          Number(/0*(\d+)$/.exec(normalizeTraceAnswer(text))[1]) === link.expectedAnswer
+        : normalizeTraceAnswer(text) === target.expectedAnswer);
+      const prior = answersById.get(probe.targetProbeId) ?? null;
+      const priorValue = prior !== null && prior.parsed
+        ? normalizeTraceAnswer(prior.answerText) : null;
+      const echoValue = answer.parsed ? normalizeTraceAnswer(answer.answerText) : null;
+      const outcome = !answer.parsed ? "unanswered"
+        : priorValue === null ? "unauthored"
+        : priorValue === "" || echoValue === "" ? "ambiguous"
+        : echoValue === priorValue ? "consistent" : "inconsistent";
+      rows.push({
+        probeId: probe.id,
+        targetProbeId: probe.targetProbeId,
+        wave: wave.stage,
+        outcome,
+        echoConsistent: outcome === "consistent",
+        priorCorrect: priorValue !== null && truthMatches(prior.answerText),
+        truthMatch: answer.parsed && truthMatches(answer.answerText),
+      });
+    }
+  }
+  return rows;
+}
+
 export function deliverableTranscripts({ entries, plan }) {
   const stageIndex = stageResultIndexByOrdinal(entries);
   const deliverableStages = plan.stages.filter((stage) => stage.deliverable);

@@ -75,6 +75,7 @@ import {
   buildDerivationControlProbes,
   buildEchoProbes,
   buildIncludeResolver,
+  echoVerdicts,
   evaluateAuditHop,
   normalizeTraceAnswer,
   probeClassOf,
@@ -1978,6 +1979,59 @@ try {
   paired.stages[6].instructions += " cross-check stage 1 alongside stage-1.rs";
   assert.throws(() => validateStagePlan(rehash(paired)), /pairs trace-a link 1's stage and path/);
   checks.instructionSurfacesNeverLeakChainAnswers = true;
+
+  // -------------------------------------------------------------------------
+  // GATE 38 - echo grading. Consistency with the agent's OWN earlier answer is
+  // the recall metric, truth sits beside it unsummed, and the money cell is
+  // consistent-and-wrong: reproducing your own error is unfakeable event
+  // recall, while inconsistent-but-right is re-derivation evidence.
+  // -------------------------------------------------------------------------
+  const echoWaves = (priorText, echoText) => [
+    {
+      stage: 4,
+      answers: [{
+        probeId: "probe-04-01", kind: "chain-link",
+        answerText: priorText, parsed: priorText !== null,
+      }],
+    },
+    {
+      stage: 8,
+      answers: [{
+        probeId: "probe-08-02", kind: "echo",
+        answerText: echoText, parsed: echoText !== null,
+      }],
+    },
+  ];
+  const cellOf = (priorText, echoText) => {
+    const [row] = echoVerdicts({ plan, transcripts: echoWaves(priorText, echoText) });
+    return [row.outcome, row.echoConsistent, row.priorCorrect, row.truthMatch];
+  };
+  assert.deepEqual(cellOf("1", "1"), ["consistent", true, true, true]);
+  assert.deepEqual(cellOf("3", "3"), ["consistent", true, false, false],
+    "consistent-and-wrong is the unfakeable event-recall cell");
+  assert.deepEqual(cellOf("3", "1"), ["inconsistent", false, false, true],
+    "inconsistent-but-right is re-derivation, never recall");
+  assert.deepEqual(cellOf(null, "1"), ["unauthored", false, false, true]);
+  assert.deepEqual(cellOf("1", null), ["unanswered", false, true, false]);
+  // A stage-valued target is compared as a STRING for consistency: restating
+  // "stage 1" when the prior said "1" is not verbatim recall.
+  assert.deepEqual(cellOf("1", "stage 1"), ["inconsistent", false, true, true]);
+  // Plan-side echo laws refuse a same-wave target and a smuggled answer.
+  const rehash38 = (mutated) => {
+    mutated.planSha256 = stagePlanSha256(mutated);
+    return mutated;
+  };
+  const sameWave = structuredClone(plan);
+  sameWave.stages[7].probes[1].targetProbeId = "probe-08-01";
+  assert.throws(() => validateStagePlan(rehash38(sameWave)),
+    /must target a distinct earlier chain-link probe/);
+  const smuggled = structuredClone(plan);
+  smuggled.stages[7].probes[1].expectedAnswer = "1";
+  assert.throws(() => validateStagePlan(rehash38(smuggled)), /Invalid echo probe shape/);
+  assert(adjudicator.includes("echoVerdicts({ plan, transcripts: probes })") &&
+    adjudicator.includes("echoes,"),
+  "the adjudicator must grade echoes through the shared helper");
+  checks.echoConsistencyGradedBesideTruthNeverSummed = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
