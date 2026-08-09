@@ -8,6 +8,9 @@ export default [
   {
     ignores: [
       "node_modules/**",
+      // Gitignored workspace: deposit copies and vendored d3 for the paper
+      // figures live here, and none of it is package or harness source.
+      "lab/**",
       // Adopted 2026-08-07 from the quorum repo, where they were never linted
       // (quorum is a Python project). They are the measurement harness for the
       // fold-vs-compaction study, not package source — nothing here ships to
