@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import {
   CONTEXT_EVENT_SUFFIX,
   EXPERIMENT_ARMS,
+  EXPERIMENT_CLOSED_BOOK_LABEL,
   EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS,
   EXPERIMENT_DEFAULT_FOLD_SCHEDULING,
   EXPERIMENT_MARKER_ENTRY,
@@ -25,6 +26,9 @@ import {
   armRuntimeConfiguration,
   assertExperiment,
   buildIncludeResolver,
+  closedBookPrompt,
+  closedBookQuestions,
+  closedBookTranscript,
   computeRereadTax,
   contextEventMetrics,
   corpusManifestSha256,
@@ -283,8 +287,12 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   const candidate = readJson(join(runDir, "candidate-report.json"));
   const seal = readJson(join(runDir, "candidate-seal.json"));
   const worker = readJson(join(runDir, "worker-report.json"));
-  const armRuntime = armRuntimeConfiguration(config.arm);
-  assertExperiment(EXPERIMENT_ARMS.includes(config.arm), "Run config arm is not one of the three arms");
+  const closedBook = config.sessionType === EXPERIMENT_CLOSED_BOOK_LABEL;
+  const armRuntime = closedBook
+    ? { activeContextEnabled: false, nativeCompactionEnabled: false, toleratesOverflow: false }
+    : armRuntimeConfiguration(config.arm);
+  assertExperiment(closedBook || EXPERIMENT_ARMS.includes(config.arm),
+    "Run config arm is not one of the three arms");
   assertExperiment(candidate.runId === config.runId && candidate.arm === config.arm &&
     seal.runId === config.runId && seal.arm === config.arm &&
     seal.candidateReportSha256 === fileSha256(join(runDir, "candidate-report.json")) &&
@@ -300,15 +308,22 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   assertExperiment(plan.planSha256 === config.planSha256, "Adjudicated plan is not the run's pinned plan");
   const manifest = validateExperimentManifest(readJson(join(runDir, "run-manifest.json")));
   assertExperiment(manifest.runId === config.runId && manifest.arm === config.arm &&
-    manifest.guidance === config.guidance && manifest.plan.planSha256 === plan.planSha256 &&
+    manifest.plan.planSha256 === plan.planSha256 &&
     manifest.target.commit === plan.repo.commit &&
     manifest.target.treeSha256 === config.targetTreeSha256 &&
-    manifest.target.checkoutSha256 === config.targetTreeSha256 &&
     manifest.model.provider === config.model.provider && manifest.model.id === config.model.id &&
     manifest.model.effort === config.model.effort &&
     manifest.runtime.codeCommit === config.codeCommit &&
     sha256Json(manifest) === worker.manifestSha256,
   "Run manifest does not pin this run's arm, model, runtime, target repo and stage plan");
+  assertExperiment(closedBook
+    ? manifest.sessionType === EXPERIMENT_CLOSED_BOOK_LABEL &&
+      manifest.questionsSha256 === sha256Json(closedBookQuestions(plan))
+    : manifest.guidance === config.guidance &&
+      manifest.target.checkoutSha256 === config.targetTreeSha256,
+  closedBook
+    ? "Closed-book manifest does not pin this plan's question list"
+    : "Run manifest guidance/checkout pins drifted from the run config");
   // Re-derive the corpus fingerprint from the plan, so the manifest pin is checked against
   // the plan rather than trusted from the run that wrote it.
   assertExperiment(corpusManifestSha256(plan.stages.flatMap((stage) => stage.files)) ===
@@ -327,6 +342,77 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     entry.message?.role === "user").length;
   assertExperiment(userMessages === 1,
     `One-user-message contract broken: ${userMessages} user messages in the run span`);
+
+  // Closed-book runs grade through the SAME mechanical verdicts and stop there. The
+  // prompt law makes "no stage payload bytes" checkable: the sealed prompt hash must
+  // equal the plan-derived question list recomputed here, and the session must have
+  // used nothing at all: no tools, no folds, no compactions, no supervisor ledgers.
+  if (closedBook) {
+    assertExperiment(candidate.workerReady?.promptSha256 === sha256Text(closedBookPrompt(plan)),
+      "Closed-book session prompt is not the plan-derived question list");
+    assertExperiment(!runEntries.some((entry) => entry?.type === "message" &&
+      ["toolResult", "toolCall"].includes(entry.message?.role)) &&
+      runEntries.flatMap(messageToolCalls).length === 0,
+    "Closed-book session carries tool traffic");
+    assertExperiment(!runEntries.some((entry) => entry?.type === "compaction"),
+      "Closed-book session carries a compaction");
+    assertExperiment(!runEntries.some((entry) => entry?.type === "custom" &&
+      typeof entry.customType === "string" && entry.customType.endsWith(FOLD_RECORD_SUFFIX)),
+    "Closed-book session carries a fold record");
+    const usage = usageTotals(runEntries);
+    const transcripts = closedBookTranscript({ entries: runEntries, plan });
+    const probeVerdicts = probeMechanicalVerdicts({ plan, transcripts });
+    const answers = transcripts.flatMap((wave) => wave.answers);
+    const probeClassSummary = Object.fromEntries(["conversation", "derived", "repository"]
+      .map((klass) => {
+        const inClass = answers.filter((answer) => probeClassOf(answer.kind) === klass);
+        return [klass, {
+          questions: inClass.length,
+          parsed: inClass.filter((answer) => answer.parsed).length,
+        }];
+      }));
+    const report = {
+      ok: true,
+      independentlyAdjudicated: true,
+      version: 1,
+      sessionType: EXPERIMENT_CLOSED_BOOK_LABEL,
+      runDir,
+      runId: config.runId,
+      campaignId: config.campaignId,
+      arm: config.arm,
+      repetition: config.repetition,
+      mode: config.mode,
+      transport: config.transport ?? "auto",
+      manifest,
+      usage: {
+        ...usage,
+        wallClockMs: worker.workerFinishedMonotonicMs - worker.workerStartedMonotonicMs,
+      },
+      probeClassSummary,
+      probeVerdicts,
+      probes: transcripts,
+      evidence: {
+        sessionSha256: seal.sessionSha256,
+        candidateReportSha256: seal.candidateReportSha256,
+        manifestSha256: sha256Json(manifest),
+        planSha256: plan.planSha256,
+        questionsSha256: manifest.questionsSha256,
+        promptSha256: candidate.workerReady.promptSha256,
+        adjudicatorSourceSha256: fileSha256(fileURLToPath(import.meta.url)),
+        probeTranscriptSha256: sha256Text(JSON.stringify(transcripts)),
+      },
+    };
+    const evidencePath = join(runDir, reAdjudicate
+      ? `experiment-evidence.${report.evidence.adjudicatorSourceSha256.slice(0, 8)}.json`
+      : "experiment-evidence.json");
+    if (reAdjudicate) {
+      assertExperiment(existsSync(join(runDir, "experiment-evidence.json")),
+        "Re-adjudication expects an already-adjudicated run: adjudicate it normally first");
+    }
+    report.evidencePath = evidencePath;
+    writeJsonExclusive(evidencePath, report);
+    return report;
+  }
 
   const ledger = readJsonLines(join(runDir, "provider-requests.jsonl"));
   validateHashChain(ledger, "provider/context ledger");

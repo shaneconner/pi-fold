@@ -20,6 +20,8 @@ import { fileURLToPath } from "node:url";
 import {
   EXPERIMENT_ARMS,
   EXPERIMENT_BEHAVIORAL_MODE,
+  EXPERIMENT_CLOSED_BOOK_LABEL,
+  EXPERIMENT_SESSION_TYPES,
   EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS,
   EXPERIMENT_DEFAULT_FOLD_SCHEDULING,
   EXPERIMENT_DEPENDENCY_KEYS,
@@ -287,7 +289,15 @@ async function run() {
   const unit = argumentValue("--unit");
   const campaignDir = argumentValue("--campaign-dir");
   const planPath = argumentValue("--plan");
-  const arm = argumentValue("--arm");
+  const sessionType = argumentValue("--session-type", "arm");
+  assertExperiment(EXPERIMENT_SESSION_TYPES.includes(sessionType),
+    "Invalid --session-type: arm|closed-book");
+  const closedBook = sessionType === EXPERIMENT_CLOSED_BOOK_LABEL;
+  // A closed-book session has no arm and no arm conditions; its label rides the arm
+  // slot so run ids, slot claims and reports stay one shape without ever colliding.
+  const arm = closedBook ? EXPERIMENT_CLOSED_BOOK_LABEL : argumentValue("--arm");
+  assertExperiment(!closedBook || argumentValue("--arm") === null,
+    "--session-type closed-book takes no --arm");
   const foldScheduling = argumentValue("--fold-scheduling", EXPERIMENT_DEFAULT_FOLD_SCHEDULING);
   const foldPeekResultsArgument = argumentValue("--fold-peek-results",
     String(EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS));
@@ -297,7 +307,8 @@ async function run() {
   const modelId = argumentValue("--model-id", "gpt-5.6-sol");
   const effort = argumentValue("--effort", "xhigh");
   assertExperiment(requestedRunDir && unit && campaignDir && planPath, "Experiment run requires --run-dir, --unit, --campaign-dir and --plan");
-  assertExperiment(EXPERIMENT_ARMS.includes(arm), "Experiment run requires --arm pifold|native|unmanaged");
+  assertExperiment(closedBook || EXPERIMENT_ARMS.includes(arm),
+    "Experiment run requires --arm pifold|native|unmanaged");
   assertExperiment(EXPERIMENT_FOLD_SCHEDULING.includes(foldScheduling),
     "Invalid --fold-scheduling: immediate|epoch");
   assertExperiment(["true", "false"].includes(foldPeekResultsArgument),
@@ -337,17 +348,23 @@ async function run() {
   for (const relative of ["ipc", "ipc/requests", "ipc/responses"]) {
     mkdirSync(join(runDir, relative), { mode: 0o700 });
   }
-  // Every run reads its OWN detached worktree at the pinned commit.
+  // Every arm run reads its OWN detached worktree at the pinned commit. A closed-book
+  // session gets an EMPTY directory in the same position: no checkout bytes exist to
+  // leak, and the run-config law that the repo path lives inside the run dir holds.
   const repoDir = join(runDir, "repo");
-  gitExec(["-C", join(resolve(campaignDir), "repo.git"), "worktree", "add", "--quiet", "--detach",
-    repoDir, plan.repo.commit]);
   const stagedFiles = plan.stages.flatMap((stage) => stage.files);
-  const checkoutFingerprint = corpusManifestSha256(stagedFiles.map((file) => ({
-    path: file.path, sha256: sha256Text(readFileSync(join(repoDir, file.path), "utf8")),
-  })));
   const plannedFingerprint = corpusManifestSha256(stagedFiles);
-  assertExperiment(checkoutFingerprint === plannedFingerprint,
-    "Run checkout does not reproduce the planned staged corpus");
+  if (closedBook) {
+    mkdirSync(repoDir, { mode: 0o700 });
+  } else {
+    gitExec(["-C", join(resolve(campaignDir), "repo.git"), "worktree", "add", "--quiet", "--detach",
+      repoDir, plan.repo.commit]);
+    const checkoutFingerprint = corpusManifestSha256(stagedFiles.map((file) => ({
+      path: file.path, sha256: sha256Text(readFileSync(join(repoDir, file.path), "utf8")),
+    })));
+    assertExperiment(checkoutFingerprint === plannedFingerprint,
+      "Run checkout does not reproduce the planned staged corpus");
+  }
 
   const config = validateExperimentRunConfig({
     version: EXPERIMENT_PROTOCOL_VERSION,
@@ -356,9 +373,13 @@ async function run() {
     campaignId: basename(resolve(campaignDir)),
     arm,
     mode: plan.mode,
-    foldScheduling,
-    foldPeekResults,
-    ...(providerTotalWindow === null ? {} : { providerTotalWindow }),
+    ...(closedBook
+      ? { sessionType }
+      : {
+        foldScheduling,
+        foldPeekResults,
+        ...(providerTotalWindow === null ? {} : { providerTotalWindow }),
+      }),
     transport: EXPERIMENT_TRANSPORT,
     repetition,
     ordinal,
@@ -410,7 +431,9 @@ async function run() {
     priorPaceSha256: null,
     workerStartTicks: processStartTicks(worker.pid),
   };
-  const armRuntime = armRuntimeConfiguration(arm);
+  const armRuntime = closedBook
+    ? { activeContextEnabled: false, nativeCompactionEnabled: false, toleratesOverflow: false }
+    : armRuntimeConfiguration(arm);
   let workerReady;
   let workerExit;
   let failure = null;
@@ -426,7 +449,8 @@ async function run() {
     });
     workerReady = readJson(readyPath);
     assertExperiment(workerReady.runId === runId && workerReady.workerPid === worker.pid &&
-      workerReady.arm === arm && workerReady.checkoutSha256 === plannedFingerprint &&
+      workerReady.arm === arm &&
+      workerReady.checkoutSha256 === (closedBook ? null : plannedFingerprint) &&
       workerReady.sessionFile.startsWith(`${runDir}/`),
     "Worker readiness identity drifted");
     state.workerStartTicks = workerReady.workerStartTicks;
@@ -434,7 +458,9 @@ async function run() {
 
     let expectedChallenge = config.firstChallenge;
     let previousRelease = config.createdMonotonicMs;
-    for (let stage = 1; stage <= config.stageCount; stage += 1) {
+    // A closed-book session has no stages to release: the loop body never runs and the
+    // supervisor drops straight to awaiting the worker's single-turn completion.
+    for (let stage = 1; !closedBook && stage <= config.stageCount; stage += 1) {
       const requestPath = join(runDir, "ipc", "requests", `stage-${String(stage).padStart(2, "0")}.json`);
       // The unmanaged arm is expected to die at the window wall mid-plan; that exit is its
       // measurement, so the release loop stops instead of failing the run.
@@ -573,8 +599,7 @@ async function run() {
     runDir,
     campaignId: config.campaignId,
     arm,
-    foldScheduling,
-    foldPeekResults,
+    ...(closedBook ? { sessionType } : { foldScheduling, foldPeekResults }),
     repetition,
     ordinal,
     mode: config.mode,

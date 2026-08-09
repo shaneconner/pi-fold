@@ -87,7 +87,14 @@ OLD_IFS=$IFS
 IFS=,
 for ARM in $ARMS; do
   IFS=$OLD_IFS
-  case "$ARM" in pifold|native|unmanaged) ;; *) echo "unknown arm $ARM" >&2; exit 2;; esac
+  # "closedbook" is not an arm: it launches the plan's closed-book floor session
+  # (question list only, no stages, no tools, no checkout) through the same unit shape.
+  case "$ARM" in pifold|native|unmanaged|closedbook) ;; *) echo "unknown arm $ARM" >&2; exit 2;; esac
+  if [ "$ARM" = closedbook ]; then
+    ARM_ARGS="--session-type closed-book"
+  else
+    ARM_ARGS="--arm $ARM --fold-scheduling $FOLD_SCHEDULING --fold-peek-results $FOLD_PEEK_RESULTS"
+  fi
   RUN_ID=$(/usr/bin/date -u +%Y-%m-%dT%H-%M-%SZ)-$ARM-rep$REP-$(/usr/bin/openssl rand -hex 4)
   RUN_DIR=$CAMPAIGN_DIR/runs/$RUN_ID
   UNIT_SUFFIX=$(printf '%s' "$RUN_ID" | /usr/bin/tr '[:upper:]' '[:lower:]')
@@ -112,8 +119,7 @@ for ARM in $ARMS; do
     --property="StandardError=append:$LOG" \
     /usr/bin/node "$ROOT/scripts/run_pi_context_experiment.mjs" \
       --run-dir "$RUN_DIR" --unit "$UNIT" --campaign-dir "$CAMPAIGN_DIR" --plan "$PLAN" \
-      --arm "$ARM" --fold-scheduling "$FOLD_SCHEDULING" \
-      --fold-peek-results "$FOLD_PEEK_RESULTS" \
+      $ARM_ARGS \
       --repetition "$REP" --ordinal "$REP" \
       --model-provider "$MODEL_PROVIDER" --model-id "$MODEL_ID" --effort "$EFFORT" >/dev/null
   UNITS="$UNITS $UNIT"

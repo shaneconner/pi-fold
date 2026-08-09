@@ -85,8 +85,14 @@ import {
   traceStepTranscripts,
   traceStepVerdicts,
   visibleStage,
+  EXPERIMENT_CLOSED_BOOK_LABEL,
+  EXPERIMENT_SESSION_TYPES,
+  closedBookPrompt,
+  closedBookQuestions,
+  closedBookSystemPrompt,
+  closedBookTranscript,
 } from "./lib/pi_context_experiment.mjs";
-import { directoryTreeSha256, sha256Text, verifySourceHashes } from "./lib/pi_context_soak_attestation.mjs";
+import { directoryTreeSha256, sha256Json, sha256Text, verifySourceHashes } from "./lib/pi_context_soak_attestation.mjs";
 
 const PROJECT = dirname(dirname(fileURLToPath(import.meta.url)));
 const source = (relative) => readFileSync(join(PROJECT, relative), "utf8");
@@ -766,10 +772,10 @@ assert(extension.includes("appendToolResult({") && extension.includes("toolResul
   "every tool result must be hashed into the reread-tax ledger");
 assert(worker.includes("compaction: { enabled: armRuntime.nativeCompactionEnabled") &&
   worker.includes("thinkingLevel: config.model.effort") &&
-  worker.includes("validateExperimentManifest({"),
+  worker.includes("validateExperimentManifest(closedBook ? {"),
 "the worker must drive compaction from the arm, pin effort, and emit a validated manifest");
-assert(worker.includes("checkoutSha256 === config.targetTreeSha256"),
-  "the worker must pin its checkout against the staged corpus");
+assert(worker.includes("closedBook || checkoutSha256 === config.targetTreeSha256"),
+  "the worker must pin its checkout against the staged corpus on every arm run");
 assert(supervisor.includes("claimSlot(") && supervisor.includes("writeJsonExclusive(slotPath") &&
   supervisor.includes("worktree\", \"add\", \"--quiet\", \"--detach\""),
 "the supervisor must claim an exclusive campaign slot and use a pinned detached worktree");
@@ -2129,6 +2135,102 @@ try {
   assert(adjudicator.includes("probeProvenance({") && adjudicator.includes("provenance,"),
     "the adjudicator must report provenance from the shared helper");
   checks.provenanceAttributesOnlyOnDeterministicLinks = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 40 - closed-book floor session: the question list is every non-echo probe
+// in wave order, the prompt is deterministic plan-derived bytes that never carry
+// a session-event answer, the closed-book manifest round-trips its type while an
+// arm manifest without one still validates, and a closed-book transcript grades
+// through the SAME probeMechanicalVerdicts.
+// ---------------------------------------------------------------------------
+{
+  assert.deepEqual([...EXPERIMENT_SESSION_TYPES], ["arm", EXPERIMENT_CLOSED_BOOK_LABEL]);
+  const questions = closedBookQuestions(plan);
+  const nonEcho = plan.stages.flatMap((stage) =>
+    stage.probes.filter((probe) => probe.kind !== "echo"));
+  assert.deepEqual(questions.map((q) => q.id), nonEcho.map((probe) => probe.id),
+    "closed-book questions are every non-echo probe in wave order");
+  const prompt = closedBookPrompt(plan);
+  assert.equal(prompt, closedBookPrompt(plan), "closed-book prompt bytes are deterministic");
+  assert(closedBookSystemPrompt().length > 0);
+  for (const q of questions) {
+    assert(prompt.includes(`- ${q.id}: ${q.question}`), `closed-book prompt carries ${q.id}`);
+  }
+  assert(!prompt.includes("probe-08-02"), "echo questions never reach the closed-book prompt");
+  // Session-event answers (code words, delivery order, chain values) must not be
+  // derivable from the prompt itself: no conversation-class or chain-link expected
+  // answer may appear anywhere in its bytes.
+  for (const probe of nonEcho) {
+    if (!["chain-link", "stage-fact", "stage-binding"].includes(probe.kind)) continue;
+    if (typeof probe.expectedAnswer !== "string" || probe.expectedAnswer.length < 6) continue;
+    assert(!prompt.includes(probe.expectedAnswer),
+      `closed-book prompt leaks the answer to ${probe.id}`);
+  }
+
+  const closedManifest = {
+    version: EXPERIMENT_PROTOCOL_VERSION,
+    runId: "2026-08-09T00-00-00Z-closed-book-rep1-abcd1234",
+    campaignId: "campaign-1",
+    sessionType: EXPERIMENT_CLOSED_BOOK_LABEL,
+    arm: EXPERIMENT_CLOSED_BOOK_LABEL,
+    mode: "smoke",
+    ordinal: 1,
+    repetition: 1,
+    seed: "0011223344556677",
+    model: manifest.model,
+    runtime: { ...manifest.runtime, activeContextEnabled: false, nativeCompactionEnabled: false },
+    target: { repoKey: repo.key, url: repo.url, commit: repo.commit, treeSha256: "1".repeat(64) },
+    plan: manifest.plan,
+    questionsSha256: sha256Json(questions),
+    createdWallMs: 1_800_000_000_000,
+  };
+  validateExperimentManifest(closedManifest);
+  assert.throws(() => validateExperimentManifest({ ...closedManifest, arm: "pifold" }),
+    /closed-book label/);
+  assert.throws(() => validateExperimentManifest({ ...closedManifest, foldScheduling: "immediate" }),
+    /closed-book manifest shape/i);
+  assert.throws(() => validateExperimentManifest((({ questionsSha256: _q, ...rest }) => rest)(closedManifest)),
+    /closed-book manifest shape|question-list hash/i);
+  assert.throws(() => validateExperimentManifest({
+    ...closedManifest, runtime: { ...closedManifest.runtime, activeContextEnabled: true },
+  }), /claims a managed runtime/);
+  assert.throws(() => validateExperimentManifest({
+    ...closedManifest,
+    target: { ...closedManifest.target, checkoutSha256: "1".repeat(64) },
+  }), /target pin/);
+  // Back-compat is the law, not luck: an arm manifest without a session type and one
+  // stating "arm" explicitly both validate; an arm manifest may never claim the type.
+  validateExperimentManifest(manifest);
+  validateExperimentManifest({ ...manifest, sessionType: "arm" });
+  assert.throws(() => validateExperimentManifest({ ...manifest, sessionType: "floor" }),
+    /foreign session type/);
+
+  const closedRunConfig = (({ guidance: _g, ...rest }) => rest)({
+    ...runConfig, sessionType: EXPERIMENT_CLOSED_BOOK_LABEL, arm: EXPERIMENT_CLOSED_BOOK_LABEL,
+  });
+  validateExperimentRunConfig(closedRunConfig);
+  assert.throws(() => validateExperimentRunConfig({ ...closedRunConfig, arm: "native" }),
+    /arm is invalid/);
+  assert.throws(() => validateExperimentRunConfig({ ...closedRunConfig, foldScheduling: "immediate" }),
+    /no referent/);
+
+  const entries = [
+    { type: "message", message: { role: "user", content: prompt } },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text:
+      "probe-04-01: 1\nprobe-04-02: not-the-word\nprobe-08-01: stage-1-extra.rs" }] } },
+  ];
+  const transcripts = closedBookTranscript({ entries, plan });
+  assert(transcripts.flatMap((wave) => wave.answers).every((answer) => answer.kind !== "echo"),
+    "closed-book transcripts never carry echo rows");
+  const verdicts = probeMechanicalVerdicts({ plan, transcripts });
+  const byId = new Map(verdicts.map((row) => [row.probeId, row.verdict]));
+  assert.equal(byId.get("probe-04-01"), "match");
+  assert.equal(byId.get("probe-04-02"), "mismatch");
+  assert.equal(byId.get("probe-08-01"), "match");
+  assert.equal(byId.get("probe-08-03"), "unanswered");
+  assert(!byId.has("probe-08-02"), "echo probes never reach closed-book verdicts");
+  checks.closedBookFloorGradesThroughTheSameVerdicts = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

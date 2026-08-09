@@ -32,6 +32,12 @@ export const EXPERIMENT_PROTOCOL_VERSION = 3;
 // (c) unmanaged: both OFF; the run terminates at window overflow, which is the datum.
 export const EXPERIMENT_ARMS = Object.freeze(["pifold", "native", "unmanaged"]);
 export const EXPERIMENT_MODES = Object.freeze(["smoke", "full"]);
+// A closed-book session receives ONLY the probe questions: no transcript, no stage
+// payloads, no tools, no checkout. It publishes the prior-knowledge floor per probe
+// class for a plan (curl is heavily trained on), so "the model might just know this"
+// becomes a measured number instead of an objection. One session per PLAN, not per arm.
+export const EXPERIMENT_SESSION_TYPES = Object.freeze(["arm", "closed-book"]);
+export const EXPERIMENT_CLOSED_BOOK_LABEL = "closed-book";
 // Shipped pi-fold package options (gate 24); each variant is an experiment condition.
 export const EXPERIMENT_GUIDANCE_PROFILES = Object.freeze(["pressure", "curation", "minimal"]);
 // Fold scheduling is the second shipped dial: fold as soon as a batch is eligible, or
@@ -1270,13 +1276,68 @@ export function stagePlanForRun(plan) {
 // Run manifest: pins everything the publication has to be able to reproduce.
 // ---------------------------------------------------------------------------
 export function validateExperimentManifest(manifest) {
+  // A closed-book manifest keeps every pin that has a referent (model, runtime code on
+  // disk, the plan the questions derive from, the plan's corpus fingerprint) and drops
+  // the ones that do not (arm conditions, pacing, a checkout that never existed). It
+  // REQUIRES the question-list hash so the sealed session states exactly what it asked.
+  if (manifest?.sessionType === EXPERIMENT_CLOSED_BOOK_LABEL) {
+    assertExperiment(keysWithin(manifest, [
+      "version", "runId", "campaignId", "sessionType", "arm", "mode", "ordinal", "repetition",
+      "seed", "model", "runtime", "target", "plan", "questionsSha256", "createdWallMs",
+    ], ["transport"]),
+    "Invalid closed-book manifest shape");
+    assertExperiment(manifest.version === EXPERIMENT_PROTOCOL_VERSION,
+      "Closed-book manifest protocol version drifted");
+    assertExperiment(manifest.arm === EXPERIMENT_CLOSED_BOOK_LABEL,
+      "Closed-book manifest arm must be the closed-book label");
+    assertExperiment(EXPERIMENT_MODES.includes(manifest.mode), "Manifest mode is invalid");
+    assertExperiment(manifest.transport === undefined ||
+      EXPERIMENT_TRANSPORTS.includes(manifest.transport),
+    "Manifest transport is not a known Pi transport");
+    assertExperiment(Number.isSafeInteger(manifest.ordinal) && manifest.ordinal > 0 &&
+      Number.isSafeInteger(manifest.repetition) && manifest.repetition > 0,
+    "Manifest ordinal/repetition are invalid");
+    assertExperiment(typeof manifest.seed === "string" && manifest.seed.length >= 16,
+      "Manifest seed is missing or too short");
+    assertExperiment(exactKeys(manifest.model, ["provider", "id", "effort", "contextWindow",
+      "maxTokens", "descriptorSha256"]) &&
+      [manifest.model.provider, manifest.model.id, manifest.model.effort].every((part) =>
+        typeof part === "string" && part.length > 0) &&
+      Number.isSafeInteger(manifest.model.contextWindow) && manifest.model.contextWindow > 0 &&
+      HEX_64.test(manifest.model.descriptorSha256),
+    "Manifest model pin is incomplete: provider, model id and effort are all required");
+    assertExperiment(exactKeys(manifest.runtime, [
+      "codeCommit", "codeTree", "piVersion", "sourceHashes", "dependencyHashes",
+      "activeContextEnabled", "nativeCompactionEnabled",
+    ]) && HEX_40.test(manifest.runtime.codeCommit) && HEX_40.test(manifest.runtime.codeTree) &&
+      typeof manifest.runtime.piVersion === "string" &&
+      manifest.runtime.activeContextEnabled === false &&
+      manifest.runtime.nativeCompactionEnabled === false,
+    "Closed-book manifest runtime pin is incomplete or claims a managed runtime");
+    assertExperiment(exactKeys(manifest.target, ["repoKey", "url", "commit", "treeSha256"]) &&
+      Object.hasOwn(EXPERIMENT_REPOS, manifest.target.repoKey) &&
+      manifest.target.commit === EXPERIMENT_REPOS[manifest.target.repoKey].commit &&
+      HEX_64.test(manifest.target.treeSha256),
+    "Closed-book manifest target pin is incomplete or unregistered");
+    assertExperiment(exactKeys(manifest.plan, ["planSha256", "stageCount", "probeCount", "deliverableCount"]) &&
+      HEX_64.test(manifest.plan.planSha256) && Number.isSafeInteger(manifest.plan.stageCount) &&
+      manifest.plan.stageCount === EXPERIMENT_MODE_PLANS[manifest.mode].stageCount,
+    "Manifest stage-plan pin is incomplete");
+    assertExperiment(HEX_64.test(manifest.questionsSha256),
+      "Closed-book manifest requires the question-list hash");
+    assertExperiment(Number.isSafeInteger(manifest.createdWallMs) && manifest.createdWallMs > 0,
+      "Manifest creation clock is invalid");
+    return manifest;
+  }
   // `reliabilityLevers` is a RETIRED condition key, tolerated on read only: sealed run
   // manifests are immutable data and runs 10-14 recorded it. Nothing emits it any more.
   assertExperiment(keysWithin(manifest, [
     "version", "runId", "campaignId", "arm", "mode", "ordinal", "repetition",
     "seed", "model", "runtime", "target", "plan", "pacing", "createdWallMs",
-  ], ["guidance", "foldScheduling", "foldPeekResults", "guidedCuration", "providerTotalWindow", "transport", "reliabilityLevers"]),
+  ], ["sessionType", "guidance", "foldScheduling", "foldPeekResults", "guidedCuration", "providerTotalWindow", "transport", "reliabilityLevers"]),
   "Invalid experiment manifest shape");
+  assertExperiment(manifest.sessionType === undefined || manifest.sessionType === "arm",
+    "Arm manifest carries a foreign session type");
   assertExperiment(manifest.foldScheduling === undefined ||
     EXPERIMENT_FOLD_SCHEDULING.includes(manifest.foldScheduling),
   "Manifest fold scheduling is not a shipped package option");
@@ -1360,7 +1421,7 @@ export const EXPERIMENT_RUN_CONFIG_KEYS = Object.freeze([
 // foldScheduling key and adjudicate as EXPERIMENT_DEFAULT_FOLD_SCHEDULING. `reliabilityLevers`
 // is retired and tolerated on read only, so sealed runs 10-14 still adjudicate.
 export const EXPERIMENT_RUN_CONFIG_OPTIONAL_KEYS = Object.freeze([
-  "guidance", "foldScheduling", "foldPeekResults", "guidedCuration", "providerTotalWindow", "transport", "reliabilityLevers",
+  "sessionType", "guidance", "foldScheduling", "foldPeekResults", "guidedCuration", "providerTotalWindow", "transport", "reliabilityLevers",
 ]);
 
 export function validateExperimentRunConfig(value) {
@@ -1379,7 +1440,19 @@ export function validateExperimentRunConfig(value) {
   assertExperiment(value.transport === undefined || EXPERIMENT_TRANSPORTS.includes(value.transport),
     "Run config transport is not a known Pi transport");
   assertExperiment(value.version === EXPERIMENT_PROTOCOL_VERSION, "Run config protocol version drifted");
-  assertExperiment(EXPERIMENT_ARMS.includes(value.arm), "Run config arm is invalid");
+  assertExperiment(value.sessionType === undefined ||
+    EXPERIMENT_SESSION_TYPES.includes(value.sessionType),
+  "Run config session type is invalid");
+  // A closed-book run's "arm" is its own label, never one of the three arms: slot
+  // claims, run ids and reports all key on it, so it can never collide with an arm.
+  assertExperiment(value.sessionType === EXPERIMENT_CLOSED_BOOK_LABEL
+    ? value.arm === EXPERIMENT_CLOSED_BOOK_LABEL
+    : EXPERIMENT_ARMS.includes(value.arm),
+  "Run config arm is invalid");
+  assertExperiment(value.sessionType !== EXPERIMENT_CLOSED_BOOK_LABEL ||
+    (value.foldScheduling === undefined && value.foldPeekResults === undefined &&
+      value.guidance === undefined && value.guidedCuration === undefined),
+  "Closed-book run config carries arm-condition keys with no referent");
   assertExperiment(EXPERIMENT_MODES.includes(value.mode), "Run config mode is invalid");
   assertExperiment(value.guidance === undefined ||
     EXPERIMENT_GUIDANCE_PROFILES.includes(value.guidance),
@@ -1635,6 +1708,68 @@ export function probeTranscripts({ entries, plan }) {
       }),
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Closed-book floor session. The question list, the prompt and the transcript
+// extraction are all derived from the plan alone, deterministically: the
+// adjudicator recomputes the prompt bytes and refuses a session whose sealed
+// prompt hash disagrees, which is the "no stage payload bytes" law in one line.
+// Echo questions are excluded: their truth is per-run and meaningless cold.
+// ---------------------------------------------------------------------------
+export function closedBookQuestions(plan) {
+  return plan.stages.flatMap((stage) => stage.probes
+    .filter((probe) => probe.kind !== "echo")
+    .map((probe) => ({ id: probe.id, question: probe.question })));
+}
+
+export function closedBookSystemPrompt() {
+  return [
+    "You are answering recall questions cold: there is no session history, no tool and no",
+    "repository checkout available. Use only what you already know.",
+  ].join(" ");
+}
+
+export function closedBookPrompt(plan) {
+  const questions = closedBookQuestions(plan);
+  assertExperiment(questions.length > 0, "Closed-book prompt requires a plan with probes");
+  return [
+    [
+      "Answer the following questions. Some reference a staged reading session over the",
+      `${plan.repo.key} repository at commit ${plan.repo.commit} that you have NOT seen and`,
+      "cannot look at. Answer each question on its own line in the exact form",
+      "`<probe-id>: <answer>`. Answer every question even if you are unsure, giving your",
+      "best single answer.",
+    ].join(" "),
+    "",
+    ...questions.map((probe) => `- ${probe.id}: ${probe.question}`),
+  ].join("\n");
+}
+
+// Shaped like one probeTranscripts wave per real wave so probeMechanicalVerdicts
+// grades a closed-book session UNCHANGED. There are no stages, so every answer is
+// scanned for across ALL assistant text with the same parser and no window.
+export function closedBookTranscript({ entries, plan }) {
+  const combined = entries.map((entry) => assistantText(entry))
+    .filter((text) => text.trim() !== "").join("\n");
+  return plan.stages.filter((stage) => stage.probes.length > 0).map((stage) => ({
+    stage: stage.ordinal,
+    delivered: true,
+    rawText: combined,
+    messagesSkipped: null,
+    resultEntryIndex: null,
+    answerEntryIndex: null,
+    answers: stage.probes.filter((probe) => probe.kind !== "echo").map((probe) => {
+      const match = probeAnswerPattern(probe.id).exec(combined);
+      return {
+        probeId: probe.id,
+        kind: probe.kind,
+        question: probe.question,
+        answerText: match ? match[1].trim() : null,
+        parsed: Boolean(match),
+      };
+    }),
+  }));
 }
 
 // Trace steps grade like probes but continuously: each chain step is a

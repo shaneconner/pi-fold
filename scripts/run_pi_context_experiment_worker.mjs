@@ -13,9 +13,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   EXPERIMENT_ALLOWED_TOOLS,
   EXPERIMENT_BEHAVIORAL_MODE,
+  EXPERIMENT_CLOSED_BOOK_LABEL,
   EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS,
   EXPERIMENT_DEFAULT_FOLD_SCHEDULING,
   EXPERIMENT_MARKER_ENTRY,
+  closedBookPrompt,
+  closedBookQuestions,
+  closedBookSystemPrompt,
   EXPERIMENT_PIFOLD_EXTRA_TOOLS,
   EXPERIMENT_PROTOCOL_VERSION,
   EXPERIMENT_RUNNER_MODE,
@@ -90,20 +94,27 @@ const { PI_FOLD_STATE_ENTRY, PI_FOLD_FOLD_RECORD_ENTRY } = await jiti.import(
 );
 verifySourceHashes(PROJECT, config.sourceHashes);
 
-const armRuntime = armRuntimeConfiguration(config.arm);
+// A closed-book session runs the SAME worker scaffolding (readiness, watchdog,
+// quiescence, manifest, report) with the workload swapped for the bare question
+// list: no extension, no tools, no checkout, one user message.
+const closedBook = config.sessionType === EXPERIMENT_CLOSED_BOOK_LABEL;
+const armRuntime = closedBook
+  ? { activeContextEnabled: false, nativeCompactionEnabled: false, toleratesOverflow: false }
+  : armRuntimeConfiguration(config.arm);
 const plan = validateStagePlan(readJson(config.planPath));
 assertExperiment(plan.planSha256 === config.planSha256 && plan.mode === config.mode &&
   plan.repo.commit === config.targetCommit, "Stage plan does not match the run config pin");
 
 // Pin the checkout: every byte this run will read is the byte that was staged.
+// A closed-book session has no checkout to pin; its corpus statement is the plan's.
 const stagedFiles = plan.stages.flatMap((stage) => stage.files);
-const observed = stagedFiles.map((file) => {
+const observed = closedBook ? [] : stagedFiles.map((file) => {
   const path = join(config.repoDir, file.path);
   assertExperiment(existsSync(path), `Pinned checkout is missing ${file.path}`);
   return { path: file.path, sha256: sha256Text(readFileSync(path, "utf8")) };
 });
-const checkoutSha256 = corpusManifestSha256(observed);
-assertExperiment(checkoutSha256 === config.targetTreeSha256,
+const checkoutSha256 = closedBook ? null : corpusManifestSha256(observed);
+assertExperiment(closedBook || checkoutSha256 === config.targetTreeSha256,
   "Pinned checkout does not reproduce the staged corpus fingerprint");
 
 function workloadSystemPrompt() {
@@ -178,7 +189,7 @@ try {
   // 4,096 was too small in rep 1: xhigh reasoning plus a deliverable hit stopReason
   // "length" on the native arm at stage 39 and killed the worker.
   const model = { ...discoveredModel, maxTokens: 16_384 };
-  const systemPrompt = workloadSystemPrompt();
+  const systemPrompt = closedBook ? closedBookSystemPrompt() : workloadSystemPrompt();
 
   manager = SessionManager.create(config.repoDir, config.runDir);
   const markerId = manager.appendCustomEntry(EXPERIMENT_MARKER_ENTRY, {
@@ -210,7 +221,7 @@ try {
     noContextFiles: true,
     systemPrompt,
     appendSystemPrompt: [],
-    extensionFactories: [createPiContextExperimentExtension(config)],
+    extensionFactories: closedBook ? [] : [createPiContextExperimentExtension(config)],
   });
   await loader.reload();
   assertExperiment(loader.getAppendSystemPrompt().length === 0,
@@ -234,7 +245,7 @@ try {
   assertExperiment(session.settingsManager.getTransport() === (config.transport ?? "auto"),
     `Run transport pin did not reach the session: ${session.settingsManager.getTransport()}`);
   const discoveredToolNames = session.getActiveToolNames().sort();
-  const requiredTools = [
+  const requiredTools = closedBook ? [] : [
     ...EXPERIMENT_ALLOWED_TOOLS,
     ...(armRuntime.activeContextEnabled ? EXPERIMENT_PIFOLD_EXTRA_TOOLS : []),
   ];
@@ -251,7 +262,7 @@ try {
     !activeToolNames.includes(EXPERIMENT_PIFOLD_EXTRA_TOOLS[0]),
   `Arm ${config.arm} exposed the active-context tool it must not have`);
 
-  const prompt = workloadPrompt(config.firstChallenge);
+  const prompt = closedBook ? closedBookPrompt(plan) : workloadPrompt(config.firstChallenge);
   writeJsonExclusive(readyPath, {
     version: 1,
     runId: config.runId,
@@ -347,7 +358,49 @@ try {
     };
   }
 
-  const manifest = validateExperimentManifest({
+  const manifest = validateExperimentManifest(closedBook ? {
+    version: EXPERIMENT_PROTOCOL_VERSION,
+    runId: config.runId,
+    campaignId: config.campaignId,
+    sessionType: EXPERIMENT_CLOSED_BOOK_LABEL,
+    arm: config.arm,
+    mode: config.mode,
+    ...(config.transport === undefined ? {} : { transport: config.transport }),
+    ordinal: config.ordinal,
+    repetition: config.repetition,
+    seed: config.seed,
+    model: {
+      provider: model.provider,
+      id: model.id,
+      effort: config.model.effort,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      descriptorSha256: modelDescriptorSha256,
+    },
+    runtime: {
+      codeCommit: config.codeCommit,
+      codeTree: config.codeTree,
+      piVersion,
+      sourceHashes: config.sourceHashes,
+      dependencyHashes: config.dependencyHashes,
+      activeContextEnabled: false,
+      nativeCompactionEnabled: false,
+    },
+    target: {
+      repoKey: plan.repo.key,
+      url: plan.repo.url,
+      commit: plan.repo.commit,
+      treeSha256: config.targetTreeSha256,
+    },
+    plan: {
+      planSha256: plan.planSha256,
+      stageCount: plan.stageCount,
+      probeCount: plan.probeCount,
+      deliverableCount: plan.deliverableCount,
+    },
+    questionsSha256: sha256Json(closedBookQuestions(plan)),
+    createdWallMs: config.createdWallMs,
+  } : {
     version: EXPERIMENT_PROTOCOL_VERSION,
     runId: config.runId,
     campaignId: config.campaignId,
