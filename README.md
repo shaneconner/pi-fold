@@ -1,5 +1,7 @@
 # pi-fold
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21856873.svg)](https://doi.org/10.5281/zenodo.21856873)
+
 Agent-governed lossless context folding for Pi. A session folds its own transcript instead of losing it: the stale end collapses into short briefs while the exact originals stay on disk, addressed and verified by SHA-256, one tool call away.
 
 The full write-up, with interactive versions of every mechanism on this page and the complete measurement story, is at [shaneconner.com/projects/pi-fold](https://shaneconner.com/projects/pi-fold/).
@@ -49,6 +51,8 @@ The campaign behind these tables is two experiments. The first, here, is pi-fold
 One 64-stage staged assignment over the curl C repository: one Pi session per run, one user message, and the agent calls a `repo_stage` tool 64 times inside a single agentic turn. Model gpt-5.6-sol at xhigh effort, provider openai-codex. The 272,000-token figure in these tables is the transport's per-request input descriptor, which is what pi-fold budgeted against; the Codex catalog actually serves gpt-5.6 at a 372,000-token cap, which is where the native arm lived, peaking at 369.0k before each compaction. One arm runs pi-fold, the other runs Pi's native compaction.
 
 There is one run per arm, and native did not finish: it ended its turn at stage 56 of 64. That leaves two pairings, and both are reported here rather than the flattering one.
+
+The measurement is written up as a paper, with the figure sources, the redacted per-request ledgers, and the campaign log deposited beside it: [doi.org/10.5281/zenodo.21856873](https://doi.org/10.5281/zenodo.21856873). The story of how the campaign got here is on [Medium](https://medium.com/@shane.conner/compaction-doesnt-have-to-mean-starting-over-89c0b319d1a6).
 
 ### Same seed, both cut at stage 56
 
