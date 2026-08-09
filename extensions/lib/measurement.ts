@@ -7,6 +7,7 @@ import {
   sha256Value,
 } from "../json.ts";
 import {
+  bytes,
   clone,
   exactRecord,
   messageRole,
@@ -368,6 +369,28 @@ export function toolRefsProtected(
     const item = exactMapped(snapshot, ref);
     return !item || explicit.has(objectRefKey(ref)) || snapshot.toolProtectedIndices.has(item.index);
   });
+}
+
+/**
+ * Mass the agent's pins hold out of the ladder's reach: explicitly protected evidence
+ * outside the fresh tail. A pin's cost must be a number the agent sees on receipts,
+ * never a silent commit shortfall.
+ */
+export function protectedStaleMass(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+): { bytes: number; refs: number } {
+  const explicit = explicitProtectedKeys(state);
+  if (!explicit.size) return { bytes: 0, refs: 0 };
+  let total = 0;
+  let refs = 0;
+  for (const item of snapshot.mapped) {
+    if (!item.ref || !explicit.has(objectRefKey(item.ref))) continue;
+    if (snapshot.protectedIndices.has(item.index)) continue;
+    total += bytes(item.message);
+    refs += 1;
+  }
+  return { bytes: total, refs };
 }
 
 export interface AdmissionVerdict {

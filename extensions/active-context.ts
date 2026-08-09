@@ -49,6 +49,7 @@ import {
   parseNativeCompactionDecision,
   parseProviderContextMeasurementReceipt,
   persistenceProjection,
+  protectedStaleMass,
   providerContextMeasurement,
   providerTokens,
   refsProtected,
@@ -641,6 +642,7 @@ export function registerActiveContext(pi: any, options: {
       split_from_chars: receipt.splitFromChars,
       absorbed_wedges: receipt.absorbedWedges,
       recovered: receipt.recovered,
+      protected_bytes: receipt.protectedBytes,
       note: receipt.note,
     });
   };
@@ -2170,6 +2172,9 @@ export function registerActiveContext(pi: any, options: {
     persistence.state = result.state;
     const bytesAfter = bytes(projectActiveContext(snapshot, result.state));
     const freedBytes = Math.max(0, bytesBefore - bytesAfter);
+    // The cost of the agent's pins, measured at the moment it matters: mass this
+    // commit could not touch because protect holds it.
+    const pinHeld = protectedStaleMass(snapshot, result.state);
     const commitEvent = emit("context.commit", {
       trigger,
       deferred: false,
@@ -2208,6 +2213,8 @@ export function registerActiveContext(pi: any, options: {
       rewrite_tokens: accounting.rewriteTokens,
       pinned_bytes: accounting.pinnedBytes,
       pinned_results: accounting.pinnedResults,
+      protected_stale_bytes: pinHeld.bytes,
+      protected_stale_refs: pinHeld.refs,
       window_tokens: snapshot.contextWindow,
     });
     instrumentation.mutationsSinceHandoff += 1;
@@ -2273,6 +2280,8 @@ export function registerActiveContext(pi: any, options: {
       deferredMarks: result.retained.length,
       pinnedBytes: accounting.pinnedBytes,
       pinnedResults: accounting.pinnedResults,
+      protectedStaleBytes: pinHeld.bytes,
+      protectedStaleRefs: pinHeld.refs,
       retainedMarks: result.retained.length,
       currentTurnRetained: result.retained.filter((mark) =>
         markTouchesCurrentTurn(state, mark, guarded)).length,
@@ -2373,6 +2382,7 @@ export function registerActiveContext(pi: any, options: {
       splitFromChars: Number(action.splitFromChars ?? 0),
       absorbedWedges: Number(epoch?.absorbedWedges ?? 0),
       recovered: curation.recoveryAttempts > 0,
+      protectedBytes: Number(epoch?.protectedStaleBytes ?? 0),
       note: epoch && Number(epoch.deepenedMarks ?? 0) > 0
         ? `The commit reached into the fresh tail for ${epoch.deepenedMarks} further span(s), because a ` +
           "shallower commit would have freed less than one turn of inflow."
@@ -3637,12 +3647,22 @@ export function registerActiveContext(pi: any, options: {
     }
     if (action === "protect" || action === "unprotect") {
       const ids = stringIds(params.ids);
+      const refsBefore = persistence.state.protected.length;
       await persistManual(protectEvidence(snapshot, persistence.state, ids, action === "protect"), action, ctx);
+      const refsAfter = persistence.state.protected.length;
+      emit("context.protect", {
+        protect: action === "protect",
+        ids: ids.join(","),
+        id_count: ids.length,
+        protected_refs_before: refsBefore,
+        protected_refs_after: refsAfter,
+      });
       updateStatus(ctx);
       return toolPayload({
         version: 1,
         action,
         ids,
+        protectedRefs: refsAfter,
         activation: "durable immediately; projected on the next model call in this same turn",
       });
     }

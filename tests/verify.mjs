@@ -7015,6 +7015,86 @@ async function gateRep19ShapeResolves() {
   };
 }
 
+async function gateProtectIsDurablePin() {
+  // Protect is the pin. It must hold an expanded fold against the refold rung after
+  // the lease runs out, hold entries out of commits, release on unprotect, land on
+  // the event stream as context.protect, and be advertised in the description text,
+  // because a verb nobody can discover is a verb nobody uses.
+  const runtime = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
+  const stream = () => runtime.appended
+    .filter((entry) => entry.customType === "pi-fold-context-event")
+    .map((entry) => entry.data);
+  const description = [...runtime.tools.values()][0].description;
+  assert(description.includes("Protect is the pin"), "The pin is not advertised in the tool surface");
+
+  for (const tokens of [70_000, 80_000, 86_000]) {
+    await measure(runtime, tokens, 100_000);
+    await project(runtime);
+  }
+  await settle();
+  const folds = materialized(runtime).folds;
+  assert(folds.length >= 2, "Pressure must have produced at least two committed folds");
+  const foldId = folds[0].id;
+  // A second expanded fold stays UNpinned, so the refold rung has work to commit
+  // while the pin is live and the pinned-mass accounting has a commit to ride.
+  const unpinnedFoldId = folds[1].id;
+  await toolCall(runtime, { action: "expand", id: foldId });
+  await toolCall(runtime, { action: "protect", ids: [foldId] });
+  await toolCall(runtime, { action: "expand", id: unpinnedFoldId });
+  const pinned = stream().filter((record) => record.kind === "context.protect");
+  assert.equal(pinned.length, 1, "A protect action must land exactly one context.protect record");
+  assert.equal(pinned[0].protect, true);
+  assert.equal(pinned[0].ids, foldId);
+  assert(pinned[0].protected_refs_after > pinned[0].protected_refs_before,
+    "Protecting a fold must add its evidence refs to the durable pin set");
+
+  // Ten measured requests above the refold ratio: the 8-generation lease is long
+  // exhausted, and the pin is the only thing keeping the span expanded.
+  for (let index = 0; index < 10; index += 1) {
+    await measure(runtime, 86_000 + index, 100_000, `pin-measurement-${index + 1}`);
+    await project(runtime);
+  }
+  let state = materialized(runtime);
+  assert(state.expanded.includes(foldId),
+    "The pin must hold an expanded fold against the refold rung after the lease expires");
+  assert.equal(state.leases[foldId], undefined, "The lease should be exhausted; only the pin holds");
+
+  // Commits under pressure report the mass the pin held out of reach. Only commits
+  // AFTER the pin landed can testify to it.
+  const pinSeq = pinned[0].seq;
+  const applied = stream().filter((record) =>
+    record.kind === "context.commit" && record.deferred === false && record.seq > pinSeq);
+  assert(applied.length >= 1, "The unpinned expanded fold must have produced an applied commit under pressure");
+  assert(applied.every((record) =>
+    Number.isSafeInteger(record.protected_stale_bytes) && Number.isSafeInteger(record.protected_stale_refs)),
+    "Applied commits must carry the pinned-mass accounting");
+  assert(applied.some((record) => record.protected_stale_bytes > 0),
+    "A commit under a live pin must report nonzero protected stale mass");
+
+  // Unpin: the release lands on the stream, the pin set drains, and the ladder may
+  // reclaim the span again.
+  await toolCall(runtime, { action: "unprotect", ids: [foldId] });
+  const releases = stream().filter((record) =>
+    record.kind === "context.protect" && record.protect === false);
+  assert.equal(releases.length, 1);
+  assert.equal(materialized(runtime).protected.length, 0, "Unprotect must drain the refs protect added");
+  for (let index = 0; index < 3; index += 1) {
+    await measure(runtime, 91_000 + index, 100_000, `unpin-measurement-${index + 1}`);
+    await project(runtime);
+  }
+  state = materialized(runtime);
+  assert(!state.expanded.includes(foldId), "After unprotect the refold rung must reclaim the span");
+  assert(!state.expanded.includes(unpinnedFoldId), "The unpinned expanded fold should have been refolded under pressure");
+  return {
+    advertised: true,
+    pinnedRefs: pinned[0].protected_refs_after,
+    heldThroughMeasurements: 10,
+    appliedCommitsWhilePinned: applied.length,
+    maxProtectedStaleBytes: Math.max(...applied.map((record) => record.protected_stale_bytes)),
+    refoldedAfterRelease: !state.expanded.includes(foldId),
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -7091,6 +7171,7 @@ const gates = [
   [84, "The rep-19 shape resolves", gateRep19ShapeResolves],
   [87, "The projection is append-only", gateProjectionIsAppendOnly],
   [88, "A peek never rewrites the window", gatePeekIsAppendOnly],
+  [89, "Protect is a durable pin", gateProtectIsDurablePin],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

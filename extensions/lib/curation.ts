@@ -330,6 +330,8 @@ export interface ContextReceipt {
   absorbedWedges: number;
   /** Overflow recovery, when this action rebuilt a request the provider would reject. */
   recovered: boolean;
+  /** Mass the agent's pins held out of this commit's reach, in bytes. */
+  protectedBytes: number;
   note: string | null;
 }
 
@@ -349,6 +351,7 @@ export function contextReceipt(input: Partial<ContextReceipt> & { kind: string; 
     splitFromChars: input.splitFromChars ?? 0,
     absorbedWedges: input.absorbedWedges ?? 0,
     recovered: input.recovered ?? false,
+    protectedBytes: input.protectedBytes ?? 0,
     note: input.note ?? null,
   };
 }
@@ -386,6 +389,9 @@ export function receiptLine(receipt: ContextReceipt): string {
       : "",
     receipt.recovered
       ? "This ran as overflow recovery: the request would not have been transmissible, and it was rebuilt rather than dropped."
+      : "",
+    receipt.protectedBytes
+      ? `${receipt.protectedBytes} byte(s) stay pinned under protect; unprotect releases them when the work moves on.`
       : "",
     receipt.note ?? "",
   ];

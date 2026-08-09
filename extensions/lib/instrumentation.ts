@@ -137,6 +137,8 @@ export type ContextEventKind =
   | "context.attempt"
   /** One auto-snap applied to a requested span, referencing its attempt. */
   | "context.correction"
+  /** One protect or unprotect: durable pin bookkeeping; no window bytes move. */
+  | "context.protect"
   /** The resolved serving budget, stated once at startup so a live run can prove it. */
   | "context.capacity"
   /** One evaluation of the guided-curation last-call gate. */
