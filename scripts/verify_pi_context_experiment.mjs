@@ -15,8 +15,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   EXPERIMENT_ARMS,
-  EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS,
-  EXPERIMENT_DEFAULT_FOLD_SCHEDULING,
   EXPERIMENT_DEFAULT_GUIDED_CURATION,
   EXPERIMENT_PROVIDER_TOTAL_WINDOWS,
   EXPERIMENT_TRANSPORT,
@@ -1149,48 +1147,56 @@ try {
 }
 
 // ---------------------------------------------------------------------------
-// GATE 17 - fold scheduling is threaded from the launcher to the registration
+// GATE 17 - the fold-scheduling dial is retired: tolerated on read, emitted by nobody,
+// and the epoch scheduler is pinned unconditionally
 // ---------------------------------------------------------------------------
 {
   assert.deepEqual([...EXPERIMENT_FOLD_SCHEDULING], ["immediate", "epoch"]);
-  assert.equal(EXPERIMENT_DEFAULT_FOLD_SCHEDULING, "immediate");
   assert.equal(EXPERIMENT_SCHEDULING_SOURCE, "extensions/lib/scheduling.ts");
-  // Runs sealed before the dial existed carry no key and still adjudicate.
+  // Sealed run directories are immutable data: reps 1-23 recorded foldScheduling, and
+  // the paper's second experiment is an immediate-vs-epoch pairing, so BOTH values must
+  // keep validating on read. A run config written after the deletion carries no key.
   validateExperimentRunConfig(runConfig);
   validateExperimentRunConfig({ ...runConfig, foldScheduling: "epoch" });
+  validateExperimentRunConfig({ ...runConfig, foldScheduling: "immediate" });
   assert.throws(() => validateExperimentRunConfig({ ...runConfig, foldScheduling: "eventual" }),
     /fold scheduling is invalid/);
   assert.throws(() => validateExperimentRunConfig({ ...runConfig, foldSchedule: "epoch" }),
     /run config shape/);
   validateExperimentManifest(manifest);
   validateExperimentManifest({ ...manifest, foldScheduling: "epoch" });
+  validateExperimentManifest({ ...manifest, foldScheduling: "immediate" });
   assert.throws(() => validateExperimentManifest({ ...manifest, foldScheduling: "eventual" }),
     /fold scheduling is not a shipped package option/);
   assert.throws(() => validateExperimentManifest({ ...manifest, foldSchedule: "epoch" }),
     /manifest shape/);
-  assert(supervisor.includes('argumentValue("--fold-scheduling"') &&
-    supervisor.includes("EXPERIMENT_FOLD_SCHEDULING.includes(foldScheduling)") &&
-    supervisor.includes("experimentSourceHashes(foldScheduling)") &&
-    supervisor.includes("schedulingPresent || foldScheduling !== \"epoch\"") &&
-    supervisor.includes("runtimePaths.includes(EXPERIMENT_SCHEDULING_SOURCE) === schedulingPresent") &&
-    supervisor.includes("foldScheduling,"),
-  "the supervisor must accept --fold-scheduling, pin the whole runtime source tree, require the scheduler for epoch, and record it in the run config");
-  assert(worker.includes("foldScheduling: config.foldScheduling ?? EXPERIMENT_DEFAULT_FOLD_SCHEDULING"),
-    "the worker must record the run's fold scheduling in the sealed manifest");
-  assert(extension.includes("foldScheduling: config.foldScheduling ?? EXPERIMENT_DEFAULT_FOLD_SCHEDULING"),
-    "the extension must pass fold scheduling into the active-context registration");
-  assert(launcher.includes("--fold-scheduling") &&
-    launcher.includes('case "$FOLD_SCHEDULING" in immediate|epoch)'),
-  "the shell launcher must accept and validate --fold-scheduling");
-  checks.foldSchedulingThreadedFromLauncherToRegistration = true;
+  // NO PRODUCER. The runtime refuses the option at construction now, so a script that
+  // still threaded it would abort the very run it configured.
+  for (const [name, text] of [
+    ["extension", extension], ["worker", worker], ["supervisor", supervisor],
+  ]) {
+    assert(!/foldScheduling/.test(text), `${name} still threads the retired fold-scheduling dial`);
+  }
+  // The epoch scheduler source is pinned unconditionally: a run that cannot pin the code
+  // implementing its own condition is not the experiment.
+  assert(supervisor.includes("experimentSourceHashes()") &&
+    supervisor.includes("assertExperiment(existsSync(join(PROJECT, EXPERIMENT_SCHEDULING_SOURCE))") &&
+    supervisor.includes("assertExperiment(runtimePaths.includes(EXPERIMENT_SCHEDULING_SOURCE)"),
+  "the supervisor must pin the whole runtime source tree and require the epoch scheduler");
+  // The adjudicator reports the key from artifacts that carry it, and reads an ABSENT
+  // key as epoch: every pre-deletion artifact wrote it explicitly, so absent means the
+  // run was configured after the deletion. Defaulting to the shipped-through-1.0.2
+  // value here would publish every future epoch run as "immediate".
+  assert(adjudicator.includes('foldScheduling: config.foldScheduling ?? "epoch"'),
+    "the adjudicator must read an absent fold-scheduling key as epoch");
+  checks.foldSchedulingRetiredAndReadOnly = true;
 }
 
 // ---------------------------------------------------------------------------
-// GATE 21 - the peek-fold condition is threaded from the launcher to the registration
+// GATE 21 - the peek-fold dial is retired: tolerated on read, emitted by nobody
 // ---------------------------------------------------------------------------
 {
-  assert.equal(EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS, false);
-  // Runs sealed before the dial existed carry no key and still adjudicate.
+  // Same precedent, same shape: reps 15-23 recorded it, so both values keep validating.
   validateExperimentRunConfig(runConfig);
   validateExperimentRunConfig({ ...runConfig, foldPeekResults: true });
   validateExperimentRunConfig({ ...runConfig, foldPeekResults: false });
@@ -1199,22 +1205,19 @@ try {
   assert.throws(() => validateExperimentRunConfig({ ...runConfig, foldPeek: true }),
     /run config shape/);
   validateExperimentManifest({ ...manifest, foldPeekResults: true });
+  validateExperimentManifest({ ...manifest, foldPeekResults: false });
   assert.throws(() => validateExperimentManifest({ ...manifest, foldPeekResults: "true" }),
     /peek-fold condition is not a boolean/);
   assert.throws(() => validateExperimentManifest({ ...manifest, foldPeek: true }),
     /manifest shape/);
-  assert(supervisor.includes('argumentValue("--fold-peek-results"') &&
-    supervisor.includes('["true", "false"].includes(foldPeekResultsArgument)') &&
-    supervisor.includes("foldPeekResults,"),
-  "the supervisor must accept --fold-peek-results and record it in the run config");
-  assert(worker.includes("foldPeekResults: config.foldPeekResults ?? EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS"),
-    "the worker must record the run's peek-fold condition in the sealed manifest");
-  assert(extension.includes("foldPeekResults: config.foldPeekResults ?? EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS"),
-    "the extension must pass the peek-fold condition into the active-context registration");
-  assert(launcher.includes("--fold-peek-results") &&
-    launcher.includes('case "$FOLD_PEEK_RESULTS" in true|false)'),
-  "the shell launcher must accept and validate --fold-peek-results");
-  checks.foldPeekResultsThreadedFromLauncherToRegistration = true;
+  for (const [name, text] of [
+    ["extension", extension], ["worker", worker], ["supervisor", supervisor],
+  ]) {
+    assert(!/foldPeekResults/.test(text), `${name} still threads the retired peek-fold dial`);
+  }
+  assert(adjudicator.includes("foldPeekResults: config.foldPeekResults ?? true"),
+    "the adjudicator must read an absent peek-fold key as foldable");
+  checks.foldPeekResultsRetiredAndReadOnly = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1256,8 +1259,9 @@ try {
     assert(!/guidedCuration:|guidance: config\.guidance/.test(text),
       `${name} still emits a retired condition dial`);
   }
-  assert(!/--guided-curation|--guidance|GUIDED_CURATION|GUIDANCE=/.test(launcher),
-    "the shell launcher still accepts a retired condition dial");
+  assert(!/--guided-curation|--guidance|GUIDED_CURATION|GUIDANCE=/.test(launcher) &&
+    !/--fold-scheduling|FOLD_SCHEDULING|--fold-peek-results|FOLD_PEEK_RESULTS/.test(launcher),
+  "the shell launcher still accepts a retired condition dial");
   // Removal-and-debt: the retired option set must not survive anywhere in scripts/ as
   // callable code — an anti-pattern left callable gets recomposed. The needle is
   // assembled so this gate does not match itself.

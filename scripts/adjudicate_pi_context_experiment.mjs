@@ -19,8 +19,6 @@ import {
   CONTEXT_EVENT_SUFFIX,
   EXPERIMENT_ARMS,
   EXPERIMENT_CLOSED_BOOK_LABEL,
-  EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS,
-  EXPERIMENT_DEFAULT_FOLD_SCHEDULING,
   EXPERIMENT_MARKER_ENTRY,
   EXPERIMENT_TOOL_NAME,
   armRuntimeConfiguration,
@@ -581,8 +579,15 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     runId: config.runId,
     campaignId: config.campaignId,
     arm: config.arm,
-    foldScheduling: config.foldScheduling ?? EXPERIMENT_DEFAULT_FOLD_SCHEDULING,
-    foldPeekResults: config.foldPeekResults ?? EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS,
+    // The retired condition dials, reported from the run config when it carries them.
+    // An ABSENT key means the run was configured after the dials were deleted, so it is
+    // epoch with foldable peek results by construction: every artifact sealed while the
+    // dials existed wrote both keys explicitly (verified across all 17 campaign-metrics
+    // rows), and the runtime now refuses either option at construction. Defaulting to
+    // the shipped-through-1.0.2 values here would publish every future epoch run as
+    // "immediate".
+    foldScheduling: config.foldScheduling ?? "epoch",
+    foldPeekResults: config.foldPeekResults ?? true,
     providerTotalWindow: config.providerTotalWindow ?? null,
     transport: config.transport ?? "auto",
     repetition: config.repetition,

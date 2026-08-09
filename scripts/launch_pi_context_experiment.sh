@@ -8,8 +8,7 @@ set -eu
 # serial schedule would fold straight into the result.
 #
 #   scripts/launch_pi_context_experiment.sh --campaign <id> --mode smoke|full [--rep 1] \
-#       [--arms pifold,native,unmanaged] [--repo curl] \
-#       [--fold-scheduling immediate|epoch] [--fold-peek-results true|false]
+#       [--arms pifold,native,unmanaged] [--repo curl]
 
 ROOT=$(CDPATH= cd -- "$(/usr/bin/dirname -- "$0")/.." && /bin/pwd)
 RUN_HOME=$(/usr/bin/getent passwd "$(/usr/bin/id -u)" | /usr/bin/cut -d: -f6)
@@ -19,8 +18,6 @@ CAMPAIGN=
 MODE=
 REP=1
 ARMS=pifold,native,unmanaged
-FOLD_SCHEDULING=immediate
-FOLD_PEEK_RESULTS=false
 REPO=curl
 MODEL_PROVIDER=openai-codex
 MODEL_ID=gpt-5.6-sol
@@ -32,20 +29,16 @@ while [ "$#" -gt 0 ]; do
     --mode) MODE=$2; shift 2;;
     --rep) REP=$2; shift 2;;
     --arms) ARMS=$2; shift 2;;
-    --fold-scheduling) FOLD_SCHEDULING=$2; shift 2;;
-    --fold-peek-results) FOLD_PEEK_RESULTS=$2; shift 2;;
     --repo) REPO=$2; shift 2;;
     --model-provider) MODEL_PROVIDER=$2; shift 2;;
     --model-id) MODEL_ID=$2; shift 2;;
     --effort) EFFORT=$2; shift 2;;
-    *) echo "usage: $0 --campaign <id> --mode smoke|full [--rep N] [--arms a,b,c] [--repo r] [--fold-scheduling s] [--fold-peek-results b]" >&2; exit 2;;
+    *) echo "usage: $0 --campaign <id> --mode smoke|full [--rep N] [--arms a,b,c] [--repo r]" >&2; exit 2;;
   esac
 done
 [ -n "$CAMPAIGN" ] || { echo "--campaign is required" >&2; exit 2; }
 case "$MODE" in smoke|full) ;; *) echo "--mode must be smoke or full" >&2; exit 2;; esac
 case "$REP" in ''|*[!0-9]*) echo "--rep must be an integer" >&2; exit 2;; esac
-case "$FOLD_SCHEDULING" in immediate|epoch) ;; *) echo "--fold-scheduling must be immediate or epoch" >&2; exit 2;; esac
-case "$FOLD_PEEK_RESULTS" in true|false) ;; *) echo "--fold-peek-results must be true or false" >&2; exit 2;; esac
 
 unset NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS LD_PRELOAD LD_LIBRARY_PATH \
   BASH_ENV ENV NODE_TLS_REJECT_UNAUTHORIZED PI_CODING_AGENT_DIR OPENAI_BASE_URL OPENAI_API_BASE \
@@ -93,7 +86,7 @@ for ARM in $ARMS; do
   if [ "$ARM" = closedbook ]; then
     ARM_ARGS="--session-type closed-book"
   else
-    ARM_ARGS="--arm $ARM --fold-scheduling $FOLD_SCHEDULING --fold-peek-results $FOLD_PEEK_RESULTS"
+    ARM_ARGS="--arm $ARM"
   fi
   RUN_ID=$(/usr/bin/date -u +%Y-%m-%dT%H-%M-%SZ)-$ARM-rep$REP-$(/usr/bin/openssl rand -hex 4)
   RUN_DIR=$CAMPAIGN_DIR/runs/$RUN_ID

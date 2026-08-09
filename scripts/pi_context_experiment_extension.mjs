@@ -27,8 +27,6 @@ import {
 } from "./lib/pi_fold_identity.mjs";
 import {
   EXPERIMENT_ALLOWED_TOOLS,
-  EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS,
-  EXPERIMENT_DEFAULT_FOLD_SCHEDULING,
   EXPERIMENT_MARKER_ENTRY,
   EXPERIMENT_PIFOLD_EXTRA_TOOLS,
   EXPERIMENT_TOOL_NAME,
@@ -240,12 +238,6 @@ export function createPiContextExperimentExtension(config) {
           registerActiveContext(pi, {
             ...PI_FOLD_ACTIVE_CONTEXT_REGISTRATION,
             readOnlyTools: EXPERIMENT_READ_ONLY_TOOLS,
-            // The second condition dial: fold as soon as a batch is eligible, or batch the
-            // eligible spans into an epoch. Pinned in the run config and the manifest.
-            foldScheduling: config.foldScheduling ?? EXPERIMENT_DEFAULT_FOLD_SCHEDULING,
-            // The third condition dial: whether the ladder may reclaim the runtime's own
-            // peek output. Pinned in the run config and the manifest.
-            foldPeekResults: config.foldPeekResults ?? EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS,
             // The deployment fact, when the run config carries one: without it the
             // runtime measures every threshold against the per-request descriptor.
             ...(config.providerTotalWindow === undefined ? {} : { providerTotalWindow: config.providerTotalWindow }),

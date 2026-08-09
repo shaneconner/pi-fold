@@ -26,7 +26,7 @@ import {
 } from "./persistence.ts";
 import {
   ACTIVE_CONTEXT_POLICY,
-  CONSOLIDATION_WIDTH_THRESHOLD,
+  CONSOLIDATE_AFTER,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   MAX_FOLD_SPAN_CHARS,
 } from "./policy.ts";
@@ -288,6 +288,51 @@ export function deterministicConsolidationBrief(candidate: FoldCandidate, state:
   return `${bounded}.`;
 }
 
+/**
+ * Every fold kind, as a span may contain it.
+ *
+ * The agent path composes with this set: a mark's span may include folds of any kind and
+ * any count, and the fold it commits re-parents them. Automation composes with a NARROWER
+ * set, because its own restraint is the counting rule (placeholders are span material
+ * only at or above CONSOLIDATE_AFTER), not a rule about shape.
+ */
+export const ALL_FOLD_KINDS: ReadonlySet<FoldKind> =
+  new Set<FoldKind>(["tool-result", "chapter", "consolidation"]);
+
+/** The first pinned fold a span would nest, or null when the span swallows no pin. */
+export function pinnedChildFold(
+  parts: FoldPart[],
+  state: ActiveContextState,
+  snapshot: ActiveContextSnapshot,
+): ActiveFold | null {
+  const byId = foldMap(state);
+  for (const part of parts) {
+    if (part.kind !== "fold") continue;
+    const child = byId.get(part.foldId);
+    if (!child) continue;
+    const refs = flattenFoldRefs(child, state);
+    const pinned = child.kind === "tool-result"
+      ? toolRefsProtected(refs, state, snapshot)
+      : refsProtected(refs, state, snapshot);
+    if (pinned) return child;
+  }
+  return null;
+}
+
+/**
+ * The one refusal nesting keeps.
+ *
+ * A span may take in any fold, so the pin is the sole thing that can stop it, and a pin
+ * is a promise to hold bytes raw. Nesting one would put a fold the agent asked to keep
+ * visible behind a placeholder, so the span is refused by name with the release valve
+ * in it, the same texture the pinned-share cap uses.
+ */
+export function pinnedNestingRefusal(pinned: ActiveFold, toolName: string): string {
+  return `fold refused: ${pinned.id} is pinned, and nesting it would hide context you asked to keep. ` +
+    `Release it with ${toolName} {"action":"unprotect","ids":["${pinned.id}"]} first, ` +
+    "or name a span that stops at its boundary.";
+}
+
 export function partsForRange(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -335,61 +380,78 @@ export function chapterUnits(snapshot: ActiveContextSnapshot): ChapterUnit[] {
     .flatMap((segment) => structurallyClosedChapterUnits(snapshot.messages, segment));
 }
 
-export function selectAutomaticConsolidation(
+/**
+ * Folds the automatic law may treat as span material.
+ *
+ * The counting rule reads the stale region only, and pins are the exemption: a fold the
+ * agent protected is never auto-included, and an EXPANDED fold is not a placeholder at
+ * all. One predicate answers both halves, because "stale" and "unpinned" are the same
+ * question `refsProtected` already asks of a span's evidence.
+ */
+export function unpinnedStaleFolds(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
-  ratio: number,
-  claimed: ReadonlySet<string> = new Set<string>(),
+): Array<{ fold: ActiveFold; start: number; end: number }> {
+  return visibleCollapsedRoots(state, snapshot)
+    .filter(({ fold }) => !refsProtected(flattenFoldRefs(fold, state), state, snapshot));
+}
+
+/** Whether fold placeholders currently count as ordinary material for an automatic span. */
+export function foldsAreSpanMaterial(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+): boolean {
+  return unpinnedStaleFolds(snapshot, state).length >= CONSOLIDATE_AFTER;
+}
+
+/**
+ * The stalest contiguous run of unpinned folds, read as ONE span.
+ *
+ * This is not a rung with a trigger of its own: it only ever runs once placeholders are
+ * span material, and then it is just the case where the span happens to contain nothing
+ * but folds. A tool-result placeholder nests through the chapter span instead, which is
+ * where the forest law already allows it.
+ */
+export function selectAutomaticFoldRun(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
 ): FoldCandidate | null {
-  const visibleRoots = visibleCollapsedRoots(state, snapshot);
-  const widthEligible = visibleRoots.length > CONSOLIDATION_WIDTH_THRESHOLD;
-  const pressureEligible = Number.isFinite(ratio) && ratio >= snapshot.policy.consolidationRatio;
-  if (!widthEligible && !pressureEligible) return null;
-  const roots = visibleRoots.filter(({ fold }) => {
-    if (fold.kind !== "chapter" && fold.kind !== "consolidation") return false;
-    const refs = flattenFoldRefs(fold, state);
-    if (claimed.size && refs.some((ref) => claimed.has(objectRefKey(ref)))) return false;
-    return !refsProtected(refs, state, snapshot);
-  });
+  // The counting rule is the whole trigger: below it there is no run to compose.
+  if (!foldsAreSpanMaterial(snapshot, state)) return null;
+  // A fold's own evidence is claimed BY that fold, so the raw-key claim set every other
+  // selector reads says nothing here. What a run must not touch is a fold some pending
+  // mark already spoke for, which is a claim on the fold ITSELF.
+  const spokenFor = new Set<string>();
+  for (const mark of state.pendingMarks ?? []) {
+    if (mark.mark === "refold") spokenFor.add(mark.id);
+    else for (const part of mark.parts) if (part.kind === "fold") spokenFor.add(part.foldId);
+  }
+  const roots = unpinnedStaleFolds(snapshot, state).filter(({ fold }) =>
+    (fold.kind === "chapter" || fold.kind === "consolidation") && !spokenFor.has(fold.id));
+  // No shaping constants: the run is as wide as the transcript makes it, trimmed only by
+  // the one bound a fold record has, which is how many exact references it may carry.
   const candidateFor = (selected: typeof roots): FoldCandidate | null => {
-    const parts: FoldPart[] = selected.map(({ fold }) => ({ kind: "fold", foldId: fold.id }));
-    const sourceRefs = candidateSourceRefs(parts, state);
-    return selected.length >= 2 && sourceRefs.length <= snapshot.policy.maxFoldSourceRefs
-      ? { kind: "consolidation", parts, sourceRefs }
-      : null;
-  };
-  if (widthEligible && !pressureEligible) {
-    const oldest = roots.slice(0, snapshot.policy.consolidationChildren);
-    let run: typeof roots = [];
-    for (const root of oldest) {
-      if (!run.length || root.start === run.at(-1)!.end + 1) {
-        run.push(root);
-      } else {
-        if (run.length >= 2) return candidateFor(run);
-        run = [root];
+    for (let width = selected.length; width >= 2; width -= 1) {
+      const parts: FoldPart[] = selected.slice(0, width)
+        .map(({ fold }) => ({ kind: "fold", foldId: fold.id }));
+      const sourceRefs = candidateSourceRefs(parts, state);
+      if (sourceRefs.length <= snapshot.policy.maxFoldSourceRefs) {
+        return { kind: "consolidation", parts, sourceRefs };
       }
     }
-    return run.length >= 2 ? candidateFor(run) : null;
-  }
-  let run: typeof roots = [];
-  const finish = (): FoldCandidate | null => {
-    if (run.length < snapshot.policy.consolidationChildren) return null;
-    const selected = run.slice(0, snapshot.policy.maxConsolidationChildren);
-    const parts: FoldPart[] = selected.map(({ fold }) => ({ kind: "fold", foldId: fold.id }));
-    const sourceRefs = candidateSourceRefs(parts, state);
-    return sourceRefs.length <= snapshot.policy.maxFoldSourceRefs
-      ? { kind: "consolidation", parts, sourceRefs }
-      : null;
+    return null;
   };
+  let run: typeof roots = [];
   for (const root of roots) {
-    if (!run.length || root.start === run.at(-1)!.end + 1) run.push(root);
-    else {
-      const candidate = finish();
-      if (candidate) return candidate;
-      run = [root];
+    if (!run.length || root.start === run.at(-1)!.end + 1) {
+      run.push(root);
+      continue;
     }
+    const candidate = candidateFor(run);
+    if (candidate) return candidate;
+    run = [root];
   }
-  return finish();
+  return candidateFor(run);
 }
 
 /**
@@ -600,9 +662,9 @@ export function snapFoldCandidate(
   }
   // Nearest first, then the other readings of the same intent. A span that cuts into one
   // fold has exactly two endpoint corrections -- absorb it, or step past it -- and which
-  // one survives depends on structure the caller cannot see. A span that cuts into folds
-  // on BOTH sides has neither: every endpoint correction still leaves a whole chapter
-  // inside the span, and a chapter may not swallow one.
+  // one survives depends on structure the caller cannot see. A whole fold left inside the
+  // corrected span is no longer a reason to fail: the span nests it. What still fails is
+  // a span with no valid frame at all, and a pin the span would swallow.
   const alternatives = snapSpanAlternatives(snapshot, state, ids);
   let lastError: Error = directError;
   for (const snapped of alternatives) {
@@ -627,10 +689,10 @@ export function snapFoldCandidate(
 /**
  * Every constructible reading of a requested span, nearest intent first.
  *
- * The three endpoint modes move the EDGES; the fourth reading moves the FRAME. A span
- * cutting into folds at both ends has no endpoint correction that yields a foldable
- * chapter -- each one still contains a whole chapter, which `partsForRange` refuses --
- * so the only faithful reading left is the whole folds themselves: a consolidation.
+ * The three endpoint modes move the EDGES; the fourth reading moves the FRAME, reading
+ * the span as the whole folds it cuts into. The frame reading survives the nesting law
+ * because it is still the faithful one where the endpoints cannot snap to closed units:
+ * the folds themselves already tile the range exactly.
  */
 export function snapSpanAlternatives(
   snapshot: ActiveContextSnapshot,
@@ -678,7 +740,7 @@ export function snapSpanToWholeFolds(
     ids: tiling.map((root) => root.fold.id),
     corrections: [{
       ...outward.corrections[0],
-      reason: `span cut into ${tiling.length} folds it may not re-fold; corrected outward to their whole ` +
+      reason: `span cut into ${tiling.length} folds; corrected outward to their whole ` +
         `boundaries and read as a consolidation of ${tiling.map((root) => root.fold.id).join(", ")}`,
     }],
   };
@@ -709,57 +771,67 @@ export function snapSpanIds(
       reason,
     });
   };
-  for (const root of orderedRoots(state, snapshot)) {
-    if (start > root.start && start <= root.end) {
-      const absorb = mode === "absorb" ||
-        (mode === "nearest" && start - root.start <= root.end + 1 - start);
-      start = absorb ? root.start : root.end + 1;
-      note(`span started inside ${root.fold.id}; corrected to its ` +
-        `${absorb ? "start" : "far"} boundary`);
-    }
-    if (end >= root.start && end < root.end) {
-      const absorb = mode === "absorb" ||
-        (mode === "nearest" && root.end - end <= end - (root.start - 1));
-      end = absorb ? root.end : root.start - 1;
-      note(`span ended inside ${root.fold.id}; corrected to its ` +
-        `${absorb ? "end" : "near"} boundary`);
-    }
-  }
-  const boundary = currentTurnBoundary(snapshot);
-  if (boundary >= 0 && end > boundary) {
-    end = boundary;
-    note("span reached into the turn still in flight; corrected back to the last closed turn");
-  }
   const units = chapterUnits(snapshot);
-  const startUnit = units.find((unit) => start >= unit.start && start < unit.end);
-  if (startUnit && startUnit.start !== start) {
-    start = startUnit.start;
-    note("span started mid-unit; corrected to the start of its closed user/assistant/tool unit");
-  }
-  const endUnit = units.find((unit) => end >= unit.start && end < unit.end);
-  if (endUnit && endUnit.end - 1 !== end) {
-    end = endUnit.end - 1;
-    note("span ended mid-unit; corrected to the end of its closed user/assistant/tool unit");
-  }
-  // A chapter spans at most a few closed turns. A longer request is a span the agent
-  // meant, so it is CLAMPED to what one fold may hold rather than refused; the
-  // remainder stays raw and is the agent's to fold next.
-  const covered = units.filter((unit) => unit.start >= start && unit.end <= end + 1);
-  if (covered.length) {
-    const turns: number[] = [];
-    let clamped = end;
-    for (const unit of covered) {
-      if (!turns.includes(unit.turnStart)) {
-        if (turns.length >= snapshot.policy.maxChapterTurns) break;
-        turns.push(unit.turnStart);
+  // Each correction can undo another: pulling an endpoint onto a unit boundary can put
+  // it back inside a fold, and clamping the width can cut one in half. So the passes run
+  // to a FIXED POINT rather than once each. After the first pass an endpoint inside a
+  // fold always absorbs it, which is outward and therefore terminating: stepping past a
+  // fold here would drop material the agent named, and nesting no longer loses anything.
+  for (let pass = 0; pass < state.folds.length + 2; pass += 1) {
+    const passStart = start;
+    const passEnd = end;
+    for (const root of orderedRoots(state, snapshot)) {
+      if (start > root.start && start <= root.end) {
+        const absorb = pass > 0 || mode === "absorb" ||
+          (mode === "nearest" && start - root.start <= root.end + 1 - start);
+        start = absorb ? root.start : root.end + 1;
+        note(`span started inside ${root.fold.id}; corrected to its ` +
+          `${absorb ? "start" : "far"} boundary`);
       }
-      clamped = unit.end - 1;
+      if (end >= root.start && end < root.end) {
+        const absorb = pass > 0 || mode === "absorb" ||
+          (mode === "nearest" && root.end - end <= end - (root.start - 1));
+        end = absorb ? root.end : root.start - 1;
+        note(`span ended inside ${root.fold.id}; corrected to its ` +
+          `${absorb ? "end" : "near"} boundary`);
+      }
     }
-    if (clamped < end) {
-      end = clamped;
-      note(`span covered more than the ${snapshot.policy.maxChapterTurns}-turn chapter limit; ` +
-        "corrected to the last turn that fits");
+    const boundary = currentTurnBoundary(snapshot);
+    if (boundary >= 0 && end > boundary) {
+      end = boundary;
+      note("span reached into the turn still in flight; corrected back to the last closed turn");
     }
+    const startUnit = units.find((unit) => start >= unit.start && start < unit.end);
+    if (startUnit && startUnit.start !== start) {
+      start = startUnit.start;
+      note("span started mid-unit; corrected to the start of its closed user/assistant/tool unit");
+    }
+    const endUnit = units.find((unit) => end >= unit.start && end < unit.end);
+    if (endUnit && endUnit.end - 1 !== end) {
+      end = endUnit.end - 1;
+      note("span ended mid-unit; corrected to the end of its closed user/assistant/tool unit");
+    }
+    // A chapter spans at most a few closed turns. A longer request is a span the agent
+    // meant, so it is CLAMPED to what one fold may hold rather than refused; the
+    // remainder stays raw and is the agent's to fold next.
+    const covered = units.filter((unit) => unit.start >= start && unit.end <= end + 1);
+    if (covered.length) {
+      const turns: number[] = [];
+      let clamped = end;
+      for (const unit of covered) {
+        if (!turns.includes(unit.turnStart)) {
+          if (turns.length >= snapshot.policy.maxChapterTurns) break;
+          turns.push(unit.turnStart);
+        }
+        clamped = unit.end - 1;
+      }
+      if (clamped < end) {
+        end = clamped;
+        note(`span covered more than the ${snapshot.policy.maxChapterTurns}-turn chapter limit; ` +
+          "corrected to the last turn that fits");
+      }
+    }
+    if (start === passStart && end === passEnd) break;
   }
   if (!corrections.length || end < start ||
       !snapshot.mapped[start]?.ref || !snapshot.mapped[end]?.ref) return null;
@@ -856,14 +928,28 @@ export function manualFoldCandidate(
   if (exactFolds && selected.length >= 2) {
     const parts: FoldPart[] = selected.map((item) => ({ kind: "fold", foldId: item.fold!.id }));
     const refs = candidateSourceRefs(parts, state);
+    const pinnedChild = pinnedChildFold(parts, state, snapshot);
+    if (pinnedChild) throw new Error(pinnedNestingRefusal(pinnedChild, snapshot.toolName));
     if (blocked(refs)) throw new Error("Manual consolidation contains protected evidence");
     return bounded({ kind: "consolidation", parts, sourceRefs: refs });
   }
   if (!chapterRangeIsUnitAligned(snapshot, start, end)) {
     throw new Error("Chapter folds must align to a contiguous structurally closed user/assistant/tool-batch range");
   }
-  const parts = partsForRange(snapshot, state, start, end, new Set<FoldKind>(["tool-result"]));
-  if (!parts) throw new Error("Chapter fold would partially overlap or swallow an existing chapter");
+  const parts = partsForRange(snapshot, state, start, end, ALL_FOLD_KINDS);
+  if (!parts) {
+    // Two shapes reach here, and they are different asks. A span INSIDE one fold is
+    // material that is already folded, so there is no fold to make and the useful answer
+    // names the fold holding it. A span that merely cuts one is a boundary the snap
+    // corrects, and it says which fold moved the edge.
+    const cut = orderedRoots(state, snapshot).filter((root) => root.start <= end && start <= root.end);
+    const container = cut.find((root) => root.start <= start && root.end >= end);
+    throw new Error(container
+      ? `That span is already folded inside ${container.fold.id}; peek or expand ${container.fold.id} instead`
+      : `Fold span partially overlaps ${cut.map((root) => root.fold.id).join(", ")}`);
+  }
+  const swallowedPin = pinnedChildFold(parts, state, snapshot);
+  if (swallowedPin) throw new Error(pinnedNestingRefusal(swallowedPin, snapshot.toolName));
   const refs = candidateSourceRefs(parts, state);
   if (blocked(refs)) throw new Error("Manual chapter contains fresh, unfinished, unmatched, unmapped, or protected evidence");
   return bounded({ kind: "chapter", parts, sourceRefs: refs });

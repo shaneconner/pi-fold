@@ -39,16 +39,13 @@ export const NATIVE_COMPACTION_RECEIPT_ENTRY = `${DEFAULT_ENTRY_NAMESPACE}-nativ
 export const NATIVE_COMPACTION_DECISION_ENTRY = `${DEFAULT_ENTRY_NAMESPACE}-native-compaction-decision`;
 export const PROVIDER_CONTEXT_MEASUREMENT_ENTRY = `${DEFAULT_ENTRY_NAMESPACE}-provider-context-measurement`;
 export const ACTIVE_CONTEXT_STATUS_KEY = DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX;
-export const ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
-  "status", "peek", "fold", "expand", "refold", "protect", "unprotect",
-  // The correction verbs. Curation the agent cannot fix afterwards is curation it
-  // will not risk making, so re-briefing a fold and dissolving a mis-cut boundary
-  // are part of the ordinary surface, not an epoch-only extra.
-  "rebrief", "reboundary",
-] as const);
 /**
- * The epoch surface: the immediate actions plus `unmark`. A mark is a standing decision
- * rather than a one-shot attempt, so withdrawing one needs a verb of its own.
+ * The action surface, whole. There was a second, narrower list while immediate
+ * scheduling existed; epoch is the only scheduler now, so marks always exist and
+ * `unmark` is an ordinary verb: a mark is a standing decision rather than a one-shot
+ * attempt, so withdrawing one needs a verb of its own. The correction verbs are here
+ * for the same reason: curation the agent cannot fix afterwards is curation it will
+ * not risk making.
  *
  * There is deliberately NO agent-callable commit verb. Marking is the agent's job and
  * folding is the runtime's, and a verb the runtime is entitled to overrule is surface
@@ -56,17 +53,29 @@ export const ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
  * runtime correctly held it both times. The internal commit paths -- the epoch commit,
  * the gated commit, the fence and the recovery lane -- are unchanged and unexposed.
  */
-export const EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
-  ...ACTIVE_CONTEXT_TOOL_ACTIONS, "unmark",
+export const ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
+  "status", "peek", "fold", "expand", "refold", "protect", "unprotect",
+  "rebrief", "reboundary", "unmark",
 ] as const);
-export type ActiveContextToolAction = typeof EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS[number];
+export type ActiveContextToolAction = typeof ACTIVE_CONTEXT_TOOL_ACTIONS[number];
 export const USER_RESCUE_MAX_SOURCE_CHARS = 512_000;
 export const DEFAULT_CONTEXT_WINDOW = 272_000;
 export const TOOL_FOLD_CADENCE_MIN_TOKENS = 12_000;
 export const TOOL_FOLD_CADENCE_WINDOW_FRACTION = 0.06;
 export const EXPAND_LEASE_GENERATIONS = 8;
 export const MAX_EXPAND_LEASES = 64;
-export const CONSOLIDATION_WIDTH_THRESHOLD = 10;
+/**
+ * The counting rule that turns fold placeholders into ordinary span material.
+ *
+ * At or above this many unpinned folds in the stale region, an automatic span may
+ * include placeholders like any other message, so folds nest inside folds. Below it,
+ * automation folds raw spans only and steps over every placeholder. This is an
+ * INTERNAL constant in this build; it becomes the user parameter `consolidateAfter`
+ * alongside maxTarget/minTarget/freshTail/staleTail in the threshold core. Ten is the
+ * proven value (the width rung counted the same roots against the same line); Shane's
+ * working example was five, and a user setting is where that choice belongs.
+ */
+export const CONSOLIDATE_AFTER = 10;
 export const MAX_ADVISORY_DELIVERIES_PER_MILESTONE = 16;
 
 // Ephemeral surfacing structure. These stay INTERNAL constants rather than public
@@ -92,14 +101,13 @@ export const SURFACING_SOURCE_ID = "fold-brief";
 // the protected byte tail as a share of a small window; never to estimate usage.
 export const BYTES_PER_TOKEN_FLOOR = 2;
 
-// Two-phase fold scheduling. A provider prefix cache is positional: any mid-window
-// edit invalidates every byte after it, so the cost of folding is dominated by how
-// OFTEN the projection changes, not by how much it saves. In "epoch" mode a fold
-// decision becomes a free MARK and a later COMMIT applies every pending mark in one
-// rewrite. "immediate" is the default and is byte-identical to pre-0.1.2 behavior.
-export const FOLD_SCHEDULING_MODES = Object.freeze(["immediate", "epoch"] as const);
-export type FoldSchedulingMode = typeof FOLD_SCHEDULING_MODES[number];
-export const DEFAULT_FOLD_SCHEDULING: FoldSchedulingMode = "immediate";
+// Two-phase fold scheduling, and the only scheduler. A provider prefix cache is
+// positional: any mid-window edit invalidates every byte after it, so the cost of
+// folding is dominated by how OFTEN the projection changes, not by how much it saves.
+// A fold decision is therefore a free MARK, and a later COMMIT applies every pending
+// mark in one rewrite. The alternative shipped as an option through 1.0.2 and was
+// deleted once measured: applying each fold where it was made cost 54 prefix rewrites
+// and a 0.193 pooled cache share against epoch's 0.919 on the same task.
 
 // Epoch knobs stay INTERNAL constants for the same reason the surfacing knobs do:
 // they are what the round-2 cost measurement exists to settle, and an option surface
@@ -171,8 +179,10 @@ export const ESTIMATED_PLACEHOLDER_OVERHEAD_BYTES = 240;
 // through iterations 2 and 3 and was sealed ON by rep 14 (64/64), so it is now
 // simply how pi-fold works: the flags and their conditional twins are gone, and
 // git history is the lineage. What stays configurable is only what is genuinely a
-// deployment fact (`providerTotalWindow`) or an experiment condition (`guidance`,
-// `foldScheduling`, `foldPeekResults`, `guidedCuration`).
+// deployment fact (`providerTotalWindow`). The experiment conditions that used to sit
+// beside it (`foldScheduling`, `foldPeekResults`, `guidedCuration`) are gone too: epoch
+// scheduling, peek foldability and guided curation are simply how pi-fold works, and
+// the harness keeps reading the keys only so sealed runs still validate.
 //
 // Sealed unconditional: admission control, retained pending marks, the eligible-share
 // commit trigger, stage-identified briefs, the current-turn commit guard, the
@@ -206,11 +216,10 @@ export const STATUS_DIET_SUGGESTIONS = 5;
 export const MAX_PROJECTION_HASH_RECORDS = 64;
 
 // ---------------------------------------------------------------------------
-// Guided curation. The one iteration-4 experiment condition: the two-signal
-// curation trigger, its bounded last-call gate, and the reactive receipt block.
+// Guided curation: the two-signal curation trigger, its bounded last-call gate,
+// and the reactive receipt block. It shipped as the one iteration-4 experiment
+// condition and is unconditional now, so only the constants below remain.
 // ---------------------------------------------------------------------------
-
-export const DEFAULT_GUIDED_CURATION = false;
 
 /**
  * Signal one: measured occupancy of the truthful serving budget.
@@ -344,13 +353,13 @@ export const PEEK_HEAD_SHARE = 0.6;
  */
 export const OVERFLOW_RECOVERY_MAX_ATTEMPTS = 2;
 
-/** Active-context tool actions that read without mutating, so their results may fold. */
-export const READ_ONLY_CONTEXT_ACTIONS_DEFAULT: ReadonlySet<string> = new Set(["status"]);
 /**
- * The classification that also lets a `peek` result be reclaimed by the tool-fold rung.
+ * Active-context tool actions that read without mutating, so their results may fold.
+ *
  * A peek copies a fold's own stored source back into the window, so leaving it raw is a
- * pure duplicate of evidence the runtime already holds; epoch scheduling adopts this set
- * unconditionally, and immediate scheduling reaches it through `foldPeekResults`.
+ * pure duplicate of evidence the runtime already holds and the tool-fold rung reclaims
+ * it. There was a narrower set while immediate scheduling existed, reached by opting
+ * out; epoch is the only scheduler now and this classification is unconditional.
  */
 export const PEEK_READ_ONLY_CONTEXT_ACTIONS: ReadonlySet<string> = new Set(["status", "peek"]);
 
@@ -389,9 +398,6 @@ export const ACTIVE_CONTEXT_POLICY = Object.freeze({
   prepareRatio: 0.90,
   warmRatio: 0.55,
   responseReserve: 16_384,
-  consolidationRatio: 0.85,
-  consolidationChildren: 5,
-  maxConsolidationChildren: 8,
   minToolChars: 2_000,
   minChapterChars: 4_000,
   maxChapterChars: 128_000,

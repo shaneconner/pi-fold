@@ -10,7 +10,6 @@
 //
 //   node scripts/run_pi_context_experiment.mjs --run-dir <dir> --unit <unit> \
 //        --campaign-dir <dir> --plan <stages.json> --arm pifold|native|unmanaged \
-//        [--fold-scheduling immediate|epoch] [--fold-peek-results true|false] \
 //        [--model-provider openai-codex] [--model-id gpt-5.6-sol] [--effort xhigh]
 
 import { execFileSync, spawn } from "node:child_process";
@@ -22,19 +21,15 @@ import {
   EXPERIMENT_BEHAVIORAL_MODE,
   EXPERIMENT_CLOSED_BOOK_LABEL,
   EXPERIMENT_SESSION_TYPES,
-  EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS,
-  EXPERIMENT_DEFAULT_FOLD_SCHEDULING,
   EXPERIMENT_DEPENDENCY_KEYS,
   EXPERIMENT_PROVIDER_TOTAL_WINDOWS,
   EXPERIMENT_TRANSPORT,
-  EXPERIMENT_FOLD_SCHEDULING,
   EXPERIMENT_GUIDANCE_PROFILES,
   EXPERIMENT_MODE_PLANS,
   EXPERIMENT_PROTOCOL_VERSION,
   EXPERIMENT_RUNNER_MODE,
   EXPERIMENT_SCHEDULING_SOURCE,
   EXPERIMENT_STATE_ROOT,
-  EXPERIMENT_TMP_ROOT,
   armRuntimeConfiguration,
   assertExperiment,
   corpusManifestSha256,
@@ -74,8 +69,6 @@ import {
 const PROJECT = dirname(dirname(fileURLToPath(import.meta.url)));
 const PI_ROOT = PI_INSTALL_ROOT;
 
-const args = new Set(process.argv.slice(2));
-const verification = args.has("--verification");
 const argumentValue = (name, fallback = null) => {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : fallback;
@@ -93,20 +86,18 @@ const EXPERIMENT_SOURCE_PATHS = Object.freeze([
   "scripts/stage_pi_context_experiment.mjs",
 ]);
 
-// The epoch scheduler is pinned the MOMENT it exists in the runtime, and is REQUIRED once
-// a run asks for epoch scheduling: a run that cannot pin the code implementing its own
-// condition is not the experiment.
+// The epoch scheduler is REQUIRED: epoch is the runtime's only scheduler, so a run that
+// cannot pin the code implementing its own condition is not the experiment.
 //
 // The measured runtime is this repo's own `extensions/` package, not a consumer's deployed
 // copy, so every byte under measurement is a tracked byte and `codeCommit` describes it.
 // Every source file under that root is pinned rather than a hand-kept subset: a new module
 // joins the seal the moment it exists, and the seal can never silently lag the code.
-function experimentSourceHashes(foldScheduling) {
+function experimentSourceHashes() {
   const runtimeRoot = join(PROJECT, "extensions");
   assertExperiment(existsSync(runtimeRoot), "pi-fold runtime source root is missing");
-  const schedulingPresent = existsSync(join(PROJECT, EXPERIMENT_SCHEDULING_SOURCE));
-  assertExperiment(schedulingPresent || foldScheduling !== "epoch",
-    `Fold scheduling "epoch" requires ${EXPERIMENT_SCHEDULING_SOURCE}`);
+  assertExperiment(existsSync(join(PROJECT, EXPERIMENT_SCHEDULING_SOURCE)),
+    `Epoch fold scheduling requires ${EXPERIMENT_SCHEDULING_SOURCE}`);
   const runtimePaths = [];
   const collect = (directory, prefix) => {
     for (const name of readdirSync(directory).sort()) {
@@ -116,8 +107,8 @@ function experimentSourceHashes(foldScheduling) {
     }
   };
   collect(runtimeRoot, "extensions/");
-  assertExperiment(runtimePaths.includes(EXPERIMENT_SCHEDULING_SOURCE) === schedulingPresent,
-    "Runtime source listing disagrees with the scheduling-source existence check");
+  assertExperiment(runtimePaths.includes(EXPERIMENT_SCHEDULING_SOURCE),
+    "Runtime source listing lost the scheduling source");
   const paths = [...runtimePaths, ...EXPERIMENT_SOURCE_PATHS];
   return paths.reduce((result, relative) => {
     const path = join(PROJECT, relative);
@@ -298,9 +289,6 @@ async function run() {
   const arm = closedBook ? EXPERIMENT_CLOSED_BOOK_LABEL : argumentValue("--arm");
   assertExperiment(!closedBook || argumentValue("--arm") === null,
     "--session-type closed-book takes no --arm");
-  const foldScheduling = argumentValue("--fold-scheduling", EXPERIMENT_DEFAULT_FOLD_SCHEDULING);
-  const foldPeekResultsArgument = argumentValue("--fold-peek-results",
-    String(EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS));
   const repetition = Number(argumentValue("--repetition", "1"));
   const ordinal = Number(argumentValue("--ordinal", "1"));
   const modelProvider = argumentValue("--model-provider", "openai-codex");
@@ -309,11 +297,6 @@ async function run() {
   assertExperiment(requestedRunDir && unit && campaignDir && planPath, "Experiment run requires --run-dir, --unit, --campaign-dir and --plan");
   assertExperiment(closedBook || EXPERIMENT_ARMS.includes(arm),
     "Experiment run requires --arm pifold|native|unmanaged");
-  assertExperiment(EXPERIMENT_FOLD_SCHEDULING.includes(foldScheduling),
-    "Invalid --fold-scheduling: immediate|epoch");
-  assertExperiment(["true", "false"].includes(foldPeekResultsArgument),
-    "Invalid --fold-peek-results: true|false");
-  const foldPeekResults = foldPeekResultsArgument === "true";
   // pi-fold's registerActiveContext throws when guided curation has no commit to announce.
   // Refuse the combination here so it fails at config time, not at worker start.
   // Deployment fact resolved from the model pin, never a flag: rep 16 aborted after the
@@ -321,26 +304,24 @@ async function run() {
   // fact never reached the registration. Unlisted models run in descriptor mode.
   const providerTotalWindow = EXPERIMENT_PROVIDER_TOTAL_WINDOWS[modelId] ?? null;
   const runDir = resolve(requestedRunDir);
-  const requiredRoot = verification ? EXPERIMENT_TMP_ROOT : join(EXPERIMENT_STATE_ROOT, basename(resolve(campaignDir)), "runs");
+  const requiredRoot = join(EXPERIMENT_STATE_ROOT, basename(resolve(campaignDir)), "runs");
   assertExperiment(dirname(runDir) === requiredRoot, `Run directory must live under ${requiredRoot}`);
   const runId = basename(runDir);
-  const invocationId = verification ? freshChallenge().slice(0, 32) : process.env.INVOCATION_ID;
+  const invocationId = process.env.INVOCATION_ID;
   assertExperiment(typeof invocationId === "string" && /^[0-9a-f]{32}$/.test(invocationId),
     "Live experiment run lacks a valid invocation identity");
-  if (!verification) {
-    const properties = parseSystemdShow(execFileSync("/usr/bin/systemctl", [
-      "--user", "show", unit,
-      "--property=Id,InvocationID,MainPID,ActiveState,ExecMainStartTimestampMonotonic",
-    ], { encoding: "utf8" }));
-    assertExperiment(properties.Id === unit && properties.InvocationID === invocationId &&
-      Number(properties.MainPID) === process.pid && properties.ActiveState === "active",
-    `Experiment systemd identity drifted: ${JSON.stringify(properties)}`);
-  }
+  const properties = parseSystemdShow(execFileSync("/usr/bin/systemctl", [
+    "--user", "show", unit,
+    "--property=Id,InvocationID,MainPID,ActiveState,ExecMainStartTimestampMonotonic",
+  ], { encoding: "utf8" }));
+  assertExperiment(properties.Id === unit && properties.InvocationID === invocationId &&
+    Number(properties.MainPID) === process.pid && properties.ActiveState === "active",
+  `Experiment systemd identity drifted: ${JSON.stringify(properties)}`);
 
   const plan = validateStagePlan(readJson(resolve(planPath)));
   const modePlan = EXPERIMENT_MODE_PLANS[plan.mode];
-  const gitStart = gitAttestation({ requireClean: !verification });
-  const sourceHashes = experimentSourceHashes(foldScheduling);
+  const gitStart = gitAttestation({ requireClean: true });
+  const sourceHashes = experimentSourceHashes();
   const dependencies = dependencyHashes();
   const slotPath = claimSlot(resolve(campaignDir), arm, repetition, runId);
 
@@ -375,11 +356,7 @@ async function run() {
     mode: plan.mode,
     ...(closedBook
       ? { sessionType }
-      : {
-        foldScheduling,
-        foldPeekResults,
-        ...(providerTotalWindow === null ? {} : { providerTotalWindow }),
-      }),
+      : { ...(providerTotalWindow === null ? {} : { providerTotalWindow }) }),
     transport: EXPERIMENT_TRANSPORT,
     repetition,
     ordinal,
@@ -599,7 +576,7 @@ async function run() {
     runDir,
     campaignId: config.campaignId,
     arm,
-    ...(closedBook ? { sessionType } : { foldScheduling, foldPeekResults }),
+    ...(closedBook ? { sessionType } : {}),
     repetition,
     ordinal,
     mode: config.mode,

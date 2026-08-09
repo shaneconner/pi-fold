@@ -101,10 +101,8 @@ import {
   CONTEXT_RECEIPT_BLOCK_BYTES,
   CURATION_TARGET_OCCUPANCY_SHARE,
   DEFAULT_CONTEXT_WINDOW,
-  DEFAULT_FOLD_SCHEDULING,
   ESTIMATED_BYTES_PER_TOKEN,
   entryTypeNamespace,
-  EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS,
   EPOCH_COMMIT_TARGET_WINDOW_SHARE,
   MAX_FOLD_SPAN_CHARS,
   MAX_PINNED_SHARE,
@@ -113,8 +111,6 @@ import {
   PEEK_DEFAULT_MAX_BYTES,
   PEEK_MIN_SLICE_BYTES,
   PEEK_READ_ONLY_CONTEXT_ACTIONS,
-  FOLD_SCHEDULING_MODES,
-  READ_ONLY_CONTEXT_ACTIONS_DEFAULT,
   READ_ONLY_TOOLS_DEFAULT,
   USER_RESCUE_MAX_SOURCE_CHARS,
 } from "./lib/policy.ts";
@@ -125,7 +121,6 @@ import type {
   FoldCandidate,
   FoldKind,
   FoldRecordEntry,
-  FoldSchedulingMode,
   PreparedFold,
   SuggestionSource,
 } from "./lib/policy.ts";
@@ -268,7 +263,6 @@ export function registerActiveContext(pi: any, options: {
   summarizeContextSpan?: (request: Record<string, unknown>, ctx: unknown) => Promise<Record<string, unknown>>;
   setProjectionProvider?: (provider: (ctx: any) => Array<Record<string, unknown>>) => void;
   setSuggestionSourceRegistrar?: (register: SuggestionSourceRegistrar) => void;
-  toolActions?: readonly ActiveContextToolAction[];
   toolName?: string;
   toolLabel?: string;
   brandNoun?: string;
@@ -277,8 +271,6 @@ export function registerActiveContext(pi: any, options: {
   commandNames?: { status?: string; fold?: string };
   readOnlyTools?: ReadonlySet<string>;
   blockingTools?: readonly string[];
-  foldScheduling?: FoldSchedulingMode;
-  foldPeekResults?: boolean;
   providerTotalWindow?: number;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
@@ -290,19 +282,17 @@ export function registerActiveContext(pi: any, options: {
   const entryTypePrefix = options.entryTypePrefix ?? DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX;
   const commandPrefix = options.commandPrefix ?? "";
   const readOnlyTools = options.readOnlyTools ?? READ_ONLY_TOOLS_DEFAULT;
-  const foldScheduling = options.foldScheduling ?? DEFAULT_FOLD_SCHEDULING;
-  if (!FOLD_SCHEDULING_MODES.includes(foldScheduling)) {
-    throw new Error(`foldScheduling must be one of ${FOLD_SCHEDULING_MODES.join(", ")}`);
+  // Deleted options are REFUSED by name, never ignored. A deployment still passing one
+  // believes it asked for something, and silence would hand it the opposite behavior:
+  // `foldScheduling` chose between epoch and the deleted immediate scheduler,
+  // `foldPeekResults` opted peek results out of the foldable classification, and
+  // `toolActions` narrowed the action surface. All three are unconditional now.
+  for (const removed of ["foldScheduling", "foldPeekResults", "toolActions"]) {
+    if (Object.hasOwn(options, removed)) {
+      throw new Error(`${removed} is no longer an option: epoch scheduling, peek foldability ` +
+        "and the whole action surface are unconditional");
+    }
   }
-  const epochScheduling = foldScheduling === "epoch";
-  if (options.foldPeekResults !== undefined && typeof options.foldPeekResults !== "boolean") {
-    throw new Error("foldPeekResults must be a boolean");
-  }
-  // Peek mutates nothing, so its own tool result is a foldable read batch. Epoch mode
-  // adopts that classification with its scheduling; immediate mode keeps the narrower
-  // one unless the deployment opts in, because a peek copies a fold's stored source
-  // back into the window and a window that cannot reclaim it grows without bound.
-  const foldPeekResults = options.foldPeekResults ?? epochScheduling;
   if (options.providerTotalWindow !== undefined &&
       (!Number.isSafeInteger(options.providerTotalWindow) || options.providerTotalWindow <= 0)) {
     throw new Error("providerTotalWindow must be a positive integer");
@@ -311,9 +301,7 @@ export function registerActiveContext(pi: any, options: {
   // ratio, fence and budget truthful, and leaving it out falls back to the provider
   // descriptor and SAYS "descriptor" in the capacity accounting.
   const providerTotalWindow = options.providerTotalWindow ?? null;
-  const readOnlyContextActions = foldPeekResults
-    ? PEEK_READ_ONLY_CONTEXT_ACTIONS
-    : READ_ONLY_CONTEXT_ACTIONS_DEFAULT;
+  const readOnlyContextActions = PEEK_READ_ONLY_CONTEXT_ACTIONS;
   if (!toolName || !toolLabel || !brandNoun || !entryTypePrefix || typeof commandPrefix !== "string" ||
       (commandPrefix && !/^[a-z0-9-]+$/.test(commandPrefix)) ||
       [...readOnlyTools].some((name) => typeof name !== "string" || !name)) {
@@ -350,29 +338,8 @@ export function registerActiveContext(pi: any, options: {
   const nativeReceiptEntryType = `${entryNamespace}-native-compaction-receipt`;
   const contextEventEntryType = `${entryNamespace}-context-event`;
   const nativeDecisionEntryType = `${entryNamespace}-native-compaction-decision`;
-  // The commit verb only exists where marks exist; immediate mode keeps its exact
-  // seven-action surface and description.
-  const defaultToolActions = epochScheduling
-    ? EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS
-    : ACTIVE_CONTEXT_TOOL_ACTIONS;
-  const configuredToolActions = denseOwnArrayValues(
-    options.toolActions ?? defaultToolActions,
-  );
-  if (!configuredToolActions || configuredToolActions.length < 1) {
-    throw new Error("Active-context tool actions must be one non-empty dense array");
-  }
-  const allowedToolActions: ActiveContextToolAction[] = [];
-  const allowedToolActionSet = new Set<string>();
-  for (const value of configuredToolActions) {
-    if (typeof value !== "string" ||
-        !EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS.includes(value as ActiveContextToolAction) ||
-        allowedToolActionSet.has(value)) {
-      throw new Error(`Invalid or duplicate active-context tool action '${String(value)}'`);
-    }
-    allowedToolActions.push(value as ActiveContextToolAction);
-    allowedToolActionSet.add(value);
-  }
-  Object.freeze(allowedToolActions);
+  const allowedToolActions: readonly ActiveContextToolAction[] = ACTIVE_CONTEXT_TOOL_ACTIONS;
+  const allowedToolActionSet = new Set<string>(allowedToolActions);
 
   type AutomaticFailureState = {
     key: string;
@@ -1250,7 +1217,6 @@ export function registerActiveContext(pi: any, options: {
         refoldRatio: snapshot.policy.refoldRatio,
         prepareRatio: snapshot.policy.prepareRatio,
         hardFenceRatio: hardFenceRatio(snapshot),
-        consolidationRatio: snapshot.policy.consolidationRatio,
       } : null,
     });
   };
@@ -2511,59 +2477,57 @@ export function registerActiveContext(pi: any, options: {
     };
     let epoch: Record<string, unknown> | null = null;
     let inlineRungs = true;
-    if (epochScheduling) {
-      // QUIET RUNTIME. A commit is an epoch transition: it rewrites the projection, and
-      // every rewrite risks the whole prefix cache, so the cadence has to be the fewest
-      // commits that still keep the window inside its budget.
-      //
-      // The economic eligible-share trigger is DELETED: it fired 164 commits from
-      // ordinal 17 in rep 15, each a fresh cache rebuild bought with marks that had not
-      // yet earned one. What remains is the two-signal curation trigger, which fired 10
-      // to 17 times across reps 17 and 20, over the pressure backstop.
-      //
-      // The trigger stays; only its ANNOUNCEMENT is gone. Nothing warns that a commit
-      // is coming and nothing waits for the agent to react, because a warning has to
-      // arrive before the event it warns about and therefore has to break a prefix
-      // nothing else was breaking. Deleting the trigger with the announcement was the
-      // wrong cut: it left the raw backstop alone in front of the window, and gate 58
-      // caught the projection overrunning its budget before anything reclaimed -- the
-      // rep 13 death. The runtime still decides early. It just no longer says so.
-      const backstopDue = epochCommitDue(snapshot, ratio);
-      // The trigger is evaluated on CONTEXT passes only. A commit is an epoch
-      // transition, and it belongs on the pass that builds the next projection rather
-      // than in the middle of a tool batch: firing it mid-batch makes a MARK rewrite
-      // the window, which is precisely the thing marking is supposed never to do.
-      const curationDue = !backstopDue && rungOptions.announcing === true &&
-        curationCommitDue(snapshot);
-      if (backstopDue || curationDue) {
-        epoch = await runCommitEpoch(
-          snapshot,
-          backstopDue ? "window-pressure" : "curation-trigger",
-          true,
-          rungOptions.waiverRatio ?? ratio,
-        );
-        // Latch the eligible share this commit left behind, so the next one waits for
-        // genuinely new foldable mass rather than for the same window to still be full.
-        if (persistence.state && (curationDue || curation.reopenBaselineShare !== null)) {
-          curation.reopenBaselineShare =
-            markAccounting(snapshot, persistence.state).eligibleFreedWindowShare;
-        }
+    // QUIET RUNTIME. A commit is an epoch transition: it rewrites the projection, and
+    // every rewrite risks the whole prefix cache, so the cadence has to be the fewest
+    // commits that still keep the window inside its budget.
+    //
+    // The economic eligible-share trigger is DELETED: it fired 164 commits from
+    // ordinal 17 in rep 15, each a fresh cache rebuild bought with marks that had not
+    // yet earned one. What remains is the two-signal curation trigger, which fired 10
+    // to 17 times across reps 17 and 20, over the pressure backstop.
+    //
+    // The trigger stays; only its ANNOUNCEMENT is gone. Nothing warns that a commit
+    // is coming and nothing waits for the agent to react, because a warning has to
+    // arrive before the event it warns about and therefore has to break a prefix
+    // nothing else was breaking. Deleting the trigger with the announcement was the
+    // wrong cut: it left the raw backstop alone in front of the window, and gate 58
+    // caught the projection overrunning its budget before anything reclaimed -- the
+    // rep 13 death. The runtime still decides early. It just no longer says so.
+    const backstopDue = epochCommitDue(snapshot, ratio);
+    // The trigger is evaluated on CONTEXT passes only. A commit is an epoch
+    // transition, and it belongs on the pass that builds the next projection rather
+    // than in the middle of a tool batch: firing it mid-batch makes a MARK rewrite
+    // the window, which is precisely the thing marking is supposed never to do.
+    const curationDue = !backstopDue && rungOptions.announcing === true &&
+      curationCommitDue(snapshot);
+    if (backstopDue || curationDue) {
+      epoch = await runCommitEpoch(
+        snapshot,
+        backstopDue ? "window-pressure" : "curation-trigger",
+        true,
+        rungOptions.waiverRatio ?? ratio,
+      );
+      // Latch the eligible share this commit left behind, so the next one waits for
+      // genuinely new foldable mass rather than for the same window to still be full.
+      if (persistence.state && (curationDue || curation.reopenBaselineShare !== null)) {
+        curation.reopenBaselineShare =
+          markAccounting(snapshot, persistence.state).eligibleFreedWindowShare;
       }
-      // An inline rung is free only INSIDE a rewrite the epoch already paid for. Below
-      // the threshold no commit ran, and an epoch that applied NOTHING -- every mark
-      // held back by an open turn or by ineligibility -- paid for no rewrite either,
-      // so folding inline there is a fresh single-fold rewrite of its own. Measured
-      // 2026-08-06 (rep 10): the current-turn guard retained all nine marks every turn
-      // while the inline rung folded one batch per turn anyway, 52 single-fold
-      // rewrites that left the prefix cache share at zero. Below a paid rewrite the
-      // ladder MARKS, so the decisions batch into the first commit that can apply them.
-      inlineRungs = Boolean(epoch) && Number(epoch?.appliedMarks ?? 0) > 0;
-      if (!inlineRungs) {
-        const marked = markLadderSelection();
-        if (marked) {
-          if (epoch) ladder.lastAutomaticAction = { ...marked, epoch };
-          return ladder.lastAutomaticAction;
-        }
+    }
+    // An inline rung is free only INSIDE a rewrite the epoch already paid for. Below
+    // the threshold no commit ran, and an epoch that applied NOTHING -- every mark
+    // held back by an open turn or by ineligibility -- paid for no rewrite either,
+    // so folding inline there is a fresh single-fold rewrite of its own. Measured
+    // 2026-08-06 (rep 10): the current-turn guard retained all nine marks every turn
+    // while the inline rung folded one batch per turn anyway, 52 single-fold
+    // rewrites that left the prefix cache share at zero. Below a paid rewrite the
+    // ladder MARKS, so the decisions batch into the first commit that can apply them.
+    inlineRungs = Boolean(epoch) && Number(epoch?.appliedMarks ?? 0) > 0;
+    if (!inlineRungs) {
+      const marked = markLadderSelection();
+      if (marked) {
+        if (epoch) ladder.lastAutomaticAction = { ...marked, epoch };
+        return ladder.lastAutomaticAction;
       }
     }
     // Evidence a pending mark already covers is not the inline rung's to fold: a mark
@@ -2579,16 +2543,14 @@ export function registerActiveContext(pi: any, options: {
     // quiet cadence started landing a commit on the same context pass, which is what
     // turns the inline rung on in the first place.
     const selection = inlineRungs
-      ? selectAutomaticRung(snapshot, persistence.state, ratio, epochScheduling
-        ? {
-          ...rungSelectionOptions,
-          claimed: new Set([
-            ...claimedRefKeys(persistence.state),
-            ...currentTurnRefKeys(snapshot),
-          ]),
-          claimedFoldIds: markedFoldIds(persistence.state),
-        }
-        : rungSelectionOptions)
+      ? selectAutomaticRung(snapshot, persistence.state, ratio, {
+        ...rungSelectionOptions,
+        claimed: new Set([
+          ...claimedRefKeys(persistence.state),
+          ...currentTurnRefKeys(snapshot),
+        ]),
+        claimedFoldIds: markedFoldIds(persistence.state),
+      })
       : null;
     // Above the commit threshold we are already inside the epoch's rewrite turn, so
     // every rung applies inline: the extra rung costs at most one more invalidation
@@ -3402,7 +3364,6 @@ export function registerActiveContext(pi: any, options: {
             ...currentCapacity(ctx),
             bytesPerToken: projectionCharsPerToken(),
           },
-          consolidationRatio: snapshot.policy.consolidationRatio,
           providerMeasurement: measurements.lastProviderMeasurement ? {
             tokens: measurements.lastProviderMeasurement.tokens,
             contextWindow: measurements.lastProviderMeasurement.contextWindow,
@@ -3456,7 +3417,6 @@ export function registerActiveContext(pi: any, options: {
           scheduling: schedulingStatus({
             snapshot,
             state: persistence.state,
-            mode: foldScheduling,
             ratio: measurements.latestRatio,
           }),
           nativeSummaries: "disabled",
@@ -3468,7 +3428,6 @@ export function registerActiveContext(pi: any, options: {
             // THE stream, as the durable entries carry it. One shape, one convention.
             events: clone(instrumentation.ledger.events),
           },
-          foldPeekResults,
           peek: {
             defaultMaxBytes: PEEK_DEFAULT_MAX_BYTES,
             lifetime: "append-only",
@@ -3670,7 +3629,7 @@ export function registerActiveContext(pi: any, options: {
       // An expand with marks pending opens the commit epoch: the restore and the
       // batch of folds then cost one rewrite between them instead of two.
       let epochApplied: unknown[] = [];
-      if (epochScheduling && action === "expand" && pendingMarks(persistence.state).length) {
+      if (action === "expand" && pendingMarks(persistence.state).length) {
         const result = await commitPendingMarks({
           snapshot,
           state: persistence.state,
@@ -3819,172 +3778,130 @@ export function registerActiveContext(pi: any, options: {
         }
       }
       const corrections = resolved.flatMap((item) => item.corrections);
-      if (epochScheduling) {
-        // Resolve every brief now, while the source is in hand, so the commit epoch
-        // itself stays deterministic and free of provider calls. A span that is not
-        // eligible YET cannot go through preparation at all, so it takes the
-        // deterministic brief: the mark is a decision, and refusing to record it
-        // because the span is momentarily fresh is exactly the drop being fixed.
-        const marks: Array<Record<string, unknown>> = [];
-        let staged = persistence.state;
-        for (const item of resolved) {
-          const { candidate } = item;
-          // ACCEPT AND HOLD. A span that is still fresh or protected is not a refusal:
-          // the mark is a standing decision, it is recorded now, and it folds at the
-          // first commit after the span ages out. Refusal is reserved for a mark that
-          // cannot be constructed at all.
-          // A REPEATED DECISION IS INERT. The fold id is derived from the span, so a
-          // span the ladder already prepared carries that exact id in the forest
-          // already, and preparing it a second time throws "Prepared fold already
-          // exists" out of the tool call. Under the old cadence commits were frequent
-          // enough to drain prepared folds before a second decision could land on one;
-          // the quiet runtime commits far less often, so the collision became reachable
-          // in ordinary use -- the ladder marks a span, the agent then folds the same
-          // span, and the agent's call fails. Marking is a standing decision about a
-          // span, and deciding the same thing twice has to be a no-op.
-          const alreadyPrepared = staged.folds.some((fold) =>
-            fold.id === foldIdFor(candidate.kind, candidate.parts));
-          const deferred = refsProtected(candidate.sourceRefs, staged, snapshot) ||
-            (candidate.kind === "tool-result" &&
-              toolRefsProtected(candidate.sourceRefs, staged, snapshot));
-          const briefed = !deferred && !alreadyPrepared
-            ? await prepareFold({
-              candidate,
-              snapshot,
-              state: staged,
-              generation: lifecycle.generation,
-              brief: item.brief,
-              summarize: options.summarizeContextSpan,
-              ctx,
-              signal,
-            })
-            : null;
-          const mark = foldMarkFor({
+      // Resolve every brief now, while the source is in hand, so the commit epoch
+      // itself stays deterministic and free of provider calls. A span that is not
+      // eligible YET cannot go through preparation at all, so it takes the
+      // deterministic brief: the mark is a decision, and refusing to record it
+      // because the span is momentarily fresh is exactly the drop being fixed.
+      const marks: Array<Record<string, unknown>> = [];
+      let staged = persistence.state;
+      for (const item of resolved) {
+        const { candidate } = item;
+        // ACCEPT AND HOLD. A span that is still fresh or protected is not a refusal:
+        // the mark is a standing decision, it is recorded now, and it folds at the
+        // first commit after the span ages out. Refusal is reserved for a mark that
+        // cannot be constructed at all.
+        // A REPEATED DECISION IS INERT. The fold id is derived from the span, so a
+        // span the ladder already prepared carries that exact id in the forest
+        // already, and preparing it a second time throws "Prepared fold already
+        // exists" out of the tool call. Under the old cadence commits were frequent
+        // enough to drain prepared folds before a second decision could land on one;
+        // the quiet runtime commits far less often, so the collision became reachable
+        // in ordinary use -- the ladder marks a span, the agent then folds the same
+        // span, and the agent's call fails. Marking is a standing decision about a
+        // span, and deciding the same thing twice has to be a no-op.
+        const alreadyPrepared = staged.folds.some((fold) =>
+          fold.id === foldIdFor(candidate.kind, candidate.parts));
+        const deferred = refsProtected(candidate.sourceRefs, staged, snapshot) ||
+          (candidate.kind === "tool-result" &&
+            toolRefsProtected(candidate.sourceRefs, staged, snapshot));
+        const briefed = !deferred && !alreadyPrepared
+          ? await prepareFold({
             candidate,
-            brief: briefed?.fold.brief ?? item.brief ?? ladderBrief(snapshot, staged, candidate),
-            briefProvenance: briefed?.fold.provenance ??
-              (item.brief ? { kind: "supplied" } : { kind: "deterministic" }),
-            origin: "agent",
-            ordinal: markOrdinal(snapshot),
-          });
-          const addition = addPendingMark(staged, mark);
-          if (!addition.added) {
-            marks.push({ id: mark.id, kind: mark.kind, ok: false, deferred: false, reason: addition.reason });
-            continue;
-          }
-          staged = addition.state;
-          marks.push({
-            id: mark.id,
-            kind: mark.kind,
-            ok: true,
-            deferred,
-            ...(deferred
-              ? {
-                scheduled: "the span is still in the fresh window; this mark is held and folds at the " +
-                  "first commit after it ages out",
-              }
-              : {}),
-            brief: mark.brief,
-            provenance: normalizeLegacyProvenance(mark.briefProvenance),
-          });
+            snapshot,
+            state: staged,
+            generation: lifecycle.generation,
+            brief: item.brief,
+            summarize: options.summarizeContextSpan,
+            ctx,
+            signal,
+          })
+          : null;
+        const mark = foldMarkFor({
+          candidate,
+          brief: briefed?.fold.brief ?? item.brief ?? ladderBrief(snapshot, staged, candidate),
+          briefProvenance: briefed?.fold.provenance ??
+            (item.brief ? { kind: "supplied" } : { kind: "deterministic" }),
+          origin: "agent",
+          ordinal: markOrdinal(snapshot),
+        });
+        const addition = addPendingMark(staged, mark);
+        if (!addition.added) {
+          marks.push({ id: mark.id, kind: mark.kind, ok: false, deferred: false, reason: addition.reason });
+          continue;
         }
-        await persistManual(staged, action, ctx);
-        updateStatus(ctx);
-        const accounting = markAccounting(snapshot, persistence.state);
-        // MECHANISM 3. The projection is byte-frozen between fold events, so this reply
-        // is the only cache-free channel left: it carries the whole picture, not just
-        // an acknowledgement of the spans this call named.
-        const held = pendingMarks(persistence.state).map((mark) => ({
+        staged = addition.state;
+        marks.push({
           id: mark.id,
           kind: mark.kind,
-          tokens: estimatedTokens(markFreedBytes(snapshot, persistence.state!, mark)),
-        }));
-        const remainder = unmarkedRemainder(snapshot, persistence.state, projectionCharsPerToken());
-        // The single-span shape is the head of the batched one: one call carrying one
-        // span answers exactly as it always did, and a batch adds fields rather than
-        // replacing them.
-        const only = marks.length === 1 && marks[0].ok === true ? marks[0] : null;
-        return toolPayload({
-          version: 1,
-          action,
-          scheduling: "epoch",
-          ok: marks.some((mark) => mark.ok === true),
-          deferredMarks: marks.filter((mark) => mark.deferred === true).length,
-          ...(only
+          ok: true,
+          deferred,
+          ...(deferred
             ? {
-              id: only.id,
-              kind: only.kind,
-              brief: only.brief,
-              provenance: only.provenance,
-              deferred: only.deferred,
-              ...(only.scheduled ? { scheduled: only.scheduled } : {}),
+              scheduled: "the span is still in the fresh window; this mark is held and folds at the " +
+                "first commit after it ages out",
             }
             : {}),
-          marks,
-          // Never silently reinterpreted: a span the runtime moved says so, here.
-          corrections,
-          argumentsSha256: executionArgumentsSha256,
-          durableRevision: persistence.state.revision,
-          pendingMarks: accounting.pending,
-          eligibleMarks: accounting.eligibleMarks,
-          retainedMarks: accounting.retainedMarks,
-          estimatedFreedWindowShare: accounting.freedWindowShare,
-          estimatedEligibleWindowShare: accounting.eligibleFreedWindowShare,
-          estimatedRewriteTokens: accounting.rewriteTokens,
-          held,
-          heldNote: "held until it ages out or the next fold event",
-          unmarkedSpans: remainder.spans,
-          unmarkedTokens: remainder.tokens,
-          unmarkedShare: remainder.share,
-          unmarkedCandidates: remainder.candidates,
-          awareness: markAwarenessText({ held, remainder, toolName, brandNoun }),
-          activation: "accepted as pending marks; no context bytes moved, and nothing else in your " +
-            "context changed either. They apply together at the next commit epoch, which the runtime " +
-            "opens at the fold event. " +
-            "A mark over a still-fresh span is held, not refused: it is scheduled, and it folds at the " +
-            "first commit after that span ages out of the fresh window. " +
-            "Mark several spans in one call: this whole picture comes back with each one.",
+          brief: mark.brief,
+          provenance: normalizeLegacyProvenance(mark.briefProvenance),
         });
       }
-      const applied: Array<Record<string, unknown>> = [];
-      for (const item of resolved) {
-        const { preparedFold, nextState } = await prepareAndCommitExplicit({
-          snapshot,
-          candidate: item.candidate,
-          brief: item.brief,
-          ctx,
-          signal,
-        });
-        persistence.state = nextState;
-        applied.push({
-          id: preparedFold.id,
-          kind: preparedFold.fold.kind,
-          brief: preparedFold.fold.brief,
-          provenance: normalizeLegacyProvenance(preparedFold.fold.provenance),
-          expand: { action: "expand", id: preparedFold.id },
-        });
-      }
-      await persistManual(persistence.state, "fold", ctx);
+      await persistManual(staged, action, ctx);
       updateStatus(ctx);
-      const single = applied.length === 1 ? applied[0] : null;
+      const accounting = markAccounting(snapshot, persistence.state);
+      // MECHANISM 3. The projection is byte-frozen between fold events, so this reply
+      // is the only cache-free channel left: it carries the whole picture, not just
+      // an acknowledgement of the spans this call named.
+      const held = pendingMarks(persistence.state).map((mark) => ({
+        id: mark.id,
+        kind: mark.kind,
+        tokens: estimatedTokens(markFreedBytes(snapshot, persistence.state!, mark)),
+      }));
+      const remainder = unmarkedRemainder(snapshot, persistence.state, projectionCharsPerToken());
+      // The single-span shape is the head of the batched one: one call carrying one
+      // span answers exactly as it always did, and a batch adds fields rather than
+      // replacing them.
+      const only = marks.length === 1 && marks[0].ok === true ? marks[0] : null;
       return toolPayload({
         version: 1,
         action,
-        scheduling: "immediate",
-        ...(single
+        scheduling: "epoch",
+        ok: marks.some((mark) => mark.ok === true),
+        deferredMarks: marks.filter((mark) => mark.deferred === true).length,
+        ...(only
           ? {
-            id: single.id,
-            kind: single.kind,
-            brief: single.brief,
-            provenance: single.provenance,
-            expand: single.expand,
+            id: only.id,
+            kind: only.kind,
+            brief: only.brief,
+            provenance: only.provenance,
+            deferred: only.deferred,
+            ...(only.scheduled ? { scheduled: only.scheduled } : {}),
           }
           : {}),
-        folds: applied,
+        marks,
+        // Never silently reinterpreted: a span the runtime moved says so, here.
         corrections,
         argumentsSha256: executionArgumentsSha256,
         durableRevision: persistence.state.revision,
-        activation: "durable immediately; projected on the next model call in this same turn",
+        pendingMarks: accounting.pending,
+        eligibleMarks: accounting.eligibleMarks,
+        retainedMarks: accounting.retainedMarks,
+        estimatedFreedWindowShare: accounting.freedWindowShare,
+        estimatedEligibleWindowShare: accounting.eligibleFreedWindowShare,
+        estimatedRewriteTokens: accounting.rewriteTokens,
+        held,
+        heldNote: "held until it ages out or the next fold event",
+        unmarkedSpans: remainder.spans,
+        unmarkedTokens: remainder.tokens,
+        unmarkedShare: remainder.share,
+        unmarkedCandidates: remainder.candidates,
+        awareness: markAwarenessText({ held, remainder, toolName, brandNoun }),
+        activation: "accepted as pending marks; no context bytes moved, and nothing else in your " +
+          "context changed either. They apply together at the next commit epoch, which the runtime " +
+          "opens at the fold event. " +
+          "A mark over a still-fresh span is held, not refused: it is scheduled, and it folds at the " +
+          "first commit after that span ages out of the fresh window. " +
+          "Mark several spans in one call: this whole picture comes back with each one.",
       });
     }
     throw new Error(`Unknown ${toolName} action '${action}'`);
@@ -4135,7 +4052,7 @@ export function registerActiveContext(pi: any, options: {
     name: toolName,
     label: toolLabel,
     allowedActions: allowedToolActions,
-    fullSurface: allowedToolActions.length === defaultToolActions.length,
+    fullSurface: true,
     maxBriefChars: ACTIVE_CONTEXT_POLICY.maxBriefChars,
     statusDetails: ["fold_candidates", "tree", "folds", "objects"],
     minPeekSliceBytes: PEEK_MIN_SLICE_BYTES,

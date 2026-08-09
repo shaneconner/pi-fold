@@ -298,11 +298,15 @@ export function validateFoldForest(folds: ActiveFold[]): ActiveFold[] {
   }
   for (const fold of values) {
     if ((parent.get(fold.id) ?? null) !== fold.parentId) throw new Error(`Fold ${fold.id} parent drift`);
+    // A chapter's children are whatever its span contained. The old law let a chapter
+    // hold tool-result folds only, which made a wide agent span across chapters the
+    // automation itself had made unconstructible: the agent could not curate over its
+    // own history. Nesting never removes anything, so there is nothing for a kind rule
+    // to protect here. What stays is the shape of the two composed kinds: a tool-result
+    // fold owns one raw batch (checked above), and a consolidation groups composed
+    // folds, because a bare tool batch nests through a chapter span instead.
     for (const childId of childFoldIds(fold)) {
       const child = byId.get(childId)!;
-      if (fold.kind === "chapter" && child.kind !== "tool-result") {
-        throw new Error(`Chapter ${fold.id} may contain only tool-result folds`);
-      }
       if (fold.kind === "consolidation" && child.kind === "tool-result") {
         throw new Error(`Consolidation ${fold.id} may contain only chapter or consolidation folds`);
       }

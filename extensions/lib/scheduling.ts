@@ -7,9 +7,11 @@ import {
 import {
   commitPreparedFold,
   pinnedPeekMass,
+  preparedMatchesCandidate,
   prepareFold,
   renderFold,
   renderFoldParts,
+  selectAutomaticSpan,
   setFoldProjectionState,
 } from "./folding.ts";
 import type { AutomaticRungSelection } from "./folding.ts";
@@ -21,6 +23,7 @@ import {
   toolRefsProtected,
 } from "./measurement.ts";
 import {
+  clearPrepared,
   flattenFoldRefs,
   foldIdFor,
   parsePendingMarks,
@@ -54,7 +57,6 @@ import {
   deterministicChapterCandidateBrief,
   deterministicConsolidationBrief,
   resultCall,
-  selectAutomaticToolBatch,
   toolCallArguments,
 } from "./selection.ts";
 
@@ -390,6 +392,26 @@ export function ladderBrief(
 }
 
 /**
+ * The brief and provenance an automatic mark carries.
+ *
+ * A warmed chapter brief the runtime already paid a model call for is REUSED when the
+ * prepared fold is exactly this candidate. Under epoch scheduling every automatic fold
+ * arrives through a mark, so a preparation whose brief the mark path ignored would be a
+ * model call spent on nothing.
+ */
+export function automaticMarkBrief(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+  candidate: FoldCandidate,
+): { brief: string; briefProvenance: PendingFoldMark["briefProvenance"] } {
+  const prepared = state.prepared;
+  if (prepared && preparedMatchesCandidate(prepared, candidate)) {
+    return { brief: prepared.fold.brief, briefProvenance: clone(prepared.fold.provenance) };
+  }
+  return { brief: ladderBrief(snapshot, state, candidate), briefProvenance: { kind: "deterministic" } };
+}
+
+/**
  * Turn one automatic rung selection into a mark. Prepared chapters are excluded on
  * purpose: that rung only fires at the hard provider fence, which is already inside
  * a commit epoch, and deferring it would strand a model-generated brief.
@@ -409,8 +431,7 @@ export function ladderSelectionMark(input: {
   }
   return foldMarkFor({
     candidate: selection.candidate,
-    brief: ladderBrief(input.snapshot, input.state, selection.candidate),
-    briefProvenance: { kind: "deterministic" },
+    ...automaticMarkBrief(input.snapshot, input.state, selection.candidate),
     origin: "ladder",
     ordinal: input.ordinal,
   });
@@ -564,9 +585,12 @@ export function markedFoldIds(state: ActiveContextState): Set<string> {
 }
 
 /**
- * Agent judgment leads; automation guarantees the floor. If the marks the agent
- * made would free less than the target share of the window, the ladder adds the
- * stalest unprotected eligible tool batches until they do.
+ * Agent judgment leads; automation guarantees the floor. If the marks the agent made
+ * would free less than the target share of the window, automation adds the stalest
+ * unprotected eligible SPANS until they do: completed tool batches, raw narrative
+ * chapters, and, once the stale region carries enough unpinned folds, the placeholders
+ * themselves. One law proposes all three, which is what makes chapters and nested folds
+ * reachable from the commit path at all.
  */
 export function topUpMarks(input: {
   snapshot: ActiveContextSnapshot;
@@ -590,12 +614,11 @@ export function topUpMarks(input: {
   };
   let share = progress(state);
   for (let attempt = 0; attempt < EPOCH_MAX_TOPUP_MARKS && share < target; attempt += 1) {
-    const candidate = selectAutomaticToolBatch(snapshot, state, 1, claimed)[0];
+    const candidate = selectAutomaticSpan(snapshot, state, claimed);
     if (!candidate) break;
     const mark = foldMarkFor({
       candidate,
-      brief: automaticToolBrief(snapshot, candidate),
-      briefProvenance: { kind: "deterministic" },
+      ...automaticMarkBrief(snapshot, state, candidate),
       origin: "ladder",
       ordinal: input.ordinal,
     });
@@ -875,6 +898,12 @@ export async function commitPendingMarks(input: {
         generation: input.generation,
       });
       applied.push({ mark: "fold", id: mark.id, origin: mark.origin, foldId: prepared.id });
+      // A warmed preparation the commit just materialized through its mark is spent:
+      // leaving it standing would hold a prepared fold whose id already exists in the
+      // forest, and every later drift check would refuse it by name.
+      if (state.prepared && state.folds.some((fold) => fold.id === state.prepared!.id)) {
+        state = clearPrepared(state);
+      }
     } catch (error) {
       refused.push({
         mark: mark.mark,
@@ -892,13 +921,13 @@ export async function commitPendingMarks(input: {
 export function schedulingStatus(input: {
   snapshot: ActiveContextSnapshot;
   state: ActiveContextState;
-  mode: string;
   ratio: number | null;
 }): Record<string, unknown> {
   const accounting = markAccounting(input.snapshot, input.state);
   const threshold = EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD;
   return {
-    mode: input.mode,
+    // A literal, not a setting: epoch is the only scheduler there is.
+    mode: "epoch",
     ...accounting,
     targetWindowShare: EPOCH_COMMIT_TARGET_WINDOW_SHARE,
     commitDue: epochCommitDue(input.snapshot, input.ratio, accounting.eligibleFreedWindowShare),

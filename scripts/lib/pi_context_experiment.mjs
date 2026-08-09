@@ -40,15 +40,14 @@ export const EXPERIMENT_SESSION_TYPES = Object.freeze(["arm", "closed-book"]);
 export const EXPERIMENT_CLOSED_BOOK_LABEL = "closed-book";
 // Shipped pi-fold package options (gate 24); each variant is an experiment condition.
 export const EXPERIMENT_GUIDANCE_PROFILES = Object.freeze(["pressure", "curation", "minimal"]);
-// Fold scheduling is the second shipped dial: fold as soon as a batch is eligible, or
-// batch the eligible spans into an epoch. It is an experiment condition, so it is pinned
-// in the run config and the manifest exactly like the guidance profile.
+// `foldScheduling` was the second condition dial: fold as soon as a batch is eligible,
+// or batch the eligible spans into an epoch. Epoch won the pairing (rep 2 immediate
+// 0.193 pooled against rep 3 epoch 0.919) and is the runtime's only scheduler now, so
+// the dial is RETIRED and its vocabulary survives for reading sealed artifacts only:
+// reps 1-23 recorded it and their run configs are immutable data. `foldPeekResults`,
+// the third dial, is retired the same way and for the same reason: peek results are
+// foldable unconditionally. Nothing emits either key any more.
 export const EXPERIMENT_FOLD_SCHEDULING = Object.freeze(["immediate", "epoch"]);
-// Immediate scheduling refuses to fold a peek result, so a peek-heavy arm accumulates a
-// copy of evidence the runtime already holds. The third condition dial hands that supply
-// back without moving any ladder threshold.
-export const EXPERIMENT_DEFAULT_FOLD_PEEK_RESULTS = false;
-export const EXPERIMENT_DEFAULT_FOLD_SCHEDULING = "immediate";
 // `guidedCuration` was the fourth condition dial: announce the pending epoch commit and
 // give the agent a bounded last call to curate what is about to fold. It is RETIRED as of
 // the append-only build and tolerated on read only, exactly like `reliabilityLevers`:
@@ -91,7 +90,6 @@ export const EXPERIMENT_SCHEDULING_SOURCE = "extensions/lib/scheduling.ts";
 // very run it was just handed. Relocating run state is a one-line edit and a commit.
 export const EXPERIMENT_RUN_ROOT = join(RUNTIME_HOME, "pi-fold-runs");
 export const EXPERIMENT_STATE_ROOT = join(EXPERIMENT_RUN_ROOT, "state", "ops", "pi-context-experiment");
-export const EXPERIMENT_TMP_ROOT = join(EXPERIMENT_RUN_ROOT, "tmp");
 // The exact environment a run attests, named ONCE. The supervisor builds this object and
 // the run-config validator checks it; when the two each carried their own copy of the list
 // they drifted, and the drift only surfaced when a launched run died at validation. The
@@ -1417,9 +1415,10 @@ export const EXPERIMENT_RUN_CONFIG_KEYS = Object.freeze([
   "model",
 ]);
 
-// Added after the first sealed campaign: runs written before the dial existed carry no
-// foldScheduling key and adjudicate as EXPERIMENT_DEFAULT_FOLD_SCHEDULING. `reliabilityLevers`
-// is retired and tolerated on read only, so sealed runs 10-14 still adjudicate.
+// Tolerated on read, emitted by nothing. `foldScheduling`, `foldPeekResults`,
+// `guidedCuration` and `reliabilityLevers` are all retired condition keys whose sealed
+// run configs are immutable data, so runs 1-23 must keep adjudicating. A run config
+// written after the retirement carries none of them.
 export const EXPERIMENT_RUN_CONFIG_OPTIONAL_KEYS = Object.freeze([
   "sessionType", "guidance", "foldScheduling", "foldPeekResults", "guidedCuration", "providerTotalWindow", "transport", "reliabilityLevers",
 ]);

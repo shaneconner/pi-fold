@@ -21,7 +21,7 @@ import {
   DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   DEFAULT_CONTEXT_WINDOW,
-  READ_ONLY_CONTEXT_ACTIONS_DEFAULT,
+  PEEK_READ_ONLY_CONTEXT_ACTIONS,
   READ_ONLY_TOOLS_DEFAULT,
 } from "./policy.ts";
 import type {
@@ -85,7 +85,7 @@ export function isReadOnlyContextTool(
   args?: unknown,
   toolName = DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   readOnlyTools: ReadonlySet<string> = READ_ONLY_TOOLS_DEFAULT,
-  readOnlyContextActions: ReadonlySet<string> = READ_ONLY_CONTEXT_ACTIONS_DEFAULT,
+  readOnlyContextActions: ReadonlySet<string> = PEEK_READ_ONLY_CONTEXT_ACTIONS,
 ): boolean {
   if (readOnlyTools.has(name)) return true;
   if (name !== toolName || !isPlainRecord(args)) return false;
@@ -126,7 +126,7 @@ export function scanTurnToolBatches(
   allowIncomplete = false,
   toolName = DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   readOnlyTools: ReadonlySet<string> = READ_ONLY_TOOLS_DEFAULT,
-  readOnlyContextActions: ReadonlySet<string> = READ_ONLY_CONTEXT_ACTIONS_DEFAULT,
+  readOnlyContextActions: ReadonlySet<string> = PEEK_READ_ONLY_CONTEXT_ACTIONS,
 ): ScannedToolBatches | null {
   if (!Number.isSafeInteger(turn.start) || !Number.isSafeInteger(turn.end) ||
       turn.start < 0 || turn.end > messages.length || turn.start >= turn.end) return null;
@@ -213,7 +213,7 @@ export function validateTurnToolBatch(
   turn: CompleteTurn,
   toolName = DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   readOnlyTools: ReadonlySet<string> = READ_ONLY_TOOLS_DEFAULT,
-  readOnlyContextActions: ReadonlySet<string> = READ_ONLY_CONTEXT_ACTIONS_DEFAULT,
+  readOnlyContextActions: ReadonlySet<string> = PEEK_READ_ONLY_CONTEXT_ACTIONS,
 ): ValidatedToolBatch | null {
   const scanned = scanTurnToolBatches(
     messages, turn, false, toolName, readOnlyTools, readOnlyContextActions,
@@ -496,7 +496,7 @@ export function mapActiveContext(input: {
     brandNoun: input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
     entryTypePrefix: input.entryTypePrefix ?? DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX,
     readOnlyTools: input.readOnlyTools ?? READ_ONLY_TOOLS_DEFAULT,
-    readOnlyContextActions: input.readOnlyContextActions ?? READ_ONLY_CONTEXT_ACTIONS_DEFAULT,
+    readOnlyContextActions: input.readOnlyContextActions ?? PEEK_READ_ONLY_CONTEXT_ACTIONS,
     contextWindow: reportedContextWindow ?? DEFAULT_CONTEXT_WINDOW,
     windowSource: reportedContextWindow === null ? "fallback" : "reported",
   };

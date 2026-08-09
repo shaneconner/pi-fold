@@ -30,7 +30,6 @@ import {
   refsProtected,
   toolFoldCadence,
   toolRefsProtected,
-  visibleCollapsedRoots,
 } from "./measurement.ts";
 import {
   childFoldIds,
@@ -49,7 +48,7 @@ import {
   ACTIVE_CONTEXT_POLICY,
   activeContextBrand,
   activeContextSource,
-  CONSOLIDATION_WIDTH_THRESHOLD,
+  CONSOLIDATE_AFTER,
   CONTEXT_STATUS_RESPONSE_BYTES,
   EXPAND_LEASE_GENERATIONS,
   MAX_EXPAND_LEASES,
@@ -74,11 +73,14 @@ import {
   candidateSourceRefs,
   chapterUnits,
   deterministicChapterCandidateBrief,
+  foldsAreSpanMaterial,
   partsForRange,
   resultCall,
-  selectAutomaticConsolidation,
+  selectAutomaticFoldRun,
   selectAutomaticRefold,
+  selectAutomaticToolBatch,
   selectAutomaticToolForRung,
+  unpinnedStaleFolds,
 } from "./selection.ts";
 
 export function selectAutomaticChapter(
@@ -88,7 +90,12 @@ export function selectAutomaticChapter(
   claimed: ReadonlySet<string> = new Set<string>(),
 ): FoldCandidate | null {
   const units = chapterUnits(snapshot);
-  const allowedChildren = new Set<FoldKind>(["tool-result"]);
+  // The counting rule, applied to the span the automation composes: below the line a
+  // span is raw material only and steps over every placeholder; at or above it the
+  // placeholders are ordinary material and the span swallows them, so folds nest.
+  const allowedChildren = foldsAreSpanMaterial(snapshot, state)
+    ? new Set<FoldKind>(["tool-result"])
+    : new Set<FoldKind>();
   for (let unitIndex = 0; unitIndex < units.length; unitIndex += 1) {
     const first = units[unitIndex];
     let best: FoldCandidate | null = null;
@@ -123,6 +130,43 @@ export function selectAutomaticChapter(
     if (best) return best;
   }
   return null;
+}
+
+/**
+ * ONE automatic selection law for stale material.
+ *
+ * There is no chapter rung and no consolidation rung any more, each with its own
+ * trigger: automation proposes the stalest eligible SPAN, and what the span contains
+ * decides the fold's kind. Raw narrative folds as a chapter. Once the stale region
+ * carries CONSOLIDATE_AFTER unpinned folds, placeholders are ordinary span material,
+ * so a span of whole folds folds as a consolidation and a mixed span nests its
+ * tool-result children inside a chapter. Nothing here is pressure-scaled: the epoch's
+ * own commit trigger decides WHEN, and this decides WHAT.
+ */
+export function selectAutomaticStaleSpan(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+  claimed: ReadonlySet<string> = new Set<string>(),
+): FoldCandidate | null {
+  const chapter = selectAutomaticChapter(snapshot, state, snapshot.policy.maxFoldSourceRefs, claimed);
+  const folds = selectAutomaticFoldRun(snapshot, state);
+  if (!chapter || !folds) return chapter ?? folds;
+  const at = (candidate: FoldCandidate): number =>
+    exactMapped(snapshot, candidate.sourceRefs[0])?.index ?? Number.MAX_SAFE_INTEGER;
+  return at(folds) < at(chapter) ? folds : chapter;
+}
+
+/**
+ * What the commit epoch proposes: a completed read-only tool batch if one is stale, and
+ * otherwise the stalest span the one law composes. This is the whole automatic path.
+ */
+export function selectAutomaticSpan(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+  claimed: ReadonlySet<string> = new Set<string>(),
+): FoldCandidate | null {
+  return selectAutomaticToolBatch(snapshot, state, 1, claimed)[0] ??
+    selectAutomaticStaleSpan(snapshot, state, claimed);
 }
 
 export type AutomaticRungSelection =
@@ -175,9 +219,11 @@ export function selectAutomaticRung(
   if (options.toolOnly || !Number.isFinite(ratio)) return null;
   const refold = selectAutomaticRefold(snapshot, state, ratio, claimedFoldIds);
   if (refold) return { kind: "refold", foldId: refold };
-  const consolidation = selectAutomaticConsolidation(snapshot, state, ratio, claimed);
-  if (consolidation) return { kind: "consolidation", candidate: consolidation };
-  const chapter = selectAutomaticChapter(snapshot, state, snapshot.policy.maxFoldSourceRefs, claimed);
+  // One law decides the span; only the CHAPTER kind still has a preparation path in
+  // front of it, because only a chapter brief is worth a model call.
+  const span = selectAutomaticStaleSpan(snapshot, state, claimed);
+  if (span?.kind === "consolidation") return { kind: "consolidation", candidate: span };
+  const chapter = span;
   if (!chapter) return null;
   const preparationFailed = options.failedPreparationIds?.has(
     automaticPreparationId(chapter, state),
@@ -210,8 +256,9 @@ export function foldCandidatesDetail(
   const measuredRatio = ratio !== null && Number.isFinite(ratio) ? ratio : Number.NaN;
   const tool = selectAutomaticToolForRung(snapshot, state, measuredRatio);
   const refold = selectAutomaticRefold(snapshot, state, measuredRatio);
-  const consolidation = selectAutomaticConsolidation(snapshot, state, measuredRatio);
-  const chapter = selectAutomaticChapter(snapshot, state);
+  const staleSpan = selectAutomaticStaleSpan(snapshot, state);
+  const consolidation = staleSpan?.kind === "consolidation" ? staleSpan : null;
+  const chapter = staleSpan?.kind === "chapter" ? staleSpan : null;
   const selection = selectAutomaticRung(snapshot, state, measuredRatio, {
     summarizerAvailable: options.summarizerAvailable,
     failedPreparationIds: options.failedPreparationIds,
@@ -248,9 +295,11 @@ export function foldCandidatesDetail(
       tokensSinceToolFold: state.tokensSinceToolFold,
       cadenceNeed: toolFoldCadence(snapshot.contextWindow),
     },
+    // The counting rule, reported as the number it counts: how many unpinned folds sit
+    // in the stale region, and the line at which they become ordinary span material.
     width: {
-      visibleRoots: visibleCollapsedRoots(state, snapshot).length,
-      threshold: CONSOLIDATION_WIDTH_THRESHOLD,
+      visibleRoots: unpinnedStaleFolds(snapshot, state).length,
+      threshold: CONSOLIDATE_AFTER,
     },
   };
 }
@@ -1283,15 +1332,16 @@ export function projectionSlateCandidates(
   });
 }
 
-export function recoverFoldMessages(input: {
+export interface FoldSourceRequest {
   foldId: string;
   state: ActiveContextState;
   entries: Array<Record<string, unknown>>;
   sessionId: string;
   projectEntry?: (entry: Record<string, unknown>) => unknown[];
-}): unknown[] {
-  const fold = input.state.folds.find((item) => item.id === input.foldId);
-  if (!fold) throw new Error(`Unknown active-context fold ${input.foldId}`);
+}
+
+/** One exact message per ref identity and digest, read off the immutable session entries. */
+function exactSessionMessages(input: FoldSourceRequest): Map<string, unknown> {
   const projectEntry = input.projectEntry ?? sessionEntryMessages;
   const exact = new Map<string, unknown>();
   for (const entry of input.entries) {
@@ -1301,20 +1351,81 @@ export function recoverFoldMessages(input: {
       exact.set(`${objectRefKey(ref)}:${ref.sha256}`, message);
     }
   }
-  return flattenFoldRefs(fold, input.state).map((ref) => {
-    if (ref.sessionId !== input.sessionId) throw new Error(`Fold source ${ref.entryId} belongs to another session`);
-    const message = exact.get(`${objectRefKey(ref)}:${ref.sha256}`);
-    if (!message || evidenceSha256(message) !== ref.sha256) {
-      throw new Error(`Exact recovery failed for ${ref.entryId}`);
-    }
-    return clone(message);
+  return exact;
+}
+
+function exactMessageFor(
+  exact: Map<string, unknown>,
+  ref: EvidenceRef,
+  sessionId: string,
+): unknown {
+  if (ref.sessionId !== sessionId) throw new Error(`Fold source ${ref.entryId} belongs to another session`);
+  const message = exact.get(`${objectRefKey(ref)}:${ref.sha256}`);
+  if (!message || evidenceSha256(message) !== ref.sha256) {
+    throw new Error(`Exact recovery failed for ${ref.entryId}`);
+  }
+  return clone(message);
+}
+
+/**
+ * One fold's ENTIRE original source, at every depth.
+ *
+ * This is the rescue read: restoration and the recovery audit both need the bytes as the
+ * session first wrote them, with nothing standing in for anything. Retrieval inside a
+ * session is the other function, and it serves one level.
+ */
+export function recoverFoldMessages(input: FoldSourceRequest): unknown[] {
+  const fold = input.state.folds.find((item) => item.id === input.foldId);
+  if (!fold) throw new Error(`Unknown active-context fold ${input.foldId}`);
+  const exact = exactSessionMessages(input);
+  return flattenFoldRefs(fold, input.state).map((ref) => exactMessageFor(exact, ref, input.sessionId));
+}
+
+/** A child fold as its parent's stored span holds it: the placeholder, not the bytes under it. */
+export function storedChildPlaceholder(child: ActiveFold, state: ActiveContextState): Record<string, unknown> {
+  return {
+    placeholder: "fold",
+    id: child.id,
+    kind: child.kind,
+    brief: foldBrief(child, state),
+    sourceSha256: child.sourceSha256,
+    sourceBytes: child.sourceChars,
+    children: childFoldIds(child).length,
+    peek: { action: "peek", id: child.id },
+  };
+}
+
+/**
+ * One fold's stored span, AS STORED: one level.
+ *
+ * A fold's span is what it took in, and what it took in was already whatever the window
+ * held: raw entries, and placeholders for folds that were there first. So the honest read
+ * of a parent is that same span, children still placeheld. Reading it as the original
+ * bytes at every depth would hand back a whole session's transcript for one call and
+ * undo the nesting the fold performed.
+ *
+ * The verbatim floor is untouched by this. A leaf's stored span IS its original bytes, so
+ * the bytes are always exactly one peek away from any id the read hands back.
+ */
+export function foldStoredSpan(input: FoldSourceRequest): unknown[] {
+  const fold = input.state.folds.find((item) => item.id === input.foldId);
+  if (!fold) throw new Error(`Unknown active-context fold ${input.foldId}`);
+  const exact = exactSessionMessages(input);
+  const byId = foldMap(input.state);
+  return fold.parts.map((part) => {
+    if (part.kind === "raw") return exactMessageFor(exact, part.ref, input.sessionId);
+    const child = byId.get(part.foldId);
+    if (!child) throw new Error(`Missing active-context child ${part.foldId}`);
+    return storedChildPlaceholder(child, input.state);
   });
 }
 
 /**
- * Ephemeral point read of one fold's exact source at any depth. It recovers the same
- * SHA-256-verified messages expansion restores, bounded for one model call, and changes no
- * projection: the fold stays collapsed and the durable state is untouched.
+ * Ephemeral point read of one fold's stored span. It returns the same SHA-256-verified
+ * span expansion restores, ONE level: raw entries verbatim, child folds still placeheld.
+ * It is bounded for one model call and changes no projection: the fold stays collapsed and
+ * the durable state is untouched. Any id in the result peeks in one hop, so the verbatim
+ * floor is a hop away at every depth rather than a payload nobody asked for.
  */
 export function peekFoldSource(input: {
   foldId: string;
@@ -1330,7 +1441,7 @@ export function peekFoldSource(input: {
 }): Record<string, unknown> {
   const fold = input.state.folds.find((item) => item.id === input.foldId);
   if (!fold) throw new Error(`Unknown active-context fold ${input.foldId}`);
-  const messages = recoverFoldMessages({
+  const messages = foldStoredSpan({
     foldId: input.foldId,
     state: input.state,
     entries: input.entries,
@@ -1391,7 +1502,10 @@ export function peekFoldSource(input: {
     note: truncated
       ? `Bounded read: ${returnedBytes} of ${sourceBytes} exact source bytes, ${view.omittedBytes} omitted ` +
         `from the middle. Widen with bytes, page with offset, or expand ${fold.id} to restore it in place.`
-      : "Complete exact source; the fold stayed collapsed and no projection changed.",
+      : children.length
+        ? `Complete stored span, one level: raw entries exactly, and ${children.length} child fold(s) still ` +
+          "placeheld. Peek a child id to read its own span; the fold stayed collapsed and no projection changed."
+        : "Complete exact source; the fold stayed collapsed and no projection changed.",
     source: returned,
     // Serialized AFTER the source on purpose: a reader that just consumed a bounded slice
     // decides its next action at the end of the payload, and a notice buried before ten
