@@ -7095,6 +7095,36 @@ async function gateProtectIsDurablePin() {
   };
 }
 
+async function gateRecoveryNormAdvertised() {
+  // The recovery norm. In the sol-20260809 rep-3 full run the model answered recall
+  // questions about folded stages from memory and fabricated plausible values, while
+  // every placeholder stated the exact expand call: the syntax was discoverable, the
+  // norm was not. The norm rides the stable tool surface on BOTH description branches,
+  // and disappears only when expand itself is not an allowed action.
+  const surface = await jiti.import(join(projectRoot, "extensions", "lib", "tool-surface.ts"));
+  const policy = await jiti.import(join(projectRoot, "extensions", "lib", "policy.ts"));
+  const describe = (allowedActions, fullSurface) => surface.buildActiveContextTool({
+    name: "active_context",
+    label: "Active context",
+    allowedActions,
+    fullSurface,
+    maxBriefChars: 1200,
+    statusDetails: [],
+    minPeekSliceBytes: 1,
+    defaultPeekBytes: 4096,
+    handler: async () => null,
+  }).description;
+  const norm = "A fold brief is an index entry, not the source";
+  const full = describe([...policy.EPOCH_ACTIVE_CONTEXT_TOOL_ACTIONS], true);
+  assert(full.includes(norm), "The recovery norm is missing from the full surface");
+  assert(full.includes("peek or expand that fold"), "The norm must name the recovery verbs");
+  const configured = describe(["status", "expand"], false);
+  assert(configured.includes(norm), "The recovery norm is missing from the configured surface");
+  const noExpand = describe(["status", "fold"], false);
+  assert(!noExpand.includes(norm), "A surface without expand must not preach a verb it lacks");
+  return { advertisedOnFull: true, advertisedOnConfigured: true, silentWithoutExpand: true };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -7172,6 +7202,7 @@ const gates = [
   [87, "The projection is append-only", gateProjectionIsAppendOnly],
   [88, "A peek never rewrites the window", gatePeekIsAppendOnly],
   [89, "Protect is a durable pin", gateProtectIsDurablePin],
+  [90, "Recovery is the stated norm", gateRecoveryNormAdvertised],
 ];
 
 const gateFilter = (process.env.GATES ?? "")
