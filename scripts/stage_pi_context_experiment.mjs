@@ -17,11 +17,16 @@ import {
   EXPERIMENT_MODE_PLANS,
   EXPERIMENT_PROTOCOL_VERSION,
   EXPERIMENT_REPOS,
+  CONVERSATION_PROBE_KINDS,
   assertExperiment,
+  auditDelivery,
   auditStepId,
   auditStepSentence,
   buildAuditTraces,
+  buildChainLinkProbes,
   buildConversationProbes,
+  buildDerivationControlProbes,
+  buildEchoProbes,
   buildIncludeResolver,
   buildProbes,
   codeWordSentence,
@@ -251,6 +256,12 @@ function buildPlan({ repo, mode, seed, facts, codeWords, uniqueIdentifiers, chec
   });
   const chainStepByStage = new Map();
   const chainStageNodes = new Set();
+  // Revisit instructions resend an earlier stage's ordinal and full path list,
+  // so they must avoid every stage a chain RESOLVES to (both hop answers) and
+  // every stage that DELIVERED a chain file (a later mention of a link answer
+  // is refused by the plan's anti-leak scan).
+  const revisitExcludedStages = new Set();
+  const skeletonDelivery = auditDelivery(skeletons);
   for (const chain of chains) {
     for (const link of chain.links) {
       chainStepByStage.set(link.stage, {
@@ -261,12 +272,22 @@ function buildPlan({ repo, mode, seed, facts, codeWords, uniqueIdentifiers, chec
         hopIndex: link.hopIndex,
         anchor: link.index === 1 ? link.input : null,
       });
-      if (link.hop === "SOF") chainStageNodes.add(link.expectedAnswer);
+      if (link.hop === "SOF") {
+        chainStageNodes.add(link.expectedAnswer);
+        revisitExcludedStages.add(link.expectedAnswer);
+      }
+      if (typeof link.expectedAnswer === "string") {
+        const deliveredAt = skeletonDelivery.stageOfPath.get(link.expectedAnswer);
+        if (deliveredAt !== undefined) revisitExcludedStages.add(deliveredAt);
+      }
     }
   }
 
   // Pass 3: instructions, probes, payload hashes.
   const usedCarrierStages = new Set();
+  const probedLinks = new Set();
+  const probedChains = new Set();
+  const echoedTargets = new Set();
   const stages = [];
   for (const { ordinal, kind, files: takenFacts, codeWord } of skeletons) {
     const isProbe = kind === "probe";
@@ -288,46 +309,66 @@ function buildPlan({ repo, mode, seed, facts, codeWords, uniqueIdentifiers, chec
     let instructions;
     let probes = [];
     if (isProbe) {
-      // Each wave follows the mode plan's kind schedule: conversation probes ask for
-      // facts that exist only in the earlier transcript, then one repo-class control.
+      // Each wave follows the mode plan's kind schedule slot by slot: chain-link
+      // probes target recorded audit-trace values, an echo restates an earlier
+      // answer, conversation probes ask for facts that exist only in the earlier
+      // transcript, the wave-64 derivation control prices the hop with nothing
+      // to recall, and one repo-class control keeps the corpus baseline.
       const waveIndex = modePlan.probeStages.indexOf(ordinal);
       const waveKinds = modePlan.probeKinds[waveIndex];
-      const conversationKinds = waveKinds.filter((kind) => kind !== "repo");
-      const conversation = buildConversationProbes({
-        stages,
-        probeOrdinal: ordinal,
-        seed: `${seed}:probe:${ordinal}`,
-        kinds: conversationKinds,
-        usedStages: usedCarrierStages,
-      });
+      const countOf = (kind) => waveKinds.filter((candidate) => candidate === kind).length;
+      const queues = {
+        "chain-link": buildChainLinkProbes({
+          chains, probeOrdinal: ordinal, seed: `${seed}:probe:${ordinal}`,
+          count: countOf("chain-link"), probedLinks, probedChains,
+        }),
+        echo: buildEchoProbes({
+          earlierWaves: stages.filter((stage) => stage.kind === "probe"),
+          seed: `${seed}:probe:${ordinal}`,
+          count: countOf("echo"), echoedTargets,
+        }),
+        "derivation-control": buildDerivationControlProbes({
+          stages, chains, seed: `${seed}:probe:${ordinal}`,
+          count: countOf("derivation-control"), includeTargets,
+        }),
+        conversation: buildConversationProbes({
+          stages,
+          probeOrdinal: ordinal,
+          seed: `${seed}:probe:${ordinal}`,
+          kinds: waveKinds.filter((kind) => CONVERSATION_PROBE_KINDS.includes(kind)),
+          usedStages: usedCarrierStages,
+          excludedBindingStages: chainStageNodes,
+        }),
+      };
       const earlierFacts = stages.flatMap((stage) =>
         stage.ordinal <= Math.ceil(ordinal / 2)
           ? stage.files.map((file) => byPath.get(file.path)).filter(Boolean)
           : []);
       assertExperiment(earlierFacts.length > 0, `Probe stage ${ordinal} has no early corpus`);
-      const repoProbes = buildProbes({
+      queues.repo = buildProbes({
         facts: earlierFacts,
         seed: `${seed}:probe:${ordinal}`,
-        count: waveKinds.length - conversationKinds.length,
+        count: countOf("repo"),
         uniqueIdentifiers,
         rotationOffset: waveIndex,
       });
       // Ids carry the wave ordinal so they are unique across the WHOLE plan: the
       // grading packet flattens every wave, and a repeated id would leave the
       // grader joining answers to ground truth by position.
-      probes = [...conversation, ...repoProbes].map((probe, index) => ({
+      probes = waveKinds.map((kind) => {
+        if (kind === "repo") return queues.repo.shift();
+        if (CONVERSATION_PROBE_KINDS.includes(kind)) return queues.conversation.shift();
+        return queues[kind].shift();
+      }).map((probe, index) => ({
         ...probe,
         id: `probe-${String(ordinal).padStart(2, "0")}-${String(index + 1).padStart(2, "0")}`,
       }));
       instructions = probeInstruction();
     } else if (kind === "revisit") {
-      // A revisit names an earlier stage together with its full path list, which
-      // would hand over both hop answers for any stage a chain resolves to, so
-      // chain stage nodes are never revisit targets.
       const earlierStage = stages.find((stage) => stage.files.length > 0 &&
         stage.ordinal >= Math.max(1, Math.floor(ordinal / 3)) && stage.ordinal < ordinal &&
-        !chainStageNodes.has(stage.ordinal)) ??
-        stages.find((stage) => stage.files.length > 0 && !chainStageNodes.has(stage.ordinal));
+        !revisitExcludedStages.has(stage.ordinal)) ??
+        stages.find((stage) => stage.files.length > 0 && !revisitExcludedStages.has(stage.ordinal));
       assertExperiment(earlierStage, `Revisit stage ${ordinal} has no chain-free earlier stage`);
       instructions = revisitInstruction({ repoKey: repo.key }, files, {
         ordinal: earlierStage.ordinal,

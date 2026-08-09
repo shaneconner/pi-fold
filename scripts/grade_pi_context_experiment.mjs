@@ -107,20 +107,45 @@ function groundTruthFromPlans(evidence) {
   const plan = [...plans.values()][0];
   return {
     planSha256: plan.planSha256,
-    // Conversation probes carry the stage whose transcript held the answer; repo
-    // probes carry the file position. The class is what the analysis pools by:
-    // conversation-class scores are the recall instrument, repo-class the control.
-    probes: plan.stages.flatMap((stage) => stage.probes.map((probe) => (
-      CONVERSATION_PROBE_KINDS.includes(probe.kind)
-        ? {
-          probeId: probe.id,
-          kind: probe.kind,
-          class: "conversation",
-          question: probe.question,
-          expectedAnswer: probe.expectedAnswer,
-          sourceStage: probe.sourceStage,
+    // Conversation probes carry the stage whose transcript held the answer, repo
+    // probes the file position, derived probes the step stage or anchor file.
+    // The class is what the analysis pools by: conversation and derived are the
+    // recall instrument, repo-class the control. Echo probes NEVER enter the
+    // packet: their truth is per-run, which would encode the run into the packet.
+    probes: plan.stages.flatMap((stage) => stage.probes
+      .filter((probe) => probe.kind !== "echo")
+      .map((probe) => {
+        if (CONVERSATION_PROBE_KINDS.includes(probe.kind)) {
+          return {
+            probeId: probe.id,
+            kind: probe.kind,
+            class: "conversation",
+            question: probe.question,
+            expectedAnswer: probe.expectedAnswer,
+            sourceStage: probe.sourceStage,
+          };
         }
-        : {
+        if (probe.kind === "chain-link") {
+          return {
+            probeId: probe.id,
+            kind: probe.kind,
+            class: "derived",
+            question: probe.question,
+            expectedAnswer: probe.expectedAnswer,
+            sourceStage: probe.sourceStage,
+          };
+        }
+        if (probe.kind === "derivation-control") {
+          return {
+            probeId: probe.id,
+            kind: probe.kind,
+            class: "derived",
+            question: probe.question,
+            expectedAnswer: probe.expectedAnswer,
+            sourcePath: probe.sourcePath,
+          };
+        }
+        return {
           probeId: probe.id,
           kind: probe.kind,
           class: "repository",
@@ -128,7 +153,8 @@ function groundTruthFromPlans(evidence) {
           expectedAnswer: probe.expectedAnswer,
           sourcePath: probe.sourcePath,
           sourceLine: probe.sourceLine,
-        }))),
+        };
+      })),
     deliverables: plan.stages.flatMap((stage) => stage.deliverable
       ? [{ id: stage.deliverable.id, instructions: stage.deliverable.instructions }]
       : []),
@@ -139,10 +165,12 @@ function buildPacketAndKey(evidence, salt) {
   const groundTruth = groundTruthFromPlans(evidence);
   const submissions = evidence.map((run) => ({
     submissionId: submissionId(run.runId, salt),
-    probeAnswers: run.probes.flatMap((probe) => probe.answers.map((answer) => ({
-      probeId: answer.probeId,
-      answerText: answer.answerText ?? "",
-    }))),
+    probeAnswers: run.probes.flatMap((probe) => probe.answers
+      .filter((answer) => answer.kind !== "echo")
+      .map((answer) => ({
+        probeId: answer.probeId,
+        answerText: answer.answerText ?? "",
+      }))),
     deliverables: run.deliverables.map((deliverable) => ({
       id: deliverable.id,
       text: deliverable.text ?? "",

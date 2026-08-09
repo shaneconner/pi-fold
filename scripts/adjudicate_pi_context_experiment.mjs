@@ -32,6 +32,7 @@ import {
   estimateTokens,
   isWindowOverflow,
   probeClassOf,
+  probeMechanicalVerdicts,
   probeTranscripts,
   quotedIncludeSpecs,
   thinkTimeFromPace,
@@ -424,7 +425,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   // control, and a run that never even ANSWERED one class should be visible
   // without opening the blind packet.
   const probeAnswers = probes.flatMap((wave) => wave.answers);
-  const probeClassSummary = Object.fromEntries(["conversation", "derived", "repository"]
+  const probeClassSummary = Object.fromEntries(["conversation", "derived", "echo", "repository"]
     .map((klass) => {
       const inClass = probeAnswers.filter((answer) => probeClassOf(answer.kind) === klass);
       return [klass, {
@@ -432,6 +433,9 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
         parsed: inClass.filter((answer) => answer.parsed).length,
       }];
     }));
+  // Decision (Shane 2026-08-09): mechanical exact match is the headline verdict;
+  // the blind grader is a second reader. Echo probes are graded separately.
+  const probeVerdicts = probeMechanicalVerdicts({ plan, transcripts: probes });
 
   // Audit traces: every chain step graded absolutely (against the harness walk)
   // and against the agent's own predecessor. INC self-evaluation reads the run's
@@ -528,6 +532,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     curation: curationSummary,
     overflowPoint,
     probeClassSummary,
+    probeVerdicts,
     auditTraces,
     probes,
     deliverables,

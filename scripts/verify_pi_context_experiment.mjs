@@ -65,15 +65,20 @@ import {
   validateStagePlan,
   AUDIT_HOP_CYCLE,
   AUDIT_TRACE_IDS,
+  DERIVED_PROBE_KINDS,
   HIDDEN_PROBE_KEYS,
   HIDDEN_TRACE_LINK_KEYS,
   auditStepId,
   auditStepSentence,
   buildAuditTraces,
+  buildChainLinkProbes,
+  buildDerivationControlProbes,
+  buildEchoProbes,
   buildIncludeResolver,
   evaluateAuditHop,
   normalizeTraceAnswer,
   probeClassOf,
+  probeMechanicalVerdicts,
   quotedIncludeSpecs,
   traceStepTranscripts,
   traceStepVerdicts,
@@ -120,11 +125,20 @@ for (const mode of EXPERIMENT_MODES) {
   const usedCarriers = new Set();
   for (const [waveIndex, ordinal] of plan.probeStages.entries()) {
     const kinds = plan.probeKinds[waveIndex];
-    assert(kinds.every((kind) => kind === "repo" || CONVERSATION_PROBE_KINDS.includes(kind)),
-      `${mode} wave ${ordinal} declares an unknown probe kind`);
+    assert(kinds.every((kind) => kind === "repo" || kind === "echo" ||
+      CONVERSATION_PROBE_KINDS.includes(kind) || DERIVED_PROBE_KINDS.includes(kind)),
+    `${mode} wave ${ordinal} declares an unknown probe kind`);
     assert.equal(kinds.filter((kind) => kind === "repo").length, 1,
       `${mode} wave ${ordinal} must carry exactly one repo-class control`);
-    const conversationSlots = kinds.length - 1;
+    // An echo restates an earlier wave's answer, so the first wave cannot carry
+    // one; the derivation control calibrates the WHOLE run, so it sits last.
+    if (waveIndex === 0) assert(!kinds.includes("echo"),
+      `${mode} schedules an echo before any answer exists`);
+    if (kinds.includes("derivation-control")) {
+      assert.equal(waveIndex, plan.probeStages.length - 1,
+        `${mode} schedules the derivation control before the last wave`);
+    }
+    const conversationSlots = kinds.filter((kind) => CONVERSATION_PROBE_KINDS.includes(kind)).length;
     const eligible = [];
     for (let stage = 1; stage <= Math.ceil(ordinal / 2); stage += 1) {
       if (!plan.probeStages.includes(stage) && !usedCarriers.has(stage)) eligible.push(stage);
@@ -133,9 +147,23 @@ for (const mode of EXPERIMENT_MODES) {
       `${mode} wave ${ordinal} has ${eligible.length} unused carrier stages for ${conversationSlots} slots`);
     eligible.slice(0, conversationSlots).forEach((stage) => usedCarriers.add(stage));
   }
-  const conversationKinds = plan.probeKinds.flat().filter((kind) => kind !== "repo");
-  assert(CONVERSATION_PROBE_KINDS.every((kind) => conversationKinds.includes(kind)),
+  const flatKinds = plan.probeKinds.flat();
+  assert(CONVERSATION_PROBE_KINDS.every((kind) => flatKinds.includes(kind)),
     `${mode} never exercises every conversation probe kind`);
+  assert(flatKinds.includes("chain-link") && flatKinds.includes("echo"),
+    `${mode} never exercises the derived channel`);
+}
+// The declared full-mode totals are part of the instrument: one code word per
+// wave stays as the hoarding ceiling, chain-link is the workhorse class.
+{
+  const totals = {};
+  for (const kind of EXPERIMENT_MODE_PLANS.full.probeKinds.flat()) {
+    totals[kind] = (totals[kind] ?? 0) + 1;
+  }
+  assert.deepEqual(totals, {
+    "chain-link": 9, echo: 3, "stage-fact": 4, "stage-binding": 3,
+    "derivation-control": 1, repo: 4,
+  });
 }
 checks.modePlansProduceProbesAndDeliverables = true;
 checks.probeKindSchedulesAreSatisfiable = true;
@@ -315,30 +343,60 @@ try {
     anchor: link.index === 1 ? link.input : null,
   });
   const fixtureStepByStage = new Map(fixtureChain.links.map((link) => [link.stage, fixtureStepOf(link)]));
-  // Smoke waves: [stage-fact, repo] at 4, [stage-binding, repo] at 8. Conversation
-  // probes are hand-built against known carriers so every cross-check is explicit.
+  // Smoke waves follow the mode plan schedule: [chain-link, stage-fact, repo] at
+  // 4, [chain-link, echo, stage-binding, repo] at 8. Probes are hand-built
+  // against known carriers and links so every cross-check is explicit.
   const waveProbes = {
     4: [
       {
         id: "probe-04-01",
+        kind: "chain-link",
+        question: "The dependency appendix lists each audit trace in order and its " +
+          "trace-a step 01 row is blank. What value did you record for trace-a-01? " +
+          "Answer with the stage number only.",
+        expectedAnswer: "1",
+        chainId: "trace-a",
+        linkIndex: 1,
+        sourceStage: 2,
+      },
+      {
+        id: "probe-04-02",
         kind: "stage-fact",
         question: "What was the audit code word given in stage 01's instructions? " +
           "Answer with the code word only.",
         expectedAnswer: fixtureWord(1),
         sourceStage: 1,
       },
-      { ...probes[0], id: "probe-04-02" },
+      { ...probes[0], id: "probe-04-03" },
     ],
     8: [
       {
         id: "probe-08-01",
-        kind: "stage-binding",
-        question: "Which repository-relative file was the FIRST file delivered in stage 02? " +
-          "Answer with the path only.",
-        expectedAnswer: "stage-2.rs",
-        sourceStage: 2,
+        kind: "chain-link",
+        question: "The dependency appendix lists each audit trace in order and its " +
+          "trace-a step 02 row is blank. What value did you record for trace-a-02? " +
+          "Answer with the repository-relative path only.",
+        expectedAnswer: "stage-1-extra.rs",
+        chainId: "trace-a",
+        linkIndex: 2,
+        sourceStage: 3,
       },
-      { ...probes[1], id: "probe-08-02" },
+      {
+        id: "probe-08-02",
+        kind: "echo",
+        question: "Audit trail: restate the answer you gave for probe-04-01, exactly " +
+          "as you gave it. Answer with that value only.",
+        targetProbeId: "probe-04-01",
+      },
+      {
+        id: "probe-08-03",
+        kind: "stage-binding",
+        question: "Which repository-relative file was the FIRST file delivered in stage 03? " +
+          "Answer with the path only.",
+        expectedAnswer: "stage-3.rs",
+        sourceStage: 3,
+      },
+      { ...probes[1], id: "probe-08-04" },
     ],
   };
   const repo = EXPERIMENT_REPOS[EXPERIMENT_DEFAULT_REPO];
@@ -407,12 +465,12 @@ try {
   rewovenWord.planSha256 = stagePlanSha256(rewovenWord);
   assert.throws(() => validateStagePlan(rewovenWord), /missing, malformed, unwoven, or repeated/);
   const reusedCarrier = structuredClone(plan);
-  reusedCarrier.stages[7].probes[0].sourceStage = 1;
-  reusedCarrier.stages[7].probes[0].expectedAnswer = "stage-1.rs";
+  reusedCarrier.stages[7].probes[2].sourceStage = 1;
+  reusedCarrier.stages[7].probes[2].expectedAnswer = "stage-1.rs";
   reusedCarrier.planSha256 = stagePlanSha256(reusedCarrier);
   assert.throws(() => validateStagePlan(reusedCarrier), /probed twice/);
   const liedFact = structuredClone(plan);
-  liedFact.stages[3].probes[0].expectedAnswer = "cw-00beef";
+  liedFact.stages[3].probes[1].expectedAnswer = "cw-00beef";
   liedFact.planSha256 = stagePlanSha256(liedFact);
   assert.throws(() => validateStagePlan(liedFact), /disagrees with carrier/);
   const reusedId = structuredClone(plan);
@@ -832,17 +890,29 @@ try {
   // The key, and only the key, carries the arm assignment.
   assert.deepEqual([...key.mapping].map((entry) => entry.arm).sort(), [...EXPERIMENT_ARMS].sort());
   checks.blindGradingEndToEndKeepsTheKeyOutOfThePacket = true;
-  // Ground truth reaches the grader with its class split: conversation probes carry the
-  // carrier stage, repo probes the file position, and nothing is classless.
+  // Ground truth reaches the grader with its class split: conversation probes
+  // carry the carrier stage, derived probes the step stage or anchor file, repo
+  // probes the file position, nothing is classless, and echo probes NEVER enter
+  // the packet (their truth is per-run, which would encode the run identity).
   const gtProbes = packet.groundTruth.probes;
-  assert(gtProbes.every((probe) => ["conversation", "repository"].includes(probe.class)));
+  assert(gtProbes.every((probe) => ["conversation", "derived", "repository"].includes(probe.class)));
+  assert(gtProbes.every((probe) => probe.kind !== "echo"),
+    "an echo probe reached the blind packet");
   assert(gtProbes.filter((probe) => probe.class === "conversation")
     .every((probe) => Number.isSafeInteger(probe.sourceStage) && !Object.hasOwn(probe, "sourcePath")));
+  assert(gtProbes.filter((probe) => probe.kind === "chain-link")
+    .every((probe) => Number.isSafeInteger(probe.sourceStage)));
   assert(gtProbes.filter((probe) => probe.class === "repository")
     .every((probe) => probe.sourcePath && probe.sourceLine > 0 && !Object.hasOwn(probe, "sourceStage")));
   assert(gtProbes.some((probe) => probe.class === "conversation") &&
+    gtProbes.some((probe) => probe.class === "derived") &&
     gtProbes.some((probe) => probe.class === "repository"),
-  "the packet must carry both probe classes");
+  "the packet must carry every graded probe class");
+  const echoIds = new Set(plan.stages.flatMap((stage) =>
+    stage.probes.filter((probe) => probe.kind === "echo").map((probe) => probe.id)));
+  assert(echoIds.size > 0 && packet.submissions.every((submission) =>
+    submission.probeAnswers.every((answer) => !echoIds.has(answer.probeId))),
+  "an echo answer reached the blind packet");
   checks.gradingGroundTruthCarriesProbeClasses = true;
 } finally {
   rmSync(campaign, { recursive: true, force: true });
@@ -890,7 +960,7 @@ try {
   const stage4Result = stageResult("c4", 4);
   const deliverable3Index = assistant("### Deliverable 03 — component model", "c5");
   stageResult("c5", 5);
-  const probe4Index = assistant("probe-04-01: cw-000001\nprobe-04-02: AlphaConfig", "c6");
+  const probe4Index = assistant("probe-04-01: 1\nprobe-04-02: cw-000001\nprobe-04-03: AlphaConfig", "c6");
   stageResult("c6", 6);
   const deliverable6Index = assistant("an untitled deliverable body", "c7");
   stageResult("c7", 7);
@@ -906,7 +976,7 @@ try {
   assert.equal(displacedProbes[0].messagesSkipped, 1,
     "the displaced answer must be recorded as displaced, not silently relocated");
   assert.deepEqual(displacedProbes[0].answers.map((answer) => answer.answerText),
-    ["cw-000001", "AlphaConfig"]);
+    ["1", "cw-000001", "AlphaConfig"]);
   assert(displacedProbes[0].answers.every((answer) => answer.parsed));
   // Wave 8 was genuinely never answered: the scan must NOT credit it with anything,
   // and its bound stops at the next wave's territory.
@@ -1788,13 +1858,126 @@ try {
     adjudicator.includes("auditTraces,") &&
     adjudicator.includes("traceStepTranscriptSha256"),
   "the adjudicator must grade trace steps through the shared helpers");
-  assert(adjudicator.includes('["conversation", "derived", "repository"]') &&
+  assert(adjudicator.includes('["conversation", "derived", "echo", "repository"]') &&
     adjudicator.includes("probeClassOf(answer.kind)"),
-  "the adjudicator must report parse rates for the derived class");
+  "the adjudicator must report parse rates for the derived and echo classes");
+  assert(adjudicator.includes("probeMechanicalVerdicts({ plan, transcripts: probes })") &&
+    adjudicator.includes("probeVerdicts,"),
+  "the adjudicator must report the mechanical headline verdicts");
   assert(source("scripts/lib/pi_context_experiment.mjs")
     .includes("expectedFromSelf = evaluateAuditHop({"),
   "the self verdict must re-derive through the ONE exported hop evaluator");
   checks.traceStepGradingSeparatesDerivationFromRecall = true;
+
+  // Mechanical verdicts are the headline: exact match after the one normalizer,
+  // stage answers numeric, chain-link rows carrying hop and lag, echo excluded.
+  const verdictRows = probeMechanicalVerdicts({
+    plan,
+    transcripts: [{
+      stage: 4,
+      answers: [
+        { probeId: "probe-04-01", kind: "chain-link", answerText: "stage 1", parsed: true },
+        { probeId: "probe-04-02", kind: "stage-fact", answerText: "`cw-000001`", parsed: true },
+        { probeId: "probe-04-03", kind: "definition-line", answerText: null, parsed: false },
+      ],
+    }, {
+      stage: 8,
+      answers: [
+        { probeId: "probe-08-01", kind: "chain-link", answerText: "stage-1.rs", parsed: true },
+        { probeId: "probe-08-02", kind: "echo", answerText: "whatever", parsed: true },
+      ],
+    }],
+  });
+  assert.deepEqual(verdictRows.map((row) => [row.probeId, row.verdict, row.hop, row.lag]), [
+    ["probe-04-01", "match", "SOF", 2],
+    ["probe-04-02", "match", null, null],
+    ["probe-04-03", "unanswered", null, null],
+    ["probe-08-01", "mismatch", "FIN", 5],
+  ]);
+  checks.mechanicalExactMatchIsTheHeadlineVerdict = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 36 - wave selection laws. Chain-link draws spread across chains and
+// ages, echoes restate distinct earlier answers, and the derivation control
+// never rides a chain file.
+// ---------------------------------------------------------------------------
+{
+  const chains = [
+    { id: "trace-a", links: [
+      { index: 1, stage: 2, hop: "SOF", hopIndex: null, input: "a0", expectedAnswer: 1 },
+      { index: 2, stage: 3, hop: "FIN", hopIndex: 2, input: 1, expectedAnswer: "a2" },
+      { index: 3, stage: 5, hop: "INC", hopIndex: 1, input: "a2", expectedAnswer: "a3" },
+    ] },
+    { id: "trace-b", links: [
+      { index: 1, stage: 6, hop: "SOF", hopIndex: null, input: "b0", expectedAnswer: 2 },
+      { index: 2, stage: 7, hop: "FIN", hopIndex: 1, input: 2, expectedAnswer: "b2" },
+      { index: 3, stage: 9, hop: "INC", hopIndex: 2, input: "b2", expectedAnswer: "b3" },
+    ] },
+  ];
+  const probedLinks = new Set();
+  const probedChains = new Set();
+  const first = buildChainLinkProbes({
+    chains, probeOrdinal: 16, seed: "w16", count: 2, probedLinks, probedChains,
+  });
+  assert.equal(first.length, 2);
+  assert.notEqual(first[0].chainId, first[1].chainId, "one wave must not probe a chain twice");
+  // Eligible pool at wave 16: five links, oldest third = stages 2 and 3.
+  assert(first.some((probe) => probe.sourceStage <= 3), "the wave skipped the oldest third");
+  const sofDraws = first.filter((probe) => probe.linkIndex === 1);
+  assert(sofDraws.every((probe) => probe.question.includes("stage number")) &&
+    first.filter((probe) => probe.linkIndex > 1)
+      .every((probe) => probe.question.includes("repository-relative path")),
+  "the answer form must follow the hop kind");
+  assert.deepEqual(buildChainLinkProbes({
+    chains, probeOrdinal: 16, seed: "w16", count: 2,
+    probedLinks: new Set(), probedChains: new Set(),
+  }), first, "chain-link selection ignores its seed inputs");
+  // Once chain a is exhausted, the repeat-chain law cannot be satisfied and the
+  // draw refuses rather than quietly dropping the law.
+  assert.throws(() => buildChainLinkProbes({
+    chains, probeOrdinal: 32, seed: "w32", count: 1,
+    probedLinks: new Set(["trace-a:1", "trace-a:2", "trace-a:3"]),
+    probedChains: new Set(["trace-a"]),
+  }), /selection laws/);
+  const echoedTargets = new Set();
+  const earlierWaves = [{ probes: first.map((probe, position) => ({
+    ...probe, id: `probe-16-0${position + 1}`,
+  })) }];
+  const echoes = buildEchoProbes({ earlierWaves, seed: "echo", count: 2, echoedTargets });
+  assert.equal(echoes.length, 2);
+  assert(echoes.every((probe) => !Object.hasOwn(probe, "expectedAnswer")),
+    "an echo must never carry an expected answer");
+  assert.notEqual(echoes[0].targetProbeId, echoes[1].targetProbeId);
+  assert.throws(() => buildEchoProbes({ earlierWaves, seed: "echo-2", count: 1, echoedTargets }),
+    /unechoed chain-link/);
+  const control = buildDerivationControlProbes({
+    stages: [{ ordinal: 1, kind: "read", files: [{ path: "a2" }, { path: "free.c" }] }],
+    chains, seed: "control", count: 1,
+    includeTargets: (path) => path === "free.c" ? ["inc.h"] : ["x.h"],
+  });
+  assert.equal(control[0].sourcePath, "free.c", "the control must never ride a chain file");
+  assert.equal(control[0].expectedAnswer, "inc.h");
+  checks.probeScheduleLawsSelectAcrossChainsAndAges = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 37 - anti-leak: no instruction surface may name a link answer at or
+// after its step stage, nor pair an SOF/FIN link's stage with its path. File
+// bodies are the corpus and are exempt.
+// ---------------------------------------------------------------------------
+{
+  const rehash = (mutated) => {
+    mutated.planSha256 = stagePlanSha256(mutated);
+    return mutated;
+  };
+  const named = structuredClone(plan);
+  named.stages[6].instructions += " compare against stage-1-extra.rs";
+  assert.throws(() => validateStagePlan(rehash(named)), /names the answer/);
+  const paired = structuredClone(plan);
+  paired.stages[6].instructions += " cross-check stage 1 alongside stage-1.rs";
+  assert.throws(() => validateStagePlan(rehash(paired)), /pairs trace-a link 1's stage and path/);
+  checks.instructionSurfacesNeverLeakChainAnswers = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
