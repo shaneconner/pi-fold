@@ -1,11 +1,23 @@
 import type { EvidenceRef } from "../json.ts";
 
-export const DEFAULT_ACTIVE_CONTEXT_TOOL_NAME = "active_context";
+/**
+ * THE deployment identity. One package, one brand, no constructor options.
+ *
+ * These were five public knobs through 1.0.2, on the theory that the runtime was a
+ * generic framework a host would brand. It is not: it is a branded package with one
+ * deployment, and the knobs bought nothing but a namespace a consumer could strand its
+ * own durable state under. They are hardwired here and REFUSED by name at the package
+ * entry. An internal seam survives on `registerActiveContext`, because the neutrality
+ * gate has to register a synthetic brand to prove none of it leaks into these defaults,
+ * and the experiment harness registers this same identity explicitly so the sealed runs
+ * keep their entry types.
+ */
+export const DEFAULT_ACTIVE_CONTEXT_TOOL_NAME = "pi_fold_context";
 export const DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX = "pi-fold-active-context";
-export const DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL = "Active Context";
-export const DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN = "active-context";
+export const DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL = "pi-fold Active Context";
+export const DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN = "pi-fold";
 export const DEFAULT_ACTIVE_CONTEXT_COMMAND_NAMES = Object.freeze({
-  status: "context",
+  status: "pi-fold-context",
   fold: "fold-context",
 });
 
@@ -408,13 +420,53 @@ export const THRESHOLD_NOTICE_SHARES: readonly number[] = Object.freeze([0.25, 0
 /** Delivered notices kept rendered in the window; the oldest leaves the carrier, never the stream. */
 export const MAX_THRESHOLD_NOTICES = 9;
 /**
- * Internal switches for the two guidance surfaces this build ships, both default ON.
- * Shane wants them user-optional eventually; the PUBLIC option surface is Build D's
- * mechanism, so until then these are constants, not constructor knobs.
+ * The two guidance surfaces, as ONE public option, both switches defaulting on.
+ * Shane's ruling: notices and action responses are optional, and the default is yes.
  */
-export const THRESHOLD_NOTICES_ENABLED = true;
-/** Context-management actions answer with persistent acknowledgements by default. */
-export const CONTEXT_ACTION_RESPONSES_ENABLED = true;
+export interface ActiveContextGuidance {
+  /** Append-once occupancy waypoints at 25/50/75 percent of the serving budget. */
+  thresholdNotices: boolean;
+  /** Persistent acknowledgements for the agent's own context actions. */
+  actionResponses: boolean;
+}
+
+export const DEFAULT_GUIDANCE: ActiveContextGuidance = Object.freeze({
+  thresholdNotices: true,
+  actionResponses: true,
+});
+
+const GUIDANCE_KEYS: readonly (keyof ActiveContextGuidance)[] = Object.freeze([
+  "thresholdNotices", "actionResponses",
+]);
+
+/**
+ * Validated whole, like the thresholds: an unknown key is a typo, not a silent no-op.
+ *
+ * Booleans and nothing else. The dosage families that used to parameterize guidance
+ * (profiles, reminder shares, milestone budgets) were deleted for measuring nothing
+ * across eleven runs, and shares or per-notice keys here would rebuild them by another
+ * name. An operator either wants the runtime to speak at the boundary or does not.
+ */
+export function resolveGuidance(value: unknown): ActiveContextGuidance {
+  if (value === undefined) return DEFAULT_GUIDANCE;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("guidance must be an object of { thresholdNotices, actionResponses } booleans");
+  }
+  for (const key of Object.keys(value)) {
+    if (!GUIDANCE_KEYS.includes(key as keyof ActiveContextGuidance)) {
+      throw new Error(`guidance has no ${key} setting: the only keys are ` +
+        `${GUIDANCE_KEYS.join(", ")}, and both are booleans`);
+    }
+  }
+  const resolved = { ...DEFAULT_GUIDANCE } as ActiveContextGuidance;
+  for (const key of GUIDANCE_KEYS) {
+    if (!Object.hasOwn(value, key)) continue;
+    const setting = (value as Record<string, unknown>)[key];
+    if (typeof setting !== "boolean") throw new Error(`guidance.${key} must be a boolean`);
+    resolved[key] = setting;
+  }
+  return Object.freeze(resolved);
+}
 /** The last-call is LITERAL persisted bytes; the bound is on the stored text itself. */
 export const MAX_LAST_CALL_TEXT_BYTES = 2_048;
 /** One notice is one waypoint line; a waypoint that becomes a paragraph is bloat. */

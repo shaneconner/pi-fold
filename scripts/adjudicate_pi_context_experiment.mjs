@@ -588,7 +588,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     // "immediate".
     foldScheduling: config.foldScheduling ?? "epoch",
     foldPeekResults: config.foldPeekResults ?? true,
-    providerTotalWindow: config.providerTotalWindow ?? null,
+    providerInputBudget: config.providerInputBudget ?? null,
     transport: config.transport ?? "auto",
     repetition: config.repetition,
     mode: config.mode,

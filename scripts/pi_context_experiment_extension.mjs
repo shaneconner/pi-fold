@@ -23,7 +23,7 @@ import {
   PI_FOLD_ACTIVE_CONTEXT_REGISTRATION,
   PI_FOLD_NATIVE_COMPACTION_DECISION_ENTRY,
   PI_FOLD_NATIVE_COMPACTION_RECEIPT_ENTRY,
-  PI_FOLD_READ_ONLY_TOOLS,
+  PI_FOLD_AUTO_FOLDABLE_TOOLS,
 } from "./lib/pi_fold_identity.mjs";
 import {
   EXPERIMENT_ALLOWED_TOOLS,
@@ -50,7 +50,7 @@ import {
 // repo_stage returns pinned source bytes and mutates nothing, so it is foldable: stale
 // stage results become eligible tool-fold batches and the autonomous ladder fires on
 // cadence rather than on the model volunteering (the soak minor-3 lesson).
-const EXPERIMENT_READ_ONLY_TOOLS = new Set([...PI_FOLD_READ_ONLY_TOOLS, EXPERIMENT_TOOL_NAME]);
+const EXPERIMENT_AUTO_FOLDABLE_TOOLS = new Set([...PI_FOLD_AUTO_FOLDABLE_TOOLS, EXPERIMENT_TOOL_NAME]);
 
 function allStrings(value, result = []) {
   if (typeof value === "string") result.push(value);
@@ -232,15 +232,14 @@ export function createPiContextExperimentExtension(config) {
           // deployment bootstrap produced with its agent, MCP and memory layers disabled;
           // no summarizer is configured, so fold briefs stay deterministic.
           registerEvidenceIngestion(pi, {
-            isMcpTool: () => false,
             entryTypePrefix: PI_FOLD_ACTIVE_CONTEXT_REGISTRATION.entryTypePrefix,
           });
           registerActiveContext(pi, {
             ...PI_FOLD_ACTIVE_CONTEXT_REGISTRATION,
-            readOnlyTools: EXPERIMENT_READ_ONLY_TOOLS,
+            autoFoldableTools: EXPERIMENT_AUTO_FOLDABLE_TOOLS,
             // The deployment fact, when the run config carries one: without it the
             // runtime measures every threshold against the per-request descriptor.
-            ...(config.providerTotalWindow === undefined ? {} : { providerTotalWindow: config.providerTotalWindow }),
+            ...(config.providerInputBudget === undefined ? {} : { providerInputBudget: config.providerInputBudget }),
           });
         } finally {
           pi.registerTool = registerTool;

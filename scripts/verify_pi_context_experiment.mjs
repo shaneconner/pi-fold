@@ -16,7 +16,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   EXPERIMENT_ARMS,
   EXPERIMENT_DEFAULT_GUIDED_CURATION,
-  EXPERIMENT_PROVIDER_TOTAL_WINDOWS,
+  EXPERIMENT_PROVIDER_INPUT_BUDGETS,
   EXPERIMENT_TRANSPORT,
   EXPERIMENT_TRANSPORTS,
   EXPERIMENT_DEFAULT_REPO,
@@ -1274,36 +1274,46 @@ try {
 }
 
 // ---------------------------------------------------------------------------
-// GATE 23 - the provider-total-window deployment fact is resolved from the model pin and
-// threaded supervisor -> run config -> manifest -> registration, so no run can measure
-// its curation thresholds against the per-request descriptor budget again (rep 16's abort)
+// GATE 23 - the provider-input-budget deployment fact is resolved from the PROVIDER and
+// model pin together and threaded supervisor -> run config -> manifest -> registration, so
+// no run can measure its curation thresholds against the per-request descriptor budget
+// again (rep 16's abort), and the retired gross-window key stays readable on sealed runs
 // ---------------------------------------------------------------------------
 {
-  // The fact is keyed by model id, and each entry is pinned to its evidence.
-  assert.equal(EXPERIMENT_PROVIDER_TOTAL_WINDOWS["gpt-5.6-luna"], 400_000);
-  assert.equal(EXPERIMENT_PROVIDER_TOTAL_WINDOWS["gpt-5.6-sol"], 400_000);
-  validateExperimentRunConfig({ ...runConfig, providerTotalWindow: 400_000 });
-  validateExperimentRunConfig(runConfig); // unlisted models carry no key: descriptor mode
-  assert.throws(() => validateExperimentRunConfig({ ...runConfig, providerTotalWindow: 0 }),
-    /provider total window is invalid/);
-  assert.throws(() => validateExperimentRunConfig({ ...runConfig, providerTotalWindow: "400000" }),
-    /provider total window is invalid/);
+  // Keyed by provider AND model: capacity is a fact about a deployment, and the same
+  // model id behind another provider is another wire. Stated already net, which is the
+  // shape the runtime now takes, and equal to the 383,616 every sealed run measured.
+  assert.equal(EXPERIMENT_PROVIDER_INPUT_BUDGETS["openai-codex/gpt-5.6-luna"], 383_616);
+  assert.equal(EXPERIMENT_PROVIDER_INPUT_BUDGETS["openai-codex/gpt-5.6-sol"], 383_616);
+  assert.equal(EXPERIMENT_PROVIDER_INPUT_BUDGETS["gpt-5.6-sol"], undefined);
+  validateExperimentRunConfig({ ...runConfig, providerInputBudget: 383_616 });
+  validateExperimentRunConfig(runConfig); // unlisted deployments carry no key: descriptor mode
+  assert.throws(() => validateExperimentRunConfig({ ...runConfig, providerInputBudget: 0 }),
+    /provider input budget is invalid/);
+  assert.throws(() => validateExperimentRunConfig({ ...runConfig, providerInputBudget: "383616" }),
+    /provider input budget is invalid/);
   assert.throws(() => validateExperimentRunConfig({ ...runConfig, providerWindow: 400_000 }),
     /run config shape/);
-  validateExperimentManifest({ ...manifest, providerTotalWindow: 400_000 });
+  validateExperimentManifest({ ...manifest, providerInputBudget: 383_616 });
   validateExperimentManifest(manifest);
-  assert.throws(() => validateExperimentManifest({ ...manifest, providerTotalWindow: -1 }),
-    /provider total window is invalid/);
-  assert(supervisor.includes("EXPERIMENT_PROVIDER_TOTAL_WINDOWS[modelId] ?? null") &&
-    supervisor.includes("{ providerTotalWindow }"),
-  "the supervisor must resolve the deployment fact from the model pin and record it in the run config");
-  assert(worker.includes("{ providerTotalWindow: config.providerTotalWindow }"),
+  assert.throws(() => validateExperimentManifest({ ...manifest, providerInputBudget: -1 }),
+    /provider input budget is invalid/);
+  // The gross-window key is RETIRED, not forbidden: runs 15-23 recorded it and their
+  // sealed configs are immutable data, so they must keep validating while nothing emits it.
+  validateExperimentRunConfig({ ...runConfig, providerTotalWindow: 400_000 });
+  validateExperimentManifest({ ...manifest, providerTotalWindow: 400_000 });
+  assert.equal(supervisor.includes("EXPERIMENT_PROVIDER_TOTAL_WINDOWS"), false,
+    "the supervisor still resolves the retired gross-window fact");
+  assert(supervisor.includes("EXPERIMENT_PROVIDER_INPUT_BUDGETS[`${modelProvider}/${modelId}`] ?? null") &&
+    supervisor.includes("{ providerInputBudget }"),
+  "the supervisor must resolve the deployment fact from provider plus model and record it");
+  assert(worker.includes("{ providerInputBudget: config.providerInputBudget }"),
     "the worker must pin the run's serving-budget fact in the sealed manifest");
-  assert(extension.includes("{ providerTotalWindow: config.providerTotalWindow }"),
+  assert(extension.includes("{ providerInputBudget: config.providerInputBudget }"),
     "the extension must pass the deployment fact into the active-context registration");
-  assert(adjudicator.includes("providerTotalWindow: config.providerTotalWindow ?? null"),
+  assert(adjudicator.includes("providerInputBudget: config.providerInputBudget ?? null"),
     "the adjudicator must echo the run's serving-budget fact into the evidence");
-  checks.providerTotalWindowThreadedFromModelPinToRegistration = true;
+  checks.providerInputBudgetThreadedFromDeploymentPinToRegistration = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1435,7 +1445,7 @@ try {
   assert.equal(identity.PI_FOLD_NATIVE_COMPACTION_RECEIPT_ENTRY,
     `${identity.PI_FOLD_ENTRY_NAMESPACE}-native-compaction-receipt`);
   // The runtime is neutral: no deployment brand may be baked into it.
-  assert(!identity.PI_FOLD_READ_ONLY_TOOLS.has("pi_fold_context"),
+  assert(!identity.PI_FOLD_AUTO_FOLDABLE_TOOLS.has("pi_fold_context"),
     "the deployment's own context tool must be added at registration, not carried in the read-only set");
   checks.harnessIdentityMatchesRuntimeNamespace = true;
 }

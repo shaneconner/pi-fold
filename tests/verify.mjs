@@ -74,7 +74,6 @@ const DEPLOYMENT_IDENTITY_FIXTURE = Object.freeze({
   mcpOwnerId: "acme:active-context-test",
   evidenceDirectory: "acme-evidence",
   mcpServer: "acme",
-  mcpFallbackServer: "acme",
 });
 
 /**
@@ -83,6 +82,15 @@ const DEPLOYMENT_IDENTITY_FIXTURE = Object.freeze({
  * rounds to zero bytes is how a fixture asks for no fresh tail: the old two-key
  * `{ freshTurns: 1, freshBytes: 0 }` override no longer exists to say it with.
  */
+/**
+ * A fixture's serving budget from the window it wants to model.
+ *
+ * `providerInputBudget` is ALREADY NET, so a fixture that used to declare a 100,000-token
+ * total window and measure against the 90,000 the runtime netted out of it now declares
+ * the 90,000 directly. Same arithmetic, stated once, on the caller's side of the API.
+ */
+const servingBudget = (window) => window - Math.min(16_384, Math.floor(window * 0.1));
+
 const NO_FRESH_TAIL = Object.freeze({ ...context.DEFAULT_THRESHOLDS, freshTail: 1e-9 });
 
 /** A fresh tail wide enough that the newest turns are unfoldable at fixture scale. */
@@ -136,7 +144,7 @@ function makeFixture({
   };
   for (let turn = 0; turn < turns; turn += 1) {
     const ids = [];
-    const named = mentionToolName ? " Ask active_context for the exact candidate." : "";
+    const named = mentionToolName ? " Ask pi_fold_context for the exact candidate." : "";
     ids.push(add({
       role: "user",
       content: [{
@@ -152,7 +160,7 @@ function makeFixture({
         content: [{
           type: "toolCall",
           id: `call-${turn}`,
-          name: peek ? "active_context" : "read",
+          name: peek ? "pi_fold_context" : "read",
           arguments: peek
             ? { action: "peek", id: peekTargetId }
             : (readArguments ? readArguments(turn) : { path: `file-${turn}.txt` }),
@@ -163,7 +171,7 @@ function makeFixture({
       ids.push(add({
         role: "toolResult",
         toolCallId: `call-${turn}`,
-        toolName: peek ? "active_context" : "read",
+        toolName: peek ? "pi_fold_context" : "read",
         content: [{
           type: "text",
           text: `Result ${turn}: ${"r".repeat(resultChars)}${resultTail ? ` ${resultTail(turn)}` : ""}`,
@@ -216,18 +224,18 @@ function makeRuntime(built, {
   toolLabel,
   brandNoun,
   entryTypePrefix,
-  commandPrefix,
   commandNames,
   summarizeContextSpan,
   initialEntries,
-  readOnlyTools,
+  autoFoldableTools,
   thresholds,
+  guidance,
   retiredOptions,
-  isMcpTool,
   evidenceIngestion,
   summarizer,
   removedOptions,
-  providerTotalWindow,
+  registerEvidence = false,
+  providerInputBudget,
   loadHostModule,
   packageRegistration = false,
   sessionFile = join(tmpdir(), "pi-fold-test-session.jsonl"),
@@ -305,22 +313,27 @@ function makeRuntime(built, {
     ...(toolLabel ? { toolLabel } : {}),
     ...(brandNoun ? { brandNoun } : {}),
     ...(entryTypePrefix ? { entryTypePrefix } : {}),
-    ...(commandPrefix ? { commandPrefix } : {}),
     ...(commandNames ? { commandNames } : {}),
     ...(summarizeContextSpan ? { summarizeContextSpan } : {}),
-    ...(readOnlyTools ? { readOnlyTools } : {}),
+    ...(autoFoldableTools ? { autoFoldableTools } : {}),
     ...(thresholds ? { thresholds } : {}),
+    ...(guidance ? { guidance } : {}),
     ...(retiredOptions ?? {}),
-    ...(isMcpTool ? { isMcpTool } : {}),
     ...(evidenceIngestion === undefined ? {} : { evidenceIngestion }),
     ...(summarizer === undefined ? {} : { summarizer }),
     // Deleted options, forwarded verbatim so gate 68 can prove they are REFUSED.
     ...(removedOptions ?? {}),
-    ...(providerTotalWindow === undefined ? {} : { providerTotalWindow }),
+    ...(providerInputBudget === undefined ? {} : { providerInputBudget }),
   };
-  runtime.registration = packageRegistration
-    ? piFold.registerPiFold(pi, registrationOptions, loadHostModule)
-    : context.registerActiveContext(pi, registrationOptions);
+  if (packageRegistration) {
+    runtime.registration = piFold.registerPiFold(pi, registrationOptions, loadHostModule);
+  } else {
+    // The internal seam. Evidence first, then the runtime, which is the order the
+    // package entry uses; a deployment registering the seam directly (the experiment
+    // harness, the branding fixture) wires the same pair by hand.
+    if (registerEvidence) evidenceModule.registerEvidenceIngestion(pi, { entryTypePrefix });
+    runtime.registration = context.registerActiveContext(pi, registrationOptions);
+  }
   return runtime;
 }
 
@@ -464,7 +477,7 @@ async function runtimeCommit(runtime, {
   };
 }
 
-async function toolStatus(runtime, toolName = "active_context", detail) {
+async function toolStatus(runtime, toolName = "pi_fold_context", detail) {
   return runtime.tools.get(toolName).execute(
     "status-call",
     { action: "status", ...(detail ? { detail } : {}) },
@@ -480,7 +493,7 @@ async function toolStatus(runtime, toolName = "active_context", detail) {
  * objects page still advances through the ordinary limit-paging offsets; an
  * untruncated tree page carries everything from its offset and ends the walk.
  */
-async function pagedStatusRows(runtime, detail, toolName = "active_context") {
+async function pagedStatusRows(runtime, detail, toolName = "pi_fold_context") {
   const rows = [];
   const pages = [];
   let offset = 0;
@@ -634,11 +647,14 @@ function foldSiblings(branch, sessionId, foldId, entryTypePrefix) {
 async function collectRegistrationSurface(registration, mcpToolName) {
   const scratch = await mkdtemp(join(tmpdir(), "pi-fold-branding-"));
   try {
+    // The package entry when there is nothing to say, which is the point of hardwiring
+    // the identity; the internal seam when a synthetic brand has to be registered, which
+    // registerPiFold now refuses by name.
     const runtimeOptions = {
       ...registration,
-      packageRegistration: true,
+      packageRegistration: Object.keys(registration).length === 0,
+      registerEvidence: true,
       sessionFile: join(scratch, "session.jsonl"),
-      isMcpTool: (name) => name === mcpToolName || name === "opaque_mcp_tool",
     };
     const runtime = makeRuntime(
       makeFixture({ turns: 8, resultChars: 10_000, contextWindow: 100_000 }),
@@ -743,7 +759,7 @@ async function collectRegistrationSurface(registration, mcpToolName) {
         ownerId: evidenceProjection.details.evidence.owner.id,
         path: evidenceProjection.details.evidence.path,
         mcpServer: evidenceProjection.details.mcpServer,
-        fallbackMcpServer: fallbackEvidenceProjection.details.mcpServer,
+        fallbackProjection: fallbackEvidenceProjection,
       },
     };
   } finally {
@@ -754,14 +770,14 @@ async function collectRegistrationSurface(registration, mcpToolName) {
 async function gateRegistration() {
   const defaults = makeRuntime(makeFixture({ turns: 4, resultChars: 3_000 }));
   assert.deepEqual([...context.READ_ONLY_TOOLS_DEFAULT], ["read", "grep", "find", "ls"]);
-  assert.deepEqual([...defaults.tools.keys()], ["active_context"]);
-  assert.deepEqual([...defaults.commands.keys()].sort(), ["context", "fold-context"]);
+  assert.deepEqual([...defaults.tools.keys()], ["pi_fold_context"]);
+  assert.deepEqual([...defaults.commands.keys()].sort(), ["fold-context", "pi-fold-context"]);
   await startRuntime(defaults);
 
   const custom = makeRuntime(makeFixture({ turns: 8, resultChars: 10_000, contextWindow: 100_000 }), {
     toolName: "ctx_tool",
     entryTypePrefix: "custom-context",
-    commandPrefix: "sandbox",
+    commandNames: { status: "sandbox-context", fold: "sandbox-fold-context" },
   });
   assert.deepEqual([...custom.tools.keys()], ["ctx_tool"]);
   assert.deepEqual([...custom.commands.keys()].sort(), ["sandbox-context", "sandbox-fold-context"]);
@@ -791,8 +807,8 @@ async function gateRegistration() {
     commandNames: { status: "same", fold: "same" },
   }).tools, /distinct kebab-case/i);
   return {
-    defaultTool: "active_context",
-    defaultReadOnlyTools: [...context.READ_ONLY_TOOLS_DEFAULT],
+    defaultTool: "pi_fold_context",
+    defaultAutoFoldableTools: [...context.READ_ONLY_TOOLS_DEFAULT],
     defaultCommands: [...defaults.commands.keys()].sort(),
     commands: [...custom.commands.keys()].sort(),
     namedCommands: [...named.commands.keys()].sort(),
@@ -801,13 +817,17 @@ async function gateRegistration() {
 }
 
 async function gateNeutralDefaultBranding() {
+  // The defaults ARE the deployment identity now: the five branding options left the
+  // public surface, so this asserts the shipped identity rather than a neutral stand-in.
+  // The fixture brand still has to appear nowhere in it, which is what keeps the seam
+  // that renders the Acme surface honest instead of vacuous.
   const surface = await collectRegistrationSurface({}, "mcp__docs__fetch");
-  assert.equal(surface.toolName, "active_context");
-  assert.equal(surface.toolLabel, "Active Context");
-  assert.deepEqual(surface.commands, ["context", "fold-context"]);
+  assert.equal(surface.toolName, "pi_fold_context");
+  assert.equal(surface.toolLabel, "pi-fold Active Context");
+  assert.deepEqual(surface.commands, ["fold-context", "pi-fold-context"]);
   assert.deepEqual(surface.initialStatus, {
     key: "pi-fold-active-context",
-    text: "active_context folds: 0 · provider usage unmeasured",
+    text: "pi_fold_context folds: 0 · provider usage unmeasured",
   });
   assert.deepEqual(surface.entryTypes, [
     "pi-fold-active-context-fold-record",
@@ -817,31 +837,35 @@ async function gateNeutralDefaultBranding() {
     "pi-fold-native-compaction-receipt",
     "pi-fold-provider-context-measurement",
   ]);
-  assert(surface.placeholderTexts.some((text) => text.startsWith("[active-context fold ")));
+  assert(surface.placeholderTexts.some((text) => text.startsWith("[pi-fold active-context fold ")));
   assert.deepEqual(surface.carrierTypes, ["pi-fold-active-context-receipts"]);
-  assert(surface.carrierTexts.some((text) => text.startsWith("[active-context actions] ")));
+  assert(surface.carrierTexts.some((text) => text.startsWith("[pi-fold context actions] ")));
   assert.deepEqual(surface.carrierSources, ["pi-fold/active-context"]);
   assert.equal(
     surface.blockedCompaction,
-    "blocked stock automatic compaction; active-context folding remains authoritative",
+    "blocked stock automatic compaction; pi-fold context folding remains authoritative",
   );
   assert.equal(
     surface.completedCompaction,
-    "native compaction completed; active-context folding state rebuilt",
+    "native compaction completed; pi-fold folding state rebuilt",
   );
   assert(surface.compactionNotices.includes(
-    "Pi native compaction ran; active-context folding state was rebuilt.",
+    "Pi native compaction ran; pi-fold folding state was rebuilt.",
   ));
   assert.equal(
     surface.hardFenceNote,
-    "Provider context reached the hard active-context fence without a newly committed lossless fold. " +
+    "Provider context reached the hard pi-fold fence without a newly committed lossless fold. " +
       "The provider request was aborted before transmission; run /compact or make an explicit bounded context fold.",
   );
   assert.equal(surface.evidence.ownerKind, "pi-fold-mcp");
   assert.equal(surface.evidence.ownerId, "pi-fold:active-context-test");
   assert(surface.evidence.path.includes("/pi-fold-evidence/"));
   assert.equal(surface.evidence.mcpServer, "docs");
-  assert.equal(surface.evidence.fallbackMcpServer, "pi-fold");
+  // The MCP predicate is gone and the mcp__server__tool convention is the rule, so a
+  // name outside the convention is deliberately NOT classified as MCP: it produces no
+  // MCP evidence projection at all rather than one under a fallback server. That is the
+  // true behavior, asserted as such.
+  assert.equal(surface.evidence.fallbackProjection, undefined);
   assert.equal(new RegExp(DEPLOYMENT_IDENTITY_FIXTURE.originName, "i").test(json.stableStringify(surface)), false);
   return {
     tool: surface.toolName,
@@ -850,6 +874,7 @@ async function gateNeutralDefaultBranding() {
     entryTypes: surface.entryTypes,
     evidenceOwner: surface.evidence.ownerKind,
     mcpServer: surface.evidence.mcpServer,
+    unconventionalNameProjected: false,
     originOccurrences: 0,
   };
 }
@@ -875,7 +900,9 @@ async function gateDeploymentBrandingReproduction() {
   assert.equal(surface.evidence.ownerId, fixture.mcpOwnerId);
   assert(surface.evidence.path.includes(`/${fixture.evidenceDirectory}/`));
   assert.equal(surface.evidence.mcpServer, fixture.mcpServer);
-  assert.equal(surface.evidence.fallbackMcpServer, fixture.mcpFallbackServer);
+  // Same convention under a deployment identity: `opaque_mcp_tool` is not shaped
+  // mcp__server__tool, so nothing classifies it and no fallback server is minted.
+  assert.equal(surface.evidence.fallbackProjection, undefined);
   return {
     tool: surface.toolName,
     label: surface.toolLabel,
@@ -942,14 +969,14 @@ async function gateFoldLattice() {
   parentDrift[0].parentId = "missing-parent";
   assert.throws(() => context.validateFoldForest(parentDrift), /parent drift/);
   const structurallyValidHistoricalBrief = structuredClone(validated);
-  structurallyValidHistoricalBrief[0].brief = "active_context";
+  structurallyValidHistoricalBrief[0].brief = "pi_fold_context";
   assert.equal(context.validateFoldForest(structurallyValidHistoricalBrief).length, 1);
   await assert.rejects(() => context.prepareFold({
     candidate,
     snapshot,
     state: empty,
     generation: 1,
-    brief: "active_context",
+    brief: "pi_fold_context",
   }), /Supplied brief must be non-structural/);
 
   const recovered = context.recoverFoldMessages({
@@ -1225,7 +1252,7 @@ async function gateLegacyLunaRegression() {
   assert.equal(slate.find((item) => item.source_id === legacyFold.id).generator, "projection-model");
   const next = context.selectAutomaticToolBatch(built.snapshot, loaded)[0];
   assert(next, "Legacy fixture lacked a second tool fold for round-trip persistence");
-  const response = await runtime.tools.get("active_context").execute(
+  const response = await runtime.tools.get("pi_fold_context").execute(
     "legacy-round-trip",
     { action: "fold", ids: next.sourceRefs.map((ref) => ref.entryId) },
     new AbortController().signal,
@@ -1265,7 +1292,7 @@ async function gatePoisonedFloorRegression() {
   assert(status.details.eligibleChapter, "Chapter-only fixture has no eligible chapter");
   const action = structuredClone(status.details.eligibleChapter.action);
   delete action.brief;
-  const response = await runtime.tools.get("active_context").execute(
+  const response = await runtime.tools.get("pi_fold_context").execute(
     "poisoned-floor",
     action,
     new AbortController().signal,
@@ -1275,7 +1302,7 @@ async function gatePoisonedFloorRegression() {
   assert.equal(response.details.kind, "chapter");
   assert.equal(response.details.provenance.kind, "deterministic");
   assert(response.details.brief.length > 20 && response.details.brief.length <= 1_200);
-  assert(!/active_context/i.test(response.details.brief));
+  assert(!/pi_fold_context/i.test(response.details.brief));
   // The floor under test is a BRIEF floor, and a brief is fixed at the decision. Under
   // the epoch that decision is a mark, so the floor is read there first and then read
   // again off the fold the commit applies: the same bytes have to survive both.
@@ -1356,7 +1383,7 @@ async function gatePersistenceChain() {
     "Fold records did not precede the state that adopts them");
   const firstState = materialized(runtime);
   const foldId = firstState.folds[0].id;
-  await runtime.tools.get("active_context").execute(
+  await runtime.tools.get("pi_fold_context").execute(
     "expand-for-delta",
     { action: "expand", id: foldId },
     new AbortController().signal,
@@ -1555,7 +1582,7 @@ async function gateExpandLeases() {
   // turned that mark into a fold, so the epoch is driven to its commit first.
   await measureAndCommit(runtime, 85_000, 100_000, "lease-commit");
   const foldId = materialized(runtime).folds[0].id;
-  await runtime.tools.get("active_context").execute(
+  await runtime.tools.get("pi_fold_context").execute(
     "lease-expand",
     { action: "expand", id: foldId },
     new AbortController().signal,
@@ -1597,7 +1624,7 @@ async function gateExpandLeases() {
   await startRuntime(boundedRuntime);
   const rootIds = wide.state.folds.filter((fold) => fold.parentId === null).map((fold) => fold.id);
   for (const id of rootIds) {
-    await boundedRuntime.tools.get("active_context").execute(
+    await boundedRuntime.tools.get("pi_fold_context").execute(
       `expand-${id}`,
       { action: "expand", id },
       new AbortController().signal,
@@ -1838,7 +1865,7 @@ async function gateFoldCandidatesDetail() {
     !String(entry.customType ?? "").endsWith("-context-event"));
   const branchBefore = json.stableStringify(durableEntries(runtime.branch));
   const appendedBefore = durableEntries(runtime.appended).length;
-  const status = await toolStatus(runtime, "active_context", "fold_candidates");
+  const status = await toolStatus(runtime, "pi_fold_context", "fold_candidates");
   assert.equal(json.stableStringify(status.details.candidates), json.stableStringify(expected));
   assert.equal(status.details.automatic.measurementFresh, false);
   assert.equal(status.details.candidates.wouldFireNow, null);
@@ -1882,7 +1909,7 @@ async function gateNoToolCallRewrite() {
   const revisionBefore = materialized(runtime).revision;
   const foldsBefore = materialized(runtime).folds.length;
   for (const toolName of ["read", "Agent", "grep"]) {
-    await runtime.tools.get("active_context").execute(
+    await runtime.tools.get("pi_fold_context").execute(
       `tool-${toolName}`, { action: "status" }, new AbortController().signal, undefined, runtime.ctx,
     );
   }
@@ -2113,12 +2140,12 @@ async function gateFreshTailShareCap() {
   // A window too small to carry the policy is REFUSED at registration, never clamped.
   assert.throws(
     () => makeRuntime(makeFixture({ ...shape, contextWindow: 16_000 }),
-      { providerTotalWindow: 16_000 }),
+      { providerInputBudget: 14_400 }),
     /below the 500-token minimum one foldable unit needs/,
   );
   assert.throws(
     () => makeRuntime(makeFixture({ ...shape, contextWindow: 10_000 }),
-      { providerTotalWindow: 10_000 }),
+      { providerInputBudget: 9_000 }),
     /below the 10000-token minimum this package supports/,
   );
   return {
@@ -2139,7 +2166,6 @@ async function gateEvidenceIngestionSwitch() {
       packageRegistration: true,
       sessionFile,
       evidenceIngestion: false,
-      isMcpTool: () => true,
     });
     assert.equal(runtime.handlers.has("tool_result"), false);
     await startRuntime(runtime);
@@ -2406,7 +2432,7 @@ async function gatePeekAndFoldIndex() {
   assert(projectionBefore.includes(consolidationId));
   assert.equal(projectionBefore.includes(childId), false);
 
-  const peek = await runtime.tools.get("active_context").execute(
+  const peek = await runtime.tools.get("pi_fold_context").execute(
     "peek-nested",
     { action: "peek", id: childId },
     new AbortController().signal,
@@ -2482,7 +2508,7 @@ async function gatePeekAndFoldIndex() {
   assert.equal(peek.details.wider, undefined);
   assert.equal(peek.details.truncationReminder, undefined);
 
-  const tree = (await toolStatus(runtime, "active_context", "tree")).details.tree;
+  const tree = (await toolStatus(runtime, "pi_fold_context", "tree")).details.tree;
   assert.deepEqual(tree.map((row) => [row.id, row.depth, row.parentId, row.state, row.peekable]), [
     [consolidationId, 0, null, "folded", true],
     [chapterIds[0], 1, consolidationId, "folded", true],
@@ -2493,14 +2519,14 @@ async function gatePeekAndFoldIndex() {
     context.visibleCollapsedFolds(seeded, forest.snapshot).map((fold) => fold.id),
     [consolidationId],
   );
-  const plain = await toolStatus(runtime, "active_context");
+  const plain = await toolStatus(runtime, "pi_fold_context");
   assert.equal(plain.details.tree, undefined);
   assert.equal(plain.details.totalFolds, 3);
-  const candidates = await toolStatus(runtime, "active_context", "fold_candidates");
+  const candidates = await toolStatus(runtime, "pi_fold_context", "fold_candidates");
   assert.equal(candidates.details.tree, undefined);
   assert(candidates.details.candidates);
 
-  await assert.rejects(() => runtime.tools.get("active_context").execute(
+  await assert.rejects(() => runtime.tools.get("pi_fold_context").execute(
     "peek-unknown",
     { action: "peek", id: "no-such-fold" },
     new AbortController().signal,
@@ -2569,7 +2595,7 @@ async function gateSurfacingSelector() {
   const candidates = context.foldBriefCandidates({
     state: forest.state,
     snapshot: forest.snapshot,
-    toolName: "active_context",
+    toolName: "pi_fold_context",
   });
   assert.equal(candidates.length, 2);
   assert.deepEqual(candidates.map((candidate) => candidate.source), [SURFACING_SOURCE, SURFACING_SOURCE]);
@@ -2603,7 +2629,7 @@ async function gateSurfacingSelector() {
   const nested = context.foldBriefCandidates({
     state: consolidated.state,
     snapshot: consolidated.forest.snapshot,
-    toolName: "active_context",
+    toolName: "pi_fold_context",
   });
   assert.deepEqual(nested.map((candidate) => candidate.depth), [0, 1, 1]);
   return {
@@ -2626,7 +2652,7 @@ async function gateSurfacingThresholdAndBudget() {
   const candidates = context.foldBriefCandidates({
     state: forest.state,
     snapshot: forest.snapshot,
-    toolName: "active_context",
+    toolName: "pi_fold_context",
   });
   const unrelated = context.rankSurfacingCandidates({
     candidates,
@@ -2675,14 +2701,14 @@ async function gateSurfacingHysteresis() {
   const forest = await chapterForest(2);
   const snapshot = taskSnapshotFor(forest.snapshot);
   const sources = [context.FOLD_BRIEF_SUGGESTION_SOURCE];
-  const first = context.updateSurfacing({ state: forest.state, snapshot, sources, toolName: "active_context" });
+  const first = context.updateSurfacing({ state: forest.state, snapshot, sources, toolName: "pi_fold_context" });
   assert.equal(first.suggestions.length, 2);
   assert.equal(first.state.surfacing.length, 2);
   assert(first.state.surfacing.every((record) => record.outcome === "shown" &&
     record.source === SURFACING_SOURCE && Number.isSafeInteger(record.ordinal)));
 
   // Re-projecting the same ordinal is one showing: same slate, no duplicate record.
-  const second = context.updateSurfacing({ state: first.state, snapshot, sources, toolName: "active_context" });
+  const second = context.updateSurfacing({ state: first.state, snapshot, sources, toolName: "pi_fold_context" });
   assert.equal(json.stableStringify(second.suggestions), json.stableStringify(first.suggestions));
   assert.equal(second.state, first.state);
   assert.equal(second.state.surfacing.length, 2);
@@ -2701,7 +2727,7 @@ async function gateSurfacingHysteresis() {
 
   const expandedState = context.setFoldProjectionState(forest.state, first.suggestions[0].id, "expanded");
   const withoutExpanded = context.foldBriefCandidates({
-    state: expandedState, snapshot: forest.snapshot, toolName: "active_context",
+    state: expandedState, snapshot: forest.snapshot, toolName: "pi_fold_context",
   });
   assert.equal(withoutExpanded.some((candidate) => candidate.id === first.suggestions[0].id), false);
 
@@ -2712,7 +2738,7 @@ async function gateSurfacingHysteresis() {
     true,
   );
   const withoutProtected = context.foldBriefCandidates({
-    state: protectedState, snapshot: forest.snapshot, toolName: "active_context",
+    state: protectedState, snapshot: forest.snapshot, toolName: "pi_fold_context",
   });
   assert.equal(withoutProtected.some((candidate) => candidate.id === first.suggestions[0].id), false);
   return {
@@ -2842,17 +2868,17 @@ function epochSnapshot(built) {
   });
 }
 
-function toolCall(runtime, params, toolName = "active_context") {
+function toolCall(runtime, params, toolName = "pi_fold_context") {
   return runtime.tools.get(toolName).execute(
     `epoch-${params.action}`, params, new AbortController().signal, undefined, runtime.ctx,
   );
 }
 
-async function epochToolRuntime(fixture = {}) {
+async function epochToolRuntime({ guidance, ...fixture } = {}) {
   const built = makeFixture({
     turns: 8, resultChars: 10_000, contextWindow: 100_000, ...fixture,
   });
-  const runtime = makeRuntime(built);
+  const runtime = makeRuntime(built, guidance ? { guidance } : {});
   await startRuntime(runtime);
   return runtime;
 }
@@ -3140,19 +3166,19 @@ async function gateEphemeralPeekMark() {
   // With one scheduler a bare peek is read-only on the default surface too, so the
   // classification no longer forks on which scheduler asked.
   assert.equal(
-    context.isReadOnlyContextTool("active_context", { action: "peek", id: "fold_probe" }),
+    context.isReadOnlyContextTool("pi_fold_context", { action: "peek", id: "fold_probe" }),
     true,
   );
   assert.equal(
     context.isReadOnlyContextTool(
-      "active_context", { action: "peek", id: "fold_probe" }, "active_context",
+      "pi_fold_context", { action: "peek", id: "fold_probe" }, "pi_fold_context",
       context.READ_ONLY_TOOLS_DEFAULT, context.PEEK_READ_ONLY_CONTEXT_ACTIONS,
     ),
     true,
   );
   assert.equal(
     context.isReadOnlyContextTool(
-      "active_context", { action: "peek", id: "x", brief: "no" }, "active_context",
+      "pi_fold_context", { action: "peek", id: "x", brief: "no" }, "pi_fold_context",
       context.READ_ONLY_TOOLS_DEFAULT, context.PEEK_READ_ONLY_CONTEXT_ACTIONS,
     ),
     false,
@@ -3536,10 +3562,10 @@ async function gateStatusIndexDiet() {
     await project(lean);
   }
   const leanResult = await toolStatus(lean);
-  const pagedFoldsResult = await toolStatus(lean, "active_context", "folds");
+  const pagedFoldsResult = await toolStatus(lean, "pi_fold_context", "folds");
   const leanStatus = leanResult.details;
   const pagedFolds = pagedFoldsResult.details;
-  const pagedObjects = (await toolStatus(lean, "active_context", "objects")).details;
+  const pagedObjects = (await toolStatus(lean, "pi_fold_context", "objects")).details;
   assert(leanStatus.totalFolds >= 3, "The fixture built too small an index to measure");
 
   // The tree and the object list stop riding along; the counts stay, and the full
@@ -3595,7 +3621,7 @@ async function gateStatusIndexDiet() {
   assert(pagedFolds.folds.every((row) => Number.isSafeInteger(row.sourceChars) && row.sourceChars > 0),
     "A paged fold row carries no sourceChars");
   assert(pagedObjects.objects.length >= 1);
-  assert(Array.isArray((await toolStatus(lean, "active_context", "tree")).details.tree));
+  assert(Array.isArray((await toolStatus(lean, "pi_fold_context", "tree")).details.tree));
 
   // The paged details are part of the surface, and an unknown one still names the set.
   assert.deepEqual(
@@ -3714,8 +3740,10 @@ async function gateTruthfulCapacityAdmission() {
   const descriptor = context.capacityAccounting({
     window: 272_000, truthful: false, descriptorWindow: 272_000, usedTokens: 297_000,
   });
+  // Truthful means the DEPLOYMENT stated its serving budget, already net, so it passes
+  // through untouched. The descriptor path is the only one that still estimates.
   const truthful = context.capacityAccounting({
-    window: 400_000, truthful: true, descriptorWindow: 272_000, usedTokens: 297_000,
+    window: 383_616, truthful: true, descriptorWindow: 272_000, usedTokens: 297_000,
   });
   assert.equal(descriptor.budgetTokens, 255_616);
   assert.equal(truthful.budgetTokens, 383_616);
@@ -3724,7 +3752,7 @@ async function gateTruthfulCapacityAdmission() {
   assert(descriptor.headroomTokens < 0 && truthful.headroomTokens > 0);
   assert.equal(truthful.descriptorWindow, 272_000);
   assert.equal(context.capacityAccounting({
-    window: 400_000, truthful: true, descriptorWindow: null, usedTokens: null,
+    window: 383_616, truthful: true, descriptorWindow: null, usedTokens: null,
   }).headroomTokens, null);
 
   // The rep4 abort, replayed. The same measured load aborts against the descriptor
@@ -3737,14 +3765,17 @@ async function gateTruthfulCapacityAdmission() {
   await project(stale);
   assert(stale.aborts >= 1, "The descriptor fence did not abort at 297k against 272k");
 
-  const truthfulRuntime = makeRuntime(fixture(), { providerTotalWindow: 400_000 });
+  const truthfulRuntime = makeRuntime(fixture(), { providerInputBudget: 383_616 });
   await startRuntime(truthfulRuntime);
   await measure(truthfulRuntime, 297_000, 272_000);
   await project(truthfulRuntime);
   assert.equal(truthfulRuntime.aborts, 0, "The truthful budget aborted inside real headroom");
   const capacity = (await toolStatus(truthfulRuntime)).details.automatic.capacity;
   assert.equal(capacity.mode, "truthful");
-  assert.equal(capacity.window, 400_000);
+  // Window and budget are ONE number once the deployment declares its serving budget:
+  // it stated what it may fill, so there is nothing left for this runtime to withhold.
+  assert.equal(capacity.window, 383_616);
+  assert.equal(capacity.outputReservation, 0);
   assert.equal(capacity.descriptorWindow, 272_000);
   assert.equal(capacity.budgetTokens, 383_616);
   assert.equal(capacity.usedTokens, 297_000);
@@ -3758,7 +3789,7 @@ async function gateTruthfulCapacityAdmission() {
   // Admission control: a read whose exact stored size will not fit is refused BEFORE
   // it executes, and the refusal is constructible.
   const built = makeFixture({ turns: 10, resultChars: 20_000, contextWindow: 400_000 });
-  const runtime = makeRuntime(built, { providerTotalWindow: 400_000 });
+  const runtime = makeRuntime(built, { providerInputBudget: 383_616 });
   await startRuntime(runtime);
   // Above the backstop, so the epoch commits and there is a stored fold to read: the
   // admission control under test is about reading a COMMITTED fold back.
@@ -3808,7 +3839,7 @@ async function gateTruthfulCapacityAdmission() {
   // Room restored, the identical read executes: admission governs, it does not deny.
   // Driven through the identical epochs, so it holds the identical forest: a fold id is
   // derived from its span, so the same drive over the same fixture reproduces it.
-  const open = makeRuntime(built, { providerTotalWindow: 400_000 });
+  const open = makeRuntime(built, { providerInputBudget: 383_616 });
   await startRuntime(open);
   await measure(open, 320_000, 400_000);
   await measureAndCommit(open, 340_000, 400_000, "admission-commit");
@@ -4242,7 +4273,7 @@ async function gateStageIdentifiedBriefs() {
     "Two stage-identified briefs are identical");
   for (const brief of identifiedBriefs) {
     assert(brief.length <= 1_200, `A stage-identified brief exceeded the hard cap: ${brief.length}`);
-    assert(context.usefulBrief(brief, 1_200, "active_context"), "A stage-identified brief is not factual");
+    assert(context.usefulBrief(brief, 1_200, "pi_fold_context"), "A stage-identified brief is not factual");
     assert(/stage=\d+/.test(brief), `A stage-identified brief lost its arguments: ${brief}`);
     assert(/NEXT_KEY=stage-\d+-7f3a/.test(brief), `A stage-identified brief lost its tail anchor: ${brief}`);
   }
@@ -4573,7 +4604,7 @@ async function gatePinnedMassBackstop() {
  * deployment fact; the behaviour under test is identical to the twelve-lever runs.
  */
 const SEALED_SPINE = Object.freeze({
-  providerTotalWindow: 100_000,
+  providerInputBudget: 90_000,
 });
 
 /**
@@ -4832,7 +4863,7 @@ async function gateProjectionBudgetFence() {
   // between one provider response and the next request.
   const runtime = makeRuntime(
     makeFixture({ turns: 16, resultChars: 12_000, contextWindow: 34_000 }),
-    { ...SEALED_SPINE, providerTotalWindow: 34_000 },
+    { ...SEALED_SPINE, providerInputBudget: 30_600 },
   );
   await startRuntime(runtime);
   for (let step = 0; step < 12; step += 1) {
@@ -4913,7 +4944,7 @@ async function gateProjectionBudgetFence() {
   // standing between the session and an untransmittable request.
   const guardedOnly = makeRuntime(
     makeFixture({ turns: 8, tools: false, chapterChars: 40, contextWindow: 34_000 }),
-    { ...SEALED_SPINE, providerTotalWindow: 34_000 },
+    { ...SEALED_SPINE, providerInputBudget: 30_600 },
   );
   await startRuntime(guardedOnly);
   for (let step = 0; step < 14; step += 1) {
@@ -5015,7 +5046,7 @@ async function gateProjectionCalibration() {
   // projections reads as far over budget; against the session's own measured ratio
   // they are barely half of it.
   const built = makeFixture({ turns: 64, resultChars: 2_200, contextWindow: 40_000 });
-  const runtime = makeRuntime(built, { ...SEALED_SPINE, providerTotalWindow: 40_000 });
+  const runtime = makeRuntime(built, { ...SEALED_SPINE, providerInputBudget: 36_000 });
   await startRuntime(runtime);
   const sevenChars = (chars) => Math.round(chars / 7);
   const baseline = bytesOf((await project(runtime)).messages);
@@ -5064,7 +5095,7 @@ async function gateProjectionCalibration() {
     // 10,800-token budget that is 216 tokens, under the one-foldable-unit floor. The
     // deployment declares a policy the window can carry, which is the designed answer to
     // a tiny window: reject the impossible one, do not silently clamp it.
-    { ...SEALED_SPINE, providerTotalWindow: 12_000, thresholds: WIDE_FRESH_TAIL },
+    { ...SEALED_SPINE, providerInputBudget: 10_800, thresholds: WIDE_FRESH_TAIL },
   );
   await startRuntime(dense);
   // Calibrate on a healthy pass, then let the excursion outgrow that baseline by half.
@@ -5173,7 +5204,7 @@ async function gateFenceMarginAndDepth() {
   // serve. That is the tiny-window contract: refuse the impossible, never clamp it.
   const runtime = makeRuntime(
     makeFixture({ turns: 8, resultChars: 10_000, contextWindow: window, thresholds: WIDE_FRESH_TAIL }),
-    { ...SEALED_SPINE, providerTotalWindow: window, thresholds: WIDE_FRESH_TAIL },
+    { ...SEALED_SPINE, providerInputBudget: servingBudget(window), thresholds: WIDE_FRESH_TAIL },
   );
   await startRuntime(runtime);
   const budgetTokens = (await toolStatus(runtime)).details.automatic.projectionBudgetTokens;
@@ -5225,8 +5256,8 @@ async function gateFenceMarginAndDepth() {
   assert(worstDrift <= 0.1, `The calibrated estimate drifted ${(worstDrift * 100).toFixed(1)}% from measured`);
   const fired = climb.find((entry) => entry.reduction);
   assert(fired, "The fence never fired while the window filled, which is the rep13 death");
-  // Economy waits the round; safety never transmits. On this 20,000-token window the
-  // margin band is 1,000 tokens and one round of inflow is larger, so when a last-call
+  // Economy waits the round; safety never transmits. On this 18,000-token budget the
+  // margin band is 900 tokens and one round of inflow is larger, so when a last-call
   // round is open at the crossing the reduction may land at the over line instead of
   // inside the margin. That is the ruled trade, and it is admissible ONLY when the
   // reduction's own commit consumed an open exposure; with no round in the gap the
@@ -5242,8 +5273,10 @@ async function gateFenceMarginAndDepth() {
   assert.equal(fired.reduction.transmitted, true,
     "A reduction that started past the budget line must still land the request under it");
   assert(fired.reduction.crowded === true, "The reduction did not record why it fired");
-  assert(fired.reduction.marginTokens >= 0.05 * window,
-    `The margin was ${fired.reduction.marginTokens} tokens, under the floor share of the window`);
+  // The floor is a share of the SERVING BUDGET, which is the one denominator: with the
+  // budget declared already net there is no window behind it to take a share of.
+  assert(fired.reduction.marginTokens >= 0.05 * budgetTokens,
+    `The margin was ${fired.reduction.marginTokens} tokens, under the floor share of the budget`);
   assert(fired.reduction.estimatedTokensAfter < fired.reduction.estimatedTokensBefore,
     "The pre-wire reduction freed nothing");
   // The bootstrap pass of an already-huge session may still abort: it has nothing
@@ -5262,7 +5295,7 @@ async function gateFenceMarginAndDepth() {
   // measured tokens per pass, absolute floors this section cannot scale under.
   const drifting = makeRuntime(
     makeFixture({ turns: 16, resultChars: 4_000, contextWindow: 200_000 }),
-    { ...SEALED_SPINE, providerTotalWindow: 200_000 },
+    { ...SEALED_SPINE, providerInputBudget: 183_616 },
   );
   await startRuntime(drifting);
   const ratios = [];
@@ -5301,7 +5334,7 @@ async function gateFenceMarginAndDepth() {
   // window ratchets UP through every one of them.
   const deep = makeRuntime(
     makeFixture({ turns: 30, resultChars: 12_000, contextWindow: 100_000 }),
-    { ...SEALED_SPINE, providerTotalWindow: 100_000 },
+    { ...SEALED_SPINE, providerInputBudget: 90_000 },
   );
   await startRuntime(deep);
   const epochs = [];
@@ -5796,7 +5829,7 @@ async function gateBiteSizedFolds() {
   // The ladder: a session whose coherent chapters would run far past the cap.
   const runtime = makeRuntime(
     makeFixture({ turns: 24, tools: false, chapterChars: 2_000, contextWindow: 100_000 }),
-    { providerTotalWindow: 100_000 },
+    { providerInputBudget: 90_000 },
   );
   await startRuntime(runtime);
   for (const tokens of [70_000, 78_000, 84_000, 88_000, 90_000]) {
@@ -6020,7 +6053,7 @@ async function gateOverflowRecovery() {
   const window = 56_000;
   const runtime = makeRuntime(
     makeFixture({ turns: 12, resultChars: 12_000, contextWindow: window }),
-    { ...SEALED_SPINE, providerTotalWindow: window },
+    { ...SEALED_SPINE, providerInputBudget: servingBudget(window) },
   );
   await startRuntime(runtime);
   const budgetTokens = (await toolStatus(runtime)).details.automatic.projectionBudgetTokens;
@@ -6076,7 +6109,7 @@ async function gateOverflowRecovery() {
   // beyond the cap are not recovered from, so the loop cannot run forever.
   const capped = makeRuntime(
     makeFixture({ turns: 8, tools: false, contextWindow: window }),
-    { ...SEALED_SPINE, providerTotalWindow: window },
+    { ...SEALED_SPINE, providerInputBudget: servingBudget(window) },
   );
   await startRuntime(capped);
   await measure(capped, 28_000, window);
@@ -6351,13 +6384,13 @@ async function gateLeverCollapse() {
   assert(/path=/.test(folds[0].brief), "Stage-identified briefs are not unconditional");
   // Capacity is truthful once the deployment declares its window, and says which mode.
   assert.equal(status.capacity.mode, "descriptor");
-  const declared = makeRuntime(built, { providerTotalWindow: 400_000 });
+  const declared = makeRuntime(built, { providerInputBudget: 383_616 });
   await startRuntime(declared);
   assert.equal((await toolStatus(declared)).details.automatic.capacity.mode, "truthful");
 
   // What stays configurable is exactly the experiment conditions plus the one fact.
-  assert.throws(() => makeRuntime(built, { providerTotalWindow: -1 }).tools,
-    /providerTotalWindow must be a positive integer/);
+  assert.throws(() => makeRuntime(built, { providerInputBudget: -1 }).tools,
+    /providerInputBudget must be a positive integer/);
   // The scheduling collapse, pinned the same way: epoch is the only scheduler, peek
   // results are foldable, and the action surface is whole. A deployment still passing
   // one of the three deleted options is REFUSED by name rather than quietly handed the
@@ -6541,8 +6574,10 @@ async function gateQuietRuntimeStormReplay() {
 async function gateOneTruthfulBudget() {
   const built = makeFixture({ turns: 16, resultChars: 30_000, contextWindow: 272_000 });
   const runtime = makeRuntime(built, {
-    // The live shape: a 272,000-token per-request descriptor over a 400,000 window.
-    providerTotalWindow: 400_000,
+    // The live shape: a 272,000-token per-request descriptor over a deployment that
+    // actually serves 383,616 input tokens. Declared already net, which is why nothing
+    // downstream subtracts a reservation out of it a second time.
+    providerInputBudget: 383_616,
   });
   await startRuntime(runtime);
   const stream = () => runtime.appended
@@ -6553,8 +6588,10 @@ async function gateOneTruthfulBudget() {
   const capacity = stream().find((record) => record.kind === "context.capacity");
   assert(capacity, "The run never stated its resolved serving budget");
   assert.equal(capacity.mode, "truthful");
-  assert.equal(capacity.window_tokens, 400_000);
+  assert.equal(capacity.window_tokens, 383_616);
   assert.equal(capacity.budget_tokens, 383_616);
+  assert.equal(capacity.output_reservation ?? 0, 0,
+    "A declared input budget must not be netted down a second time");
   assert.equal(capacity.descriptor_window, 272_000);
 
   await measure(runtime, 180_000, 272_000, undefined, "toolUse");
@@ -6578,7 +6615,7 @@ async function gateOneTruthfulBudget() {
   }
   const commitRecord = stream().find((record) => record.kind === "context.commit");
   assert(commitRecord, "The runtime never committed at truthful occupancy");
-  assert.equal(commitRecord.window_tokens, 400_000);
+  assert.equal(commitRecord.window_tokens, 383_616);
   // The receipt is the ONE carrier left, and it quotes the same truthful budget the
   // stream does. Nothing in the window may quote the per-request descriptor.
   const projected = json.stableStringify(announced.messages);
@@ -6701,7 +6738,7 @@ async function gateCurationCopyAndReceipts() {
   const line = context.receiptLine(receipt);
   assert.match(line, /Occupancy 76000→45000 tokens/);
   assert.match(line, /1 span\(s\) folded, 3 tool result\(s\) folded/);
-  const block = context.receiptBlockText({ receipts: [receipt], toolName: "active_context" });
+  const block = context.receiptBlockText({ receipts: [receipt], toolName: "pi_fold_context" });
   assert.match(block, /"action":"rebrief"/);
   assert.match(block, /"action":"reboundary"/);
   assert.match(block, /"action":"expand"/);
@@ -6837,13 +6874,13 @@ async function gateNoAgentCommitVerb() {
       window: 100_000, staleToolShare: 0.3, staleToolTokens: 30_000, staleToolResults: 6,
       eligibleFolds: 4,
     },
-    unmarked: { spans: 6, tokens: 30_000 }, pendingMarks: 4, toolName: "active_context",
+    unmarked: { spans: 6, tokens: 30_000 }, pendingMarks: 4, toolName: "pi_fold_context",
   });
   const receiptBlock = context.receiptBlockText({
     receipts: [context.contextReceipt({
       kind: "commit", ordinal: 4, foldsCommitted: 2, foldsCreated: 2, freedTokens: 9_000,
     })],
-    toolName: "active_context",
+    toolName: "pi_fold_context",
   });
   for (const [surface, text] of [["last call", lastCall], ["receipt block", receiptBlock]]) {
     assert.equal(/"action":"commit"/.test(text), false,
@@ -7216,7 +7253,7 @@ async function gateBatchedMarkCopy() {
   // inherits their rule: one line, informatory, and the marking it names is the BATCH.
   const notice = context.thresholdNoticeText({
     share: 0.5, occupancyTokens: 50_000, budgetTokens: 100_000, maxTarget: 0.80,
-    toolName: "active_context",
+    toolName: "pi_fold_context",
   });
   assert.match(notice, /"action":"fold","marks":\[\{"ids"/);
   // The tool surface's own vocabulary rule: nothing here invites a chat-style answer.
@@ -7224,7 +7261,7 @@ async function gateBatchedMarkCopy() {
   assert.equal(notice.includes("\n"), false, "The notice stopped being one line");
 
   const lastCall = context.lastCallText({
-    signals, unmarked: { spans: 6, tokens: 30_000 }, pendingMarks: 4, toolName: "active_context",
+    signals, unmarked: { spans: 6, tokens: 30_000 }, pendingMarks: 4, toolName: "pi_fold_context",
   });
   assert.match(lastCall, /adds or widens several in one call/);
   assert.match(lastCall, /"action":"fold","marks":\[\{"ids"/);
@@ -7277,7 +7314,7 @@ function makeStatusResultFixture({
       content: [{
         type: "toolCall",
         id: `status-${turn}`,
-        name: "active_context",
+        name: "pi_fold_context",
         arguments: { action: "status", detail: "folds", offset: turn * 40, limit: 40 },
       }],
       stopReason: "toolUse",
@@ -7286,7 +7323,7 @@ function makeStatusResultFixture({
     statusResultIds.push(add({
       role: "toolResult",
       toolCallId: `status-${turn}`,
-      toolName: "active_context",
+      toolName: "pi_fold_context",
       content: [{ type: "text", text: `Status page ${turn}: ${"s".repeat(statusChars)}` }],
       isError: false,
       timestamp: sequence,
@@ -7338,7 +7375,7 @@ async function gateStatusPagesAreBounded() {
   // Every detail variant fits the cap, and the marker appears on every truncated page.
   const measured = {};
   for (const detail of [undefined, "fold_candidates", "tree", "folds", "objects"]) {
-    const result = await toolStatus(runtime, "active_context", detail);
+    const result = await toolStatus(runtime, "pi_fold_context", detail);
     const delivered = Buffer.byteLength(result.content[0].text, "utf8");
     assert(delivered <= context.CONTEXT_STATUS_RESPONSE_BYTES,
       `status detail=${detail ?? "default"} delivered ${delivered} bytes over the cap`);
@@ -7370,7 +7407,7 @@ async function gateStatusPagesAreBounded() {
   const small = makeRuntime(makeFixture({ turns: 2, resultChars: 400, contextWindow: 100_000 }));
   await startRuntime(small);
   for (const detail of [undefined, "fold_candidates", "tree", "folds", "objects"]) {
-    const result = await toolStatus(small, "active_context", detail);
+    const result = await toolStatus(small, "pi_fold_context", detail);
     assert(Buffer.byteLength(result.content[0].text, "utf8") <= context.CONTEXT_STATUS_RESPONSE_BYTES);
     assert.equal(result.details.continuation, undefined,
       `An untruncated status page (detail=${detail ?? "default"}) carried a continuation marker`);
@@ -7404,13 +7441,13 @@ async function gateStatusResultsAreLadderFood() {
     { status: ["action", "detail", "offset", "limit"], peek: ["action", "id"] },
   );
   const pagedShape = { action: "status", detail: "folds", offset: 40, limit: 40 };
-  assert.equal(context.isReadOnlyContextTool("active_context", pagedShape), true,
+  assert.equal(context.isReadOnlyContextTool("pi_fold_context", pagedShape), true,
     "The advertised paged status call still classifies unsafe");
-  assert.equal(context.isReadOnlyContextTool("active_context", { action: "status", detail: "tree" }), true);
+  assert.equal(context.isReadOnlyContextTool("pi_fold_context", { action: "status", detail: "tree" }), true);
   // Classification is allowlist-driven: one argument outside the surface and the
   // batch is unsafe, which is exactly how the detail-carrying shape was rejected
   // before 'detail' joined the list above.
-  assert.equal(context.isReadOnlyContextTool("active_context", { ...pagedShape, verbose: true }), false);
+  assert.equal(context.isReadOnlyContextTool("pi_fold_context", { ...pagedShape, verbose: true }), false);
 
   // The batch scanner agrees end to end: the status-with-detail batch is validated.
   // The trailing turns carry real mass so the fresh-byte tail ends inside them and
@@ -7906,7 +7943,7 @@ async function gateRecoveryNormAdvertised() {
   const surface = await jiti.import(join(projectRoot, "extensions", "lib", "tool-surface.ts"));
   const policy = await jiti.import(join(projectRoot, "extensions", "lib", "policy.ts"));
   const describe = (allowedActions, fullSurface) => surface.buildActiveContextTool({
-    name: "active_context",
+    name: "pi_fold_context",
     label: "Active context",
     allowedActions,
     fullSurface,
@@ -8032,7 +8069,7 @@ async function gateRiderContentLaw() {
   // share against its cap IN, raw occupancy and unmarked percentages OUT, bounded,
   // and byte-deterministic for identical inputs.
   const input = {
-    toolName: "active_context",
+    toolName: "pi_fold_context",
     pendingAgentMarks: 2,
     eligibleMarks: 3,
     freedTokens: 1_200,
@@ -8220,7 +8257,7 @@ async function gateLastCallRidesTheCommitBoundary() {
  * law doing its job, not a stack.
  */
 async function gateThresholdNoticesAppendOnce() {
-  assert.equal(context.THRESHOLD_NOTICES_ENABLED, true, "Notices default on");
+  assert.equal(context.DEFAULT_GUIDANCE.thresholdNotices, true, "Notices default on");
   assert.deepEqual([...context.THRESHOLD_NOTICE_SHARES], [0.25, 0.50, 0.75]);
   const runtime = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
   const notices = () => contextEvents(runtime).filter((record) => record.kind === "context.notice");
@@ -8737,7 +8774,7 @@ async function gateFenceOpensTheMiddle() {
   // transmissibility to save a rewrite.
   const runtime = makeRuntime(
     makeFixture({ turns: 20, resultChars: 9_000, contextWindow: 34_000, thresholds }),
-    { ...SEALED_SPINE, providerTotalWindow: 34_000, thresholds },
+    { ...SEALED_SPINE, providerInputBudget: 30_600, thresholds },
   );
   await startRuntime(runtime);
   // First crossing: commits, and latches.
@@ -8865,6 +8902,144 @@ async function gateAgentSpansNest() {
   };
 }
 
+/**
+ * THE public surface: six options, and nothing else reaches the runtime.
+ *
+ * Every name outside the six is refused, and a name that was RENAMED is refused by its
+ * old spelling with the new one in the message. Silence would be worse than a name that
+ * never existed: an unknown key used to spread straight through, so a caller who passed
+ * a deleted option believed it had bought behavior and got the opposite. `registerPiFold`
+ * is the front door this gate measures; the internal seam is deliberately wider, and the
+ * last leg proves the seam cannot be reached through the door.
+ */
+async function gatePublicOptionSurface() {
+  const built = makeFixture({ turns: 4, resultChars: 3_000 });
+  const register = (options) => makeRuntime(built, {
+    ...options, packageRegistration: true, retiredOptions: options,
+  }).tools;
+  // The whole surface, exercised together: six names, all accepted at once.
+  const surface = makeRuntime(built, {
+    packageRegistration: true,
+    retiredOptions: {
+      thresholds: context.DEFAULT_THRESHOLDS,
+      summarizer: "deterministic",
+      providerInputBudget: 90_000,
+      autoFoldableTools: new Set(["read", "repo_stage"]),
+      evidenceIngestion: false,
+      guidance: { thresholdNotices: true, actionResponses: true },
+    },
+  });
+  assert.deepEqual(Object.keys(surface.registration), ["projectionCandidates"]);
+  assert.deepEqual([...surface.tools.keys()], ["pi_fold_context"]);
+  // The renames, each refused by its OLD name and each naming its replacement, because a
+  // caller holding the old name needs the new one, not a shape error.
+  const renamed = [
+    ["readOnlyTools", new Set(["read"]), /readOnlyTools is no longer an option: renamed autoFoldableTools/],
+    ["providerTotalWindow", 400_000, /providerTotalWindow is no longer an option: renamed providerInputBudget/],
+  ];
+  for (const [option, value, message] of renamed) {
+    assert.throws(() => register({ [option]: value }), message,
+      `${option} was accepted after its rename`);
+  }
+  // The reshape is not just a rename: the value's MEANING changed, so the message says
+  // already net rather than leaving a caller to move a gross window across.
+  assert.throws(() => register({ providerTotalWindow: 400_000 }), /ALREADY NET/);
+  // Deployment identity left the surface entirely. Each of the five is refused, and the
+  // entry-type one says why moving it is worse than merely unsupported.
+  for (const [option, value] of [
+    ["toolName", "ctx_tool"], ["toolLabel", "Context"], ["brandNoun", "acme"],
+    ["entryTypePrefix", "acme-active-context"], ["commandPrefix", "sandbox"],
+    ["commandNames", { status: "ctx", fold: "fold-ctx" }],
+  ]) {
+    assert.throws(() => register({ [option]: value }),
+      /is no longer an option: the deployment identity is hardwired to pi-fold/,
+      `${option} survived the identity hardwiring`);
+  }
+  assert.throws(() => register({ entryTypePrefix: "acme-active-context" }), /strand every fold already written/);
+  // The predicate whose default guaranteed it never ran.
+  assert.throws(() => register({ isMcpTool: () => true }), /mcp__server__tool naming convention/);
+  // And the internal brief-generator seam, which `summarizer` is the declarative form of.
+  assert.throws(() => register({ summarizeContextSpan: async () => ({ brief: "x" }) }),
+    /choose a brief generator with summarizer/);
+  // A name this package never sold at all is refused with the whole surface named, so a
+  // typo reports the six rather than failing somewhere downstream at runtime.
+  assert.throws(() => register({ maxTarget: 0.8 }),
+    /maxTarget is not a pi-fold option: the surface is thresholds, summarizer, providerInputBudget, autoFoldableTools, evidenceIngestion, guidance/);
+  assert.throws(() => register({ foldScheduling: "epoch" }), /foldScheduling is not a pi-fold option/);
+  // The seam is not reachable through the door: the runtime still accepts a synthetic
+  // brand when registered directly, which is what keeps the neutrality gate honest.
+  const seam = makeRuntime(built, { toolName: "acme_context", brandNoun: "Acme" });
+  assert.deepEqual([...seam.tools.keys()], ["acme_context"]);
+  return {
+    publicOptions: 6,
+    renamesRefusedByOldName: renamed.length,
+    identityOptionsRefused: 6,
+    unknownNamesRefused: 2,
+    internalSeamReachableFromPackageEntry: false,
+  };
+}
+
+/**
+ * The guidance option: two booleans, on by default, and off means absent.
+ *
+ * Shane's ruling is that notices and action responses are optional with the default yes,
+ * so this pins both halves. Off has to mean the carriers do not exist, not that they
+ * render empty: an empty carrier still occupies prefix positions. And it has to change
+ * NOTHING else, because the two surfaces are prose about the mechanism, never the
+ * mechanism, and folding a session must not depend on whether the runtime narrates it.
+ */
+async function gateGuidanceOption() {
+  assert.deepEqual({ ...context.DEFAULT_GUIDANCE }, { thresholdNotices: true, actionResponses: true });
+  // Set whole or partially, but never with a key this option does not have: a typo that
+  // silently keeps the default is how a deployment believes it turned something off.
+  assert.throws(() => makeRuntime(makeFixture({ turns: 4 }), { guidance: { notices: false } }).tools,
+    /guidance has no notices setting/);
+  assert.throws(() => makeRuntime(makeFixture({ turns: 4 }), { guidance: { thresholdNotices: "no" } }).tools,
+    /guidance.thresholdNotices must be a boolean/);
+  assert.throws(() => makeRuntime(makeFixture({ turns: 4 }), { guidance: true }).tools,
+    /guidance must be an object/);
+
+  const noticeCount = async (guidance) => {
+    const runtime = await epochToolRuntime({ turns: 12, resultChars: 16_000, guidance });
+    await measure(runtime, 20_000, 100_000);
+    await measure(runtime, 23_000, 100_000);
+    await measure(runtime, 46_000, 100_000);
+    return { runtime, notices: contextEvents(runtime).filter((r) => r.kind === "context.notice") };
+  };
+  const on = await noticeCount(undefined);
+  assert.deepEqual(on.notices.map((record) => record.share), [0.25, 0.5],
+    "The waypoints did not speak under the default");
+  const off = await noticeCount({ thresholdNotices: false });
+  assert.equal(off.notices.length, 0, "A silenced waypoint still spoke");
+
+  // The action response is the mark's prose, and off removes the prose alone: the same
+  // mark is still accepted, still pending, still carries its accounting.
+  const built = makeFixture({ turns: 12, resultChars: 12_000, contextWindow: 100_000 });
+  const staleSpan = [built.turnEntries[1][0], built.turnEntries[1].at(-1)];
+  const markOnce = async (guidance) => {
+    const runtime = makeRuntime(built, guidance ? { guidance } : {});
+    await startRuntime(runtime);
+    return await toolCall(runtime, { action: "fold", ids: staleSpan });
+  };
+  const marked = await markOnce(undefined);
+  assert.equal(typeof marked.details.awareness, "string", "The default swallowed the response");
+  const silentMark = await markOnce({ actionResponses: false });
+  assert.equal(silentMark.details.awareness, undefined, "A silenced action still answered");
+  assert.equal(silentMark.details.activation, undefined);
+  assert.equal(silentMark.isError, marked.isError);
+  assert.equal(silentMark.details.pendingMarks, marked.details.pendingMarks,
+    "Silencing the response changed what the mark did");
+  assert.equal(silentMark.details.ok, marked.details.ok);
+  assert.equal(silentMark.details.deferred, marked.details.deferred);
+  return {
+    defaultOn: true,
+    silencedNotices: 0,
+    defaultNotices: on.notices.length,
+    silencedResponseKeys: ["awareness", "activation"],
+    markUnchangedWhenSilent: true,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -8952,6 +9127,8 @@ const gates = [
   [99, "The last-call rides the commit boundary", gateLastCallRidesTheCommitBoundary],
   [100, "Threshold notices append once and re-arm", gateThresholdNoticesAppendOnce],
   [101, "Peek copies reclaim with identity", gatePeekReclaimWithIdentity],
+  [102, "The public option surface", gatePublicOptionSurface],
+  [103, "Guidance is two booleans, default on", gateGuidanceOption],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

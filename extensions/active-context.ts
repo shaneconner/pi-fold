@@ -94,12 +94,11 @@ import {
   DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   COMMIT_RECLAIM_FLOOR_SHARE,
-  CONTEXT_ACTION_RESPONSES_ENABLED,
   CONTEXT_RECEIPT_BLOCK_BYTES,
   DEFAULT_CONTEXT_WINDOW,
   MAX_THRESHOLD_NOTICES,
   THRESHOLD_NOTICE_SHARES,
-  THRESHOLD_NOTICES_ENABLED,
+  resolveGuidance,
   assertThresholdsServable,
   resolveThresholds,
   servingBudgetTokens,
@@ -116,6 +115,7 @@ import {
   USER_RESCUE_MAX_SOURCE_CHARS,
 } from "./lib/policy.ts";
 import type {
+  ActiveContextGuidance,
   ActiveContextSnapshot,
   ActiveContextState,
   ActiveContextThresholds,
@@ -260,19 +260,28 @@ export function registerActiveContext(pi: any, options: {
    * is the runtime's only brief-generator interface.
    */
   summarizeContextSpan?: (request: Record<string, unknown>, ctx: unknown) => Promise<Record<string, unknown>>;
+  /**
+   * INTERNAL deployment-identity seam, not public options: the package entry refuses all
+   * five by name and the shipped identity is the one in `policy.ts`. They survive here
+   * because the neutrality gate has to register a synthetic brand to prove none of it
+   * reaches the defaults, and the experiment harness registers the pi-fold identity
+   * explicitly so its sealed runs keep their entry types.
+   */
   toolName?: string;
   toolLabel?: string;
   brandNoun?: string;
   entryTypePrefix?: string;
-  commandPrefix?: string;
   commandNames?: { status?: string; fold?: string };
-  readOnlyTools?: ReadonlySet<string>;
-  providerTotalWindow?: number;
+  autoFoldableTools?: ReadonlySet<string>;
+  /** The serving budget itself, ALREADY NET of the deployment's output reservation. */
+  providerInputBudget?: number;
   /**
    * The thermostat, set whole or not at all. USER policy: no agent action reads it back
    * as a mutable surface, and status reports the values without offering to change them.
    */
   thresholds?: ActiveContextThresholds;
+  /** Both guidance surfaces, set together, defaulting on. */
+  guidance?: Partial<ActiveContextGuidance>;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
 } {
@@ -280,8 +289,7 @@ export function registerActiveContext(pi: any, options: {
   const toolLabel = options.toolLabel ?? DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL;
   const brandNoun = options.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN;
   const entryTypePrefix = options.entryTypePrefix ?? DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX;
-  const commandPrefix = options.commandPrefix ?? "";
-  const readOnlyTools = options.readOnlyTools ?? READ_ONLY_TOOLS_DEFAULT;
+  const readOnlyTools = options.autoFoldableTools ?? READ_ONLY_TOOLS_DEFAULT;
   // Deleted options are REFUSED by name, never ignored. A deployment still passing one
   // believes it asked for something, and silence would hand it the opposite behavior:
   // `foldScheduling` chose between epoch and the deleted immediate scheduler,
@@ -308,26 +316,40 @@ export function registerActiveContext(pi: any, options: {
         "registration, and external suggestion sources have no carrier to render into");
     }
   }
-  if (options.providerTotalWindow !== undefined &&
-      (!Number.isSafeInteger(options.providerTotalWindow) || options.providerTotalWindow <= 0)) {
-    throw new Error("providerTotalWindow must be a positive integer");
+  // The renamed options are refused by their OLD names, each pointing at the new one.
+  // `readOnlyTools` said what the tools were rather than what the set does, which is
+  // grant the runtime permission to fold their results without a mark; `commandPrefix`
+  // derived two command names from a stem the full-name override then overrode anyway;
+  // `providerTotalWindow` was a gross window the runtime netted down with a GUESSED
+  // reservation, and the guess is what the reshape deleted.
+  if (Object.hasOwn(options, "readOnlyTools")) {
+    throw new Error("readOnlyTools is now autoFoldableTools: same set, and the name now says " +
+      "what it controls, which is whose results may fold without a mark");
+  }
+  if (Object.hasOwn(options, "commandPrefix")) {
+    throw new Error("commandPrefix is no longer an option: give whole names with commandNames");
+  }
+  if (Object.hasOwn(options, "providerTotalWindow")) {
+    throw new Error("providerTotalWindow is now providerInputBudget, and it is ALREADY NET: " +
+      "pass the tokens the deployment may actually fill, not the total window the runtime " +
+      "then subtracts a guessed output reservation from");
+  }
+  if (options.providerInputBudget !== undefined &&
+      (!Number.isSafeInteger(options.providerInputBudget) || options.providerInputBudget <= 0)) {
+    throw new Error("providerInputBudget must be a positive integer");
   }
   // The deployment's own fact, and the only capacity knob: declaring it makes every
   // ratio, fence and budget truthful, and leaving it out falls back to the provider
   // descriptor and SAYS "descriptor" in the capacity accounting.
-  const providerTotalWindow = options.providerTotalWindow ?? null;
+  const providerInputBudget = options.providerInputBudget ?? null;
   const readOnlyContextActions = PEEK_READ_ONLY_CONTEXT_ACTIONS;
-  if (!toolName || !toolLabel || !brandNoun || !entryTypePrefix || typeof commandPrefix !== "string" ||
-      (commandPrefix && !/^[a-z0-9-]+$/.test(commandPrefix)) ||
+  if (!toolName || !toolLabel || !brandNoun || !entryTypePrefix ||
       [...readOnlyTools].some((name) => typeof name !== "string" || !name)) {
-    throw new Error("Active-context names and read-only tools must be nonempty strings");
+    throw new Error("Active-context names and auto-foldable tools must be nonempty strings");
   }
-  const commandStem = commandPrefix ? `${commandPrefix.replace(/-+$/, "")}-` : "";
-  // Full-name override for hosts that need non-default command names (e.g. the
-  // pi-fold package's neutral "context"); commandPrefix remains the derived form.
   const commandNames = {
-    status: options.commandNames?.status ?? `${commandStem}${DEFAULT_ACTIVE_CONTEXT_COMMAND_NAMES.status}`,
-    fold: options.commandNames?.fold ?? `${commandStem}${DEFAULT_ACTIVE_CONTEXT_COMMAND_NAMES.fold}`,
+    status: options.commandNames?.status ?? DEFAULT_ACTIVE_CONTEXT_COMMAND_NAMES.status,
+    fold: options.commandNames?.fold ?? DEFAULT_ACTIVE_CONTEXT_COMMAND_NAMES.fold,
   };
   if (![commandNames.status, commandNames.fold].every((name) =>
       typeof name === "string" && /^[a-z0-9][a-z0-9-]*$/.test(name)) ||
@@ -337,7 +359,8 @@ export function registerActiveContext(pi: any, options: {
   // The thermostat, validated atomically before anything else reads a threshold, and
   // then checked against the budget this deployment can actually serve.
   const thresholds = resolveThresholds(options.thresholds);
-  assertThresholdsServable(thresholds, servingBudgetTokens(options.providerTotalWindow ?? DEFAULT_CONTEXT_WINDOW));
+  assertThresholdsServable(thresholds, providerInputBudget ?? servingBudgetTokens(DEFAULT_CONTEXT_WINDOW));
+  const guidance = resolveGuidance(options.guidance);
   const stateEntryType = `${entryTypePrefix}-state`;
   const foldRecordEntryType = `${entryTypePrefix}-fold-record`;
   const milestoneProjectionType = `${entryTypePrefix}-milestone`;
@@ -654,18 +677,18 @@ export function registerActiveContext(pi: any, options: {
   };
 
   /**
-   * The window every ratio, fence and budget is computed against. With truthful
-   * capacity on this is the provider's TOTAL admission window, not the per-request
-   * max-input descriptor: the descriptor bakes in a full output reservation the
-   * deployment never asked for, and treating it as the ceiling aborts requests inside
-   * real headroom. The descriptor is still read, and still reported, so the gap stays
+   * The number every ratio, fence and budget is computed against. Declared, it is the
+   * deployment's own serving budget, already net of whatever output reservation it holds
+   * back; undeclared, it is the per-request max-input descriptor, which bakes in a full
+   * output reservation the deployment never asked for and so aborts requests inside real
+   * headroom. The descriptor is still read, and still reported, so the gap stays
    * auditable rather than assumed.
    */
   const budgetWindowFor = (ctx: any): number | null => {
     // Remembered so the ctx-free callers (trigger, gate, reminders, advisory) report the
     // same descriptor gap the fence does instead of re-reading a second source.
     measurements.descriptorWindow = contextWindowFor(ctx);
-    return providerTotalWindow ?? measurements.descriptorWindow;
+    return providerInputBudget ?? measurements.descriptorWindow;
   };
 
   /**
@@ -681,7 +704,7 @@ export function registerActiveContext(pi: any, options: {
   const servingCapacity = (window: number | null): ReturnType<typeof capacityAccounting> =>
     capacityAccounting({
       window: window ?? lifecycle.latestSnapshot?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-      truthful: providerTotalWindow !== null,
+      truthful: providerInputBudget !== null,
       descriptorWindow: measurements.descriptorWindow,
       usedTokens: measurements.lastProviderMeasurement?.tokens ?? null,
     });
@@ -699,6 +722,7 @@ export function registerActiveContext(pi: any, options: {
     readOnlyTools,
     readOnlyContextActions,
     contextWindow: budgetWindowFor(ctx) ?? undefined,
+    netBudget: providerInputBudget !== null,
     thresholds,
   });
 
@@ -718,6 +742,7 @@ export function registerActiveContext(pi: any, options: {
       readOnlyTools,
       readOnlyContextActions,
       contextWindow: budgetWindowFor(ctx) ?? undefined,
+      netBudget: providerInputBudget !== null,
       thresholds,
     });
   };
@@ -2625,11 +2650,11 @@ export function registerActiveContext(pi: any, options: {
    * Threshold notices, evaluated on every pass the ladder runs on. One waypoint fires
    * once per upward crossing of the measured occupancy; delivery is an append-once
    * carrier plus its stream record, and re-arming belongs to the commit that drops
-   * occupancy back under the line. Default on; the switch is a constant until Build D
-   * makes the option surface public.
+   * occupancy back under the line. Default on; `guidance.thresholdNotices: false`
+   * registers the runtime with the waypoints silent.
    */
   const deliverThresholdNotices = (snapshot: ActiveContextSnapshot): boolean => {
-    if (!THRESHOLD_NOTICES_ENABLED || !persistence.state) return false;
+    if (!guidance.thresholdNotices || !persistence.state) return false;
     const capacity = servingCapacity(snapshot.contextWindow);
     if (capacity.usedTokens === null || capacity.budgetTokens <= 0) return false;
     const occupancy = capacity.usedTokens / capacity.budgetTokens;
@@ -3644,10 +3669,9 @@ export function registerActiveContext(pi: any, options: {
             freshBoundary: snapshot.freshBoundary,
             budgetTokens: snapshot.budgetTokens,
           },
-          responseReserve: Math.min(
-            ACTIVE_CONTEXT_POLICY.responseReserve,
-            Math.floor(snapshot.contextWindow * 0.1),
-          ),
+          // What THIS runtime withheld, which is nothing once the deployment declared an
+          // already-net budget. One number, from the same accounting the fence divides by.
+          responseReserve: currentCapacity(ctx).outputReservation,
           windowSource: snapshot.windowSource,
           capacity: {
             ...currentCapacity(ctx),
@@ -4183,9 +4207,9 @@ export function registerActiveContext(pi: any, options: {
         unmarkedShare: remainder.share,
         unmarkedCandidates: remainder.candidates,
         // The acknowledgement rides the tool result, so it PERSISTS in context the way
-        // every tool result does. Default on; the switch is a constant until Build D
-        // makes the option surface public.
-        ...(CONTEXT_ACTION_RESPONSES_ENABLED ? {
+        // every tool result does. Default on;
+        // `guidance.actionResponses: false` returns the accounting without the prose.
+        ...(guidance.actionResponses ? {
           awareness: markAwarenessText({ held, remainder, toolName, brandNoun }),
           activation: "accepted as pending marks; no context bytes moved, and nothing else in your " +
             "context changed either. They apply together at the next commit epoch, which the runtime " +

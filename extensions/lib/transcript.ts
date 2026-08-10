@@ -469,6 +469,8 @@ export function mapActiveContext(input: {
   readOnlyTools?: ReadonlySet<string>;
   readOnlyContextActions?: ReadonlySet<string>;
   contextWindow?: number;
+  /** True when `contextWindow` is a declared serving budget rather than a raw window. */
+  netBudget?: boolean;
   thresholds?: ActiveContextThresholds;
 }): ActiveContextSnapshot {
   const policy = Object.freeze({ ...ACTIVE_CONTEXT_POLICY, ...(input.policy ?? {}) }) as typeof ACTIVE_CONTEXT_POLICY;
@@ -529,8 +531,13 @@ export function mapActiveContext(input: {
   // One denominator: both zone widths are shares of the serving budget the declared
   // window yields, so a smaller window narrows the tails in proportion instead of
   // meeting a fixed byte floor that only a second constant could rescue.
+  // A deployment that declared `providerInputBudget` passes its window in ALREADY NET of
+  // the reservation it holds back, so the zone widths divide by it as given. Only the
+  // descriptor fallback estimates a reservation out of the raw window.
   const thresholds = input.thresholds ?? DEFAULT_THRESHOLDS;
-  const budgetTokens = servingBudgetTokens(reportedContextWindow ?? DEFAULT_CONTEXT_WINDOW);
+  const budgetTokens = input.netBudget === true
+    ? (reportedContextWindow ?? DEFAULT_CONTEXT_WINDOW)
+    : servingBudgetTokens(reportedContextWindow ?? DEFAULT_CONTEXT_WINDOW);
   const freshBytes = zoneBytes(thresholds.freshTail, budgetTokens);
   const turns = completeTurns(input.eventMessages);
   const boundary = freshBoundary(input.eventMessages, turns, freshBytes);

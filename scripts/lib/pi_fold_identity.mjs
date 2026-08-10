@@ -19,7 +19,7 @@
 // only `read` and the stage tool, so this set is the generic read-only surface rather than
 // any one consumer's tool catalogue; the stage tool is added at registration, where its
 // name is known.
-export const PI_FOLD_READ_ONLY_TOOLS = Object.freeze(new Set([
+export const PI_FOLD_AUTO_FOLDABLE_TOOLS = Object.freeze(new Set([
   "read", "grep", "find", "ls",
   "web_search", "source_check", "fetch_content", "get_search_content",
 ]));
@@ -30,7 +30,7 @@ export const PI_FOLD_ACTIVE_CONTEXT_REGISTRATION = Object.freeze({
   commandNames: Object.freeze({ status: "pi-fold-context", fold: "fold-context" }),
   toolLabel: "pi-fold Active Context",
   brandNoun: "pi-fold",
-  readOnlyTools: PI_FOLD_READ_ONLY_TOOLS,
+  autoFoldableTools: PI_FOLD_AUTO_FOLDABLE_TOOLS,
 });
 
 const PREFIX = PI_FOLD_ACTIVE_CONTEXT_REGISTRATION.entryTypePrefix;

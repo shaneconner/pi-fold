@@ -64,7 +64,7 @@ function extractRun(run) {
       foldScheduling: run.foldScheduling,
       foldPeekResults: run.foldPeekResults,
       guidedCuration: run.guidedCuration,
-      providerTotalWindow: run.providerTotalWindow,
+      providerInputBudget: run.providerInputBudget,
       transport: run.transport,
     },
     workload: run.workload ?? null,

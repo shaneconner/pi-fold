@@ -562,8 +562,21 @@ function mcpServerForTool(toolName, fallback) {
     : fallback;
 }
 
+/**
+ * MCP tools are recognized by their name, and by nothing else.
+ *
+ * This was a host-supplied predicate whose default returned false for everything, so a
+ * conventionally named MCP tool was never classified unless a host wrote the predicate:
+ * a documented feature whose shipped state guaranteed it never ran. `mcp__server__tool`
+ * is the convention every MCP host follows, so it is the rule. A name outside the
+ * convention is deliberately not classified as MCP, and its oversized results fall to
+ * the ordinary tool-result path.
+ */
+function conventionalMcpTool(toolName) {
+  return mcpServerForTool(toolName, null) !== null;
+}
+
 export function registerEvidenceIngestion(pi, {
-  isMcpTool = () => false,
   entryTypePrefix = DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX,
 } = {}) {
   const evidenceNamespace = safeSegment(
@@ -623,7 +636,7 @@ export function registerEvidenceIngestion(pi, {
       return projectEvidenceText(text, descriptor, "utf8-head", truncation ? { truncation } : undefined);
     }
 
-    if (isMcpTool(toolName)) {
+    if (conventionalMcpTool(toolName)) {
       const envelope = eventEnvelope(event);
       const serialized = `${stableStringify(envelope)}\n`;
       if (utf8Bytes(serialized) <= TOOL_RESULT_PROJECTION_BYTES) return;

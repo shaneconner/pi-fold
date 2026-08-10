@@ -406,7 +406,7 @@ try {
     mode: config.mode,
     // The deployment fact travels config -> manifest -> registration, so the sealed
     // manifest states which serving budget the run's thresholds were measured against.
-    ...(config.providerTotalWindow === undefined ? {} : { providerTotalWindow: config.providerTotalWindow }),
+    ...(config.providerInputBudget === undefined ? {} : { providerInputBudget: config.providerInputBudget }),
     ...(config.transport === undefined ? {} : { transport: config.transport }),
     ordinal: config.ordinal,
     repetition: config.repetition,

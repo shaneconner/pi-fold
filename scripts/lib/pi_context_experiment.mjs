@@ -69,9 +69,17 @@ export const EXPERIMENT_DEFAULT_GUIDED_CURATION = false;
 // = 400k total), same provider family, and rep 15 proved the 400k serving budget on
 // the wire for that family. An entry here is the difference between measuring curation
 // thresholds against the true budget and rep 16's descriptor-mode abort.
-export const EXPERIMENT_PROVIDER_TOTAL_WINDOWS = Object.freeze({
-  "gpt-5.6-luna": 400_000,
-  "gpt-5.6-sol": 400_000,
+// Stated as the SERVING BUDGET, already net of the deployment's output reservation,
+// because that is the shape the runtime now takes: `providerInputBudget` passes straight
+// through as the one denominator instead of being netted down by a guessed reservation.
+// 383,616 is the same number every sealed run measured against (400,000 total less the
+// 16,384 the runtime used to withhold), so the arms stay comparable across the rename.
+// Keyed by PROVIDER and model together: capacity is a fact about a deployment, and the
+// same model id behind a different provider is a different deployment with a different
+// wire, so a bare model key would hand it this fact incorrectly.
+export const EXPERIMENT_PROVIDER_INPUT_BUDGETS = Object.freeze({
+  "openai-codex/gpt-5.6-luna": 383_616,
+  "openai-codex/gpt-5.6-sol": 383_616,
 });
 // Pi's default "auto" transport rides a WebSocket whose follow-ups are DELTA requests
 // against connection-scoped server state; every drop re-sends the full context, usually
@@ -1332,7 +1340,7 @@ export function validateExperimentManifest(manifest) {
   assertExperiment(keysWithin(manifest, [
     "version", "runId", "campaignId", "arm", "mode", "ordinal", "repetition",
     "seed", "model", "runtime", "target", "plan", "pacing", "createdWallMs",
-  ], ["sessionType", "guidance", "foldScheduling", "foldPeekResults", "guidedCuration", "providerTotalWindow", "transport", "reliabilityLevers"]),
+  ], ["sessionType", "guidance", "foldScheduling", "foldPeekResults", "guidedCuration", "providerTotalWindow", "providerInputBudget", "transport", "reliabilityLevers"]),
   "Invalid experiment manifest shape");
   assertExperiment(manifest.sessionType === undefined || manifest.sessionType === "arm",
     "Arm manifest carries a foreign session type");
@@ -1348,6 +1356,9 @@ export function validateExperimentManifest(manifest) {
   assertExperiment(manifest.providerTotalWindow === undefined ||
     (Number.isSafeInteger(manifest.providerTotalWindow) && manifest.providerTotalWindow > 0),
   "Manifest provider total window is invalid");
+  assertExperiment(manifest.providerInputBudget === undefined ||
+    (Number.isSafeInteger(manifest.providerInputBudget) && manifest.providerInputBudget > 0),
+  "Manifest provider input budget is invalid");
   assertExperiment(manifest.transport === undefined || EXPERIMENT_TRANSPORTS.includes(manifest.transport),
     "Manifest transport is not a known Pi transport");
   assertExperiment(manifest.version === EXPERIMENT_PROTOCOL_VERSION, "Manifest protocol version drifted");
@@ -1416,11 +1427,13 @@ export const EXPERIMENT_RUN_CONFIG_KEYS = Object.freeze([
 ]);
 
 // Tolerated on read, emitted by nothing. `foldScheduling`, `foldPeekResults`,
-// `guidedCuration` and `reliabilityLevers` are all retired condition keys whose sealed
-// run configs are immutable data, so runs 1-23 must keep adjudicating. A run config
-// written after the retirement carries none of them.
+// `guidedCuration`, `reliabilityLevers` and now `providerTotalWindow` are all retired
+// condition keys whose sealed run configs are immutable data, so runs 1-23 must keep
+// adjudicating. A run config written after the retirement carries none of them, and
+// carries `providerInputBudget` instead of the gross window.
 export const EXPERIMENT_RUN_CONFIG_OPTIONAL_KEYS = Object.freeze([
-  "sessionType", "guidance", "foldScheduling", "foldPeekResults", "guidedCuration", "providerTotalWindow", "transport", "reliabilityLevers",
+  "sessionType", "guidance", "foldScheduling", "foldPeekResults", "guidedCuration",
+  "providerTotalWindow", "providerInputBudget", "transport", "reliabilityLevers",
 ]);
 
 export function validateExperimentRunConfig(value) {
@@ -1436,6 +1449,9 @@ export function validateExperimentRunConfig(value) {
   assertExperiment(value.providerTotalWindow === undefined ||
     (Number.isSafeInteger(value.providerTotalWindow) && value.providerTotalWindow > 0),
   "Run config provider total window is invalid");
+  assertExperiment(value.providerInputBudget === undefined ||
+    (Number.isSafeInteger(value.providerInputBudget) && value.providerInputBudget > 0),
+  "Run config provider input budget is invalid");
   assertExperiment(value.transport === undefined || EXPERIMENT_TRANSPORTS.includes(value.transport),
     "Run config transport is not a known Pi transport");
   assertExperiment(value.version === EXPERIMENT_PROTOCOL_VERSION, "Run config protocol version drifted");

@@ -105,6 +105,16 @@ export function budgetOccupancy(snapshot: ActiveContextSnapshot, windowRatio: nu
   return windowRatio * snapshot.contextWindow / snapshot.budgetTokens;
 }
 
+/**
+ * The fence, as a ratio of the window the measured ratio is denominated against.
+ *
+ * A measured ratio is tokens over `contextWindow`, so "the request reached its serving
+ * budget" is exactly `ratio >= budgetTokens / contextWindow`. When the snapshot carries
+ * a budget the runtime uses it verbatim: a deployment that DECLARED its input budget has
+ * already netted out its output reservation, and re-subtracting one here would fence it
+ * roughly four points early. Only the ctx fallback, where nothing but a raw provider
+ * window is known, still estimates the reservation.
+ */
 export function hardFenceRatio(value?: unknown, ctx?: any): number {
   const direct = ownValue(value, "contextWindow");
   const reported = ownValue(ctx?.getContextUsage?.(), "contextWindow");
@@ -113,6 +123,10 @@ export function hardFenceRatio(value?: unknown, ctx?: any): number {
     : typeof reported === "number" && Number.isFinite(reported) && reported > 0
       ? reported
       : DEFAULT_CONTEXT_WINDOW;
+  const budgetTokens = ownValue(value, "budgetTokens");
+  if (typeof budgetTokens === "number" && Number.isFinite(budgetTokens) && budgetTokens > 0) {
+    return Math.min(1, budgetTokens / contextWindow);
+  }
   const reserve = Math.min(
     ACTIVE_CONTEXT_POLICY.responseReserve,
     Math.floor(contextWindow * 0.1),
@@ -134,7 +148,7 @@ export function hardFenceRatio(value?: unknown, ctx?: any): number {
  * is how a 25 percent error survived four instrumented runs.
  */
 export interface CapacityAccounting {
-  /** "truthful" once the deployment declares its total serving window. */
+  /** "truthful" once the deployment declares its own serving budget. */
   mode: "descriptor" | "truthful";
   /** The denominator every pressure ratio and fence is computed against. */
   window: number;
@@ -147,6 +161,18 @@ export interface CapacityAccounting {
   descriptorWindow: number | null;
 }
 
+/**
+ * ONE denominator, and no guess in front of it.
+ *
+ * `truthful` means the deployment stated the budget it may actually fill, already net of
+ * whatever output reservation it holds back, so the value passes through untouched and
+ * the reservation this runtime reports is zero because it withheld nothing. Only the
+ * descriptor fallback still subtracts, because a per-request max-input descriptor is a
+ * total-window claim and the reservation inside it has to be estimated. That estimate was
+ * the defect the reshape removed: the runtime subtracted a fixed 16,384 tokens capped at
+ * a tenth of the window while the documentation claimed it subtracted the reservation
+ * actually in force.
+ */
 export function capacityAccounting(input: {
   window: number;
   truthful: boolean;
@@ -154,7 +180,7 @@ export function capacityAccounting(input: {
   usedTokens: number | null;
 }): CapacityAccounting {
   const window = Number.isFinite(input.window) && input.window > 0 ? input.window : DEFAULT_CONTEXT_WINDOW;
-  const budgetTokens = servingBudgetTokens(window);
+  const budgetTokens = input.truthful ? window : servingBudgetTokens(window);
   const outputReservation = window - budgetTokens;
   const usedTokens = typeof input.usedTokens === "number" && Number.isFinite(input.usedTokens) &&
     input.usedTokens >= 0 ? input.usedTokens : null;

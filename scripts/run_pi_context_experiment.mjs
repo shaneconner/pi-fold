@@ -22,7 +22,7 @@ import {
   EXPERIMENT_CLOSED_BOOK_LABEL,
   EXPERIMENT_SESSION_TYPES,
   EXPERIMENT_DEPENDENCY_KEYS,
-  EXPERIMENT_PROVIDER_TOTAL_WINDOWS,
+  EXPERIMENT_PROVIDER_INPUT_BUDGETS,
   EXPERIMENT_TRANSPORT,
   EXPERIMENT_GUIDANCE_PROFILES,
   EXPERIMENT_MODE_PLANS,
@@ -300,7 +300,7 @@ async function run() {
   // Deployment fact resolved from the model pin, never a flag: rep 16 aborted after the
   // curation thresholds ran against the 255,616-token descriptor budget because this
   // fact never reached the registration. Unlisted models run in descriptor mode.
-  const providerTotalWindow = EXPERIMENT_PROVIDER_TOTAL_WINDOWS[modelId] ?? null;
+  const providerInputBudget = EXPERIMENT_PROVIDER_INPUT_BUDGETS[`${modelProvider}/${modelId}`] ?? null;
   const runDir = resolve(requestedRunDir);
   const requiredRoot = join(EXPERIMENT_STATE_ROOT, basename(resolve(campaignDir)), "runs");
   assertExperiment(dirname(runDir) === requiredRoot, `Run directory must live under ${requiredRoot}`);
@@ -354,7 +354,7 @@ async function run() {
     mode: plan.mode,
     ...(closedBook
       ? { sessionType }
-      : { ...(providerTotalWindow === null ? {} : { providerTotalWindow }) }),
+      : { ...(providerInputBudget === null ? {} : { providerInputBudget }) }),
     transport: EXPERIMENT_TRANSPORT,
     repetition,
     ordinal,
