@@ -118,6 +118,9 @@ function makeFixture({
   sessionId = "active-context-test",
   turns = 8,
   tools = true,
+  // Which tool the fixture's batches call. Every completed batch is auto-foldable now,
+  // so this changes what the ladder is being shown, not whether it may act.
+  toolName = "read",
   resultChars = 10_000,
   chapterChars = 0,
   mentionToolName = false,
@@ -162,7 +165,7 @@ function makeFixture({
         content: [{
           type: "toolCall",
           id: `call-${turn}`,
-          name: peek ? "pi_fold_context" : "read",
+          name: peek ? "pi_fold_context" : toolName,
           arguments: peek
             ? { action: "peek", id: peekTargetId }
             : (readArguments ? readArguments(turn) : { path: `file-${turn}.txt` }),
@@ -173,7 +176,7 @@ function makeFixture({
       ids.push(add({
         role: "toolResult",
         toolCallId: `call-${turn}`,
-        toolName: peek ? "pi_fold_context" : "read",
+        toolName: peek ? "pi_fold_context" : toolName,
         content: [{
           type: "text",
           text: `Result ${turn}: ${"r".repeat(resultChars)}${resultTail ? ` ${resultTail(turn)}` : ""}`,
@@ -229,11 +232,10 @@ function makeRuntime(built, {
   commandNames,
   summarizeContextSpan,
   initialEntries,
-  autoFoldableTools,
+  blacklistAutoFoldTools,
   thresholds,
   guidance,
   retiredOptions,
-  evidenceIngestion,
   summarizer,
   removedOptions,
   registerEvidence = false,
@@ -356,11 +358,10 @@ function makeRuntime(built, {
     ...(entryTypePrefix ? { entryTypePrefix } : {}),
     ...(commandNames ? { commandNames } : {}),
     ...(summarizeContextSpan ? { summarizeContextSpan } : {}),
-    ...(autoFoldableTools ? { autoFoldableTools } : {}),
+    ...(blacklistAutoFoldTools ? { blacklistAutoFoldTools } : {}),
     ...(thresholds ? { thresholds } : {}),
     ...(guidance ? { guidance } : {}),
     ...(retiredOptions ?? {}),
-    ...(evidenceIngestion === undefined ? {} : { evidenceIngestion }),
     ...(summarizer === undefined ? {} : { summarizer }),
     // Deleted options, forwarded verbatim so gate 68 can prove they are REFUSED.
     ...(removedOptions ?? {}),
@@ -841,7 +842,9 @@ async function collectRegistrationSurface(registration, mcpToolName) {
 
 async function gateRegistration() {
   const defaults = makeRuntime(makeFixture({ turns: 4, resultChars: 3_000 }));
-  assert.deepEqual([...context.READ_ONLY_TOOLS_DEFAULT], ["read", "grep", "find", "ls"]);
+  // The default auto-fold blacklist is EMPTY: every completed tool batch is foldable
+  // unmarked. A non-empty default would be an allow-list wearing the new name.
+  assert.deepEqual([...context.AUTO_FOLD_BLACKLIST_DEFAULT], []);
   assert.deepEqual([...defaults.tools.keys()], ["pi_fold_context"]);
   assert.deepEqual([...defaults.commands.keys()].sort(), ["fold-context", "pi-fold-context"]);
   await startRuntime(defaults);
@@ -880,7 +883,7 @@ async function gateRegistration() {
   }).tools, /distinct kebab-case/i);
   return {
     defaultTool: "pi_fold_context",
-    defaultAutoFoldableTools: [...context.READ_ONLY_TOOLS_DEFAULT],
+    defaultAutoFoldBlacklist: [...context.AUTO_FOLD_BLACKLIST_DEFAULT],
     defaultCommands: [...defaults.commands.keys()].sort(),
     commands: [...custom.commands.keys()].sort(),
     namedCommands: [...named.commands.keys()].sort(),
@@ -1019,10 +1022,19 @@ async function gateFoldLattice() {
   const missingResult = structuredClone(validBatchMessages);
   missingResult.splice(2, 1);
   assert.equal(context.validateTurnToolBatch(missingResult, { start: 0, end: 4 }), null);
-  const mutating = structuredClone(validBatchMessages);
-  mutating[1].content[0].name = "write";
-  mutating[2].toolName = "write";
-  assert.equal(context.validateTurnToolBatch(mutating, { start: 0, end: 5 }), null);
+  // An arbitrary tool, one nobody put on a list: its completed batch validates, because
+  // foldability is the default now. The same batch stops validating when the deployment
+  // blacklists that tool, which is the only thing the list does.
+  const arbitrary = structuredClone(validBatchMessages);
+  arbitrary[1].content[0].name = "write";
+  arbitrary[2].toolName = "write";
+  assert.equal(context.validateTurnToolBatch(arbitrary, { start: 0, end: 5 }).calls.length, 2);
+  assert.equal(
+    context.validateTurnToolBatch(
+      arbitrary, { start: 0, end: 5 }, "pi_fold_context", new Set(["write"]),
+    ),
+    null,
+  );
 
   const empty = context.emptyActiveContextState("batch-session");
   const [candidate] = context.selectAutomaticToolBatch(snapshot, empty);
@@ -2230,23 +2242,65 @@ async function gateFreshTailShareCap() {
   };
 }
 
-async function gateEvidenceIngestionSwitch() {
-  const scratch = await mkdtemp(join(tmpdir(), "pi-fold-no-evidence-"));
+/**
+ * Evidence ingestion is UNCONDITIONAL, and no option reaches it.
+ *
+ * It shipped as a switch through the six-option surface, defaulting on. The switch was the
+ * only public way to keep the folds and drop what makes them lossless: the 0444 artifacts
+ * are the exact-recovery anchors an oversized tool result folds against, so a deployment
+ * that turned ingestion off kept placeholders whose sources it could no longer produce.
+ * Nothing else about the mechanism moved: the same hook, the same read-only mode, the same
+ * 512 MB session cap, now constants rather than a choice.
+ */
+async function gateEvidenceIngestionIsUnconditional() {
+  const scratch = await mkdtemp(join(tmpdir(), "pi-fold-evidence-always-"));
   try {
     const sessionFile = join(scratch, "session.jsonl");
+    // No options at all: the plain package registration a host gets from `registerPiFold`.
     const runtime = makeRuntime(makeFixture({ turns: 4, resultChars: 20_000 }), {
       packageRegistration: true,
       sessionFile,
-      evidenceIngestion: false,
     });
-    assert.equal(runtime.handlers.has("tool_result"), false);
+    assert.equal(runtime.handlers.has("tool_result"), true,
+      "The default registration wired no evidence hook");
     await startRuntime(runtime);
-    assert.equal(existsSync(sessionFile), false);
-    assert.equal(existsSync(join(scratch, "pi-fold-evidence")), false);
+    const projection = await runtime.handlers.get("tool_result")({
+      toolName: "mcp__docs__fetch",
+      toolCallId: "unconditional-evidence-call",
+      isError: false,
+      content: [{ type: "text", text: "m".repeat(20_000) }],
+      details: { structuredContent: { payload: "p".repeat(20_000) } },
+    }, runtime.ctx);
+    const path = projection.details.evidence.path;
+    assert(path.includes("/pi-fold-evidence/"), path);
+    assert.equal(existsSync(path), true, "The evidence artifact was never written");
+    // Written read-only, as the artifacts must be: the recovery anchor cannot be a file a
+    // later pass can edit.
+    assert.equal((await stat(path)).mode & 0o777, 0o444);
+
+    // And there is no way back to the old behavior through the door. The name is refused
+    // rather than ignored, because a deployment still passing `evidenceIngestion: false`
+    // believes it turned the writes off.
+    assert.throws(
+      () => makeRuntime(makeFixture({ turns: 4 }), {
+        packageRegistration: true,
+        retiredOptions: { evidenceIngestion: false },
+      }).tools,
+      /evidenceIngestion is no longer an option: evidence ingestion is always on/,
+      "evidenceIngestion survived as a switch",
+    );
+    assert.throws(
+      () => makeRuntime(makeFixture({ turns: 4 }), {
+        packageRegistration: true,
+        retiredOptions: { evidenceIngestion: true },
+      }).tools,
+      /evidence ingestion is always on/,
+      "Passing the default value silently accepted a name the package no longer sells",
+    );
     return {
-      toolResultEvidenceHook: "absent",
-      sessionArtifact: "absent",
-      evidenceDirectory: "absent",
+      toolResultEvidenceHook: "present",
+      evidenceArtifactMode: "0444",
+      switchRefused: true,
     };
   } finally {
     await rm(scratch, { recursive: true, force: true });
@@ -2342,20 +2396,26 @@ async function gateSummarizerOption() {
   assert.equal(completionRequest.options.signalIdentical, true);
   assert.equal(completionRequest.options.reasoning, "max");
 
-  let deterministicLoaderCalls = 0;
-  const deterministic = makeRuntime(built, {
-    packageRegistration: true,
-    summarizer: "deterministic",
-    loadHostModule: async () => {
-      deterministicLoaderCalls += 1;
-      throw new Error("deterministic mode loaded the host");
-    },
-  });
-  await startRuntime(deterministic);
-  await measure(deterministic, fenceTokens, 100_000);
-  assert.equal(deterministicLoaderCalls, 0);
+  // "deterministic" was a public VALUE through the six-option surface, and it is refused
+  // now: it named the failure path as though it were a third generator to choose between,
+  // when every summarizer failure already falls back to exactly that brief. The refusal
+  // says so rather than reporting a shape error, so a deployment holding the value learns
+  // it lost nothing.
+  for (const alongside of [{}, { providerInputBudget: 90_000 }]) {
+    assert.throws(
+      () => makeRuntime(built, { packageRegistration: true, ...alongside, summarizer: "deterministic" }),
+      /summarizer has no "deterministic" value: the deterministic brief is the automatic fallback/,
+      "summarizer: \"deterministic\" survived as a selectable mode",
+    );
+  }
+  // The GENERATOR is untouched, and the seam that reaches it is the one the experiment
+  // extension uses: register the runtime directly, wire no brief generator, and every
+  // chapter brief is deterministic with no host module in the picture at all.
+  const unwired = makeRuntime(built);
+  await startRuntime(unwired);
+  await measure(unwired, fenceTokens, 100_000);
   assert.equal(
-    materialized(deterministic).folds.find((fold) => fold.kind === "chapter")?.provenance.kind,
+    materialized(unwired).folds.find((fold) => fold.kind === "chapter")?.provenance.kind,
     "deterministic",
   );
 
@@ -2388,7 +2448,7 @@ async function gateSummarizerOption() {
   // brief-generator interface, and `summarizer` is the declarative way to choose one, so
   // the package refuses the name rather than forwarding a callback the summarizer choice
   // would overwrite. Refused whether or not a summarizer accompanies it.
-  for (const alongside of [{ summarizer: "session" }, { summarizer: "deterministic" }, {}]) {
+  for (const alongside of [{ summarizer: "session" }, {}]) {
     assert.throws(() => makeRuntime(built, {
       packageRegistration: true,
       ...alongside,
@@ -2470,7 +2530,8 @@ async function gateSummarizerOption() {
     toolCalls: 0,
     hostLoads: loaderCalls,
     runtimeCreates: createCalls,
-    deterministic: "no-host-load",
+    deterministicValue: "refused",
+    unwiredSeamBriefs: "deterministic",
     failureFallback: "deterministic",
     publicSurfaceRefusals: 3,
     malformedObjects: "rejected",
@@ -3364,20 +3425,20 @@ async function gateEphemeralPeekMark() {
   // With one scheduler a bare peek is read-only on the default surface too, so the
   // classification no longer forks on which scheduler asked.
   assert.equal(
-    context.isReadOnlyContextTool("pi_fold_context", { action: "peek", id: "fold_probe" }),
+    context.isAutoFoldableToolCall("pi_fold_context", { action: "peek", id: "fold_probe" }),
     true,
   );
   assert.equal(
-    context.isReadOnlyContextTool(
+    context.isAutoFoldableToolCall(
       "pi_fold_context", { action: "peek", id: "fold_probe" }, "pi_fold_context",
-      context.READ_ONLY_TOOLS_DEFAULT, context.PEEK_READ_ONLY_CONTEXT_ACTIONS,
+      context.AUTO_FOLD_BLACKLIST_DEFAULT, context.PEEK_READ_ONLY_CONTEXT_ACTIONS,
     ),
     true,
   );
   assert.equal(
-    context.isReadOnlyContextTool(
+    context.isAutoFoldableToolCall(
       "pi_fold_context", { action: "peek", id: "x", brief: "no" }, "pi_fold_context",
-      context.READ_ONLY_TOOLS_DEFAULT, context.PEEK_READ_ONLY_CONTEXT_ACTIONS,
+      context.AUTO_FOLD_BLACKLIST_DEFAULT, context.PEEK_READ_ONLY_CONTEXT_ACTIONS,
     ),
     false,
   );
@@ -7805,13 +7866,13 @@ async function gateStatusResultsAreLadderFood() {
     { status: ["action", "detail", "offset", "limit"], peek: ["action", "id"] },
   );
   const pagedShape = { action: "status", detail: "folds", offset: 40, limit: 40 };
-  assert.equal(context.isReadOnlyContextTool("pi_fold_context", pagedShape), true,
+  assert.equal(context.isAutoFoldableToolCall("pi_fold_context", pagedShape), true,
     "The advertised paged status call still classifies unsafe");
-  assert.equal(context.isReadOnlyContextTool("pi_fold_context", { action: "status", detail: "tree" }), true);
+  assert.equal(context.isAutoFoldableToolCall("pi_fold_context", { action: "status", detail: "tree" }), true);
   // Classification is allowlist-driven: one argument outside the surface and the
   // batch is unsafe, which is exactly how the detail-carrying shape was rejected
   // before 'detail' joined the list above.
-  assert.equal(context.isReadOnlyContextTool("pi_fold_context", { ...pagedShape, verbose: true }), false);
+  assert.equal(context.isAutoFoldableToolCall("pi_fold_context", { ...pagedShape, verbose: true }), false);
 
   // The batch scanner agrees end to end: the status-with-detail batch is validated.
   // The trailing turns carry real mass so the fresh-byte tail ends inside them and
@@ -7874,11 +7935,19 @@ async function gateStatusResultsAreLadderFood() {
 }
 
 /**
- * Turns whose tool is NOT read-only, so the chapter encoding must inline the whole
- * result: this is the shape whose closed unit can exceed maxChapterChars, exactly
- * how rep 19's status units encoded to 146k-331k chars before this build.
+ * Turns whose tool the deployment BLACKLISTED, so no tool rung may claim their results
+ * and the chapter encoding must inline them whole: this is the shape whose closed unit
+ * can exceed maxChapterChars, exactly how rep 19's status units encoded to 146k-331k
+ * chars before this build. It took no blacklist to produce before 2026-08-10, when an
+ * unlisted tool was one the ladder could not fold; a blacklisted tool is the only way
+ * left to build the shape, which is the whole cost of naming one.
  */
-function makeOpaqueToolFixture({ sessionId, resultSizes, contextWindow = 400_000 }) {
+function makeOpaqueToolFixture({
+  sessionId,
+  resultSizes,
+  contextWindow = 400_000,
+  blacklisted = true,
+}) {
   const entries = [];
   const messages = [];
   let parentId = null;
@@ -7933,7 +8002,12 @@ function makeOpaqueToolFixture({ sessionId, resultSizes, contextWindow = 400_000
     });
   }
   const snapshot = context.mapActiveContext({
-    sessionId, eventMessages: messages, contextEntries: entries, policy: {}, contextWindow,
+    sessionId,
+    eventMessages: messages,
+    contextEntries: entries,
+    policy: {},
+    contextWindow,
+    ...(blacklisted ? { blacklistAutoFoldTools: new Set(["bash"]) } : {}),
   });
   return { sessionId, entries, messages, snapshot };
 }
@@ -7992,12 +8066,32 @@ async function gateNoPermanentlyUnfoldableUnit() {
     multiIndices.some((index) => index >= item.start && index < item.end));
   assert(multiUnits.length >= 2, "The cap check collapsed composition to single units");
 
+  // The same transcript with the tool NOT blacklisted, which is every deployment's
+  // default: the oversized unit never reaches the chapter rung as 140k of inline bytes at
+  // all, because the tool rung claims the result directly and the chapter encoding carries
+  // a brief in its place. Both halves say the same thing, which is this gate's name: there
+  // is no closed unit the automatic law cannot reclaim by SOME rung.
+  const unlisted = makeOpaqueToolFixture({
+    sessionId: "giant-unlisted", resultSizes: [140_000], blacklisted: false,
+  });
+  const unlistedState = context.emptyActiveContextState(unlisted.sessionId);
+  const [unlistedCandidate] = context.selectAutomaticToolBatch(unlisted.snapshot, unlistedState);
+  assert(unlistedCandidate, "The oversized result was unreachable once the blacklist was empty");
+  assert.equal(unlistedCandidate.kind, "tool-result");
+  const unlistedCommitted = await commitCandidate(unlistedState, unlisted.snapshot, unlistedCandidate);
+  const unlistedBefore = bytesOf(context.projectActiveContext(unlisted.snapshot, unlistedState));
+  const unlistedAfter = bytesOf(context.projectActiveContext(unlisted.snapshot, unlistedCommitted.state));
+  assert(unlistedBefore - unlistedAfter >= 140_000 * 0.9,
+    `Folding the oversized result freed only ${unlistedBefore - unlistedAfter} bytes`);
+
   return {
     maxChapterChars: giant.snapshot.policy.maxChapterChars,
     oversizedUnitBytes: Buffer.byteLength(encoded, "utf8"),
     freedBytes: before - after,
     multiUnitChapterBytes: Buffer.byteLength(multiEncoded, "utf8"),
     multiUnitCount: multiUnits.length,
+    unlistedToolRung: "tool-result",
+    unlistedFreedBytes: unlistedBefore - unlistedAfter,
   };
 }
 
@@ -9266,38 +9360,46 @@ async function gateAgentSpansNest() {
 }
 
 /**
- * THE public surface: six options, and nothing else reaches the runtime.
+ * THE public surface: five options, and nothing else reaches the runtime.
  *
- * Every name outside the six is refused, and a name that was RENAMED is refused by its
+ * Every name outside the five is refused, and a name that was RENAMED is refused by its
  * old spelling with the new one in the message. Silence would be worse than a name that
  * never existed: an unknown key used to spread straight through, so a caller who passed
  * a deleted option believed it had bought behavior and got the opposite. `registerPiFold`
  * is the front door this gate measures; the internal seam is deliberately wider, and the
  * last leg proves the seam cannot be reached through the door.
+ *
+ * Six became five on 2026-08-10. `evidenceIngestion` is hardwired on, `autoFoldableTools`
+ * inverted into `blacklistAutoFoldTools`, and `summarizer` lost `"deterministic"`, which
+ * is the first REFUSED VALUE on this surface rather than a refused name.
  */
 async function gatePublicOptionSurface() {
   const built = makeFixture({ turns: 4, resultChars: 3_000 });
   const register = (options) => makeRuntime(built, {
     ...options, packageRegistration: true, retiredOptions: options,
   }).tools;
-  // The whole surface, exercised together: six names, all accepted at once.
+  // The whole surface, exercised together: five names, all accepted at once.
   const surface = makeRuntime(built, {
     packageRegistration: true,
     retiredOptions: {
       thresholds: context.DEFAULT_THRESHOLDS,
-      summarizer: "deterministic",
+      summarizer: { provider: "openai", model: "gpt-brief", effort: "low" },
       providerInputBudget: 90_000,
-      autoFoldableTools: new Set(["read", "repo_stage"]),
-      evidenceIngestion: false,
+      blacklistAutoFoldTools: new Set(["repo_stage"]),
       guidance: { thresholdNotices: true, actionResponses: true },
     },
   });
   assert.deepEqual(Object.keys(surface.registration), ["projectionCandidates"]);
   assert.deepEqual([...surface.tools.keys()], ["pi_fold_context"]);
   // The renames, each refused by its OLD name and each naming its replacement, because a
-  // caller holding the old name needs the new one, not a shape error.
+  // caller holding the old name needs the new one, not a shape error. Both spellings of
+  // the auto-fold list are ALLOW-lists, so their refusals must also say the sense flipped:
+  // forwarded verbatim, either one would bar exactly the tools it meant to permit.
   const renamed = [
-    ["readOnlyTools", new Set(["read"]), /readOnlyTools is no longer an option: renamed autoFoldableTools/],
+    ["readOnlyTools", new Set(["read"]),
+      /readOnlyTools is no longer an option: renamed blacklistAutoFoldTools, and the sense is INVERTED/],
+    ["autoFoldableTools", new Set(["read", "repo_stage"]),
+      /autoFoldableTools is no longer an option: renamed blacklistAutoFoldTools, and the sense is INVERTED/],
     ["providerTotalWindow", 400_000, /providerTotalWindow is no longer an option: renamed providerInputBudget/],
   ];
   for (const [option, value, message] of renamed) {
@@ -9322,23 +9424,132 @@ async function gatePublicOptionSurface() {
   // The predicate whose default guaranteed it never ran.
   assert.throws(() => register({ isMcpTool: () => true }), /mcp__server__tool naming convention/);
   // And the internal brief-generator seam, which `summarizer` is the declarative form of.
+  // The message names the values that remain, so it must no longer offer "deterministic".
   assert.throws(() => register({ summarizeContextSpan: async () => ({ brief: "x" }) }),
-    /choose a brief generator with summarizer/);
+    /choose a brief generator with summarizer \("session" or \{ provider, model, effort \}\)/);
+  // The MECHANISM that lost its switch. The switch is refused by name and the message says
+  // the mechanism is on, not that the name is unknown: a deployment reading "unknown
+  // option" would conclude the writes had stopped.
+  assert.throws(() => register({ evidenceIngestion: false }),
+    /evidenceIngestion is no longer an option: evidence ingestion is always on/);
+  // The refused VALUE, which no name-level check can catch: the option is on the surface
+  // and this one setting of it is not. The message says the deterministic brief is still
+  // the failure fallback, so the caller knows it kept the behavior it wanted.
+  assert.throws(() => register({ summarizer: "deterministic" }),
+    /summarizer has no "deterministic" value: the deterministic brief is the automatic fallback/);
   // A name this package never sold at all is refused with the whole surface named, so a
-  // typo reports the six rather than failing somewhere downstream at runtime.
+  // typo reports the five rather than failing somewhere downstream at runtime.
   assert.throws(() => register({ maxTarget: 0.8 }),
-    /maxTarget is not a pi-fold option: the surface is thresholds, summarizer, providerInputBudget, autoFoldableTools, evidenceIngestion, guidance/);
+    /maxTarget is not a pi-fold option: the surface is thresholds, summarizer, providerInputBudget, blacklistAutoFoldTools, guidance/);
   assert.throws(() => register({ foldScheduling: "epoch" }), /foldScheduling is not a pi-fold option/);
   // The seam is not reachable through the door: the runtime still accepts a synthetic
   // brand when registered directly, which is what keeps the neutrality gate honest.
   const seam = makeRuntime(built, { toolName: "acme_context", brandNoun: "Acme" });
   assert.deepEqual([...seam.tools.keys()], ["acme_context"]);
+  // The inverted name is refused at the seam too, so a direct registration cannot move an
+  // allow-list across either. The seam is wider than the door; it is not laxer.
+  assert.throws(() => makeRuntime(built, { retiredOptions: { autoFoldableTools: new Set(["read"]) } }),
+    /autoFoldableTools is now blacklistAutoFoldTools, and the sense is INVERTED/);
   return {
-    publicOptions: 6,
+    publicOptions: 5,
     renamesRefusedByOldName: renamed.length,
     identityOptionsRefused: 6,
     unknownNamesRefused: 2,
+    refusedValues: 1,
     internalSeamReachableFromPackageEntry: false,
+  };
+}
+
+/**
+ * EVERY completed tool batch folds unmarked. The blacklist is the exception, not the rule.
+ *
+ * The list ran the other way until 2026-08-10: an allow-list seeded with pi's four
+ * built-in readers, so a deployment's own tools were unfoldable by the ladder until
+ * someone remembered to name them, and the ladder starved on exactly the results that
+ * filled the window. Foldability was never the protection. The pins, the three zones and
+ * the fresh tail are, and they hold for a blacklisted tool and an ordinary one alike,
+ * which is why the default list is empty and the zone leg below is part of this gate.
+ *
+ * `bash` is the probe on purpose: it is not one of the four names the old allow-list
+ * carried, so every assertion here is one the previous surface would have failed.
+ */
+async function gateEveryToolBatchFoldsUnmarked() {
+  // The classifier, before any ladder: an arbitrary tool is foldable whatever its
+  // arguments look like, and blacklisting it is the only thing that changes the answer.
+  assert.equal(context.isAutoFoldableToolCall("bash", { command: "make" }), true);
+  assert.equal(context.isAutoFoldableToolCall("write", { path: "x", contents: "y" }), true);
+  assert.equal(
+    context.isAutoFoldableToolCall("bash", { command: "make" }, "pi_fold_context", new Set(["bash"])),
+    false,
+  );
+  // The one carve-out survives the inversion: the context tool's own MUTATING calls are
+  // never auto-foldable, because a tool call may not cause a rewrite of its own batch.
+  // Its read-only actions still are.
+  assert.equal(context.isAutoFoldableToolCall("pi_fold_context", { action: "fold", ids: "e1" }), false);
+  assert.equal(context.isAutoFoldableToolCall("pi_fold_context", { action: "status" }), true);
+
+  const shape = { turns: 8, resultChars: 10_000, contextWindow: 100_000, toolName: "bash" };
+  const built = makeFixture(shape);
+  const bashResultIds = built.turnEntries.map((ids) => ids[2]);
+  // The rung selects the stale bash batch with no option set anywhere.
+  const state = context.emptyActiveContextState(built.sessionId);
+  const [candidate] = context.selectAutomaticToolBatch(built.snapshot, state);
+  assert(candidate, "The tool rung selected nothing from an unlisted tool's completed batches");
+  assert.equal(candidate.kind, "tool-result");
+  assert(candidate.sourceRefs.every((ref) => bashResultIds.includes(ref.entryId)));
+
+  // Named in the blacklist, the same transcript offers the rung nothing.
+  const blacklisted = context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: built.messages,
+    contextEntries: built.entries,
+    contextWindow: shape.contextWindow,
+    blacklistAutoFoldTools: new Set(["bash"]),
+  });
+  assert.deepEqual(context.selectAutomaticToolBatch(blacklisted, state), [],
+    "A blacklisted tool's completed batch was still selected unmarked");
+
+  // The zones did not move. Foldability grants eligibility, never reach: every ref the
+  // rung took sits inside the stale zone, and the freshest batch is untouched.
+  const staleIndices = candidate.sourceRefs.map((ref) =>
+    built.snapshot.mapped.findIndex((item) => item.ref?.entryId === ref.entryId));
+  assert(staleIndices.length && staleIndices.every((index) =>
+    index >= 0 && index < built.snapshot.staleBoundary),
+  "The ladder reached outside the stale zone once the tool became foldable");
+  assert(!candidate.sourceRefs.some((ref) => ref.entryId === bashResultIds.at(-1)),
+    "The rung took the freshest batch");
+
+  // End to end through the ladder, at the default registration a host gets: the epoch
+  // commits and a tool-result fold covers bash results nobody marked and nobody listed.
+  const runtime = makeRuntime(makeFixture(shape));
+  await startRuntime(runtime);
+  await runtimeCommit(runtime, { tokens: 95_000, contextWindow: 100_000 });
+  const toolFolds = materialized(runtime).folds.filter((fold) => fold.kind === "tool-result");
+  assert(toolFolds.length, "The running ladder never folded an unlisted tool's batch");
+  assert(toolFolds.some((fold) =>
+    fold.parts.some((part) => bashResultIds.includes(part.ref?.entryId))),
+  "The tool-result folds covered something other than the bash results");
+  assert.equal(contextEvents(runtime).filter((record) =>
+    record.kind === "context.fold" && record.origin === "agent").length, 0,
+  "The fold under test was agent-marked rather than automatic");
+
+  // And with the tool blacklisted, the running ladder claims no tool batch at all. The
+  // chapter rung may still take the span; the tool rung, which is what the list governs,
+  // may not.
+  const barred = makeRuntime(makeFixture(shape), { blacklistAutoFoldTools: new Set(["bash"]) });
+  await startRuntime(barred);
+  await runtimeCommit(barred, { tokens: 95_000, contextWindow: 100_000 });
+  assert.deepEqual(
+    materialized(barred).folds.filter((fold) => fold.kind === "tool-result"), [],
+    "The blacklisted tool's results were folded by the tool rung anyway",
+  );
+  return {
+    defaultBlacklist: [...context.AUTO_FOLD_BLACKLIST_DEFAULT],
+    unlistedToolSelected: candidate.sourceRefs.length,
+    blacklistedToolSelected: 0,
+    selectionConfinedToStaleZone: true,
+    ladderToolFolds: toolFolds.length,
+    contextToolMutatingActionsFoldable: false,
   };
 }
 
@@ -9470,7 +9681,7 @@ const gates = [
   [19, "Fresh tail is one proportion", gateFreshTailShareCap],
   [20, "Neutral default branding", gateNeutralDefaultBranding],
   [21, "Deployment branding reproduction", gateDeploymentBrandingReproduction],
-  [22, "Evidence ingestion switch", gateEvidenceIngestionSwitch],
+  [22, "Evidence ingestion is unconditional", gateEvidenceIngestionIsUnconditional],
   [23, "Summarizer option", gateSummarizerOption],
   [25, "Peek and fold index", gatePeekAndFoldIndex],
   [26, "Two surfacing channels, one divergence trigger", gateSurfacingChannels],
@@ -9537,6 +9748,7 @@ const gates = [
   [100, "Threshold notices append once and re-arm", gateThresholdNoticesAppendOnce],
   [101, "Peek copies reclaim with identity", gatePeekReclaimWithIdentity],
   [102, "The public option surface", gatePublicOptionSurface],
+  [105, "Every completed tool batch folds unmarked", gateEveryToolBatchFoldsUnmarked],
   [103, "Guidance is two booleans, default on", gateGuidanceOption],
   [104, "The slate rides the commit boundary", gateSurfacingDeliveryRidesTheBoundary],
 ];

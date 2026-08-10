@@ -1457,9 +1457,13 @@ try {
     `${identity.PI_FOLD_ENTRY_NAMESPACE}-native-compaction-decision`);
   assert.equal(identity.PI_FOLD_NATIVE_COMPACTION_RECEIPT_ENTRY,
     `${identity.PI_FOLD_ENTRY_NAMESPACE}-native-compaction-receipt`);
-  // The runtime is neutral: no deployment brand may be baked into it.
-  assert(!identity.PI_FOLD_AUTO_FOLDABLE_TOOLS.has("pi_fold_context"),
-    "the deployment's own context tool must be added at registration, not carried in the read-only set");
+  // The registration block is identity ONLY. Foldability policy left it on 2026-08-10
+  // when the auto-fold list inverted: the arm folds every completed tool batch unmarked,
+  // exactly as a consumer's does, and a blacklist smuggled in here would make the measured
+  // ladder a harness-only variant of the shipped one.
+  assert(!Object.hasOwn(identity.PI_FOLD_ACTIVE_CONTEXT_REGISTRATION, "blacklistAutoFoldTools") &&
+    !Object.hasOwn(identity.PI_FOLD_ACTIVE_CONTEXT_REGISTRATION, "autoFoldableTools"),
+  "the harness identity must carry no auto-fold policy: the arm runs the shipped default");
   checks.harnessIdentityMatchesRuntimeNamespace = true;
 }
 

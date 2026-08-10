@@ -86,7 +86,7 @@ export function resultCallIndex(snapshot: ActiveContextSnapshot, allowConsumedIn
       turn,
       allowConsumedIncomplete,
       snapshot.toolName,
-      snapshot.readOnlyTools,
+      snapshot.blacklistAutoFoldTools,
       snapshot.readOnlyContextActions,
     );
     if (!validated) continue;

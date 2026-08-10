@@ -112,7 +112,7 @@ import {
   PEEK_DEFAULT_MAX_BYTES,
   PEEK_MIN_SLICE_BYTES,
   PEEK_READ_ONLY_CONTEXT_ACTIONS,
-  READ_ONLY_TOOLS_DEFAULT,
+  AUTO_FOLD_BLACKLIST_DEFAULT,
   SURFACING_BRIEF_HIT,
   SURFACING_CONTENT_HIT,
   SURFACING_DIVERGENCE_MARGIN,
@@ -291,7 +291,11 @@ export function registerActiveContext(pi: any, options: {
   brandNoun?: string;
   entryTypePrefix?: string;
   commandNames?: { status?: string; fold?: string };
-  autoFoldableTools?: ReadonlySet<string>;
+  /**
+   * The auto-fold EXCEPTION list, empty by default: every completed tool batch folds
+   * unmarked, and this names the tools whose results must stay raw.
+   */
+  blacklistAutoFoldTools?: ReadonlySet<string>;
   /** The serving budget itself, ALREADY NET of the deployment's output reservation. */
   providerInputBudget?: number;
   /**
@@ -308,7 +312,7 @@ export function registerActiveContext(pi: any, options: {
   const toolLabel = options.toolLabel ?? DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL;
   const brandNoun = options.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN;
   const entryTypePrefix = options.entryTypePrefix ?? DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX;
-  const readOnlyTools = options.autoFoldableTools ?? READ_ONLY_TOOLS_DEFAULT;
+  const blacklistAutoFoldTools = options.blacklistAutoFoldTools ?? AUTO_FOLD_BLACKLIST_DEFAULT;
   // Deleted options are REFUSED by name, never ignored. A deployment still passing one
   // believes it asked for something, and silence would hand it the opposite behavior:
   // `foldScheduling` chose between epoch and the deleted immediate scheduler,
@@ -336,14 +340,19 @@ export function registerActiveContext(pi: any, options: {
     }
   }
   // The renamed options are refused by their OLD names, each pointing at the new one.
-  // `readOnlyTools` said what the tools were rather than what the set does, which is
-  // grant the runtime permission to fold their results without a mark; `commandPrefix`
-  // derived two command names from a stem the full-name override then overrode anyway;
+  // `readOnlyTools` and then `autoFoldableTools` were both ALLOW-lists, and the list runs
+  // the other way now, so neither may be forwarded silently: an allow-list read as a
+  // blacklist bars exactly the tools it meant to permit. `commandPrefix` derived two
+  // command names from a stem the full-name override then overrode anyway;
   // `providerTotalWindow` was a gross window the runtime netted down with a GUESSED
   // reservation, and the guess is what the reshape deleted.
-  if (Object.hasOwn(options, "readOnlyTools")) {
-    throw new Error("readOnlyTools is now autoFoldableTools: same set, and the name now says " +
-      "what it controls, which is whose results may fold without a mark");
+  for (const inverted of ["readOnlyTools", "autoFoldableTools"]) {
+    if (Object.hasOwn(options, inverted)) {
+      throw new Error(`${inverted} is now blacklistAutoFoldTools, and the sense is INVERTED: ` +
+        "every completed tool batch folds unmarked, and the list names the exceptions whose " +
+        "results must stay raw. An allow-list moved across verbatim would bar exactly the " +
+        "tools it meant to permit");
+    }
   }
   if (Object.hasOwn(options, "commandPrefix")) {
     throw new Error("commandPrefix is no longer an option: give whole names with commandNames");
@@ -363,8 +372,8 @@ export function registerActiveContext(pi: any, options: {
   const providerInputBudget = options.providerInputBudget ?? null;
   const readOnlyContextActions = PEEK_READ_ONLY_CONTEXT_ACTIONS;
   if (!toolName || !toolLabel || !brandNoun || !entryTypePrefix ||
-      [...readOnlyTools].some((name) => typeof name !== "string" || !name)) {
-    throw new Error("Active-context names and auto-foldable tools must be nonempty strings");
+      [...blacklistAutoFoldTools].some((name) => typeof name !== "string" || !name)) {
+    throw new Error("Active-context names and blacklisted auto-fold tools must be nonempty strings");
   }
   const commandNames = {
     status: options.commandNames?.status ?? DEFAULT_ACTIVE_CONTEXT_COMMAND_NAMES.status,
@@ -761,7 +770,7 @@ export function registerActiveContext(pi: any, options: {
     toolName,
     brandNoun,
     entryTypePrefix,
-    readOnlyTools,
+    blacklistAutoFoldTools,
     readOnlyContextActions,
     contextWindow: budgetWindowFor(ctx) ?? undefined,
     netBudget: providerInputBudget !== null,
@@ -781,7 +790,7 @@ export function registerActiveContext(pi: any, options: {
       toolName,
       brandNoun,
       entryTypePrefix,
-      readOnlyTools,
+      blacklistAutoFoldTools,
       readOnlyContextActions,
       contextWindow: budgetWindowFor(ctx) ?? undefined,
       netBudget: providerInputBudget !== null,

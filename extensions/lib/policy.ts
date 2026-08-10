@@ -886,7 +886,7 @@ export interface ActiveContextSnapshot {
   toolName: string;
   brandNoun: string;
   entryTypePrefix: string;
-  readOnlyTools: ReadonlySet<string>;
+  blacklistAutoFoldTools: ReadonlySet<string>;
   /** Active-context tool actions treated as read-only when classifying tool batches. */
   readOnlyContextActions: ReadonlySet<string>;
   contextWindow: number;
@@ -899,8 +899,15 @@ export interface FoldCandidate {
   sourceRefs: EvidenceRef[];
 }
 
-export const READ_ONLY_TOOLS_DEFAULT = new Set([
-  "read", "grep", "find", "ls",
-]);
+/**
+ * The auto-fold exception list, EMPTY by default: every completed tool batch is foldable
+ * by the ladder without an agent mark, and this names the tools whose results must stay
+ * raw. The list ran the other way until the 2026-08-10 surface, as an allow-list seeded
+ * with pi's four built-in readers, which meant a deployment's own tools were unfoldable
+ * until someone remembered to name them and the ladder starved on exactly the results
+ * that filled the window. Foldability was never the protection: pins, the three zones and
+ * the fresh tail are, and they apply to a blacklisted tool and an ordinary one alike.
+ */
+export const AUTO_FOLD_BLACKLIST_DEFAULT: ReadonlySet<string> = new Set();
 
 export type AdvisoryMilestone = "orientation" | "notice" | "tools" | "chapters" | "urgent";

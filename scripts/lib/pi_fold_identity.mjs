@@ -15,22 +15,18 @@
 // there. The namespace is therefore written out below, and a verification gate imports the
 // runtime function to assert the two still agree.
 
-// Which tool results the ladder may treat as replayable evidence. The experiment exposes
-// only `read` and the stage tool, so this set is the generic read-only surface rather than
-// any one consumer's tool catalogue; the stage tool is added at registration, where its
-// name is known.
-export const PI_FOLD_AUTO_FOLDABLE_TOOLS = Object.freeze(new Set([
-  "read", "grep", "find", "ls",
-  "web_search", "source_check", "fetch_content", "get_search_content",
-]));
-
+// Identity ONLY: names and entry types, no foldability policy. Which tool results the
+// ladder may claim unmarked used to be an allow-list carried here, seeded with a generic
+// read-only surface and topped up at registration with the stage tool. The list inverted
+// on 2026-08-10: every completed tool batch folds unmarked and `blacklistAutoFoldTools`
+// names the exceptions, so the harness carries no list at all and the arm under
+// measurement runs the shipped law rather than a harness-only variant of it.
 export const PI_FOLD_ACTIVE_CONTEXT_REGISTRATION = Object.freeze({
   toolName: "pi_fold_context",
   entryTypePrefix: "pi-fold-active-context",
   commandNames: Object.freeze({ status: "pi-fold-context", fold: "fold-context" }),
   toolLabel: "pi-fold Active Context",
   brandNoun: "pi-fold",
-  autoFoldableTools: PI_FOLD_AUTO_FOLDABLE_TOOLS,
 });
 
 const PREFIX = PI_FOLD_ACTIVE_CONTEXT_REGISTRATION.entryTypePrefix;

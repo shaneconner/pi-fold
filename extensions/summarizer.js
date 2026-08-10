@@ -1,14 +1,22 @@
 const loadPiHost = () => import("@earendil-works/pi-coding-agent");
 
 function normalizeSummarizer(summarizer) {
-  if (summarizer === "session" || summarizer === "deterministic") return summarizer;
+  // "deterministic" was a way to select the FAILURE PATH on purpose. Every summarizer
+  // failure already falls back to the deterministic brief, so the value bought nothing a
+  // failure does not, while reading as a third generator a deployment had to choose
+  // between. The generator stays; the value that named it does not.
+  if (summarizer === "deterministic") {
+    throw new Error('summarizer has no "deterministic" value: the deterministic brief is the ' +
+      "automatic fallback whenever a summarizer fails, not a mode to select");
+  }
+  if (summarizer === "session") return summarizer;
   if (!summarizer || typeof summarizer !== "object" || Array.isArray(summarizer) ||
       typeof summarizer.provider !== "string" || !summarizer.provider ||
       typeof summarizer.model !== "string" || !summarizer.model ||
       (summarizer.effort !== undefined &&
         (typeof summarizer.effort !== "string" || !summarizer.effort))) {
     throw new Error(
-      'summarizer must be "session", "deterministic", or an object with nonempty provider and model strings',
+      'summarizer must be "session" or an object with nonempty provider and model strings',
     );
   }
   return {
@@ -20,7 +28,6 @@ function normalizeSummarizer(summarizer) {
 
 export function createSummarizeContextSpan(summarizer = "session", loadHostModule = loadPiHost) {
   const configured = normalizeSummarizer(summarizer);
-  if (configured === "deterministic") return undefined;
   if (typeof loadHostModule !== "function") {
     throw new Error("Summarizer host-module loader must be a function");
   }

@@ -16,13 +16,13 @@ import {
 } from "./canonical.ts";
 import {
   ACTIVE_CONTEXT_POLICY,
+  AUTO_FOLD_BLACKLIST_DEFAULT,
   DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
   DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_THRESHOLDS,
   PEEK_READ_ONLY_CONTEXT_ACTIONS,
-  READ_ONLY_TOOLS_DEFAULT,
   servingBudgetTokens,
   zoneBytes,
 } from "./policy.ts";
@@ -75,23 +75,33 @@ export function leadingCompactionContinuation(messages: unknown[]): CompleteTurn
 }
 
 /**
- * The exact argument surface each read-only active-context action may carry. A call
- * outside this surface is not classified read-only, so its batch never folds.
+ * The exact argument surface each read-only active-context action may carry. A context
+ * call outside this surface is not classified read-only, so its batch never folds
+ * unmarked.
  */
 export const READ_ONLY_CONTEXT_ACTION_ARGUMENTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   status: Object.freeze(["action", "detail", "offset", "limit"]),
   peek: Object.freeze(["action", "id"]),
 });
 
-export function isReadOnlyContextTool(
+/**
+ * May the ladder fold this completed call's batch without an agent mark?
+ *
+ * Yes for every tool, unless the deployment blacklisted it. The one carve-out is the
+ * active-context tool itself: a mutating context call folding its own batch would be a
+ * rewrite caused by a tool call, so only its read-only actions inside the exact argument
+ * surface above are foldable.
+ */
+export function isAutoFoldableToolCall(
   name: string,
   args?: unknown,
   toolName = DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
-  readOnlyTools: ReadonlySet<string> = READ_ONLY_TOOLS_DEFAULT,
+  blacklistAutoFoldTools: ReadonlySet<string> = AUTO_FOLD_BLACKLIST_DEFAULT,
   readOnlyContextActions: ReadonlySet<string> = PEEK_READ_ONLY_CONTEXT_ACTIONS,
 ): boolean {
-  if (readOnlyTools.has(name)) return true;
-  if (name !== toolName || !isPlainRecord(args)) return false;
+  if (blacklistAutoFoldTools.has(name)) return false;
+  if (name !== toolName) return true;
+  if (!isPlainRecord(args)) return false;
   const action = ownValue(args, "action");
   if (typeof action !== "string" || !readOnlyContextActions.has(action)) return false;
   const permitted = ownValue(READ_ONLY_CONTEXT_ACTION_ARGUMENTS, action);
@@ -128,7 +138,7 @@ export function scanTurnToolBatches(
   turn: CompleteTurn,
   allowIncomplete = false,
   toolName = DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
-  readOnlyTools: ReadonlySet<string> = READ_ONLY_TOOLS_DEFAULT,
+  blacklistAutoFoldTools: ReadonlySet<string> = AUTO_FOLD_BLACKLIST_DEFAULT,
   readOnlyContextActions: ReadonlySet<string> = PEEK_READ_ONLY_CONTEXT_ACTIONS,
 ): ScannedToolBatches | null {
   if (!Number.isSafeInteger(turn.start) || !Number.isSafeInteger(turn.end) ||
@@ -166,8 +176,8 @@ export function scanTurnToolBatches(
       const id = ownValue(part, "id");
       const name = ownValue(part, "name");
       if (typeof id !== "string" || !id || typeof name !== "string" || !name ||
-          calls.has(id) || !isReadOnlyContextTool(
-            name, ownValue(part, "arguments"), toolName, readOnlyTools, readOnlyContextActions,
+          calls.has(id) || !isAutoFoldableToolCall(
+            name, ownValue(part, "arguments"), toolName, blacklistAutoFoldTools, readOnlyContextActions,
           )) safe = false;
       else calls.set(id, { id, name, assistantIndex: index });
     }
@@ -210,16 +220,16 @@ export function scanTurnToolBatches(
   return { calls, unsafeIndices };
 }
 
-/** Validate a complete turn as wholly read-only. Granular callers may still use its safe batches. */
+/** Validate a complete turn as wholly auto-foldable. Granular callers may still use its safe batches. */
 export function validateTurnToolBatch(
   messages: unknown[],
   turn: CompleteTurn,
   toolName = DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
-  readOnlyTools: ReadonlySet<string> = READ_ONLY_TOOLS_DEFAULT,
+  blacklistAutoFoldTools: ReadonlySet<string> = AUTO_FOLD_BLACKLIST_DEFAULT,
   readOnlyContextActions: ReadonlySet<string> = PEEK_READ_ONLY_CONTEXT_ACTIONS,
 ): ValidatedToolBatch | null {
   const scanned = scanTurnToolBatches(
-    messages, turn, false, toolName, readOnlyTools, readOnlyContextActions,
+    messages, turn, false, toolName, blacklistAutoFoldTools, readOnlyContextActions,
   );
   return scanned && scanned.unsafeIndices.size === 0 ? { calls: scanned.calls } : null;
 }
@@ -429,7 +439,7 @@ export function mapActiveContext(input: {
   toolName?: string;
   brandNoun?: string;
   entryTypePrefix?: string;
-  readOnlyTools?: ReadonlySet<string>;
+  blacklistAutoFoldTools?: ReadonlySet<string>;
   readOnlyContextActions?: ReadonlySet<string>;
   contextWindow?: number;
   /** True when `contextWindow` is a declared serving budget rather than a raw window. */
@@ -532,7 +542,7 @@ export function mapActiveContext(input: {
     toolName: input.toolName ?? DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
     brandNoun: input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
     entryTypePrefix: input.entryTypePrefix ?? DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX,
-    readOnlyTools: input.readOnlyTools ?? READ_ONLY_TOOLS_DEFAULT,
+    blacklistAutoFoldTools: input.blacklistAutoFoldTools ?? AUTO_FOLD_BLACKLIST_DEFAULT,
     readOnlyContextActions: input.readOnlyContextActions ?? PEEK_READ_ONLY_CONTEXT_ACTIONS,
     contextWindow: reportedContextWindow ?? DEFAULT_CONTEXT_WINDOW,
     windowSource: reportedContextWindow === null ? "fallback" : "reported",
