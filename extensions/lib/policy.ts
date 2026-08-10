@@ -886,6 +886,20 @@ export interface CompleteTurn {
   end: number;
 }
 
+/**
+ * One fold root's footprint in the TRANSMITTED projection: the source span it covers
+ * and what those source indices cost once the placeholder stands in for them.
+ *
+ * The automatic reach is a share of the window the provider actually receives, so the
+ * walk that measures it has to spend projected bytes, not raw ones. A folded prefix
+ * costs its placeholder here and nothing more.
+ */
+export interface ProjectedSpan {
+  start: number;
+  end: number;
+  bytes: number;
+}
+
 export interface ActiveContextSnapshot {
   sessionId: string;
   messages: unknown[];

@@ -66,6 +66,7 @@ import type {
   FoldPart,
   MappedMessage,
   PreparedFold,
+  ProjectedSpan,
 } from "./policy.ts";
 import {
   automaticToolBrief,
@@ -928,6 +929,31 @@ export function pinnedPeekMass(
     results += 1;
   }
   return { bytes: total, results };
+}
+
+/**
+ * What the fold roots cost in the projection, per covered source span.
+ *
+ * The same replacement map `projectActiveContext` builds, measured instead of emitted,
+ * so the automatic reach and the transmitted window agree by construction rather than
+ * by two walks that have to be kept in step. A root the renderer reveals (expanded, or
+ * protected evidence it must show raw) still yields its span, priced at what the
+ * revealed parts cost; a root whose evidence is no longer contiguous in the window
+ * yields nothing, exactly as the projection leaves those positions alone.
+ */
+export function foldProjectionSpans(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+): ProjectedSpan[] {
+  const spans: ProjectedSpan[] = [];
+  for (const root of orderedRoots(state, snapshot)) {
+    const rendered = renderFold(root.fold, state, snapshot);
+    if (!rendered) continue;
+    let size = 0;
+    for (const message of rendered) size += bytes(message);
+    spans.push({ start: root.start, end: root.end, bytes: size });
+  }
+  return spans;
 }
 
 export function projectActiveContext(

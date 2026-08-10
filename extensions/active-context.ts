@@ -25,6 +25,7 @@ import {
   descendantIds,
   encodedFoldSource,
   foldCandidatesDetail,
+  foldProjectionSpans,
   foldTreeDetail,
   peekFoldSource,
   prepareFold,
@@ -800,6 +801,15 @@ export function registerActiveContext(pi: any, options: {
   const currentCapacity = (ctx: any): ReturnType<typeof capacityAccounting> =>
     servingCapacity(budgetWindowFor(ctx));
 
+  /**
+   * The automatic reach measured against the window the provider receives: the mapper
+   * charges a folded prefix its placeholder, and this is where it learns what those
+   * placeholders cost. Read the state at call time, because the mapper runs on paths
+   * that just installed one.
+   */
+  const foldProjection = (base: ActiveContextSnapshot) =>
+    persistence.state ? foldProjectionSpans(base, persistence.state) : [];
+
   const snapshotForEvent = (ctx: any, messages: unknown[]): ActiveContextSnapshot => mapActiveContext({
     sessionId: ctx.sessionManager.getSessionId(),
     eventMessages: messages,
@@ -812,6 +822,7 @@ export function registerActiveContext(pi: any, options: {
     contextWindow: budgetWindowFor(ctx) ?? undefined,
     netBudget: providerInputBudget !== null,
     thresholds,
+    foldProjection,
   });
 
   const authoritativeSnapshotFor = (ctx: any): ActiveContextSnapshot => {
@@ -832,6 +843,7 @@ export function registerActiveContext(pi: any, options: {
       contextWindow: budgetWindowFor(ctx) ?? undefined,
       netBudget: providerInputBudget !== null,
       thresholds,
+      foldProjection,
     });
   };
 

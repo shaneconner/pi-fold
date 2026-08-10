@@ -534,10 +534,10 @@ export function claimedRefKeys(state: ActiveContextState): Set<string> {
 
 /** What is still on the table after the marks in hand: the steering number and its parts. */
 export interface UnmarkedRemainder {
-  /** Stale tool results outside the fresh tail that no fold and no pending mark owns. */
+  /** Tool results IN THE STALE ZONE that no fold and no pending mark owns. */
   spans: number;
   tokens: number;
-  /** Unmarked stale tokens as a share of the non-fresh window. The steering number. */
+  /** Unmarked stale tokens as a share of the stale zone's tool mass. The steering number. */
   share: number;
   /** The largest few, by reclaim value, so the next batch is one read away. */
   candidates: Array<{ id: string; tokens: number }>;
@@ -549,6 +549,14 @@ export interface UnmarkedRemainder {
  * An exhaustive list is what the status index already is, and re-rendering it is what
  * this build removed from the projection. What an agent needs to decide the NEXT batch
  * is one percentage and the few largest names; everything else is a total.
+ *
+ * ONE DEFINITION OF STALE. The scope is the stale zone, the same region the selectors
+ * propose from, so the last call and the deferred-commit record announce mass a commit
+ * can actually take. Filtering on the fresh tail alone counted the MIDDLE too, and the
+ * middle is agent judgment only: rep 3 announced 280k tokens of it as stale while every
+ * automatic rung had nothing to propose, which reads as a runtime refusing to do work
+ * it had just described. Whole-window curation mass is a different question with a
+ * different name; this number answers what the ladder can reach.
  */
 export function unmarkedRemainder(
   snapshot: ActiveContextSnapshot,
@@ -563,6 +571,7 @@ export function unmarkedRemainder(
   let staleBytes = 0;
   for (const item of snapshot.mapped) {
     if (!item.ref || messageRole(item.message) !== "toolResult") continue;
+    if (item.index >= snapshot.staleBoundary) continue;
     if (snapshot.toolProtectedIndices.has(item.index)) continue;
     const size = bytes(item.message);
     staleBytes += size;

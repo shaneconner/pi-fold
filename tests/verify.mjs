@@ -1932,13 +1932,18 @@ async function gateFoldCandidatesDetail() {
   // precondition this gate reads the selector under. Under the epoch that spending
   // happens on the context pass, so the epoch is driven all the way through it.
   await measureAndCommit(runtime, 80_000, 100_000);
+  const state = materialized(runtime);
+  // Mapped the way the runtime maps: the automatic reach is a share of the PROJECTED
+  // window, so a snapshot built without the fold footprints answers a different
+  // question than the one the tool answered, and this gate exists to compare the two
+  // selectors, not the two bases.
   const snapshot = context.mapActiveContext({
     sessionId: built.sessionId,
     eventMessages: runtime.messages,
     contextEntries: runtime.branch,
     contextWindow: 100_000,
+    foldProjection: (base) => context.foldProjectionSpans(base, state),
   });
-  const state = materialized(runtime);
   const expected = context.foldCandidatesDetail(snapshot, state, 0.80, {
     summarizerAvailable: false,
     measurementFresh: false,
@@ -5652,9 +5657,27 @@ async function gateFenceMarginAndDepth() {
   // An 18,000-token budget cannot carry the default 2% fresh tail (360 tokens, under
   // the one-foldable-unit floor), so this deployment declares a policy its window can
   // serve. That is the tiny-window contract: refuse the impossible, never clamp it.
+  // STARVATION IS MASS THE LADDER MAY NOT TAKE, NOT MASS IT HAS NOT REACHED.
+  //
+  // This climb used to starve on inflow that was merely unfolded, which worked only
+  // because the stale walk charged the folded head its raw bytes and froze the reach.
+  // Measured on the corrected basis 2026-08-10: the same fixture folds each stage as it
+  // arrives and sawtooths between 84k and 123k chars forever, which measures the ladder
+  // keeping up rather than the fence. Untakeable now means declared untakeable, by two
+  // standing refusals that hold at any occupancy: the deployment named this producer
+  // unfoldable, so no tool batch forms, and the agent pinned the call inside each batch,
+  // so no chapter span may contain it. The pin is the assistant message, not the result,
+  // which costs a couple of hundred bytes against the 25% pinned-share ceiling: a pin
+  // ceiling below the stale zone's width is deliberate, and a fixture that needed to pin
+  // its way past it would be measuring the ceiling instead of the fence.
   const runtime = makeRuntime(
     makeFixture({ turns: 8, resultChars: 10_000, contextWindow: window, thresholds: WIDE_FRESH_TAIL }),
-    { ...SEALED_SPINE, providerInputBudget: servingBudget(window), thresholds: WIDE_FRESH_TAIL },
+    {
+      ...SEALED_SPINE,
+      providerInputBudget: servingBudget(window),
+      thresholds: WIDE_FRESH_TAIL,
+      blacklistAutoFoldTools: new Set(["stage_stream"]),
+    },
   );
   await startRuntime(runtime);
   const budgetTokens = (await toolStatus(runtime)).details.automatic.projectionBudgetTokens;
@@ -5696,18 +5719,25 @@ async function gateFenceMarginAndDepth() {
     }, "inflow");
     runtime.appendMessage({
       role: "assistant",
-      content: [{ type: "toolCall", id: `stage-${step}`, name: "read", arguments: { path: `stage-${step}.txt` } }],
+      content: [{ type: "toolCall", id: `stage-${step}`, name: "stage_stream", arguments: { path: `stage-${step}.txt` } }],
       stopReason: "toolUse",
       timestamp: 700 + step,
     }, "inflow");
+    const callEntryId = runtime.branch.at(-1).id;
     runtime.appendMessage({
       role: "toolResult",
       toolCallId: `stage-${step}`,
-      toolName: "read",
+      toolName: "stage_stream",
       content: [{ type: "text", text: `Stage ${step}: ${"s".repeat(10_000)}` }],
       isError: false,
       timestamp: 700 + step,
     }, "inflow");
+    // The pin lands on a current snapshot, so the stage has to be projected before the
+    // agent can name it. One pin per stage, on the call rather than the payload.
+    await project(runtime);
+    const pinned = await toolCall(runtime, { action: "protect", ids: [callEntryId] });
+    assert.equal(pinned.details.protectedRefs, step + 1,
+      `The stage-${step} pin did not hold: ${JSON.stringify(pinned.details).slice(0, 200)}`);
   }
 
   // THE ESTIMATOR, MEASURED WHERE IT MEANS SOMETHING.
@@ -9413,7 +9443,12 @@ async function gateFenceOpensTheMiddle() {
   // admits is ABORTED rather than transmitted.
   const runtime = makeRuntime(
     makeFixture({ turns: 40, resultChars: 3_000, contextWindow: 34_000, thresholds }),
-    { ...SEALED_SPINE, providerInputBudget: 30_600, thresholds },
+    {
+      ...SEALED_SPINE,
+      providerInputBudget: 30_600,
+      thresholds,
+      blacklistAutoFoldTools: new Set(["fence_stream"]),
+    },
   );
   await startRuntime(runtime);
   // First crossing: commits, and latches.
@@ -9427,55 +9462,156 @@ async function gateFenceOpensTheMiddle() {
     .filter((record) => record.kind === "context.commit" && record.deferred === false);
   assert.equal(latched.length, 0,
     "A window parked on the band top committed again with no new eligible mass");
-  // The fence: the same window, now past the serving budget, with its stale zone already
-  // spent. The inflow arrives as CLOSED turns, so this is not the open-excursion case
-  // gate 56 owns; automation still reaches nothing, because reaching further would mean
-  // the middle or the fresh tail, and the zone law admits neither at any occupancy.
+  // WHAT THE FENCE MAY TAKE, NOT WHETHER IT TAKES ANYTHING.
+  //
+  // This used to assert that no commit fires at the fence at all, on a fixture whose
+  // stale zone was spent. That premise died with the raw-basis walk: the reach is a
+  // share of the PROJECTED window now, so every commit uncovers a little more of it and
+  // tail inflow keeps manufacturing reachable mass on its way in. Total starvation is
+  // not producible by appending, and a gate that demanded it would be asserting that the
+  // ladder stops working. Measured 2026-08-10: two commits fire here however the inflow
+  // is shaped, including with a blacklisted producer whose every call is pinned.
+  //
+  // The protective purpose is untouched and is what this pins instead: the fence never
+  // opens the MIDDLE or the FRESH TAIL. Every fold a fence-pressure pass lands covers
+  // indices strictly below the stale boundary as it stood when that pass ran, takes
+  // nothing the agent pinned and nothing the deployment blacklisted, and stays out of
+  // the tail its own kind protects. The ladder takes what the zone law offers, and the
+  // request that still does not fit is aborted rather than transmitted.
+  const zoneState = () => {
+    const value = materialized(runtime);
+    return {
+      state: value,
+      snapshot: context.mapActiveContext({
+        sessionId: runtime.built.sessionId,
+        eventMessages: runtime.messages,
+        contextEntries: runtime.branch,
+        contextWindow: 30_600,
+        netBudget: true,
+        thresholds,
+        foldProjection: (base) => context.foldProjectionSpans(base, value),
+      }),
+    };
+  };
+  /** The folds a pass created, mapped back to the source indices they cover. */
+  const foldsLandedBetween = (pre, post) => {
+    const indexOf = new Map(pre.snapshot.mapped.flatMap((item) =>
+      item.ref ? [[json.objectRefKey(item.ref), item.index]] : []));
+    const known = new Set(pre.state.folds.map((fold) => fold.id));
+    return post.state.folds.filter((fold) => !known.has(fold.id)).map((fold) => ({
+      id: fold.id,
+      kind: fold.kind,
+      indices: context.flattenFoldRefs(fold, post.state)
+        .map((ref) => indexOf.get(json.objectRefKey(ref)) ?? -1),
+    }));
+  };
+  // Drain first, so the fence phase measures the law rather than a backlog: the ladder
+  // takes everything the zone law offers, in as many passes as the widening reach needs,
+  // and only then does the untakeable inflow arrive.
+  let drained = false;
+  for (let round = 0; round < 8 && !drained; round += 1) {
+    const from = runtime.appended.length;
+    await measure(runtime, 26_100 + round * 10, 34_000);
+    await project(runtime);
+    await settle();
+    drained = contextEvents(runtime, from)
+      .filter((record) => record.kind === "context.commit" && record.deferred === false).length === 0;
+  }
+  assert(drained, "The ladder never finished taking what the zone law offers");
   const beforeFence = runtime.appended.length;
   const abortsBeforeFence = runtime.aborts;
-  for (let step = 0; step < 3; step += 1) {
+  // Declared untakeable, both ways at once: the deployment blacklisted the producer, so
+  // no tool batch forms over it, and the agent pins the call inside each batch, so no
+  // chapter span may contain it. The pin lands before the payload exists, which is the
+  // order an agent actually works in and leaves no pass where the mass was takeable.
+  const untakeable = new Set();
+  const landedAtFence = [];
+  for (let step = 0; step < 5; step += 1) {
     runtime.appendMessage({
       role: "user", content: [{ type: "text", text: `Fence stage ${step}.` }], timestamp: 960 + step,
     }, "fence-inflow");
     runtime.appendMessage({
       role: "assistant",
-      content: [{ type: "toolCall", id: `fence-${step}`, name: "read", arguments: { path: `fence-${step}.txt` } }],
+      content: [{ type: "toolCall", id: `fence-${step}`, name: "fence_stream", arguments: { path: `fence-${step}.txt` } }],
       stopReason: "toolUse",
       timestamp: 960 + step,
     }, "fence-inflow");
+    const callEntryId = runtime.branch.at(-1).id;
+    const callIndex = runtime.messages.length - 1;
+    const beforePin = zoneState();
+    // The agent can only name a stage the runtime has seen, so the call is exposed for
+    // exactly one pass before its pin lands. Anything the ladder takes in that pass was
+    // genuinely takeable when it took it, and the assertions below still hold it to the
+    // zone law; the pin counts from the moment it exists, which is what a pin means.
+    await project(runtime);
+    await settle();
+    const pinned = await toolCall(runtime, { action: "protect", ids: [callEntryId] });
+    assert.equal(pinned.details.protectedRefs, step + 1,
+      `The fence-${step} pin did not hold: ${JSON.stringify(pinned.details).slice(0, 200)}`);
+    untakeable.add(callIndex);
+    landedAtFence.push(...foldsLandedBetween(beforePin, zoneState())
+      .map((fold) => ({ ...fold, boundary: beforePin.snapshot.staleBoundary, pre: beforePin })));
+    const beforeResult = zoneState();
     runtime.appendMessage({
       role: "toolResult",
       toolCallId: `fence-${step}`,
-      toolName: "read",
-      content: [{ type: "text", text: `Fence ${step}: ${"f".repeat(5_000)}` }],
+      toolName: "fence_stream",
+      content: [{ type: "text", text: `Fence ${step}: ${"f".repeat(12_000)}` }],
       isError: false,
       timestamp: 960 + step,
     }, "fence-inflow");
+    untakeable.add(runtime.messages.length - 1);
     runtime.appendMessage({
       role: "assistant",
       content: [{ type: "text", text: `Fence stage ${step} done.` }],
       stopReason: "stop",
       timestamp: 960 + step,
     }, "fence-inflow");
+    await project(runtime);
+    await settle();
+    landedAtFence.push(...foldsLandedBetween(beforeResult, zoneState())
+      .map((fold) => ({ ...fold, boundary: beforeResult.snapshot.staleBoundary, pre: beforeResult })));
   }
+  const beforeFenceMeasurement = zoneState();
   await measure(runtime, 31_500, 34_000);
   await project(runtime);
   await settle();
-  const fenceCommits = contextEvents(runtime, beforeFence)
-    .filter((record) => record.kind === "context.commit" && record.deferred === false);
-  assert.equal(fenceCommits.length, 0,
-    "A commit applied marks the zone law does not offer at the fence");
+  landedAtFence.push(...foldsLandedBetween(beforeFenceMeasurement, zoneState())
+    .map((fold) => ({ ...fold, boundary: beforeFenceMeasurement.snapshot.staleBoundary, pre: beforeFenceMeasurement })));
+  for (const fold of landedAtFence) {
+    assert(fold.indices.length > 0 && fold.indices.every((index) => index >= 0),
+      `Fold ${fold.id} landed on evidence outside the window`);
+    assert(Math.max(...fold.indices) < fold.boundary,
+      `Fold ${fold.id} reached index ${Math.max(...fold.indices)} past a stale boundary of ${fold.boundary}`);
+    assert(fold.indices.every((index) => !untakeable.has(index)),
+      `Fold ${fold.id} took pinned or blacklisted evidence at the fence`);
+    // Each kind against the tail its own renderer protects: a tool-result fold answers
+    // to the tool tail, everything else to the chapter tail.
+    const tail = fold.kind === "tool-result"
+      ? fold.pre.snapshot.toolProtectedIndices
+      : fold.pre.snapshot.protectedIndices;
+    assert(fold.indices.every((index) => !tail.has(index)),
+      `Fold ${fold.id} reached into the fresh tail at the fence`);
+  }
   assert(runtime.aborts > abortsBeforeFence,
     "An untransmittable request went out instead of being aborted");
+  // One more crossing, once the ladder has taken everything the zone law offers and only
+  // the declared-untakeable mass is left. THIS is the starved pass now: the trigger
+  // fires, the selectors have nothing, and the deferral has to say so.
+  await measure(runtime, 31_600, 34_000);
+  await project(runtime);
+  await settle();
   // AND IT SAYS SO. A commit pass that reaches the adjudication with nothing proposable
   // used to return silently, which is how the rep-2 starvation stayed invisible for 25
   // stages: the last call announced 274,173 tokens of unmarked stale spans and the pass
   // that answered it left no record that a commit had even been attempted. It names
   // itself now, and it carries the remainder beside the emptiness so the two facts sit
-  // on one record. The remainder here is legitimately nonzero: it counts every stale
-  // result outside the fresh tail, and the middle is agent judgment only. This record is
-  // a report, not an alarm; what makes it useful is that a starved window and a merely
-  // exhausted one are told apart by the stale boundary printed alongside.
+  // on one record. The remainder here is legitimately nonzero and it is scoped to the
+  // stale zone, which is the same region the selectors read: what it announces is what a
+  // commit could take, so mass it names and marks it cannot make are the same
+  // contradiction rather than two different questions. This record is a report, not an
+  // alarm; what makes it useful is that a starved window and a merely exhausted one are
+  // told apart by the stale boundary printed alongside.
   const nothingProposable = contextEvents(runtime, beforeFence).filter((record) =>
     record.kind === "context.commit" && record.reason === "nothing-proposable");
   assert(nothingProposable.length >= 1,
@@ -9510,7 +9646,11 @@ async function gateFenceOpensTheMiddle() {
     deepestProposedIndex: Math.max(...reachedIndices),
     fenceSnapshotDeleted: true,
     latchedCommits: latched.length,
-    fenceCommits: fenceCommits.length,
+    drainRounds: drained,
+    fenceFolds: landedAtFence.length,
+    fenceFoldDeepestIndex: landedAtFence.length ? Math.max(...landedAtFence.flatMap((fold) => fold.indices)) : -1,
+    fenceBoundaries: [...new Set(landedAtFence.map((fold) => fold.boundary))],
+    untakeableIndices: untakeable.size,
     nothingProposableRecords: nothingProposable.length,
     fenceAborts: runtime.aborts,
     fenceRollbackReplayed: fenceRollback.replayed,
@@ -10265,6 +10405,141 @@ async function gateBriefUpgradesRideTheBoundary() {
   };
 }
 
+/**
+ * THE STALE ALLOWANCE IS SPENT ON PROJECTED BYTES, NOT RAW ONES.
+ *
+ * The rep-3 shape at fixture scale: a head of tool results the ladder has ALREADY
+ * folded, whose raw bytes alone exceed the whole stale allowance. On the raw basis the
+ * walk charges that head its original mass, the reach halts inside the placeholders,
+ * and every rung starves on a window that is mostly foldable. Measured on the sealed
+ * rep-3 state 2026-08-10: 17 folded head results cost 1,002,801 raw bytes against a
+ * 1,072,081-byte allowance, the reach froze at index 36 of 133, three passes had
+ * nothing proposable, and the run died against the fence at 0.972 occupancy.
+ *
+ * The property, in one line: folding must never shrink what folding can reach next.
+ */
+async function gateProjectedStaleBasis() {
+  const budget = 60_000;
+  const built = makeFixture({ turns: 40, resultChars: 12_000, contextWindow: budget });
+  // Fold the head against a window wide enough that all of it is stale, which is how
+  // the real prefix got there: earlier commits, at earlier occupancies.
+  const wide = context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: built.messages,
+    contextEntries: built.entries,
+    contextWindow: 400_000,
+    netBudget: true,
+  });
+  let state = context.emptyActiveContextState(built.sessionId);
+  const head = 17;
+  for (let batch = 0; batch < head; batch += 1) {
+    const candidate = context.selectAutomaticSpan(wide, state);
+    assert(candidate, `The head ran out of foldable batches after ${batch}`);
+    state = (await commitCandidate(state, wide, candidate, { now: batch + 1 })).state;
+  }
+  const map = (extra = {}) => context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: built.messages,
+    contextEntries: built.entries,
+    contextWindow: budget,
+    netBudget: true,
+    ...extra,
+  });
+  const raw = map();
+  const projected = map({ foldProjection: (base) => context.foldProjectionSpans(base, state) });
+  const spans = context.foldProjectionSpans(raw, state);
+  assert.equal(spans.length, head, `The head folded ${spans.length} roots, not ${head}`);
+  const prefixEnd = Math.max(...spans.map((span) => span.end));
+  const allowance = context.zoneBytes(context.DEFAULT_THRESHOLDS.staleTail, projected.budgetTokens);
+  let coveredRaw = 0;
+  for (const span of spans) {
+    for (let index = span.start; index <= span.end; index += 1) coveredRaw += bytesOf(built.messages[index]);
+  }
+  const coveredProjected = spans.reduce((total, span) => total + span.bytes, 0);
+
+  // (a) THE FIXTURE REALLY IS THE SHAPE: the folded head alone would eat the allowance.
+  assert(coveredRaw > allowance,
+    `The folded head costs ${coveredRaw} raw bytes against a ${allowance}-byte allowance, so it does not starve the raw walk`);
+  assert(coveredProjected * 10 < allowance,
+    `The head's placeholders cost ${coveredProjected} bytes, too close to the allowance to show the difference`);
+
+  // (b) THE RAW BASIS STARVES INSIDE THE PLACEHOLDERS; THE PROJECTED BASIS DOES NOT.
+  assert(raw.staleBoundary <= prefixEnd,
+    `The raw-basis reach passed the folded head at ${raw.staleBoundary}, so the defect is not being measured`);
+  assert(projected.staleBoundary > prefixEnd,
+    `The projected reach stopped at ${projected.staleBoundary}, inside a folded head that ends at ${prefixEnd}`);
+
+  // (c) THE TOOL RUNG TAKES THE FIRST POST-PREFIX BATCH. On the raw basis every
+  // proposal, if any, is confined to evidence already folded; on the projected basis
+  // the rung reaches new mass.
+  const indexOf = new Map(projected.mapped.flatMap((item) =>
+    item.ref ? [[json.objectRefKey(item.ref), item.index]] : []));
+  const indices = (candidate) => candidate.sourceRefs.map((ref) => indexOf.get(json.objectRefKey(ref)) ?? -1);
+  const starved = context.selectAutomaticSpan(raw, state);
+  assert(!starved || Math.max(...indices(starved)) <= prefixEnd,
+    "The raw basis reached past the folded head, so this fixture no longer starves");
+  const reached = context.selectAutomaticSpan(projected, state);
+  assert(reached, "The projected basis proposed nothing on a window full of unfolded batches");
+  assert.equal(reached.kind, "tool-result", `The rung took a ${reached.kind}, not the tool batch`);
+  const firstReached = Math.min(...indices(reached));
+  assert(firstReached > prefixEnd,
+    `The rung took index ${firstReached}, which is inside the folded head`);
+  const nextUnfolded = built.messages.findIndex((message, index) =>
+    index > prefixEnd && message?.role === "toolResult");
+  assert.equal(firstReached, nextUnfolded,
+    `The rung skipped past the stalest unfolded batch at ${nextUnfolded}`);
+
+  // (d) AND THE COMMIT CLEARS THE FENCE LINE. Rep 3's window could not be transmitted
+  // at all; the reconstruction on the fixed basis frees enough to fit.
+  const before = bytesOf(context.projectActiveContext(projected, state));
+  assert(before / 4 > budget,
+    `The fixture projects ${Math.round(before / 4)} tokens, already inside a ${budget}-token budget`);
+  let marked = state;
+  const marks = context.topUpMarks({
+    snapshot: projected, state: marked, ordinal: 1, targetShare: 1, eligibleOnly: true,
+  });
+  for (const mark of marks) {
+    const addition = context.addPendingMark(marked, mark);
+    if (addition.added) marked = addition.state;
+  }
+  const committed = await context.commitPendingMarks({
+    snapshot: projected, state: marked, generation: 1, retainIneligible: true, guardCurrentTurn: true,
+  });
+  const after = bytesOf(context.projectActiveContext(projected, committed.state));
+  assert(committed.applied.length > 0, "The commit applied nothing");
+  assert(after / 4 < budget,
+    `The commit left ${Math.round(after / 4)} tokens against a ${budget}-token budget, still over the fence`);
+
+  // (e) ONE DEFINITION OF STALE. What the last call announces is what the ladder can
+  // take: the remainder is scoped to the same boundary the selectors read.
+  const remainder = context.unmarkedRemainder(projected, state, 4);
+  const announced = projected.mapped.filter((item) =>
+    item.message?.role === "toolResult" && item.index < projected.staleBoundary &&
+    !projected.toolProtectedIndices.has(item.index));
+  assert(remainder.spans > 0, "The remainder announced nothing on a window full of unfolded batches");
+  assert(remainder.spans <= announced.length,
+    `The remainder announced ${remainder.spans} spans against ${announced.length} inside the stale zone`);
+  const middle = context.unmarkedRemainder(
+    { ...projected, staleBoundary: projected.messages.length }, state, 4,
+  );
+  assert(middle.tokens > remainder.tokens,
+    "The fixture has no middle, so the scoping is not being measured");
+
+  return {
+    foldedHeadRoots: head,
+    headRawBytes: coveredRaw,
+    headProjectedBytes: coveredProjected,
+    staleAllowanceBytes: allowance,
+    rawBasisBoundary: raw.staleBoundary,
+    projectedBasisBoundary: projected.staleBoundary,
+    rungIndex: firstReached,
+    appliedMarks: committed.applied.length,
+    projectionTokens: [Math.round(before / 4), Math.round(after / 4)],
+    announcedStaleTokens: remainder.tokens,
+    wholeWindowUnmarkedTokens: middle.tokens,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -10358,6 +10633,7 @@ const gates = [
   [104, "The slate rides the commit boundary", gateSurfacingDeliveryRidesTheBoundary],
   [106, "The band top commits with no turn ever closed", gateOpenTurnCommits],
   [107, "Model briefs upgrade on the commit boundary", gateBriefUpgradesRideTheBoundary],
+  [108, "The automatic reach is measured in projected bytes", gateProjectedStaleBasis],
 ];
 
 const gateFilter = (process.env.GATES ?? "")
