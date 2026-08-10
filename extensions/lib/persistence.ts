@@ -961,16 +961,15 @@ export function protectionSha256(state: Pick<ActiveContextState, "protected">): 
   return sha256Value([...state.protected].sort((left, right) => objectRefKey(left).localeCompare(objectRefKey(right))));
 }
 
-export const ADVISORY_BUDGETS: Readonly<Record<AdvisoryMilestone, number>> = Object.freeze({
-  orientation: 1,
-  notice: 2,
-  tools: 2,
-  chapters: 2,
-  urgent: 3,
-});
-
+/**
+ * The milestone vocabulary a persisted `advisory` state field may carry. The delivery
+ * schedule that spent a per-milestone budget is deleted; this list stays because the
+ * state field is written into every state and covered by the state digest, so sealed
+ * runs have to keep parsing. It is its own literal now rather than the key set of the
+ * deleted budget table.
+ */
 export const ADVISORY_MILESTONES = Object.freeze(
-  Object.keys(ADVISORY_BUDGETS) as AdvisoryMilestone[],
+  ["orientation", "notice", "tools", "chapters", "urgent"] as AdvisoryMilestone[],
 );
 
 /** The rider is LITERAL persisted bytes, so the bound is on the stored text itself. */

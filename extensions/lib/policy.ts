@@ -8,9 +8,6 @@ export const DEFAULT_ACTIVE_CONTEXT_COMMAND_NAMES = Object.freeze({
   status: "context",
   fold: "fold-context",
 });
-export const GUIDANCE_PROFILES = Object.freeze(["pressure", "curation", "minimal"] as const);
-export type GuidanceProfile = typeof GUIDANCE_PROFILES[number];
-export const DEFAULT_GUIDANCE_PROFILE: GuidanceProfile = "pressure";
 
 export function entryTypeNamespace(entryTypePrefix: string): string {
   const suffix = "-active-context";
@@ -64,10 +61,11 @@ export const EXPAND_LEASE_GENERATIONS = 8;
 export const MAX_EXPAND_LEASES = 64;
 export const MAX_ADVISORY_DELIVERIES_PER_MILESTONE = 16;
 
-// Ephemeral surfacing structure. These stay INTERNAL constants rather than public
+// Surfacing SELECTOR structure. These stay INTERNAL constants rather than public
 // options: they are the knobs the surfacing experiment is meant to settle, and an
 // option surface fixed before the accept/reject data exists would freeze a guess.
-export const DEFAULT_SURFACING_ENABLED = true;
+// The per-request ephemeral carrier that once rendered the slate is deleted, and its
+// enable flag with it; the selector is retained for the commit-boundary carriers.
 export const SURFACING_TOP_K = 3;
 export const SURFACING_MIN_SCORE = 0.30;
 export const SURFACING_CHAR_BUDGET = 1_000;
@@ -398,25 +396,6 @@ export const MAX_PROJECTION_HASH_RECORDS = 64;
 // ---------------------------------------------------------------------------
 
 /**
- * The two sparse reminders, as shares of the truthful serving budget.
- *
- * Exactly two per window cycle, one line each, informatory: mark chapters as you go so
- * the folds are neat when the fold event triggers. They are the ONLY pre-gate guidance
- * in guided curation -- recurring pressure nags trained rep 15's agent to ignore the
- * one message that mattered -- and they re-arm after each commit cycle, so a window that
- * climbs twice is reminded twice.
- */
-export const CURATION_REMINDER_SHARES: readonly number[] = Object.freeze([0.45, 0.65]);
-
-/**
- * The gate's hard round cap. Every context pass with the gate open consumes one round,
- * so the commit proceeds after at most this many passes NO MATTER WHAT the agent does;
- * a pass whose response was not a context-tool call proceeds immediately. Two is a
- * bounded conversation, not a negotiation, and it makes a stall non-constructible.
- */
-export const CURATION_GATE_MAX_ROUNDS = 2;
-
-/**
  * The three occupancy waypoints, as shares of the truthful serving budget.
  *
  * Each one lands exactly once per upward crossing as an append-once notice that then
@@ -567,7 +546,6 @@ export interface PendingRefoldMark {
 export type PendingMark = PendingFoldMark | PendingRefoldMark;
 
 export const ACTIVE_CONTEXT_POLICY = Object.freeze({
-  warningRatio: 0.65,
   refoldRatio: 0.85,
   prepareRatio: 0.90,
   warmRatio: 0.55,

@@ -141,10 +141,6 @@ export type ContextEventKind =
   | "context.protect"
   /** The resolved serving budget, stated once at startup so a live run can prove it. */
   | "context.capacity"
-  /** One evaluation of the guided-curation last-call gate. */
-  | "context.gate"
-  /** One sparse occupancy reminder delivered into the window. */
-  | "context.reminder"
   /** One receipt delivered into the window. */
   | "context.receipt"
   /** One post-commit rider composed and persisted: at most one per fold epoch. */

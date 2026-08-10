@@ -8,8 +8,6 @@ import {
   contextBrand,
   CONTEXT_MARK_RESPONSE_BYTES,
   CONTEXT_RECEIPT_BLOCK_BYTES,
-  CURATION_GATE_MAX_ROUNDS,
-  CURATION_REMINDER_SHARES,
   DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
   MAX_CONTEXT_RECEIPTS,
   MAX_LAST_CALL_TEXT_BYTES,
@@ -137,42 +135,6 @@ export function curationTriggerFires(signals: CurationSignals): boolean {
 }
 
 /**
- * The sparse reminders.
- *
- * Two per window cycle, one line each, tail-appended, and informatory. Below the
- * curation threshold NOTHING folds automatically, so the only useful thing to say
- * before the fold event is: mark as you go, and the folds will be neat when it fires.
- * `fired` is the count already spent this cycle; a commit resets it to zero.
- */
-export function dueReminderIndex(
-  occupancy: number | null,
-  fired: number,
-  shares: readonly number[] = CURATION_REMINDER_SHARES,
-): number | null {
-  if (occupancy === null || !Number.isFinite(occupancy)) return null;
-  for (let index = Math.max(0, Math.trunc(fired)); index < shares.length; index += 1) {
-    if (occupancy >= shares[index]) return index;
-  }
-  return null;
-}
-
-export function curationReminderText(input: {
-  signals: CurationSignals;
-  toolName: string;
-  brandNoun?: string;
-}): string {
-  const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
-  const occupancy = input.signals.occupancy === null
-    ? "unmeasured"
-    : `${Math.round(input.signals.occupancy * 100)}%`;
-  return `[${brand} curation] Occupancy ${occupancy} of the ${input.signals.budgetTokens}-token serving ` +
-    `budget; nothing folds until ${Math.round(input.signals.maxTarget * 100)}%. Mark SEVERAL finished ` +
-    `chapters in one call with ${input.toolName} {"action":"fold","marks":[{"ids":["<start>","<end>"],` +
-    "\"brief\":\"<factual brief>\"}]}: one call answers with everything held plus what is still " +
-    "unmarked, so the folds are neat when the fold event triggers.";
-}
-
-/**
  * The awareness block a mark call answers with.
  *
  * The projection is byte-frozen between fold events, so this tool result is the ONLY
@@ -204,118 +166,53 @@ export function markAwarenessText(input: {
   ].join("\n"), CONTEXT_MARK_RESPONSE_BYTES, `[${brand} marks] Held; the remainder is unavailable this pass.`);
 }
 
-export type CurationProceedReason = "go" | "non-context-response" | "round-cap";
-
-export interface CurationGate {
-  openedOrdinal: number;
-  /** Context passes consumed while open. Monotonic, and capped, so a stall is impossible. */
-  roundsUsed: number;
-  /** Context-tool calls counted at the last evaluated pass. */
-  contextCallsAtLastRound: number;
-  marksAtOpen: number;
-  signals: CurationSignals;
-}
-
-export interface CurationGateVerdict {
-  gate: CurationGate | null;
-  event: "opened" | "held" | "proceeded";
-  proceed: boolean;
-  proceededBy: CurationProceedReason | null;
-  roundsUsed: number;
-}
-
 /**
- * One evaluation of the gate, on one context pass.
- *
- * The termination argument, stated so it can be checked rather than trusted: every
- * evaluation either proceeds or increments `roundsUsed`, and `roundsUsed` proceeds
- * unconditionally once it reaches the cap. A pass whose response was not a
- * context-management call proceeds immediately, so continuing the task IS the default
- * path through the gate and no reply is ever required to make progress.
+ * The rider: the one post-commit carrier, composed at a fold commit and delivered
+ * INSIDE the rewrite that commit already paid for, beside the receipt. Its wording
+ * follows the curation rule (report what is happening, name the actions), its numbers
+ * are decision inputs only: pending agent marks with what they free, up to three
+ * completed-unit anchors, and the pinned share against its cap. Raw occupancy,
+ * distance-to-commit and unmarked-share percentages stay OUT: they are pressure
+ * readouts, not decisions, and the pre-commit last call is where they are both
+ * accurate and free.
  */
-export function advanceCurationGate(input: {
-  gate: CurationGate | null;
-  ordinal: number;
-  signals: CurationSignals;
-  /** Context-management tool calls observed in this session so far. */
-  contextCalls: number;
-  pendingMarks: number;
-  maxRounds?: number;
-}): CurationGateVerdict {
-  const maxRounds = input.maxRounds ?? CURATION_GATE_MAX_ROUNDS;
-  if (!input.gate) {
-    return {
-      gate: {
-        openedOrdinal: input.ordinal,
-        roundsUsed: 0,
-        contextCallsAtLastRound: input.contextCalls,
-        marksAtOpen: input.pendingMarks,
-        signals: input.signals,
-      },
-      event: "opened",
-      proceed: false,
-      proceededBy: null,
-      roundsUsed: 0,
-    };
-  }
-  const roundsUsed = input.gate.roundsUsed + 1;
-  const engaged = input.contextCalls > input.gate.contextCallsAtLastRound;
-  if (engaged && roundsUsed < maxRounds) {
-    return {
-      gate: { ...input.gate, roundsUsed, contextCallsAtLastRound: input.contextCalls },
-      event: "held",
-      proceed: false,
-      proceededBy: null,
-      roundsUsed,
-    };
-  }
-  return {
-    gate: null,
-    event: "proceeded",
-    proceed: true,
-    proceededBy: engaged ? "round-cap" : "non-context-response",
-    roundsUsed,
-  };
-}
-
-/**
- * The last-call notice.
- *
- * Shape rule, chosen deliberately: operational status plus available actions, with continuing
- * work as the stated default. A message shaped like a question inviting a chat-style
- * reply can make a single-turn agent emit a final answer and end its own run, so this
- * never asks anything and never implies a reply is expected.
- */
-export function curationNoticeText(input: {
-  signals: CurationSignals;
-  roundsUsed: number;
-  maxRounds?: number;
+export function contextRiderText(input: {
   toolName: string;
   brandNoun?: string;
+  pendingAgentMarks: number;
+  eligibleMarks: number;
+  freedTokens: number;
+  eligibleFreedTokens: number;
+  /** Up to three completed-unit entry ids the agent could mark next. */
+  anchors: string[];
+  pinnedShare: number;
+  maxPinnedShare: number;
 }): string {
-  const maxRounds = input.maxRounds ?? CURATION_GATE_MAX_ROUNDS;
   const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
-  const { signals } = input;
-  const occupancy = signals.occupancy === null ? "unmeasured" : `${Math.round(signals.occupancy * 100)}%`;
-  const remaining = Math.max(0, maxRounds - input.roundsUsed);
-  return boundReceiptText([
-    `[${brand} curation] Occupancy ${occupancy} of the ${signals.budgetTokens}-token serving budget; ` +
-      `${Math.round(signals.staleToolShare * 100)}% of the window is stale tool output outside the fresh tail ` +
-      `(${signals.staleToolResults} result(s), about ${signals.staleToolTokens} tokens). ` +
-      "A commit epoch will fold that mass into briefed placeholders; " +
-      "the exact source stays expandable and nothing is lost.",
-    "Marking well is what makes this cheap: your briefs are what makes these spans findable later, and " +
-      "spans batched into one commit rewrite the prefix once instead of once per fold, so the cache survives " +
-      "and the next fold event arrives later.",
-    `Available now: ${input.toolName} ` +
-      "{\"action\":\"fold\",\"marks\":[{\"ids\":[\"<start>\",\"<end>\"],\"brief\":\"<factual brief>\"}]} " +
-      "marks SEVERAL spans in one call, and answers with everything held plus what is still unmarked; " +
-      "{\"action\":\"rebrief\",\"id\":\"<fold-id>\",\"brief\":\"<factual brief>\"} corrects an existing " +
-      "brief; {\"action\":\"reboundary\",\"id\":\"<fold-id>\"} returns a mis-cut fold to raw so you can " +
-      "re-fold it.",
-    "Continuing the task is the default: this commit proceeds on the next pass unless the next thing you do " +
-      `is a ${input.toolName} call, and it proceeds regardless after ${remaining} more curation round(s).`,
-  ].join("\n"), 2_048, `[${brand} curation] A commit epoch is due; details are unavailable this pass.`);
+  const anchors = input.anchors.length
+    ? input.anchors.slice(0, 3).join(", ")
+    : "none";
+  const pinnedPercent = Math.round(input.pinnedShare * 100);
+  const capPercent = Math.round(input.maxPinnedShare * 100);
+  return boundReceiptText(
+    [
+      `[${brand} notice] A fold commit just landed; the next one will batch every pending mark ` +
+        "into one rewrite, and marks are free until then.",
+      "Mark FINISHED units at their clean boundaries; batches beat singles: " +
+        `${input.toolName} {"action":"fold","marks":[{"ids":["<start>","<end>"],"brief":"<factual brief>"}]} ` +
+        "carries several decisions into that single rewrite, each keeping your brief instead of a " +
+        `generated one. ${input.pendingAgentMarks} of your mark(s) pending; ` +
+        `${input.eligibleMarks} mark(s) eligible now, freeing about ${input.eligibleFreedTokens} ` +
+        `of the ${input.freedTokens} marked token(s).`,
+      `Completed units ready to mark, largest first: ${anchors}.`,
+      `Pinning: ${input.toolName} {"action":"protect","ids":["<entry-id>"]} holds entries raw through ` +
+        `every fold, and {"action":"unprotect"} releases them. Pinned context is ${pinnedPercent}% of ` +
+        `the working window against a ${capPercent}% cap; at the cap, protect refuses until ` +
+        "something is released.",
+    ].join("\n"),
+    2_048,
+    `[${brand} notice] Post-commit curation details are unavailable this pass.`,
+  );
 }
 
 /** The ruled last-call sentence (Shane, 2026-08-09 13:23), verbatim. */

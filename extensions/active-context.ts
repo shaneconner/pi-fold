@@ -6,9 +6,6 @@ import {
   stableStringify,
 } from "./json.ts";
 import {
-  contextRiderText,
-} from "./lib/advisory.ts";
-import {
   bytes,
   clone,
   emptyActiveContextState,
@@ -127,13 +124,13 @@ import type {
   FoldKind,
   FoldRecordEntry,
   PreparedFold,
-  SuggestionSource,
 } from "./lib/policy.ts";
 import {
   absorbWedgeMarks,
 } from "./lib/scheduling.ts";
 import {
   contextReceipt,
+  contextRiderText,
   curationSignals,
   lastCallText,
   markAwarenessText,
@@ -208,7 +205,6 @@ import {
 } from "./lib/transcript.ts";
 
 // Test seam only; the package API is registerPiFold because package.json exports block deep imports.
-export * from "./lib/advisory.ts";
 export * from "./lib/canonical.ts";
 export * from "./lib/curation.ts";
 export * from "./lib/folding.ts";
@@ -220,14 +216,6 @@ export * from "./lib/scheduling.ts";
 export * from "./lib/selection.ts";
 export * from "./lib/surfacing.ts";
 export * from "./lib/transcript.ts";
-
-/** Handle a suggestion source keeps: withdraw itself, and report that its item was acted on. */
-export interface SuggestionSourceHandle {
-  unregister: () => void;
-  accepted: (id: string) => void;
-}
-
-export type SuggestionSourceRegistrar = (source: SuggestionSource) => SuggestionSourceHandle;
 
 /**
  * The batched fold request: several {span, brief} pairs in one call, with the single
@@ -266,9 +254,12 @@ export function batchedMarkRequests(params: Record<string, unknown>): BatchedMar
 }
 
 export function registerActiveContext(pi: any, options: {
+  /**
+   * INTERNAL brief-generator seam, not a public option: `registerPiFold` refuses the
+   * name and builds the generator from `summarizer`. It stays a parameter because it
+   * is the runtime's only brief-generator interface.
+   */
   summarizeContextSpan?: (request: Record<string, unknown>, ctx: unknown) => Promise<Record<string, unknown>>;
-  setProjectionProvider?: (provider: (ctx: any) => Array<Record<string, unknown>>) => void;
-  setSuggestionSourceRegistrar?: (register: SuggestionSourceRegistrar) => void;
   toolName?: string;
   toolLabel?: string;
   brandNoun?: string;
@@ -284,7 +275,6 @@ export function registerActiveContext(pi: any, options: {
   thresholds?: ActiveContextThresholds;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
-  registerSuggestionSource: SuggestionSourceRegistrar;
 } {
   const toolName = options.toolName ?? DEFAULT_ACTIVE_CONTEXT_TOOL_NAME;
   const toolLabel = options.toolLabel ?? DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL;
@@ -306,6 +296,17 @@ export function registerActiveContext(pi: any, options: {
   if (Object.hasOwn(options, "blockingTools")) {
     throw new Error("blockingTools is no longer an option: a tool call never causes a rewrite of " +
       "its own, and the commit epoch is the only path that mutates the projection");
+  }
+  // The per-request surfacing channel. `setProjectionProvider` was a second delivery
+  // path for the value this call already returns, and `setSuggestionSourceRegistrar`
+  // handed out registration into a carrier that no longer exists: the slate rode a
+  // per-request ephemeral tail, which moved the prefix on every single pass. The
+  // selector survives and returns at the commit boundary; the channel does not.
+  for (const removed of ["setProjectionProvider", "setSuggestionSourceRegistrar"]) {
+    if (Object.hasOwn(options, removed)) {
+      throw new Error(`${removed} is no longer an option: projection candidates are returned by ` +
+        "registration, and external suggestion sources have no carrier to render into");
+    }
   }
   if (options.providerTotalWindow !== undefined &&
       (!Number.isSafeInteger(options.providerTotalWindow) || options.providerTotalWindow <= 0)) {
@@ -523,16 +524,6 @@ export function registerActiveContext(pi: any, options: {
     hardFenceNoticeKey: null as string | null,
     hardFenceReleaseSessionId: null as string | null,
     hardFenceReleasedProjectionKeys: new Set<string>(),
-  };
-
-  // Registered suggestion sources. RETRIEVAL IS UNWIRED FROM THE PROJECTION as of this
-  // build: the slate that rendered these was a per-pass tail carrier, and a tail carrier
-  // is displaced by every append, so it diverged the prefix on every single pass. The
-  // selector in lib/surfacing.ts is kept and still gated, because proactive retrieval is
-  // the right idea in the wrong place: when it returns it must ride a commit like every
-  // other carrier. Until then nothing renders a suggestion, so nothing selects one.
-  const surfacing = {
-    sources: [] as SuggestionSource[],
   };
 
   // Owns native-compaction decisions and completion retry state; nativeReceiptQueue serializes it.
@@ -3105,40 +3096,6 @@ export function registerActiveContext(pi: any, options: {
       return [];
     }
   };
-  options.setProjectionProvider?.(projectionCandidates);
-
-  /**
-   * The suggestion-source hook. The built-in fold-brief source registers through this
-   * same call, so an external memory system's items reach the identical carrier,
-   * budget, ranking, and accept/reject log; pi-fold owns the channel, not the content.
-   */
-  const registerSuggestionSource: SuggestionSourceRegistrar = (source: SuggestionSource) => {
-    if (!source || typeof source !== "object" || typeof source.id !== "string" || !source.id ||
-        typeof source.candidates !== "function") {
-      throw new Error("A suggestion source needs a nonempty id and a candidates function");
-    }
-    if (surfacing.sources.some((registered) => registered.id === source.id)) {
-      throw new Error(`Suggestion source '${source.id}' is already registered`);
-    }
-    surfacing.sources.push(source);
-    return {
-      unregister: () => {
-        surfacing.sources = surfacing.sources.filter((registered) => registered !== source);
-      },
-      accepted: (id: string) => {
-        if (!persistence.state || typeof id !== "string" || !id) return;
-        // In-memory only: the next persisted state carries it. Reporting an outcome
-        // must never write a durable entry of its own.
-        persistence.state = acceptSurfacingSuggestion(
-          persistence.state,
-          id,
-          lifecycle.latestSnapshot ? surfacingOrdinal(lifecycle.latestSnapshot) : 0,
-        );
-      },
-    };
-  };
-  options.setSuggestionSourceRegistrar?.(registerSuggestionSource);
-
   // A same-session start/tree reload is a projection-generation mutation.
   // Queue it behind every context authority → preparation → commit →
   // projection transaction, then serialize the actual load with the action
@@ -3675,10 +3632,8 @@ export function registerActiveContext(pi: any, options: {
           pressureRatio: measurements.latestRatio,
           surfacing: {
             rendered: false,
-            sources: surfacing.sources.map((source) => source.id),
             log: clone(persistence.state.surfacing ?? []),
           },
-          warningRatio: snapshot.policy.warningRatio,
           refoldRatio: snapshot.policy.refoldRatio,
           chapterPrepareRatio: snapshot.policy.prepareRatio,
           hardFenceRatio: hardFenceRatio(snapshot),
@@ -4446,5 +4401,5 @@ export function registerActiveContext(pi: any, options: {
     try { ctx.ui?.setStatus?.(entryTypePrefix, undefined); } catch { /* Shutdown cannot be blocked by UI. */ }
   });
 
-  return { projectionCandidates, registerSuggestionSource };
+  return { projectionCandidates };
 }

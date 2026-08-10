@@ -226,10 +226,8 @@ function makeRuntime(built, {
   isMcpTool,
   evidenceIngestion,
   summarizer,
-  surfacing,
   removedOptions,
   providerTotalWindow,
-  setSuggestionSourceRegistrar,
   loadHostModule,
   packageRegistration = false,
   sessionFile = join(tmpdir(), "pi-fold-test-session.jsonl"),
@@ -316,11 +314,9 @@ function makeRuntime(built, {
     ...(isMcpTool ? { isMcpTool } : {}),
     ...(evidenceIngestion === undefined ? {} : { evidenceIngestion }),
     ...(summarizer === undefined ? {} : { summarizer }),
-    ...(surfacing === undefined ? {} : { surfacing }),
     // Deleted options, forwarded verbatim so gate 68 can prove they are REFUSED.
     ...(removedOptions ?? {}),
     ...(providerTotalWindow === undefined ? {} : { providerTotalWindow }),
-    ...(setSuggestionSourceRegistrar ? { setSuggestionSourceRegistrar } : {}),
   };
   runtime.registration = packageRegistration
     ? piFold.registerPiFold(pi, registrationOptions, loadHostModule)
@@ -2290,11 +2286,17 @@ async function gateSummarizerOption() {
     "deterministic",
   );
 
-  assert.throws(() => makeRuntime(built, {
-    packageRegistration: true,
-    summarizer: "session",
-    summarizeContextSpan: MODEL_BRIEF,
-  }), /summarizer and summarizeContextSpan cannot be configured together/);
+  // `summarizeContextSpan` left the PUBLIC surface. It is the runtime's INTERNAL
+  // brief-generator interface, and `summarizer` is the declarative way to choose one, so
+  // the package refuses the name rather than forwarding a callback the summarizer choice
+  // would overwrite. Refused whether or not a summarizer accompanies it.
+  for (const alongside of [{ summarizer: "session" }, { summarizer: "deterministic" }, {}]) {
+    assert.throws(() => makeRuntime(built, {
+      packageRegistration: true,
+      ...alongside,
+      summarizeContextSpan: MODEL_BRIEF,
+    }), /summarizeContextSpan is no longer an option/);
+  }
   assert.throws(() => makeRuntime(built, {
     packageRegistration: true,
     summarizer: { provider: "fake-session" },
@@ -2304,18 +2306,11 @@ async function gateSummarizerOption() {
     summarizer: { model: "brief-model" },
   }), /nonempty provider and model strings/);
 
-  let escapeLoaderCalls = 0;
-  const escape = makeRuntime(built, {
-    packageRegistration: true,
-    summarizeContextSpan: MODEL_BRIEF,
-    loadHostModule: async () => {
-      escapeLoaderCalls += 1;
-      throw new Error("custom callback loaded the built-in summarizer host");
-    },
-  });
+  // The seam itself still works, reached where it now lives: registerActiveContext takes
+  // the generator directly, and a brief it produces is attributed to the model.
+  const escape = makeRuntime(built, { summarizeContextSpan: MODEL_BRIEF });
   await startRuntime(escape);
   await measure(escape, fenceTokens, 100_000);
-  assert.equal(escapeLoaderCalls, 0);
   assert.equal(
     materialized(escape).folds.find((fold) => fold.kind === "chapter")?.provenance.kind,
     "model",
@@ -2379,9 +2374,9 @@ async function gateSummarizerOption() {
     runtimeCreates: createCalls,
     deterministic: "no-host-load",
     failureFallback: "deterministic",
-    exclusiveOptions: "enforced",
+    publicSurfaceRefusals: 3,
     malformedObjects: "rejected",
-    customCallback: "unchanged",
+    customCallback: "internal-seam",
     explicitRegistryRuntimeCreates: registryCreateCalls,
   };
 }
@@ -2660,17 +2655,19 @@ async function gateSurfacingThresholdAndBudget() {
     candidates: many, taskTokens, positionCeiling: 5, minimumScore: 0.99,
   });
   assert.deepEqual(raised, []);
-  const carrier = context.surfacingText({ suggestions: topK, brandNoun: "pi-fold" });
-  const silent = context.surfacingText({ suggestions: [], brandNoun: "pi-fold" });
-  assert.equal(silent, null);
-  assert(carrier.includes(topK[0].id) && carrier.includes("expand"));
+  // The selector selects; nothing renders. The per-request ephemeral carrier that used
+  // to turn a slate into tail bytes is deleted, along with the flag that enabled it: a
+  // carrier displaced by every append diverged the prefix on every pass. What comes back
+  // at the commit boundary reads the selector, not this.
+  assert.equal(context.surfacingText, undefined, "The per-request surfacing carrier survived");
+  assert.equal(context.DEFAULT_SURFACING_ENABLED, undefined, "The carrier's enable flag survived");
   return {
     structuralWeightsBelowThreshold: true,
     unrelatedSuggestions: 0,
     topK: topK.length,
     budgetedSuggestions: budgeted.length,
     raisedThresholdSuggestions: 0,
-    silentBelowThreshold: silent === null,
+    perRequestCarrier: "deleted",
   };
 }
 
@@ -6299,9 +6296,34 @@ async function gateLeverCollapse() {
     "DEFAULT_STATUS_INDEX_DIET", "DEFAULT_ADVISORY_DELIVERY", "DEFAULT_PROJECTION_INSTRUMENTATION",
     "DEFAULT_PROVIDER_TOTAL_WINDOW", "RETAINED_MARK_ACTIVE_CONTEXT_TOOL_ACTIONS",
     "EPOCH_TAIL_ADJACENT_MESSAGES", "tailAdjacent",
+    // The dead carriers. Guidance dosage never spoke (voluntary fold share 0.00 across
+    // eleven runs); the reminder shares and the round cap were superseded by the
+    // threshold notices and the single last-call round; the milestone budgets went with
+    // the delivery schedule they priced, leaving the `advisory` state field parseable
+    // through its own milestone list.
+    "GUIDANCE_PROFILES", "DEFAULT_GUIDANCE_PROFILE", "normalizeGuidanceProfile",
+    "advisorySchedule", "milestoneText", "liveAdvisoryText", "updateAdvisoryMilestone",
+    "recordAdvisoryDelivery", "clearArmedAdvisory", "advisoryState", "ADVISORY_BUDGETS",
+    "CURATION_REMINDER_SHARES", "dueReminderIndex", "curationReminderText",
+    "CURATION_GATE_MAX_ROUNDS", "advanceCurationGate", "curationNoticeText",
+    "DEFAULT_SURFACING_ENABLED", "surfacingText",
   ]) {
     assert.equal(context[name], undefined, `${name} survived the collapse`);
   }
+  // What the deletions had to LEAVE standing: the `advisory` state field is written into
+  // every state and covered by the state digest, so its vocabulary and its per-milestone
+  // ceiling stay, and every sealed run keeps materializing.
+  assert.deepEqual([...context.ADVISORY_MILESTONES],
+    ["orientation", "notice", "tools", "chapters", "urgent"]);
+  assert.equal(context.MAX_ADVISORY_DELIVERIES_PER_MILESTONE, 16);
+  assert.equal(context.validAdvisoryState({ highWater: 0.4, delivered: { notice: 2 } }), true);
+  // And the surfacing SELECTOR outlives the carrier that rendered it: it returns at the
+  // commit boundary, so its scoring, bounds and accept/reject log all stay.
+  assert.equal(typeof context.updateSurfacing, "function");
+  assert.equal(typeof context.rankSurfacingCandidates, "function");
+  assert.equal(context.SURFACING_MAX_LOG_RECORDS, 128);
+  // The pressure rung no live reader consulted. The band's maxTarget is the trigger.
+  assert.equal(context.ACTIVE_CONTEXT_POLICY.warningRatio, undefined);
 
   // And the behaviour is on, in a runtime that configures nothing at all. The epoch is
   // driven to its commit, because a mark moves no bytes and this gate reads the folds.
@@ -6309,6 +6331,10 @@ async function gateLeverCollapse() {
   await startRuntime(plain);
   await measureAndCommit(plain, 80_000, 100_000, "collapse-commit");
   const status = (await toolStatus(plain)).details.automatic;
+  assert.equal(Object.hasOwn(status, "warningRatio"), false,
+    "The status block still reports a warning rung");
+  assert.equal(Object.hasOwn(status.surfacing, "sources"), false,
+    "The status block still reports an external suggestion-source registry");
   assert.equal(status.instrumentation.enabled, true, "Projection instrumentation is not unconditional");
   assert.equal((await toolStatus(plain)).details.index, "diet", "The status index diet is not unconditional");
   const properties = [...plain.tools.values()][0].parameters.properties;
@@ -6336,15 +6362,21 @@ async function gateLeverCollapse() {
   // results are foldable, and the action surface is whole. A deployment still passing
   // one of the three deleted options is REFUSED by name rather than quietly handed the
   // opposite behavior.
+  // The dead surfacing channel is refused the same way: projection candidates are what
+  // registration RETURNS, and an external suggestion source has no carrier to render
+  // into, so a host that still passes either one is told rather than quietly ignored.
   for (const [option, value] of [
     ["foldScheduling", "epoch"], ["foldScheduling", "immediate"],
     ["foldPeekResults", false], ["foldPeekResults", true],
     ["toolActions", ["status", "peek"]],
+    ["setProjectionProvider", () => {}],
+    ["setSuggestionSourceRegistrar", () => {}],
   ]) {
     assert.throws(() => makeRuntime(built, { removedOptions: { [option]: value } }).tools,
       new RegExp(`${option} is no longer an option`),
       `${option} was accepted after its deletion`);
   }
+  assert.deepEqual(Object.keys(makeRuntime(built, {}).registration), ["projectionCandidates"]);
   assert.equal(context.DEFAULT_GUIDED_CURATION, undefined);
   assert.equal(context.FOLD_SCHEDULING_MODES, undefined);
   assert.equal(context.DEFAULT_FOLD_SCHEDULING, undefined);
@@ -6354,6 +6386,9 @@ async function gateLeverCollapse() {
   return {
     collapsedOptions: collapsed.length,
     survivingConstants: 0,
+    deadCarriersDeleted: 19,
+    advisoryStateFieldKept: true,
+    surfacingSelectorKept: true,
     unconditionalInstrumentation: true,
     unconditionalDiet: true,
     unconditionalPeekLifetime: true,
@@ -6794,18 +6829,30 @@ async function gateNoAgentCommitVerb() {
   assert.equal(/\bcommit action\b/.test(json.stableStringify(marked.details)), false,
     "A fold reply still points the agent at a commit action");
 
-  // The curation notice offers the correction verbs and nothing that no longer exists.
-  const notice = context.curationNoticeText({
+  // The live commit-boundary carriers offer the verbs that exist and nothing that does
+  // not. The pre-B1 curation notice that used to stand here is deleted with its gate.
+  const lastCall = context.lastCallText({
     signals: {
-      occupancy: 0.86, occupancyTokens: 86_000, budgetTokens: 100_000, window: 100_000,
-      staleToolShare: 0.3, staleToolTokens: 30_000, staleToolResults: 6, eligibleFolds: 4,
+      occupancy: 0.86, maxTarget: 0.80, occupancyTokens: 86_000, budgetTokens: 100_000,
+      window: 100_000, staleToolShare: 0.3, staleToolTokens: 30_000, staleToolResults: 6,
+      eligibleFolds: 4,
     },
-    roundsUsed: 1, pendingMarks: 4, toolName: "active_context",
+    unmarked: { spans: 6, tokens: 30_000 }, pendingMarks: 4, toolName: "active_context",
   });
-  assert.equal(/"action":"commit"/.test(notice), false,
-    "The last-call notice still offers a commit verb");
-  assert(notice.includes('"action":"fold"') && notice.includes('"action":"rebrief"'),
-    "The notice lost the verbs that do exist");
+  const receiptBlock = context.receiptBlockText({
+    receipts: [context.contextReceipt({
+      kind: "commit", ordinal: 4, foldsCommitted: 2, foldsCreated: 2, freedTokens: 9_000,
+    })],
+    toolName: "active_context",
+  });
+  for (const [surface, text] of [["last call", lastCall], ["receipt block", receiptBlock]]) {
+    assert.equal(/"action":"commit"/.test(text), false,
+      `The ${surface} still offers a commit verb`);
+  }
+  assert(lastCall.includes('"action":"fold"') && lastCall.includes('"action":"protect"'),
+    "The last call lost the verbs that do exist");
+  assert(receiptBlock.includes('"action":"rebrief"') && receiptBlock.includes('"action":"reboundary"'),
+    "The receipt block lost the correction verbs");
 
   // And the machinery is intact: the marks still fold, on the runtime's own trigger.
   const committed = await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
@@ -7161,22 +7208,26 @@ async function gateBatchedMarkCopy() {
   assert.match(marks.description, /which is the shape to prefer/);
 
   const signals = {
-    occupancy: 0.5, occupancyTokens: 50_000, budgetTokens: 100_000, window: 100_000,
-    staleToolShare: 0.3, staleToolTokens: 30_000, staleToolResults: 6, eligibleFolds: 4,
+    occupancy: 0.5, maxTarget: 0.80, occupancyTokens: 50_000, budgetTokens: 100_000,
+    window: 100_000, staleToolShare: 0.3, staleToolTokens: 30_000, staleToolResults: 6,
+    eligibleFolds: 4,
   };
-  const reminder = context.curationReminderText({ signals, toolName: "active_context" });
-  assert.match(reminder, /Mark SEVERAL finished chapters in one call/);
-  assert.match(reminder, /one call answers with everything held plus what is still unmarked/);
+  // The sub-commit waypoint. It replaced the two sparse curation reminders, and it
+  // inherits their rule: one line, informatory, and the marking it names is the BATCH.
+  const notice = context.thresholdNoticeText({
+    share: 0.5, occupancyTokens: 50_000, budgetTokens: 100_000, maxTarget: 0.80,
+    toolName: "active_context",
+  });
+  assert.match(notice, /"action":"fold","marks":\[\{"ids"/);
   // The tool surface's own vocabulary rule: nothing here invites a chat-style answer.
-  assert.equal(/\bthe reply\b/.test(reminder), false, "The reminder says \"the reply\"");
-  assert.equal(reminder.includes("\n"), false, "The reminder stopped being one line");
+  assert.equal(/\bthe reply\b/.test(notice), false, "The notice says \"the reply\"");
+  assert.equal(notice.includes("\n"), false, "The notice stopped being one line");
 
-  const notice = context.curationNoticeText({ signals, roundsUsed: 1, toolName: "active_context" });
-  assert.match(notice, /marks SEVERAL spans in one call/);
-  assert.match(notice, /answers with everything held plus what is still unmarked/);
-  // MECHANISM 2 at the copy level: the notice no longer renders held-mark state.
-  assert.equal(/mark\(s\) pending/.test(notice), false,
-    "The last-call notice still renders pending-mark state");
+  const lastCall = context.lastCallText({
+    signals, unmarked: { spans: 6, tokens: 30_000 }, pendingMarks: 4, toolName: "active_context",
+  });
+  assert.match(lastCall, /adds or widens several in one call/);
+  assert.match(lastCall, /"action":"fold","marks":\[\{"ids"/);
 
   const reply = await toolCall(runtime, {
     action: "fold",
@@ -7186,7 +7237,7 @@ async function gateBatchedMarkCopy() {
   assert.match(String(reply.details.activation), /Mark several spans in one call/);
   assert.match(String(reply.details.activation), /nothing else in your\s+context changed/);
 
-  return { description: true, reminder: true, notice: true, activation: true };
+  return { description: true, notice: true, lastCall: true, activation: true };
 }
 
 /**

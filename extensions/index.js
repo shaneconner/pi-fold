@@ -7,14 +7,17 @@ export function registerPiFold(pi, options = {}, loadHostModule) {
     evidenceIngestion = true,
     isMcpTool,
     summarizer = "session",
-    summarizeContextSpan,
     ...activeContextOptions
   } = options;
-  if (Object.hasOwn(options, "summarizer") && summarizeContextSpan !== undefined) {
-    throw new Error("summarizer and summarizeContextSpan cannot be configured together");
+  // `summarizeContextSpan` left the public surface: it is the runtime's INTERNAL
+  // brief-generator interface, and `summarizer` is the declarative way to choose one.
+  // Refused by name rather than forwarded, because forwarding it would be overwritten
+  // by the generator built below and hand the caller the opposite of what it asked for.
+  if (Object.hasOwn(options, "summarizeContextSpan")) {
+    throw new Error("summarizeContextSpan is no longer an option: choose a brief generator with " +
+      "summarizer (\"session\", \"deterministic\", or { provider, model, effort })");
   }
-  const configuredSummarizer = summarizeContextSpan ??
-    createSummarizeContextSpan(summarizer, loadHostModule);
+  const configuredSummarizer = createSummarizeContextSpan(summarizer, loadHostModule);
   if (evidenceIngestion) {
     registerEvidenceIngestion(pi, {
       isMcpTool,

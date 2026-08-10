@@ -297,8 +297,6 @@ async function run() {
   assertExperiment(requestedRunDir && unit && campaignDir && planPath, "Experiment run requires --run-dir, --unit, --campaign-dir and --plan");
   assertExperiment(closedBook || EXPERIMENT_ARMS.includes(arm),
     "Experiment run requires --arm pifold|native|unmanaged");
-  // pi-fold's registerActiveContext throws when guided curation has no commit to announce.
-  // Refuse the combination here so it fails at config time, not at worker start.
   // Deployment fact resolved from the model pin, never a flag: rep 16 aborted after the
   // curation thresholds ran against the 255,616-token descriptor budget because this
   // fact never reached the registration. Unlisted models run in descriptor mode.
