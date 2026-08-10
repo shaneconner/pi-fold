@@ -339,16 +339,6 @@ export function markAccounting(
 }
 
 /**
- * The commit trigger.
- *
- * The ROI half asks the economic question: commit when the marks that could apply
- * RIGHT NOW would free enough to pay for the rewrite. The pressure half reuses the
- * ladder's own refold threshold and stays underneath as the SAFETY backstop -- it
- * fires when the window is nearly full, which is the worst moment to discover the
- * marks are worth nothing (the rep4 abort fired there with zero pending marks). The
- * agent's own commit is authoritative and immediate regardless of either.
- */
-/**
  * THE commit trigger. There is exactly one.
  *
  * Occupancy of the serving budget reaches maxTarget and a commit fires. Nothing else

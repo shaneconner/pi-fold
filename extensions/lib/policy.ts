@@ -120,8 +120,9 @@ export const BYTES_PER_TOKEN_FLOOR = 2;
  * per-mutation penalty is the same on both.
  *
  * So a commit that would free less than this share of the truthful budget does not
- * fire: it defers and accumulates until it is worth a full prefix. Safety outranks
- * economics, so the hard fence and overflow recovery fire regardless.
+ * fire: it defers and accumulates until it is worth a full prefix. A request whose
+ * projection exceeds the provider input budget is rejected outright, so recovery must
+ * produce a window that fits; the hard fence and overflow recovery fire regardless.
  */
 export const COMMIT_RECLAIM_FLOOR_SHARE = 0.02;
 

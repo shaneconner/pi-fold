@@ -1576,7 +1576,9 @@ export function registerActiveContext(pi: any, options: {
     // latch must never muzzle the one reducer that can still act (the 20k-window
     // probe climbed from crowded to the wire in exactly that state). Genuine
     // untransmissibility, an over-budget projection or a provider rejection, never
-    // waits; safety outranks ceremony, and economy does not outrank the one round.
+    // waits: a request whose projection exceeds the provider input budget is rejected
+    // outright, so recovery must produce a window that fits. Economy does not outrank
+    // the one round.
     const lastCall = persistence.state?.lastCall;
     const delivery = curation.lastCallDelivery;
     const roundOpen = Boolean(lastCall) && (!delivery || delivery.exposure !== lastCall.exposure ||
@@ -2098,10 +2100,11 @@ export function registerActiveContext(pi: any, options: {
    * because the mass it had to reach sat in a middle it was forbidden to enter.
    *
    * The middle is an ECONOMY region: it exists so automation does not fold material the
-   * agent may still be curating, which is a statement about what is worth doing, not
-   * about what is safe. At the fence the request does not fit, and economy stops
-   * outranking transmissibility -- the same reasoning that already lets the fence waive
-   * the current-turn guard. So the deepened snapshot extends the stale zone to
+   * agent may still be curating, which is a statement about what is worth doing. A
+   * request whose projection exceeds the provider input budget is rejected outright, so
+   * recovery must produce a window that fits, and at the fence economy stops outranking
+   * transmissibility -- the same reasoning that already lets the fence waive the
+   * current-turn guard. So the deepened snapshot extends the stale zone to
    * everything outside the narrowed fresh tail. Pins are untouched: they are a promise,
    * not an economy.
    */
@@ -2184,11 +2187,12 @@ export function registerActiveContext(pi: any, options: {
     const capacity = servingCapacity(snapshot.contextWindow);
     const usedTokens = capacity.usedTokens;
     const budgetTokens = capacity.budgetTokens;
-    // THE SAFETY EXEMPTION, NARROWED.
+    // THE UNTRANSMISSIBILITY EXEMPTION, NARROWED.
     //
-    // The hard fence is a RATIO prediction. Standing near it is not the same as being
-    // unable to send, and treating the two alike handed the fence path a standing
-    // waiver from both economy guards. Measured 2026-08-07 (rep 17): fence-path
+    // A request whose projection exceeds the provider input budget is rejected outright,
+    // so recovery must produce a window that fits. The hard fence, though, is a RATIO
+    // prediction. Standing near it is not the same as being unable to send, and treating
+    // the two alike handed the fence path a standing waiver from both economy guards. Measured 2026-08-07 (rep 17): fence-path
     // window-pressure commits fired at eligible-freed shares as low as 0.018, under the
     // 0.02 floor the guided path honors, and re-fired inside a single ordinal. So only
     // two states outrank the economy: the overflow recovery lane, which runs because a
@@ -2204,8 +2208,9 @@ export function registerActiveContext(pi: any, options: {
     // still CROWDED (inside the fence margin, but transmissible), and committed again.
     // The second commit bought margin the next pass would have bought anyway and cost a
     // whole second prefix rewrite. So a second commit in the same handoff defers unless
-    // the request is genuinely untransmittable: the fence and the recovery lane are
-    // safety, and safety outranks the budget.
+    // the request is genuinely untransmittable: a request whose projection exceeds the
+    // provider input budget is rejected outright, so recovery must produce a window that
+    // fits, and the fence and the recovery lane spend the budget to get one.
     if (instrumentation.mutationsSinceHandoff > 0 && !overflowExempt) {
       emit("context.commit", {
         trigger,
@@ -2287,8 +2292,9 @@ export function registerActiveContext(pi: any, options: {
     if (!accounting.pending) return null;
     // The reclaim floor. One structural mutation per model call is the budget, so a
     // commit that would free crumbs spends the whole budget on nothing: it defers and
-    // the marks accumulate. Safety outranks economics, so genuine overflow -- the
-    // recovery lane, or an occupancy already past the serving budget -- fires
+    // the marks accumulate. A request whose projection exceeds the provider input budget
+    // is rejected outright, so recovery must produce a window that fits: genuine overflow
+    // -- the recovery lane, or an occupancy already past the serving budget -- fires
     // regardless of what it frees. Standing at the fence RATIO does not.
     if (!overflowExempt &&
         accounting.eligibleFreedBudgetShare < COMMIT_RECLAIM_FLOOR_SHARE) {
@@ -2571,7 +2577,9 @@ export function registerActiveContext(pi: any, options: {
     if (!persistence.state) return false;
     if (!epochCommitDue(snapshot, ratio)) return false;
     measuredCurationSignals(snapshot);
-    // The latch is an ECONOMY rule and the fence is safety, so the fence is not latched.
+    // The latch is an ECONOMY rule, and the fence is not latched: a request whose
+    // projection exceeds the provider input budget is rejected outright, so recovery
+    // must produce a window that fits.
     // A request that does not fit gets its commit whether or not the previous one left
     // new eligible mass behind; holding it back would be spending the session's
     // transmissibility to save a prefix rewrite.
@@ -2692,8 +2700,10 @@ export function registerActiveContext(pi: any, options: {
   /**
    * THE PRE-COMMIT LAST-CALL GATE. When the band-top trigger fires, the commit defers
    * exactly one gated round behind one exposure of the ruled prompt; then it proceeds
-   * with whatever marks exist. Safety outranks ceremony: fence pressure, the recovery
-   * lane, or an occupancy already past the serving budget commit NOW, and the user
+   * with whatever marks exist. A request whose projection exceeds the provider input
+   * budget is rejected outright, so recovery must produce a window that fits: fence
+   * pressure, the recovery lane, or an occupancy already past the serving budget
+   * commit NOW, and the user
    * command never reaches this gate because explicit intent is its own answer. The
    * round is measured from DELIVERY: the commit proceeds only on a context pass whose
    * ordinal is past the pass that rendered the exposure, which is exactly one agent
@@ -2840,7 +2850,7 @@ export function registerActiveContext(pi: any, options: {
     // The trigger decides early and says nothing. Nothing warns that a commit is
     // coming, because a warning has to arrive before the event it warns about and
     // therefore has to break a prefix nothing else was breaking.
-    // Evaluated on EVERY pass the ladder runs on, which is where the safety backstop
+    // Evaluated on EVERY pass the ladder runs on, which is where the pressure backstop
     // always sat. Crossing the band top is a property of occupancy, not of which
     // lifecycle hook happened to notice it, and a trigger that waits for the next
     // projection pass is a window that keeps climbing while it waits.

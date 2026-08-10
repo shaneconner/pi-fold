@@ -5135,8 +5135,9 @@ async function gateProjectionCalibration() {
   //
   // Note on the quiet cadence, measured: the commit fires on this same pass and takes
   // the foldable mass first, so the fence's own rung finds nothing to fold and ABORTS
-  // the pass instead of reducing it. That is the correct safety ordering -- refusing to
-  // transmit beats transmitting over budget -- and it is why overBudgetReduction is
+  // the pass instead of reducing it. That is the correct ordering: a request whose
+  // projection exceeds the provider input budget is rejected outright, so recovery must
+  // produce a window that fits -- and it is why overBudgetReduction is
   // null here despite the projection genuinely shrinking. The shrink is the commit's.
   assert(bytesOf(afterFence.messages) < denseRaw,
     "The pass that hit the fence handed back the raw branch instead of the projection");
@@ -5256,7 +5257,9 @@ async function gateFenceMarginAndDepth() {
   assert(worstDrift <= 0.1, `The calibrated estimate drifted ${(worstDrift * 100).toFixed(1)}% from measured`);
   const fired = climb.find((entry) => entry.reduction);
   assert(fired, "The fence never fired while the window filled, which is the rep13 death");
-  // Economy waits the round; safety never transmits. On this 18,000-token budget the
+  // Economy waits the round; an over-budget projection is never transmitted, because a
+  // request whose projection exceeds the provider input budget is rejected outright and
+  // recovery must produce a window that fits. On this 18,000-token budget the
   // margin band is 900 tokens and one round of inflow is larger, so when a last-call
   // round is open at the crossing the reduction may land at the over line instead of
   // inside the margin. That is the ruled trade, and it is admissible ONLY when the
@@ -7003,8 +7006,9 @@ async function gateNoYieldCommitGuard() {
     "A deferred commit rewrote the projection anyway");
   }
 
-  // Safety still outranks economy: a projection past the serving budget recovers,
-  // whatever it frees.
+  // A request whose projection exceeds the provider input budget is rejected outright,
+  // so recovery must produce a window that fits: a projection past the serving budget
+  // recovers, whatever it frees.
   const overflow = makeRuntime(
     makeFixture({ turns: 16, resultChars: 12_000, contextWindow: 60_000 }),
     {},
@@ -8100,8 +8104,8 @@ async function gateRiderContentLaw() {
  *
  * The band-top trigger fires, and before the commit applies, exactly one prompt rides
  * the commit boundary: the ruled wording, the telemetry the 13:23 directive names,
- * one gated round, then the commit proceeds with whatever marks exist. Safety paths
- * commit without ceremony, the user command never sees the gate, a crossing that dies
+ * one gated round, then the commit proceeds with whatever marks exist. An untransmittable
+ * request commits without ceremony, the user command never sees the gate, a crossing that dies
  * uncommitted lapses with attribution, and every exposure is joined to its response
  * on the canonical stream by exposure_seq.
  */
@@ -8182,7 +8186,9 @@ async function gateLastCallRidesTheCommitBoundary() {
     context.flattenFoldRefs(fold, state).some((ref) => ref.entryId === markable)),
   "The round's mark did not fold at the commit it was made for");
 
-  // The fence path commits without ceremony: safety outranks it.
+  // The fence path commits without ceremony: a request whose projection exceeds the
+  // provider input budget is rejected outright, so recovery must produce a window that
+  // fits.
   const fence = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
   await measure(fence, 95_000, 100_000);
   await settle();
