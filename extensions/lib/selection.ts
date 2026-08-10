@@ -229,6 +229,54 @@ export function stageIdentifiedToolBrief(input: {
   return usefulBrief(bounded, ACTIVE_CONTEXT_POLICY.maxBriefChars, snapshot.toolName) ? bounded : null;
 }
 
+/**
+ * The fold ids a batch of tool results PEEKED, or null if the batch is not one.
+ *
+ * A peek result is the one tool output whose bytes the runtime already holds: it is a
+ * copy of a fold's own stored source. Reclaiming it therefore has an identity the
+ * ordinary tool-fold path does not have, and that identity has to be derivable from the
+ * transcript alone, because whichever mechanism claims the copy (the epoch's own
+ * reclaim marking or the doorless ladder) the record it leaves behind must still point
+ * back at the source.
+ */
+export function peekedSourceFoldIds(
+  snapshot: ActiveContextSnapshot,
+  refs: readonly EvidenceRef[],
+): string[] | null {
+  if (!refs.length) return null;
+  const ids: string[] = [];
+  for (const ref of refs) {
+    const item = exactMapped(snapshot, ref);
+    if (!item) return null;
+    const call = resultCall(snapshot, item.index, true);
+    if (!call || call.name !== snapshot.toolName) return null;
+    const args = toolCallArguments(snapshot, call.assistantIndex, call.id);
+    if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+    const record = args as Record<string, unknown>;
+    const id = record.id;
+    if (record.action !== "peek" || typeof id !== "string" || !id) return null;
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids.length ? ids : null;
+}
+
+/**
+ * The brief a reclaimed peek copy leaves behind: a pointer, not a summary.
+ *
+ * The copy's content is the source fold's content, so summarizing it again would mint
+ * a second description of bytes that already have one. What the agent needs from the
+ * placeholder is the id it already used once, so re-reading the verbatim content is the
+ * same one-hop peek it was before the reclaim.
+ */
+export function peekReclaimBrief(sourceFoldIds: readonly string[]): string {
+  const named = sourceFoldIds.join(", ");
+  return sourceFoldIds.length === 1
+    ? `Peek copy of fold ${named}, reclaimed: the copy was a duplicate of that fold's own stored ` +
+      `source, which stays verbatim and one hop away by peeking ${named} again.`
+    : `Peek copies of folds ${named}, reclaimed: the copies duplicated those folds' own stored ` +
+      "sources, which stay verbatim and one hop away by peeking each id again.";
+}
+
 export function automaticToolBrief(snapshot: ActiveContextSnapshot, candidate: FoldCandidate): string {
   const refs = candidate.kind === "tool-result" && candidate.parts.every((part) => part.kind === "raw")
     ? candidate.parts.map((part) => (part as Extract<FoldPart, { kind: "raw" }>).ref)
@@ -254,6 +302,13 @@ export function automaticToolBrief(snapshot: ActiveContextSnapshot, candidate: F
     ? "active-context status inspection"
     : factualBriefValue(name);
   const args = toolCallArguments(snapshot, first.assistantIndex, first.id);
+  // A peek copy is named by what it copied, before anything else. The stage-identified
+  // brief below describes a result by its own head and tail, which for a peek copy is a
+  // second description of a fold that already has one; the pointer is what makes the
+  // reclaim recoverable, so it comes first and it is derived here rather than at the one
+  // call site that happens to know a reclaim is under way.
+  const peeked = peekedSourceFoldIds(snapshot, refs);
+  if (peeked) return peekReclaimBrief(peeked);
   // Exact anchors before generic prose: one sentence per tool made every fold of that
   // tool carry the SAME brief, so no index could answer which fold holds a given stage.
   const identified = stageIdentifiedToolBrief({ snapshot, refs, calls, factualValue, factualToolName });

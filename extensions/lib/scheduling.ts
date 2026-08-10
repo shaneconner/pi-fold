@@ -52,11 +52,11 @@ import {
   candidateSourceRefs,
   chapterRangeIsUnitAligned,
   partsForRange,
+  peekedSourceFoldIds,
   spanBytes,
   deterministicChapterCandidateBrief,
   deterministicConsolidationBrief,
   resultCall,
-  toolCallArguments,
 } from "./selection.ts";
 
 /**
@@ -449,9 +449,22 @@ export function ladderSelectionMark(input: {
 }
 
 /**
- * Peek is the ephemeral read: look, decide, discard. Its own tool result is a
- * completed read batch, so at the next commit it folds away automatically, unless
- * the agent committed to the fold it peeked by expanding or protecting it.
+ * PEEK COPIES ARE EPHEMERAL BY CONTRACT.
+ *
+ * A peek returns a fold's exact stored source, so the copy sits in the window as raw
+ * mass beside that fold's own placeholder: the same bytes held twice, with the second
+ * copy re-retrievable forever from the id the agent already used. So a completed peek
+ * read is reclaimed at the NEXT commit rather than aging through the ladder, and the
+ * window being append-only is why the reclaim can only happen at a commit boundary.
+ *
+ * Two survival paths, and only two. Expanding the fold it peeked means the agent asked
+ * for those bytes in place, and pinning is the veto: a pin holds the copy raw through
+ * every commit, exactly as it holds any other evidence, and lifting it hands the copy
+ * back to the next commit. Both are read here at marking time, and a pin made AFTER the
+ * mark exists still vetoes, because a protected mark waits instead of applying.
+ *
+ * These marks are minted at the last-call exposure as well as at the commit, so the
+ * pending disposal is visible during the gated round the pin has to fit inside.
  */
 export function ephemeralPeekMarks(input: {
   snapshot: ActiveContextSnapshot;
@@ -475,25 +488,13 @@ export function ephemeralPeekMarks(input: {
     const expected = entries[0].call.batch;
     const ids = new Set(entries.map(({ call }) => call.id));
     if (ids.size !== expected.length || expected.some((id) => !ids.has(id))) continue;
-    const peeked: string[] = [];
-    let everyCallIsPeek = true;
-    for (const { call } of entries) {
-      const args = toolCallArguments(snapshot, call.assistantIndex, call.id);
-      const action = args && typeof args === "object" && !Array.isArray(args)
-        ? (args as Record<string, unknown>).action
-        : undefined;
-      const id = args && typeof args === "object" && !Array.isArray(args)
-        ? (args as Record<string, unknown>).id
-        : undefined;
-      if (action !== "peek" || typeof id !== "string" || !id) { everyCallIsPeek = false; break; }
-      peeked.push(id);
-    }
-    if (!everyCallIsPeek) continue;
-    // The agent committed to what it peeked: leave the read in the raw window.
-    if (peeked.some((id) => state.expanded.includes(id) || peekedFoldProtected(snapshot, state, id))) continue;
     const refs = entries
       .sort((left, right) => left.index - right.index)
       .map(({ index }) => snapshot.mapped[index].ref!);
+    const peeked = peekedSourceFoldIds(snapshot, refs);
+    if (!peeked) continue;
+    // The agent committed to what it peeked: leave the read in the raw window.
+    if (peeked.some((id) => state.expanded.includes(id) || peekedFoldProtected(snapshot, state, id))) continue;
     if (refs.some((ref) => claimed.has(objectRefKey(ref))) ||
         refs.length > snapshot.policy.maxFoldSourceRefs ||
         toolRefsProtected(refs, state, snapshot)) continue;

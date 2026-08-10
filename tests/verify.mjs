@@ -3165,9 +3165,10 @@ async function gateEphemeralPeekMark() {
   // (2026-08-10): the doorless ladder may legitimately claim a completed peek read
   // during the gated last-call round, so the property is not WHICH mechanism claimed
   // it. It is that the claim is single, the duplicate bytes fold at the commit, and
-  // the recorded origin is truthful for whichever mechanism made the claim: agent
-  // when the epoch's own peek auto-mark did (peek_marks counts it), ladder when the
-  // doorless round got there first (and then no peek mark is counted).
+  // the recorded origin is truthful for whichever mechanism made the claim: agent when
+  // a reclaim marking did, counted at exactly one of its two moments (the last-call
+  // exposure or the commit itself), ladder when the doorless round got there first
+  // (and then neither moment counts a peek mark).
   const runtime = makeRuntime(built);
   await startRuntime(runtime);
   const peekReadId = built.turnEntries[0][2];
@@ -3179,18 +3180,177 @@ async function gateEphemeralPeekMark() {
   assert.equal(owners[0].kind, "tool-result", "The peek read did not become a tool-result fold");
   const appliedRecord = committed.applied.find((mark) => mark.foldId === owners[0].id);
   assert(appliedRecord, "The peek fold did not land through the commit's applied marks");
+  const exposureMarks = committed.records
+    .filter((record) => record.kind === "context.lastcall")
+    .reduce((sum, record) => sum + (record.peek_marks ?? 0), 0);
+  const claimCount = exposureMarks + (committed.commit.peek_marks ?? 0);
   const originTruthful = appliedRecord.origin === "agent"
-    ? committed.commit.peek_marks >= 1
-    : appliedRecord.origin === "ladder" && committed.commit.peek_marks === 0;
+    ? claimCount === 1
+    : appliedRecord.origin === "ladder" && claimCount === 0;
   assert(originTruthful,
     `The recorded origin '${appliedRecord.origin}' does not match the claiming mechanism ` +
-    `(peek_marks ${committed.commit.peek_marks})`);
+    `(exposure peek marks ${exposureMarks}, commit peek marks ${committed.commit.peek_marks})`);
+  // Whichever mechanism claimed it, the fold it left behind points back at what the
+  // copy duplicated: the brief names the source fold, so the placeholder does too.
+  assert(owners[0].brief.includes("fold_probe"),
+    `The reclaimed peek copy's brief does not name its source fold: ${owners[0].brief}`);
+  const foldRecord = committed.records.find((record) =>
+    record.kind === "context.fold" && record.fold_id === owners[0].id);
+  assert.equal(foldRecord.peek_of, "fold_probe", "The stream record does not name the peeked fold");
   return {
     peekMarks: marks.length,
     peekMarkOrigin: marks[0].origin,
     expandedPeekExempt: true,
     autoFoldedOnCommit: committed.applied.length,
     claimedBy: appliedRecord.origin,
+    claimedAt: exposureMarks ? "exposure" : (committed.commit.peek_marks ? "commit" : "ladder"),
+    pointsAt: foldRecord.peek_of,
+  };
+}
+
+/**
+ * PEEK COPIES ARE EPHEMERAL BY CONTRACT, AND THE RECLAIM CARRIES IDENTITY.
+ *
+ * A peek returns a fold's exact stored source, so the copy sits in the window as raw
+ * mass beside that fold's own placeholder: the same bytes held twice. The window is
+ * append-only, so the reclaim can only land at a commit boundary, and four properties
+ * make the contract governable rather than merely economical.
+ *
+ * 1. The reclaim is MARKED AT THE EXPOSURE, not silently at the commit, so the pending
+ *    disposal is visible during the one gated round.
+ * 2. A pin is the veto, and it holds across the commit like any other pin. Lifting it
+ *    hands the copy back to the next commit rather than dropping the decision.
+ * 3. The record points back: the reclaim's brief and therefore its placeholder name the
+ *    source fold, and the stream record names it as a field.
+ * 4. The verbatim floor is untouched: peeking the source fold after the reclaim returns
+ *    bytes identical to the peek that produced the copy.
+ *
+ * And the fresh tail is exempt with no exceptions: a copy inside it is not marked at
+ * all, and simply waits for a commit after it ages out.
+ */
+async function gatePeekReclaimWithIdentity() {
+  // BYTE IDENTITY, bracketing the exact commit that reclaims the copy. Two-phase,
+  // because the fold id the peek names must be the id the commit produces.
+  const probe = makeFixture({
+    turns: 12, resultChars: 12_000, contextWindow: 100_000, peekTurns: [3], peekTargetId: "placeholder",
+  });
+  const probeSeed = context.emptyActiveContextState(probe.sessionId);
+  const brief = "The exact stale inspection result stays recoverable behind this fold.";
+  const foldId = (await commitCandidate(
+    probeSeed, epochSnapshot(probe), context.selectAutomaticToolBatch(epochSnapshot(probe), probeSeed)[0],
+    { brief },
+  )).prepared.id;
+  const built = makeFixture({
+    turns: 12, resultChars: 12_000, contextWindow: 100_000, peekTurns: [3], peekTargetId: foldId,
+  });
+  const snapshot = epochSnapshot(built);
+  const empty = context.emptyActiveContextState(built.sessionId);
+  const seeded = (await commitCandidate(
+    empty, snapshot, context.selectAutomaticToolBatch(snapshot, empty)[0], { brief },
+  )).state;
+  const peekArguments = { state: seeded, entries: built.entries, sessionId: built.sessionId };
+  const before = context.peekFoldSource({ ...peekArguments, foldId });
+
+  const marks = context.ephemeralPeekMarks({ snapshot, state: seeded, ordinal: 1 });
+  assert.equal(marks.length, 1, "The completed peek read was not queued for reclaim");
+  assert(marks[0].brief.includes(foldId), `The reclaim mark does not name its source fold: ${marks[0].brief}`);
+  const reclaimed = await context.commitPendingMarks({
+    snapshot, state: context.withPendingMarks(seeded, marks), generation: 1,
+  });
+  assert.equal(reclaimed.applied.length, 1, "The reclaim mark did not apply");
+  const copyFold = reclaimed.state.folds.find((fold) => fold.id === reclaimed.applied[0].foldId);
+  assert.notEqual(copyFold.id, foldId, "The reclaim overwrote the source fold instead of pointing at it");
+  assert(copyFold.brief.includes(foldId), "The reclaim minted an unrelated fold: its brief names no source");
+  assert(context.foldPlaceholder(copyFold, reclaimed.state, snapshot).includes(foldId),
+    "The placeholder the reclaim leaves behind does not name the source fold");
+  // The source fold is untouched by the reclaim of its own copy, so the verbatim floor
+  // is exactly where it was: the same id, the same bytes, the same one hop.
+  const after = context.peekFoldSource({ ...peekArguments, state: reclaimed.state, foldId });
+  assert.equal(json.stableStringify(after), json.stableStringify(before),
+    "A re-peek after the reclaim did not return the original bytes");
+  assert.equal(after.sourceSha256, before.sourceSha256);
+
+  // THE EXPOSURE MARKS IT. The band-top crossing arms the last-call, and the reclaim it
+  // is about to perform is stated there, while a pin can still veto it.
+  const runtime = await epochToolRuntime({
+    turns: 12, resultChars: 16_000, peekTurns: [1], peekTargetId: "fold_probe",
+  });
+  const peekEntryId = runtime.built.turnEntries[1][2];
+  const rawCopy = runtime.built.messages.find((message) => message?.toolCallId === "call-1");
+  await measure(runtime, 80_000, 100_000);
+  const armed = materialized(runtime).lastCall;
+  assert(armed, "The band-top crossing must arm the last-call");
+  const exposure = contextEvents(runtime).filter((record) => record.kind === "context.lastcall").at(-1);
+  assert.equal(exposure.peek_marks, 1, "The exposure did not mark the completed peek read");
+  assert(armed.text.includes("Peek copies reclaimed by this commit: 1"),
+    "The exposure does not state the reclaim it is about to perform");
+  assert(/pin/i.test(armed.text), "The exposure does not name the veto");
+  const pendingReclaim = (materialized(runtime).pendingMarks ?? [])
+    .filter((mark) => typeof mark.brief === "string" && mark.brief.includes("fold_probe"));
+  assert.equal(pendingReclaim.length, 1, "The reclaim decision is not pending after the exposure");
+  assert.equal(pendingReclaim[0].origin, "agent");
+  assert.equal(materialized(runtime).folds.length, 0, "The exposure pass moved bytes");
+  assert.deepEqual((await project(runtime)).messages.find((message) => message?.toolCallId === "call-1")?.content,
+    rawCopy.content, "The marked peek copy moved before the commit");
+
+  // THE PIN IS THE VETO. It is made inside the round the exposure opened, and the
+  // commit that follows reclaims everything else while the pinned copy stays raw.
+  await toolCall(runtime, { action: "protect", ids: [peekEntryId] });
+  const vetoed = await runtimeCommit(runtime, { tokens: 80_500, contextWindow: 100_000 });
+  assert.equal(vetoed.fired, true, "The commit must still fire; a pin vetoes a fold, not the epoch");
+  const pinnedState = materialized(runtime);
+  assert.equal(
+    pinnedState.folds.filter((fold) =>
+      context.flattenFoldRefs(fold, pinnedState).some((ref) => ref.entryId === peekEntryId)).length,
+    0,
+    "A pinned peek copy was reclaimed anyway",
+  );
+  assert.deepEqual((await project(runtime)).messages.find((message) => message?.toolCallId === "call-1")?.content,
+    rawCopy.content, "The pinned peek copy did not survive the commit verbatim");
+  // The decision waits rather than being dropped: the pin is a hold, so releasing it
+  // hands the copy to the next commit without the agent having to ask again.
+  assert((materialized(runtime).pendingMarks ?? []).some((mark) =>
+    typeof mark.brief === "string" && mark.brief.includes("fold_probe")),
+  "The vetoed reclaim was discarded instead of held");
+  await toolCall(runtime, { action: "unprotect", ids: [peekEntryId] });
+  await runtimeCommit(runtime, { tokens: 84_000, contextWindow: 100_000 });
+  const releasedState = materialized(runtime);
+  const owner = releasedState.folds.find((fold) =>
+    context.flattenFoldRefs(fold, releasedState).some((ref) => ref.entryId === peekEntryId));
+  assert(owner, "The released peek copy was never reclaimed");
+  assert(owner.brief.includes("fold_probe"), "The released reclaim lost its pointer");
+
+  // THE FRESH TAIL IS EXEMPT, NO EXCEPTIONS. A copy inside it is not marked at all; the
+  // same copy, with later turns behind it, is.
+  const fresh = makeFixture({
+    turns: 6, resultChars: 4_000, contextWindow: 100_000, peekTurns: [5], peekTargetId: "fold_probe",
+  });
+  const freshSnapshot = epochSnapshot(fresh);
+  const freshCopyIndex = freshSnapshot.mapped.findIndex((item) =>
+    item.ref?.entryId === fresh.turnEntries[5][2]);
+  assert(freshSnapshot.toolProtectedIndices.has(freshCopyIndex),
+    "Fixture invariant: the newest peek copy must sit inside the fresh tail");
+  assert.deepEqual(
+    context.ephemeralPeekMarks({
+      snapshot: freshSnapshot, state: context.emptyActiveContextState(fresh.sessionId), ordinal: 1,
+    }),
+    [],
+    "A peek copy inside the fresh tail was marked for reclaim",
+  );
+  const aged = makeFixture({
+    turns: 12, resultChars: 4_000, contextWindow: 100_000, peekTurns: [5], peekTargetId: "fold_probe",
+  });
+  const agedMarks = context.ephemeralPeekMarks({
+    snapshot: epochSnapshot(aged), state: context.emptyActiveContextState(aged.sessionId), ordinal: 1,
+  });
+  assert.equal(agedMarks.length, 1, "The same copy, aged out of the fresh tail, must reclaim");
+  return {
+    reclaimPointsAt: foldId,
+    bytesIdenticalAfterReclaim: true,
+    exposurePeekMarks: exposure.peek_marks,
+    pinnedCopySurvived: true,
+    releasedCopyReclaimed: owner.id,
+    freshTailExempt: true,
   };
 }
 
@@ -8740,6 +8900,7 @@ const gates = [
   [98, "The fence opens the middle, unlatched", gateFenceOpensTheMiddle],
   [99, "The last-call rides the commit boundary", gateLastCallRidesTheCommitBoundary],
   [100, "Threshold notices append once and re-arm", gateThresholdNoticesAppendOnce],
+  [101, "Peek copies reclaim with identity", gatePeekReclaimWithIdentity],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

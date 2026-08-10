@@ -336,25 +336,35 @@ export function lastCallText(input: {
   signals: CurationSignals;
   unmarked: { spans: number; tokens: number };
   pendingMarks: number;
+  /** Peek copies this exposure marked for reclaim, so the pin that vetoes one is timely. */
+  peekReclaims?: number;
   toolName: string;
   brandNoun?: string;
 }): string {
   const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
   const { signals } = input;
   const occupancy = signals.occupancy === null ? "unmeasured" : `${Math.round(signals.occupancy * 100)}%`;
+  const peekReclaims = input.peekReclaims ?? 0;
   return boundReceiptText([
     `[${brand} last call] ${LAST_CALL_WORDING}`,
     `Occupancy is ${occupancy} of the ${signals.budgetTokens}-token serving budget, at or past the ` +
       `${Math.round(signals.maxTarget * 100)}% commit line. Unmarked foldable mass in the stale zone: ` +
       `${input.unmarked.spans} span(s), about ${input.unmarked.tokens} tokens. ` +
       `Pending marks: ${input.pendingMarks}.`,
+    // Stated only when there is one to veto: a standing sentence about zero peek copies
+    // is bytes every exposure pays for and no round ever acts on.
+    peekReclaims > 0
+      ? `Peek copies reclaimed by this commit: ${peekReclaims}. Each duplicates a fold you can peek ` +
+        "again at any time, and its placeholder names that fold, so nothing becomes unreachable. " +
+        "Pin one to keep the copy raw."
+      : "",
     `Marks: ${input.toolName} ` +
       "{\"action\":\"fold\",\"marks\":[{\"ids\":[\"<start>\",\"<end>\"],\"brief\":\"<factual brief>\"}]} " +
       "adds or widens several in one call. Pins: {\"action\":\"protect\",\"ids\":[\"<entry-id>\"]} holds " +
       "entries raw through every fold, and {\"action\":\"unprotect\"} releases them.",
     "This is one round: the commit proceeds on the pass after your next response with whatever marks " +
       "exist. Continuing the task is the default; nothing here needs a reply.",
-  ].join("\n"), MAX_LAST_CALL_TEXT_BYTES,
+  ].filter(Boolean).join("\n"), MAX_LAST_CALL_TEXT_BYTES,
   `[${brand} last call] ${LAST_CALL_WORDING}`);
 }
 

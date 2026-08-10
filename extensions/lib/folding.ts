@@ -1497,8 +1497,10 @@ export function peekFoldSource(input: {
     ...(truncated
       ? { wider: { action: "peek", id: fold.id, bytes: Math.min(sourceBytes, ACTIVE_CONTEXT_POLICY.maxChapterChars) } }
       : {}),
-    lifetime: "these bytes stay in the window exactly as returned, like any other tool " +
-      "result, until the ladder folds them at a commit. Nothing rewrites this result in place.",
+    lifetime: "these bytes stay in the window exactly as returned, like any other tool result, and " +
+      `nothing rewrites this result in place. It is a COPY of fold ${fold.id}'s stored source, so the ` +
+      `next commit reclaims it behind a placeholder naming ${fold.id}; peek ${fold.id} again for the ` +
+      "same verbatim bytes, or pin this result to keep the copy raw.",
     note: truncated
       ? `Bounded read: ${returnedBytes} of ${sourceBytes} exact source bytes, ${view.omittedBytes} omitted ` +
         `from the middle. Widen with bytes, page with offset, or expand ${fold.id} to restore it in place.`

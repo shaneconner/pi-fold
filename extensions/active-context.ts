@@ -174,6 +174,7 @@ import {
   deterministicChapterCandidateBrief,
   deterministicConsolidationBrief,
   manualFoldCandidate,
+  peekedSourceFoldIds,
   selectAutomaticToolBatch,
   snapFoldCandidate,
   snapToFoldBoundaries,
@@ -2439,6 +2440,12 @@ export function registerActiveContext(pi: any, options: {
       const fold = persistence.state.folds.find((item) => item.id === applied.foldId);
       if (fold?.kind === "tool-result") foldedToolResults += 1;
       else foldedSpans += 1;
+      // A reclaimed peek copy names what it copied. Derived from the transcript rather
+      // than carried on the mark, so the pointer is the same whichever mechanism claimed
+      // the copy: the exposure's reclaim marking, the commit's, or the doorless ladder.
+      const peekedSources = fold?.kind === "tool-result"
+        ? peekedSourceFoldIds(snapshot, flattenFoldRefs(fold, persistence.state))
+        : null;
       emit("context.fold", {
         commit_seq: commitEvent.seq,
         fold_id: applied.foldId,
@@ -2447,6 +2454,7 @@ export function registerActiveContext(pi: any, options: {
         mark_id: applied.id,
         fold_kind: fold?.kind ?? applied.mark,
         origin: applied.origin,
+        peek_of: peekedSources ? peekedSources.join(",") : null,
         source_chars: fold?.sourceChars ?? 0,
         placeholder_chars: fold?.placeholderChars ?? 0,
         brief_provenance: fold ? normalizeLegacyProvenance(fold.provenance).kind : null,
@@ -2698,6 +2706,19 @@ export function registerActiveContext(pi: any, options: {
 
   const exposeLastCall = (snapshot: ActiveContextSnapshot): void => {
     if (!persistence.state) return;
+    // THE PEEK RECLAIM IS MARKED HERE, NOT ONLY AT THE COMMIT.
+    //
+    // A peek copy is reclaimed at the next commit by contract, and a contract the agent
+    // cannot see until after it executes is not one it can veto. The exposure is the one
+    // bounded round before the rewrite, so minting the reclaim marks now puts the pending
+    // disposal in front of the agent while a pin still changes the outcome: a pinned mark
+    // waits instead of applying, and lifting the pin hands the copy to a later commit.
+    const exposureOrdinal = markOrdinal(snapshot);
+    let peekReclaims = 0;
+    for (const mark of ephemeralPeekMarks({ snapshot, state: persistence.state, ordinal: exposureOrdinal })) {
+      const addition = addPendingMark(persistence.state, mark);
+      if (addition.added) { persistence.state = addition.state; peekReclaims += 1; }
+    }
     const signals = measuredCurationSignals(snapshot);
     const remainder = unmarkedRemainder(snapshot, persistence.state, projectionCharsPerToken());
     const accounting = markAccounting(snapshot, persistence.state);
@@ -2705,6 +2726,7 @@ export function registerActiveContext(pi: any, options: {
       signals,
       unmarked: { spans: remainder.spans, tokens: remainder.tokens },
       pendingMarks: accounting.pending,
+      peekReclaims,
       toolName,
       brandNoun,
     });
@@ -2717,6 +2739,7 @@ export function registerActiveContext(pi: any, options: {
       unmarked_stale_tokens: remainder.tokens,
       pending_marks: accounting.pending,
       pending_agent_marks: accounting.agentMarks,
+      peek_marks: peekReclaims,
       chars: text.length,
     });
     persistence.state = {
@@ -3740,7 +3763,7 @@ export function registerActiveContext(pi: any, options: {
           },
           peek: {
             defaultMaxBytes: PEEK_DEFAULT_MAX_BYTES,
-            lifetime: "append-only",
+            lifetime: "append-only; the copy is reclaimed at the next commit unless pinned",
           },
           pressureSource: "last-successful-provider-response-only",
           postOverflowCallback: "blocked-while-stock-native-compaction-is-disabled",
