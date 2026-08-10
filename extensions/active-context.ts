@@ -44,6 +44,7 @@ import {
   contextUsageRatio,
   contextWindowFor,
   explicitProtectedMass,
+  budgetOccupancy,
   hardFenceRatio,
   latestProviderContextMeasurement,
   orderedRoots,
@@ -96,14 +97,13 @@ import {
   DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   COMMIT_RECLAIM_FLOOR_SHARE,
-  CURATION_OCCUPANCY_SHARE,
-  CURATION_STALE_TOOL_SHARE,
   CONTEXT_RECEIPT_BLOCK_BYTES,
-  CURATION_TARGET_OCCUPANCY_SHARE,
   DEFAULT_CONTEXT_WINDOW,
+  assertThresholdsServable,
+  resolveThresholds,
+  servingBudgetTokens,
   ESTIMATED_BYTES_PER_TOKEN,
   entryTypeNamespace,
-  EPOCH_COMMIT_TARGET_WINDOW_SHARE,
   MAX_FOLD_SPAN_CHARS,
   MAX_PINNED_SHARE,
   MAX_WEDGE_ABSORB_TOKENS,
@@ -117,6 +117,7 @@ import {
 import type {
   ActiveContextSnapshot,
   ActiveContextState,
+  ActiveContextThresholds,
   ActiveContextToolAction,
   FoldCandidate,
   FoldKind,
@@ -130,7 +131,6 @@ import {
 import {
   contextReceipt,
   curationSignals,
-  curationTriggerFires,
   markAwarenessText,
   receiptBlockText,
   withReceipt,
@@ -169,7 +169,6 @@ import {
   deterministicConsolidationBrief,
   manualFoldCandidate,
   selectAutomaticToolBatch,
-  selectAutomaticToolForRung,
   snapFoldCandidate,
   snapToFoldBoundaries,
   splitCandidateBySize,
@@ -197,8 +196,8 @@ import type {
 import { buildActiveContextCommands, buildActiveContextTool } from "./lib/tool-surface.ts";
 import {
   currentTurnRefKeys,
+  deepenedFenceSnapshot,
   mapActiveContext,
-  toolFreshIndices,
 } from "./lib/transcript.ts";
 
 // Test seam only; the package API is registerPiFold because package.json exports block deep imports.
@@ -270,8 +269,12 @@ export function registerActiveContext(pi: any, options: {
   commandPrefix?: string;
   commandNames?: { status?: string; fold?: string };
   readOnlyTools?: ReadonlySet<string>;
-  blockingTools?: readonly string[];
   providerTotalWindow?: number;
+  /**
+   * The thermostat, set whole or not at all. USER policy: no agent action reads it back
+   * as a mutable surface, and status reports the values without offering to change them.
+   */
+  thresholds?: ActiveContextThresholds;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
   registerSuggestionSource: SuggestionSourceRegistrar;
@@ -292,6 +295,10 @@ export function registerActiveContext(pi: any, options: {
       throw new Error(`${removed} is no longer an option: epoch scheduling, peek foldability ` +
         "and the whole action surface are unconditional");
     }
+  }
+  if (Object.hasOwn(options, "blockingTools")) {
+    throw new Error("blockingTools is no longer an option: a tool call never causes a rewrite of " +
+      "its own, and the commit epoch is the only path that mutates the projection");
   }
   if (options.providerTotalWindow !== undefined &&
       (!Number.isSafeInteger(options.providerTotalWindow) || options.providerTotalWindow <= 0)) {
@@ -319,12 +326,10 @@ export function registerActiveContext(pi: any, options: {
       commandNames.status === commandNames.fold) {
     throw new Error("Active-context command names must be distinct kebab-case strings");
   }
-  const configuredBlockingTools = denseOwnArrayValues(options.blockingTools ?? ["Agent"]);
-  if (!configuredBlockingTools || configuredBlockingTools.some((name) => typeof name !== "string" || !name) ||
-      new Set(configuredBlockingTools).size !== configuredBlockingTools.length) {
-    throw new Error("Blocking tools must be one dense array of unique nonempty strings");
-  }
-  const blockingTools = new Set(configuredBlockingTools as string[]);
+  // The thermostat, validated atomically before anything else reads a threshold, and
+  // then checked against the budget this deployment can actually serve.
+  const thresholds = resolveThresholds(options.thresholds);
+  assertThresholdsServable(thresholds, servingBudgetTokens(options.providerTotalWindow ?? DEFAULT_CONTEXT_WINDOW));
   const stateEntryType = `${entryTypePrefix}-state`;
   const foldRecordEntryType = `${entryTypePrefix}-fold-record`;
   const milestoneProjectionType = `${entryTypePrefix}-milestone`;
@@ -532,8 +537,6 @@ export function registerActiveContext(pi: any, options: {
     shuttingDown: false,
     latestSnapshot: null as ActiveContextSnapshot | null,
     latestSnapshotError: null as string | null,
-    blockingToolHarvestedThisTurn: false,
-    blockingToolHarvestQueuedThisTurn: false,
     contextQueue: Promise.resolve<void>(undefined),
   };
 
@@ -689,6 +692,7 @@ export function registerActiveContext(pi: any, options: {
     readOnlyTools,
     readOnlyContextActions,
     contextWindow: budgetWindowFor(ctx) ?? undefined,
+    thresholds,
   });
 
   const authoritativeSnapshotFor = (ctx: any): ActiveContextSnapshot => {
@@ -707,6 +711,7 @@ export function registerActiveContext(pi: any, options: {
       readOnlyTools,
       readOnlyContextActions,
       contextWindow: budgetWindowFor(ctx) ?? undefined,
+      thresholds,
     });
   };
 
@@ -755,8 +760,6 @@ export function registerActiveContext(pi: any, options: {
     measurements.latestRatio = null;
     measurements.lastProviderMeasurement = null;
     ladder.pendingManual = false;
-    lifecycle.blockingToolHarvestedThisTurn = false;
-    lifecycle.blockingToolHarvestQueuedThisTurn = false;
     if (!preserveThresholdDecision) nativeCompaction.lastThresholdDecision = null;
     ladder.lastPreparationError = null;
     ladder.boundaryFailure = null;
@@ -1213,9 +1216,10 @@ export function registerActiveContext(pi: any, options: {
       protection: persistence.state ? protectionSha256(persistence.state) : null,
       selection,
       policy: snapshot ? {
-        toolFoldRatio: snapshot.policy.toolFoldRatio,
-        refoldRatio: snapshot.policy.refoldRatio,
-        prepareRatio: snapshot.policy.prepareRatio,
+        maxTarget: snapshot.thresholds.maxTarget,
+        minTarget: snapshot.thresholds.minTarget,
+        freshTail: snapshot.thresholds.freshTail,
+        staleTail: snapshot.thresholds.staleTail,
         hardFenceRatio: hardFenceRatio(snapshot),
       } : null,
     });
@@ -1546,7 +1550,6 @@ export function registerActiveContext(pi: any, options: {
       let action: Record<string, unknown> | null = null;
       try {
         action = await attemptAutomaticRung(snapshot, 1, ctx, "projection-budget", {
-          waiveToolCadence: true,
           waiverRatio: 1,
         });
       } catch (error) {
@@ -1952,8 +1955,10 @@ export function registerActiveContext(pi: any, options: {
     return Math.max(COMMIT_RECLAIM_FLOOR_SHARE, inflow > 0 ? inflow / window : 0);
   };
 
-  const atOrAboveBackstop = (snapshot: ActiveContextSnapshot, ratio: number | null): boolean =>
-    typeof ratio === "number" && Number.isFinite(ratio) && ratio >= snapshot.policy.refoldRatio;
+  const atOrAboveBackstop = (snapshot: ActiveContextSnapshot, ratio: number | null): boolean => {
+    const occupancy = budgetOccupancy(snapshot, ratio);
+    return occupancy !== null && occupancy >= snapshot.policy.refoldRatio;
+  };
 
   /**
    * A snapshot whose FRESH tail is narrowed.
@@ -1967,22 +1972,29 @@ export function registerActiveContext(pi: any, options: {
    *
    * The newest complete turn stays protected and so does everything the current-turn
    * guard covers: this narrows freshness, it does not abolish it.
+   *
+   * THE MIDDLE OPENS HERE TOO, and that half is a fence-only rule.
+   *
+   * The stale zone is `staleTail` of the serving BUDGET, and a projection at the fence
+   * is by definition larger than the budget. So the oldest staleTail-of-budget bytes
+   * cover a shrinking fraction of what is actually in the window, and the middle -- the
+   * region automation may never touch -- swallows the remainder and keeps growing.
+   * Measured on the 18,000-token fixture: the projection climbed 132,906 to 200,299
+   * chars over three passes while every fence pass aborted and reclaimed nothing,
+   * because the mass it had to reach sat in a middle it was forbidden to enter.
+   *
+   * The middle is an ECONOMY region: it exists so automation does not fold material the
+   * agent may still be curating, which is a statement about what is worth doing, not
+   * about what is safe. At the fence the request does not fit, and economy stops
+   * outranking transmissibility -- the same reasoning that already lets the fence waive
+   * the current-turn guard. So the deepened snapshot extends the stale zone to
+   * everything outside the narrowed fresh tail. Pins are untouched: they are a promise,
+   * not an economy.
    */
-  const DEEPENED_FRESH_TURNS = 1;
-  const DEEPENED_FRESH_BYTES_SHARE = 0.25;
+  const DEEPENED_FRESH_TAIL_SHARE = 0.25;
 
-  const deepenedFreshnessSnapshot = (snapshot: ActiveContextSnapshot): ActiveContextSnapshot => {
-    const policy = {
-      ...snapshot.policy,
-      freshTurns: Math.min(snapshot.policy.freshTurns, DEEPENED_FRESH_TURNS),
-      freshBytes: Math.floor(snapshot.policy.freshBytes * DEEPENED_FRESH_BYTES_SHARE),
-    };
-    const toolProtectedIndices = toolFreshIndices(snapshot.messages, snapshot.completeTurns, policy);
-    // Unmapped messages are protected in every snapshot: nothing can fold what the
-    // durable branch cannot name.
-    for (const item of snapshot.mapped) if (!item.ref) toolProtectedIndices.add(item.index);
-    return { ...snapshot, toolProtectedIndices };
-  };
+  const deepenedFreshnessSnapshot = (snapshot: ActiveContextSnapshot): ActiveContextSnapshot =>
+    deepenedFenceSnapshot(snapshot, snapshot.thresholds.freshTail * DEEPENED_FRESH_TAIL_SHARE);
 
   const runCommitEpoch = async (
     snapshot: ActiveContextSnapshot,
@@ -1993,6 +2005,13 @@ export function registerActiveContext(pi: any, options: {
      * over-budget reduction forces the fence so nothing survivable is held back.
      */
     waiverRatio: number | null = measurements.latestRatio,
+    /**
+     * A user asked for this commit. It outranks the two ECONOMIC guards -- the reclaim
+     * floor and the one-mutation-per-handoff budget -- because those exist to spend the
+     * session's rewrites well and the user just said where to spend one. It outranks
+     * nothing else: freshness, pins, exactness and the provider fence are unchanged.
+     */
+    userRequested = false,
   ): Promise<Record<string, unknown> | null> => {
     const ordinal = markOrdinal(snapshot);
     let state = persistence.state!;
@@ -2030,7 +2049,7 @@ export function registerActiveContext(pi: any, options: {
     // two states outrank the economy: the overflow recovery lane, which runs because a
     // request already did not fit, and an occupancy genuinely past the serving budget,
     // where the next request aborts unless something moves. Everything else defers.
-    const overflowExempt = curation.recoveryAttempts > 0 ||
+    const overflowExempt = userRequested || curation.recoveryAttempts > 0 ||
       (usedTokens !== null && budgetTokens > 0 && usedTokens > budgetTokens);
     // ONE STRUCTURAL MUTATION PER HANDOFF.
     //
@@ -2053,11 +2072,16 @@ export function registerActiveContext(pi: any, options: {
       });
       return null;
     }
-    const hysteresisShare = usedTokens === null || snapshot.contextWindow <= 0
+    // THE HYSTERESIS, AND THE WHOLE FREEING TARGET.
+    //
+    // How deep this event cuts is one subtraction on one denominator: what is used,
+    // less where the thermostat wants to land, over the serving budget. The separate
+    // 0.40 floor is gone -- it was a share of the WINDOW under a share of the BUDGET,
+    // so it never once bound (the hysteresis share at these thresholds bottoms out at
+    // 0.405 of window), and a floor that cannot fire is a number that only drifts.
+    const freeingTarget = usedTokens === null || budgetTokens <= 0
       ? 0
-      : Math.max(0, (usedTokens - CURATION_TARGET_OCCUPANCY_SHARE * budgetTokens) /
-        snapshot.contextWindow);
-    const freeingTarget = Math.max(EPOCH_COMMIT_TARGET_WINDOW_SHARE, hysteresisShare);
+      : Math.max(0, (usedTokens - thresholds.minTarget * budgetTokens) / budgetTokens);
     if (topUp) {
       // Measuring top-up progress against ELIGIBLE mass is what keeps the pressure
       // backstop working under a peek-heavy agent: pinned and retained marks are mass
@@ -2084,7 +2108,7 @@ export function registerActiveContext(pi: any, options: {
       // So a commit at or above the backstop that has not reached one inflow step
       // reaches further, into everything eligible, instead of billing a rewrite for
       // crumbs.
-      preDeepenShare = markAccounting(snapshot, state).eligibleFreedWindowShare;
+      preDeepenShare = markAccounting(snapshot, state).eligibleFreedBudgetShare;
       // Deepen whenever the ordinary reach fell short of the thermostat's target too:
       // an event that does not reach the lower line is an event that re-fires soon.
       const shallow = preDeepenShare < Math.max(commitDepthFloorShare(snapshot), freeingTarget);
@@ -2122,7 +2146,7 @@ export function registerActiveContext(pi: any, options: {
     // recovery lane, or an occupancy already past the serving budget -- fires
     // regardless of what it frees. Standing at the fence RATIO does not.
     if (!overflowExempt &&
-        accounting.eligibleFreedWindowShare < COMMIT_RECLAIM_FLOOR_SHARE) {
+        accounting.eligibleFreedBudgetShare < COMMIT_RECLAIM_FLOOR_SHARE) {
       persistence.state = state;
       emit("context.commit", {
         trigger,
@@ -2131,7 +2155,7 @@ export function registerActiveContext(pi: any, options: {
         applied_marks: 0,
         pending_marks: accounting.pending,
         eligible_marks: accounting.eligibleMarks,
-        eligible_freed_share: accounting.eligibleFreedWindowShare,
+        eligible_freed_share: accounting.eligibleFreedBudgetShare,
         reclaim_floor_share: COMMIT_RECLAIM_FLOOR_SHARE,
         window_tokens: snapshot.contextWindow,
       });
@@ -2177,15 +2201,15 @@ export function registerActiveContext(pi: any, options: {
       trigger,
       deferred: false,
       reason: null,
-      eligible_freed_share: accounting.eligibleFreedWindowShare,
+      eligible_freed_share: accounting.eligibleFreedBudgetShare,
       reclaim_floor_share: COMMIT_RECLAIM_FLOOR_SHARE,
       // The two first-class dials: how much ONE event reclaims, and how long since the
       // last one. A trigger that frees too little re-fires immediately, and that shape
       // is only visible with both numbers on the same record.
       target_freed_share: freeingTarget,
-      hysteresis_target_share: hysteresisShare,
-      target_occupancy_share: CURATION_TARGET_OCCUPANCY_SHARE,
-      shortfall_share: Math.max(0, freeingTarget - accounting.eligibleFreedWindowShare),
+      hysteresis_target_share: freeingTarget,
+      target_occupancy_share: thresholds.minTarget,
+      shortfall_share: Math.max(0, freeingTarget - accounting.eligibleFreedBudgetShare),
       occupancy_tokens_before: usedTokens,
       budget_tokens: budgetTokens,
       requests_since_previous: instrumentation.requests - instrumentation.lastMutationRequest,
@@ -2277,6 +2301,7 @@ export function registerActiveContext(pi: any, options: {
       emit("context.absorb", {
         commit_seq: commitEvent.seq,
         into_fold_id: wedge.intoMarkId,
+        from_mark_id: wedge.fromMarkId,
         start_id: wedge.startId,
         end_id: wedge.endId,
         entries: wedge.entries,
@@ -2322,13 +2347,13 @@ export function registerActiveContext(pi: any, options: {
       eligibleMarks: accounting.eligibleMarks,
       estimatedRewriteTokens: accounting.rewriteTokens,
       estimatedFreedTokens: accounting.freedTokens,
-      freedWindowShare: accounting.freedWindowShare,
+      freedBudgetShare: accounting.freedBudgetShare,
       sourceBytesSaved: freedBytes,
-      actualFreedWindowShare: snapshot.contextWindow > 0
-        ? estimatedTokens(freedBytes) / snapshot.contextWindow
+      actualFreedBudgetShare: snapshot.budgetTokens > 0
+        ? estimatedTokens(freedBytes) / snapshot.budgetTokens
         : 0,
-      targetWindowShare: freeingTarget,
-      hysteresisTargetShare: hysteresisShare,
+      targetBudgetShare: freeingTarget,
+      hysteresisTargetShare: freeingTarget,
       requestsSincePreviousCommit: instrumentation.requests - instrumentation.lastMutationRequest,
       instrumentation: ledgerSummary(instrumentation.ledger),
     };
@@ -2354,11 +2379,29 @@ export function registerActiveContext(pi: any, options: {
    * that would free nothing, and the hysteresis stops a plateau from reading as a
    * stream of events. What is gone is only the announcement in front of it.
    */
-  const curationCommitDue = (snapshot: ActiveContextSnapshot): boolean => {
+  /**
+   * THE trigger, with its one piece of hysteresis.
+   *
+   * Occupancy at or above maxTarget, and then the reopen latch: a window that is still
+   * full because the last commit could not reach the target is the SAME event, not a
+   * new one, so a second commit waits for at least a reclaim floor of genuinely new
+   * eligible mass. Without it a parked window fires a commit per pass and every one of
+   * them rebuilds the prefix for crumbs.
+   */
+  const commitTriggerDue = (snapshot: ActiveContextSnapshot, ratio: number | null): boolean => {
     if (!persistence.state) return false;
-    if (!curationTriggerFires(measuredCurationSignals(snapshot))) return false;
+    if (!epochCommitDue(snapshot, ratio)) return false;
+    measuredCurationSignals(snapshot);
+    // The latch is an ECONOMY rule and the fence is safety, so the fence is not latched.
+    // A request that does not fit gets its commit whether or not the previous one left
+    // new eligible mass behind; holding it back would be spending the session's
+    // transmissibility to save a prefix rewrite.
+    if (typeof ratio === "number" && Number.isFinite(ratio) && ratio >= hardFenceRatio(snapshot)) {
+      curation.reopenBaselineShare = null;
+      return true;
+    }
     if (curation.reopenBaselineShare !== null) {
-      const eligibleShare = markAccounting(snapshot, persistence.state).eligibleFreedWindowShare;
+      const eligibleShare = markAccounting(snapshot, persistence.state).eligibleFreedBudgetShare;
       if (eligibleShare - curation.reopenBaselineShare < COMMIT_RECLAIM_FLOOR_SHARE) return false;
       curation.reopenBaselineShare = null;
     }
@@ -2375,7 +2418,7 @@ export function registerActiveContext(pi: any, options: {
     if (curation.reopenBaselineShare === null) return;
     const capacity = servingCapacity(lifecycle.latestSnapshot?.contextWindow ?? null);
     if (capacity.usedTokens === null || capacity.budgetTokens <= 0) return;
-    if (capacity.usedTokens / capacity.budgetTokens < CURATION_OCCUPANCY_SHARE) {
+    if (capacity.usedTokens / capacity.budgetTokens < thresholds.maxTarget) {
       curation.reopenBaselineShare = null;
     }
   };
@@ -2428,15 +2471,12 @@ export function registerActiveContext(pi: any, options: {
     snapshot: ActiveContextSnapshot,
     ratio: number,
     rungOptions: {
-      waiveToolCadence?: boolean;
       toolOnly?: boolean;
       waiverRatio?: number;
-      announcing?: boolean;
     } = {},
   ): Promise<Record<string, unknown> | null> => {
     if (!persistence.state || ladder.automaticFailure || ladder.preparing) return null;
     const rungSelectionOptions = {
-      waiveToolCadence: rungOptions.waiveToolCadence,
       toolOnly: rungOptions.toolOnly,
       summarizerAvailable: Boolean(options.summarizeContextSpan),
       failedPreparationIds: ladder.failedPreparations,
@@ -2477,41 +2517,43 @@ export function registerActiveContext(pi: any, options: {
     };
     let epoch: Record<string, unknown> | null = null;
     let inlineRungs = true;
-    // QUIET RUNTIME. A commit is an epoch transition: it rewrites the projection, and
-    // every rewrite risks the whole prefix cache, so the cadence has to be the fewest
-    // commits that still keep the window inside its budget.
+    // QUIET RUNTIME, AND THE ONE TRIGGER.
     //
-    // The economic eligible-share trigger is DELETED: it fired 164 commits from
-    // ordinal 17 in rep 15, each a fresh cache rebuild bought with marks that had not
-    // yet earned one. What remains is the two-signal curation trigger, which fired 10
-    // to 17 times across reps 17 and 20, over the pressure backstop.
+    // A commit is an epoch transition: it rewrites the projection, every rewrite risks
+    // the whole prefix cache, so the cadence has to be the fewest commits that still
+    // keep the window inside its budget. Occupancy reaching maxTarget is the whole
+    // automatic condition. Below it the runtime is quiet and marks accumulate free;
+    // at it, one commit folds down toward minTarget, and the gap between the two lines
+    // is what makes the spacing of events structural rather than hoped for.
     //
-    // The trigger stays; only its ANNOUNCEMENT is gone. Nothing warns that a commit
-    // is coming and nothing waits for the agent to react, because a warning has to
-    // arrive before the event it warns about and therefore has to break a prefix
-    // nothing else was breaking. Deleting the trigger with the announcement was the
-    // wrong cut: it left the raw backstop alone in front of the window, and gate 58
-    // caught the projection overrunning its budget before anything reclaimed -- the
-    // rep 13 death. The runtime still decides early. It just no longer says so.
-    const backstopDue = epochCommitDue(snapshot, ratio);
-    // The trigger is evaluated on CONTEXT passes only. A commit is an epoch
-    // transition, and it belongs on the pass that builds the next projection rather
-    // than in the middle of a tool batch: firing it mid-batch makes a MARK rewrite
-    // the window, which is precisely the thing marking is supposed never to do.
-    const curationDue = !backstopDue && rungOptions.announcing === true &&
-      curationCommitDue(snapshot);
-    if (backstopDue || curationDue) {
+    // Two other arms used to reach this line and both are deleted. The eligible-share
+    // arm fired 164 commits from ordinal 17 in rep 15 on marks that had not earned a
+    // rewrite, and it could fire below maxTarget, which is the quiet law it sat under.
+    // The stale-mass AND-condition guarded an ANNOUNCEMENT that no longer exists: a
+    // commit is never announced, so a commit with nothing eligible now applies nothing
+    // and reports it rather than being suppressed in advance.
+    //
+    // The trigger decides early and says nothing. Nothing warns that a commit is
+    // coming, because a warning has to arrive before the event it warns about and
+    // therefore has to break a prefix nothing else was breaking.
+    // Evaluated on EVERY pass the ladder runs on, which is where the safety backstop
+    // always sat. Crossing the band top is a property of occupancy, not of which
+    // lifecycle hook happened to notice it, and a trigger that waits for the next
+    // projection pass is a window that keeps climbing while it waits.
+    const commitDue = commitTriggerDue(snapshot, ratio);
+    if (commitDue) {
       epoch = await runCommitEpoch(
         snapshot,
-        backstopDue ? "window-pressure" : "curation-trigger",
+        "band-top",
         true,
         rungOptions.waiverRatio ?? ratio,
       );
-      // Latch the eligible share this commit left behind, so the next one waits for
-      // genuinely new foldable mass rather than for the same window to still be full.
-      if (persistence.state && (curationDue || curation.reopenBaselineShare !== null)) {
+      // Latch the eligible share this commit left behind, so the next crossing waits
+      // for genuinely new foldable mass rather than for the same window to still be
+      // full. The band top is a LINE, and a window parked on it is one event.
+      if (persistence.state) {
         curation.reopenBaselineShare =
-          markAccounting(snapshot, persistence.state).eligibleFreedWindowShare;
+          markAccounting(snapshot, persistence.state).eligibleFreedBudgetShare;
       }
     }
     // An inline rung is free only INSIDE a rewrite the epoch already paid for. Below
@@ -2671,10 +2713,8 @@ export function registerActiveContext(pi: any, options: {
     ctx: any,
     phase: string,
     rungOptions: {
-      waiveToolCadence?: boolean;
       toolOnly?: boolean;
       waiverRatio?: number;
-      announcing?: boolean;
     } = {},
   ): Promise<Record<string, unknown> | null> => {
     if (!persistence.state || !measurements.lastProviderMeasurement ||
@@ -2721,10 +2761,8 @@ export function registerActiveContext(pi: any, options: {
     ctx: any,
     phase: string,
     rungOptions: {
-      waiveToolCadence?: boolean;
       toolOnly?: boolean;
       waiverRatio?: number;
-      announcing?: boolean;
     } = {},
   ): Promise<Record<string, unknown> | null> => {
     const operation = ladder.actionQueue.then(() =>
@@ -2953,9 +2991,9 @@ export function registerActiveContext(pi: any, options: {
               return { messages: event.messages };
             }
           }
-          if (selectAutomaticToolForRung(snapshot, persistence.state, measurements.latestRatio)) mutationAttempted = true;
+          if (selectAutomaticToolBatch(snapshot, persistence.state)[0]) mutationAttempted = true;
           const action = await attemptAutomaticRung(
-            snapshot, measurements.latestRatio, ctx, "context", { announcing: true },
+            snapshot, measurements.latestRatio, ctx, "context",
           );
           if (action) {
             mutationAttempted = true;
@@ -3142,45 +3180,8 @@ export function registerActiveContext(pi: any, options: {
     if (curation.recoveryAttempts >= OVERFLOW_RECOVERY_MAX_ATTEMPTS) return;
     curation.pendingRejection = { status, ordinal: currentOrdinal() };
   });
-  pi.on("tool_call", (event: Record<string, unknown>, ctx: any) => {
-    const calledTool = ownValue(event, "toolName");
-    if (lifecycle.shuttingDown || lifecycle.blockingToolHarvestedThisTurn || lifecycle.blockingToolHarvestQueuedThisTurn ||
-        typeof calledTool !== "string" || !blockingTools.has(calledTool)) return;
-    lifecycle.blockingToolHarvestQueuedThisTurn = true;
-    beginMutationPass();
-    const operation = ladder.actionQueue.then(async () => {
-      try {
-        if (!persistence.state || measurements.latestRatio === null || !measurements.lastProviderMeasurement || ladder.automaticFailure ||
-            !durableProviderMeasurementMatches(measurements.lastProviderMeasurement)) return null;
-        cancelPreparation();
-        let snapshot: ActiveContextSnapshot;
-        try { snapshot = authoritativeSnapshotFor(ctx); }
-        catch { return null; }
-        const candidate = selectAutomaticToolForRung(snapshot, persistence.state, measurements.latestRatio, true);
-        if (!candidate) {
-          lifecycle.blockingToolHarvestedThisTurn = true;
-          return null;
-        }
-        const action = await runAutomaticRungTransaction(
-          snapshot,
-          measurements.latestRatio,
-          ctx,
-          "tool-call",
-          { waiveToolCadence: true, toolOnly: true },
-        );
-        if (action) lifecycle.blockingToolHarvestedThisTurn = true;
-        return action;
-      } finally {
-        lifecycle.blockingToolHarvestQueuedThisTurn = false;
-        try { updateStatus(ctx); } catch { /* A blocking tool call must never wait on presentation. */ }
-      }
-    });
-    ladder.actionQueue = operation.catch(() => undefined);
-  });
   pi.on("turn_end", async (_event: unknown, ctx: any) => {
     beginMutationPass();
-    lifecycle.blockingToolHarvestedThisTurn = false;
-    lifecycle.blockingToolHarvestQueuedThisTurn = false;
     if (lifecycle.shuttingDown || !persistence.state || !persistence.persisted) return;
     const stateAtEntry = clone(persistence.state);
     const persistedAtEntry = persistence.persisted;
@@ -3340,8 +3341,8 @@ export function registerActiveContext(pi: any, options: {
         pendingMarks: accounting.pending,
         eligibleMarks: accounting.eligibleMarks,
         retainedMarks: accounting.retainedMarks,
-        eligibleMarkedShare: accounting.eligibleFreedWindowShare,
-        markedShare: accounting.freedWindowShare,
+        eligibleMarkedShare: accounting.eligibleFreedBudgetShare,
+        markedShare: accounting.freedBudgetShare,
         available: true,
         automatic: {
           pressureRatio: measurements.latestRatio,
@@ -3351,10 +3352,16 @@ export function registerActiveContext(pi: any, options: {
             log: clone(persistence.state.surfacing ?? []),
           },
           warningRatio: snapshot.policy.warningRatio,
-          toolFoldRatio: snapshot.policy.toolFoldRatio,
           refoldRatio: snapshot.policy.refoldRatio,
           chapterPrepareRatio: snapshot.policy.prepareRatio,
           hardFenceRatio: hardFenceRatio(snapshot),
+          // The declared policy, reported. No action reads it back as a setting.
+          thresholds: { ...snapshot.thresholds },
+          zones: {
+            staleBoundary: snapshot.staleBoundary,
+            freshBoundary: snapshot.freshBoundary,
+            budgetTokens: snapshot.budgetTokens,
+          },
           responseReserve: Math.min(
             ACTIVE_CONTEXT_POLICY.responseReserve,
             Math.floor(snapshot.contextWindow * 0.1),
@@ -3385,8 +3392,7 @@ export function registerActiveContext(pi: any, options: {
           lastAutomaticAction: ladder.lastAutomaticAction,
           overBudgetReduction: ladder.overBudgetReduction ? clone(ladder.overBudgetReduction) : null,
           curation: {
-            occupancyThreshold: CURATION_OCCUPANCY_SHARE,
-            staleToolThreshold: CURATION_STALE_TOOL_SHARE,
+            occupancyThreshold: thresholds.maxTarget,
             signals: curation.lastSignals ? { ...curation.lastSignals } : null,
             contextCalls: curation.contextCalls,
             receipts: curation.receipts.map((receipt) => ({ ...receipt })),
@@ -3432,7 +3438,6 @@ export function registerActiveContext(pi: any, options: {
             defaultMaxBytes: PEEK_DEFAULT_MAX_BYTES,
             lifetime: "append-only",
           },
-          freeHarvest: blockingTools.size === 0 ? "disabled" : "enabled",
           pressureSource: "last-successful-provider-response-only",
           postOverflowCallback: "blocked-while-stock-native-compaction-is-disabled",
           sameOperationRetry: false,
@@ -3886,8 +3891,8 @@ export function registerActiveContext(pi: any, options: {
         pendingMarks: accounting.pending,
         eligibleMarks: accounting.eligibleMarks,
         retainedMarks: accounting.retainedMarks,
-        estimatedFreedWindowShare: accounting.freedWindowShare,
-        estimatedEligibleWindowShare: accounting.eligibleFreedWindowShare,
+        estimatedFreedWindowShare: accounting.freedBudgetShare,
+        estimatedEligibleWindowShare: accounting.eligibleFreedBudgetShare,
         estimatedRewriteTokens: accounting.rewriteTokens,
         held,
         heldNote: "held until it ages out or the next fold event",
@@ -3997,11 +4002,39 @@ export function registerActiveContext(pi: any, options: {
       if (!lifecycle.latestSnapshot) lifecycle.latestSnapshot = snapshot;
       const divider = args.indexOf(" -- ");
       const selector = (divider >= 0 ? args.slice(0, divider) : args).trim();
+      // THE USER COMMIT. One word, and the only commit verb any caller has: the model
+      // tool still has no commit action, because a verb the runtime is entitled to
+      // overrule is surface without function. A user is not overruled.
+      //
+      // Below maxTarget it applies the eligible marks in hand and stops -- no automatic
+      // top-up, because the user asked to bank the curation they made, not to have the
+      // runtime pick more. At or above maxTarget it is the ordinary event: the planner
+      // may top up toward minTarget. Neither path touches freshness, pins, exactness or
+      // the provider fence.
+      if (selector === "commit") {
+        const capacity = servingCapacity(snapshot.contextWindow);
+        const occupancy = capacity.usedTokens !== null && capacity.budgetTokens > 0
+          ? capacity.usedTokens / capacity.budgetTokens
+          : null;
+        const topUp = occupancy !== null && occupancy >= thresholds.maxTarget;
+        const committed = await runCommitEpoch(snapshot, "user-command", topUp, measurements.latestRatio, true);
+        try { await persist(ctx); } catch { /* The commit already reported its own outcome. */ }
+        updateStatus(ctx);
+        safeNotify(
+          ctx,
+          committed
+            ? `Committed ${ownValue(committed, "applied_marks") ?? 0} mark(s)${topUp ? " with automatic top-up" : ""}. ` +
+              "Exact source remains expandable."
+            : "Nothing eligible to commit: no pending mark is outside the fresh tail.",
+          "info",
+        );
+        return;
+      }
       const supplied = (divider >= 0 ? args.slice(divider + 4) : "").trim() || undefined;
       const ids = selector ? selector.replace(/\.\./g, " ").split(/[\s,]+/).filter(Boolean) : [];
       const candidate = ids.length
         ? manualFoldCandidate(snapshot, persistence.state!, ids)
-        : selectAutomaticChapter(snapshot, persistence.state!) ?? selectAutomaticToolBatch(snapshot, persistence.state!, 1)[0] ?? null;
+        : selectAutomaticChapter(snapshot, persistence.state!) ?? selectAutomaticToolBatch(snapshot, persistence.state!)[0] ?? null;
       if (!candidate) throw new Error("No exact stale rescue span is currently eligible");
       const stateBefore = persistence.state!;
       const persistedBefore = persistence.persisted ? clone(persistence.persisted) : null;

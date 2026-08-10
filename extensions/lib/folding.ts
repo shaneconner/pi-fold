@@ -28,7 +28,6 @@ import {
   orderedRoots,
   refsInOrder,
   refsProtected,
-  toolFoldCadence,
   toolRefsProtected,
 } from "./measurement.ts";
 import {
@@ -48,7 +47,6 @@ import {
   ACTIVE_CONTEXT_POLICY,
   activeContextBrand,
   activeContextSource,
-  CONSOLIDATE_AFTER,
   CONTEXT_STATUS_RESPONSE_BYTES,
   EXPAND_LEASE_GENERATIONS,
   MAX_EXPAND_LEASES,
@@ -56,6 +54,7 @@ import {
   PEEK_DEFAULT_MAX_BYTES,
   PEEK_HEAD_SHARE,
   STATUS_DIET_SUGGESTIONS,
+  zoneBytes,
 } from "./policy.ts";
 import type {
   ActiveContextSnapshot,
@@ -79,7 +78,6 @@ import {
   selectAutomaticFoldRun,
   selectAutomaticRefold,
   selectAutomaticToolBatch,
-  selectAutomaticToolForRung,
   unpinnedStaleFolds,
 } from "./selection.ts";
 
@@ -89,7 +87,9 @@ export function selectAutomaticChapter(
   maximumSourceRefs: number = snapshot.policy.maxFoldSourceRefs,
   claimed: ReadonlySet<string> = new Set<string>(),
 ): FoldCandidate | null {
-  const units = chapterUnits(snapshot);
+  // The stale zone is the automatic law's whole reach. A unit that ends past it sits in
+  // the middle, and the middle is agent judgment only.
+  const units = chapterUnits(snapshot).filter((unit) => unit.end <= snapshot.staleBoundary);
   // The counting rule, applied to the span the automation composes: below the line a
   // span is raw material only and steps over every placeholder; at or above it the
   // placeholders are ordinary material and the span swallows them, so folds nest.
@@ -138,7 +138,7 @@ export function selectAutomaticChapter(
  * There is no chapter rung and no consolidation rung any more, each with its own
  * trigger: automation proposes the stalest eligible SPAN, and what the span contains
  * decides the fold's kind. Raw narrative folds as a chapter. Once the stale region
- * carries CONSOLIDATE_AFTER unpinned folds, placeholders are ordinary span material,
+ * carries `thresholds.consolidateAfter` unpinned folds, placeholders are span material,
  * so a span of whole folds folds as a consolidation and a mixed span nests its
  * tool-result children inside a chapter. Nothing here is pressure-scaled: the epoch's
  * own commit trigger decides WHEN, and this decides WHAT.
@@ -165,7 +165,7 @@ export function selectAutomaticSpan(
   state: ActiveContextState,
   claimed: ReadonlySet<string> = new Set<string>(),
 ): FoldCandidate | null {
-  return selectAutomaticToolBatch(snapshot, state, 1, claimed)[0] ??
+  return selectAutomaticToolBatch(snapshot, state, claimed)[0] ??
     selectAutomaticStaleSpan(snapshot, state, claimed);
 }
 
@@ -178,7 +178,6 @@ export type AutomaticRungSelection =
   | { kind: "chapter-prepare"; candidate: FoldCandidate };
 
 export interface AutomaticRungSelectionOptions {
-  waiveToolCadence?: boolean;
   toolOnly?: boolean;
   summarizerAvailable?: boolean;
   failedPreparationIds?: ReadonlySet<string>;
@@ -214,10 +213,10 @@ export function selectAutomaticRung(
     const candidate = selectAutomaticChapter(snapshot, state, snapshot.policy.maxFoldSourceRefs, claimed);
     return candidate ? { kind: "prepared-chapter", candidate } : null;
   }
-  const tool = selectAutomaticToolForRung(snapshot, state, ratio, options.waiveToolCadence, claimed);
+  const tool = selectAutomaticToolBatch(snapshot, state, claimed)[0] ?? null;
   if (tool) return { kind: "tool", candidate: tool };
   if (options.toolOnly || !Number.isFinite(ratio)) return null;
-  const refold = selectAutomaticRefold(snapshot, state, ratio, claimedFoldIds);
+  const refold = selectAutomaticRefold(snapshot, state, claimedFoldIds);
   if (refold) return { kind: "refold", foldId: refold };
   // One law decides the span; only the CHAPTER kind still has a preparation path in
   // front of it, because only a chapter brief is worth a model call.
@@ -254,8 +253,8 @@ export function foldCandidatesDetail(
   } = {},
 ): Record<string, unknown> {
   const measuredRatio = ratio !== null && Number.isFinite(ratio) ? ratio : Number.NaN;
-  const tool = selectAutomaticToolForRung(snapshot, state, measuredRatio);
-  const refold = selectAutomaticRefold(snapshot, state, measuredRatio);
+  const tool = selectAutomaticToolBatch(snapshot, state)[0] ?? null;
+  const refold = selectAutomaticRefold(snapshot, state);
   const staleSpan = selectAutomaticStaleSpan(snapshot, state);
   const consolidation = staleSpan?.kind === "consolidation" ? staleSpan : null;
   const chapter = staleSpan?.kind === "chapter" ? staleSpan : null;
@@ -291,15 +290,16 @@ export function foldCandidatesDetail(
     } : null,
     wouldFireNow,
     blockedBy,
-    cadence: {
-      tokensSinceToolFold: state.tokensSinceToolFold,
-      cadenceNeed: toolFoldCadence(snapshot.contextWindow),
+    // The three zones, reported as the positions they actually cut at, plus the
+    // counting rule read as the number it counts.
+    zones: {
+      staleBoundary: snapshot.staleBoundary,
+      freshBoundary: snapshot.freshBoundary,
+      budgetTokens: snapshot.budgetTokens,
     },
-    // The counting rule, reported as the number it counts: how many unpinned folds sit
-    // in the stale region, and the line at which they become ordinary span material.
     width: {
       visibleRoots: unpinnedStaleFolds(snapshot, state).length,
-      threshold: CONSOLIDATE_AFTER,
+      threshold: snapshot.thresholds.consolidateAfter,
     },
   };
 }
@@ -1172,7 +1172,7 @@ export function activeContextStatus(
       endId: eligibleSourceIds.at(-1),
       action: { action: "fold", ids: eligibleEndpoints, brief: "<factual brief, at most 1000 characters>" },
     } : null,
-    rawTailMinimumBytes: snapshot.policy.freshBytes,
+    rawTailMinimumBytes: zoneBytes(snapshot.thresholds.freshTail, snapshot.budgetTokens),
     currentTurnRequiresBoundary: false,
     actions: {
       status: { action: "status", offset, limit },

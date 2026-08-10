@@ -9,9 +9,7 @@ import {
   CONTEXT_MARK_RESPONSE_BYTES,
   CONTEXT_RECEIPT_BLOCK_BYTES,
   CURATION_GATE_MAX_ROUNDS,
-  CURATION_OCCUPANCY_SHARE,
   CURATION_REMINDER_SHARES,
-  CURATION_STALE_TOOL_SHARE,
   DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
   MAX_CONTEXT_RECEIPTS,
 } from "./policy.ts";
@@ -67,6 +65,8 @@ export function staleToolMass(
 export interface CurationSignals {
   /** Measured provider tokens as a share of the truthful serving budget; null unmeasured. */
   occupancy: number | null;
+  /** The trigger line this occupancy is read against: thresholds.maxTarget. */
+  maxTarget: number;
   occupancyTokens: number | null;
   /** THE serving budget: one resolved value, the same one the fence and estimator use. */
   budgetTokens: number;
@@ -103,6 +103,7 @@ export function curationSignals(input: {
     : 4;
   const staleToolTokens = Math.ceil(mass.bytes / charsPerToken);
   return {
+    maxTarget: input.snapshot.thresholds.maxTarget,
     occupancy: input.usedTokens === null || input.budgetTokens <= 0
       ? null
       : input.usedTokens / input.budgetTokens,
@@ -117,14 +118,20 @@ export function curationSignals(input: {
 }
 
 /**
- * BOTH signals, never either. Occupancy alone announces a commit that has nothing to
- * fold; stale mass alone announces one in a window with room to spare.
+ * ONE signal. Occupancy of the serving budget reaches maxTarget, and a commit is due.
+ *
+ * The second signal is gone with the announcement it guarded. It existed because the
+ * trigger ANNOUNCED a commit before running one, and announcing a commit that has
+ * nothing stale to fold is a false statement in the window; the announcement was
+ * deleted when its cache cost was measured, and the AND-condition outlived its reason.
+ * A commit with nothing eligible now simply applies nothing and says so, which the
+ * reclaim floor and the eligibility accounting already report. Stale mass is still
+ * measured and still reported; it is no longer a condition on the trigger.
  */
 export function curationTriggerFires(signals: CurationSignals): boolean {
   return signals.occupancy !== null &&
     Number.isFinite(signals.occupancy) &&
-    signals.occupancy >= CURATION_OCCUPANCY_SHARE &&
-    signals.staleToolShare >= CURATION_STALE_TOOL_SHARE;
+    signals.occupancy >= signals.maxTarget;
 }
 
 /**
@@ -157,7 +164,7 @@ export function curationReminderText(input: {
     ? "unmeasured"
     : `${Math.round(input.signals.occupancy * 100)}%`;
   return `[${brand} curation] Occupancy ${occupancy} of the ${input.signals.budgetTokens}-token serving ` +
-    `budget; nothing folds until ${Math.round(CURATION_OCCUPANCY_SHARE * 100)}%. Mark SEVERAL finished ` +
+    `budget; nothing folds until ${Math.round(input.signals.maxTarget * 100)}%. Mark SEVERAL finished ` +
     `chapters in one call with ${input.toolName} {"action":"fold","marks":[{"ids":["<start>","<end>"],` +
     "\"brief\":\"<factual brief>\"}]}: one call answers with everything held plus what is still " +
     "unmarked, so the folds are neat when the fold event triggers.";

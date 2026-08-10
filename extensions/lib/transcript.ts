@@ -16,16 +16,19 @@ import {
 } from "./canonical.ts";
 import {
   ACTIVE_CONTEXT_POLICY,
-  BYTES_PER_TOKEN_FLOOR,
   DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
   DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_THRESHOLDS,
   PEEK_READ_ONLY_CONTEXT_ACTIONS,
   READ_ONLY_TOOLS_DEFAULT,
+  servingBudgetTokens,
+  zoneBytes,
 } from "./policy.ts";
 import type {
   ActiveContextSnapshot,
+  ActiveContextThresholds,
   BranchObject,
   CompleteTurn,
   MappedMessage,
@@ -340,7 +343,18 @@ export function unsafeChapterIndices(messages: unknown[]): Set<number> {
   return unsafe;
 }
 
-export function freshBoundary(messages: unknown[], turns: CompleteTurn[], policy: typeof ACTIVE_CONTEXT_POLICY): number {
+/**
+ * The newest end of the window, where nothing folds.
+ *
+ * Two things decide it, and only two. The STRUCTURAL invariant comes first: an
+ * unfinished turn is never foldable at any share, because the excursion in progress is
+ * still using the evidence it gathered. Then the freshTail share, walked back turn by
+ * turn until the suffix carries its bytes. The old hybrid rule -- three complete turns
+ * OR 24,000 bytes, capped at a quarter of a small window -- is gone: it was three
+ * numbers in two units answering one question, and at small windows the turn leg and
+ * the byte leg disagreed about which was the protection.
+ */
+export function freshBoundary(messages: unknown[], turns: CompleteTurn[], freshBytes: number): number {
   if (!messages.length) return 0;
   let unfinishedUser = messages.length;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -353,19 +367,16 @@ export function freshBoundary(messages: unknown[], turns: CompleteTurn[], policy
     break;
   }
   const leading = leadingCompactionContinuation(messages);
-  let boundary = turns.length >= policy.freshTurns
-    ? turns[turns.length - policy.freshTurns].start
-    : leading?.end ?? 0;
-  boundary = Math.min(boundary, unfinishedUser);
+  let boundary = Math.min(messages.length, unfinishedUser);
   while (boundary > 0) {
     const suffix: unknown[] = [];
     for (let index = boundary; index < messages.length; index += 1) suffix.push(messages[index]);
-    if (bytes(suffix) >= policy.freshBytes) break;
+    if (bytes(suffix) >= freshBytes) break;
     let previous: CompleteTurn | null = null;
     for (let turnIndex = 0; turnIndex < turns.length; turnIndex += 1) {
       if (turns[turnIndex].start < boundary) previous = turns[turnIndex];
     }
-    if (!previous) { boundary = 0; break; }
+    if (!previous) { boundary = leading?.end ?? 0; break; }
     boundary = previous.start;
   }
   return boundary;
@@ -373,23 +384,77 @@ export function freshBoundary(messages: unknown[], turns: CompleteTurn[], policy
 
 export function toolFreshIndices(
   messages: unknown[],
-  turns: CompleteTurn[],
-  policy: typeof ACTIVE_CONTEXT_POLICY,
+  _turns: CompleteTurn[],
+  freshBytes: number,
 ): Set<number> {
   const protectedIndices = new Set<number>();
-  const firstFreshTurn = Math.max(0, turns.length - policy.freshTurns);
-  for (let turnIndex = firstFreshTurn; turnIndex < turns.length; turnIndex += 1) {
-    const turn = turns[turnIndex];
-    for (let index = turn.start; index < turn.end; index += 1) protectedIndices.add(index);
-  }
   let tailBytes = 0;
   let boundary = messages.length;
-  while (boundary > 0 && tailBytes < policy.freshBytes) {
+  while (boundary > 0 && tailBytes < freshBytes) {
     boundary -= 1;
     tailBytes += bytes(messages[boundary]);
   }
   for (let index = boundary; index < messages.length; index += 1) protectedIndices.add(index);
   return protectedIndices;
+}
+
+/**
+ * The oldest end of the window, where automation may reach.
+ *
+ * Exclusive: indices below the returned value are stale. Everything between it and the
+ * fresh boundary is the MIDDLE, and the middle is agent judgment only -- marks commit
+ * there, expansions persist there, raw stays raw there, and no automatic path proposes
+ * anything there. That is the 2026-08-06 ruling that agent context is not sequential,
+ * written as a region instead of as a preference.
+ */
+/**
+ * The snapshot a commit adjudicates against AT THE FENCE.
+ *
+ * Two narrowings, one reason. The protected byte tail shrinks to a quarter of its
+ * share, because depth at high occupancy means reaching into the fresh tail rather than
+ * asking harder for evidence that is not there. And the stale zone extends to the
+ * complement of that narrowed tail, because `staleTail` is a share of the serving
+ * BUDGET and a projection at the fence is larger than the budget, so the middle -- the
+ * region automation may never touch -- swallows a growing remainder that the reduction
+ * has to reach.
+ *
+ * The stale boundary here is the BYTE tail's complement and deliberately not
+ * `freshBoundary`'s: that one also clamps to the unfinished turn. The open turn is
+ * protected by the current-turn GUARD at commit time, and the guard is the protection
+ * that has a waiver; duplicating it as a zone would make the waiver unreachable, so a
+ * session whose only foldable evidence is its open excursion could never mark it and
+ * the fence would have nothing to reduce.
+ */
+export function deepenedFenceSnapshot(
+  snapshot: ActiveContextSnapshot,
+  freshTailShare: number,
+): ActiveContextSnapshot {
+  const deepenedFreshBytes = zoneBytes(freshTailShare, snapshot.budgetTokens);
+  const toolProtectedIndices = toolFreshIndices(
+    snapshot.messages,
+    snapshot.completeTurns,
+    deepenedFreshBytes,
+  );
+  const staleBoundary = toolProtectedIndices.size
+    ? Math.min(...toolProtectedIndices)
+    : snapshot.messages.length;
+  // Unmapped messages are protected in every snapshot: nothing can fold what the
+  // durable branch cannot name.
+  for (const item of snapshot.mapped) if (!item.ref) toolProtectedIndices.add(item.index);
+  return { ...snapshot, toolProtectedIndices, staleBoundary };
+}
+
+export function staleBoundary(messages: unknown[], staleBytes: number): number {
+  if (staleBytes <= 0) return 0;
+  let total = 0;
+  let index = 0;
+  while (index < messages.length) {
+    const size = bytes(messages[index]);
+    if (total + size > staleBytes) break;
+    total += size;
+    index += 1;
+  }
+  return index;
 }
 
 export function mapActiveContext(input: {
@@ -404,6 +469,7 @@ export function mapActiveContext(input: {
   readOnlyTools?: ReadonlySet<string>;
   readOnlyContextActions?: ReadonlySet<string>;
   contextWindow?: number;
+  thresholds?: ActiveContextThresholds;
 }): ActiveContextSnapshot {
   const policy = Object.freeze({ ...ACTIVE_CONTEXT_POLICY, ...(input.policy ?? {}) }) as typeof ACTIVE_CONTEXT_POLICY;
   const projectEntry = input.projectEntry ?? sessionEntryMessages;
@@ -460,19 +526,17 @@ export function mapActiveContext(input: {
     Number.isFinite(input.contextWindow) && input.contextWindow > 0
     ? input.contextWindow
     : null;
-  // A fixed byte floor can dominate a small or shrunken window. Cap the protected
-  // tail at freshWindowShare of the window via a conservative bytes-per-token
-  // floor: this binds only on genuinely small windows and never widens the
-  // protected tail.
-  const tailPolicy = reportedContextWindow === null ? policy : Object.freeze({
-    ...policy,
-    freshBytes: Math.min(policy.freshBytes, Math.floor(
-      reportedContextWindow * policy.freshWindowShare * BYTES_PER_TOKEN_FLOOR)),
-  });
+  // One denominator: both zone widths are shares of the serving budget the declared
+  // window yields, so a smaller window narrows the tails in proportion instead of
+  // meeting a fixed byte floor that only a second constant could rescue.
+  const thresholds = input.thresholds ?? DEFAULT_THRESHOLDS;
+  const budgetTokens = servingBudgetTokens(reportedContextWindow ?? DEFAULT_CONTEXT_WINDOW);
+  const freshBytes = zoneBytes(thresholds.freshTail, budgetTokens);
   const turns = completeTurns(input.eventMessages);
-  const boundary = freshBoundary(input.eventMessages, turns, tailPolicy);
+  const boundary = freshBoundary(input.eventMessages, turns, freshBytes);
+  const stale = Math.min(boundary, staleBoundary(input.eventMessages, zoneBytes(thresholds.staleTail, budgetTokens)));
   const protectedIndices = unsafeChapterIndices(input.eventMessages);
-  const toolProtectedIndices = toolFreshIndices(input.eventMessages, turns, tailPolicy);
+  const toolProtectedIndices = toolFreshIndices(input.eventMessages, turns, freshBytes);
   // Chapter protection is set-shaped: preserve the newest complete turns and
   // raw byte tail, while allowing an older closed prefix of the current turn.
   for (const index of toolProtectedIndices) protectedIndices.add(index);
@@ -489,9 +553,12 @@ export function mapActiveContext(input: {
     branchObjects,
     completeTurns: turns,
     freshBoundary: boundary,
+    staleBoundary: stale,
+    thresholds,
+    budgetTokens,
     protectedIndices,
     toolProtectedIndices,
-    policy: tailPolicy,
+    policy,
     toolName: input.toolName ?? DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
     brandNoun: input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
     entryTypePrefix: input.entryTypePrefix ?? DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX,

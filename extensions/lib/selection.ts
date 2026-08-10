@@ -16,7 +16,6 @@ import {
   orderedRoots,
   refsInOrder,
   refsProtected,
-  toolFoldCadence,
   toolRefsProtected,
   visibleCollapsedRoots,
 } from "./measurement.ts";
@@ -26,7 +25,6 @@ import {
 } from "./persistence.ts";
 import {
   ACTIVE_CONTEXT_POLICY,
-  CONSOLIDATE_AFTER,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   MAX_FOLD_SPAN_CHARS,
 } from "./policy.ts";
@@ -294,7 +292,7 @@ export function deterministicConsolidationBrief(candidate: FoldCandidate, state:
  * The agent path composes with this set: a mark's span may include folds of any kind and
  * any count, and the fold it commits re-parents them. Automation composes with a NARROWER
  * set, because its own restraint is the counting rule (placeholders are span material
- * only at or above CONSOLIDATE_AFTER), not a rule about shape.
+ * only at or above `thresholds.consolidateAfter`), not a rule about shape.
  */
 export const ALL_FOLD_KINDS: ReadonlySet<FoldKind> =
   new Set<FoldKind>(["tool-result", "chapter", "consolidation"]);
@@ -393,7 +391,8 @@ export function unpinnedStaleFolds(
   state: ActiveContextState,
 ): Array<{ fold: ActiveFold; start: number; end: number }> {
   return visibleCollapsedRoots(state, snapshot)
-    .filter(({ fold }) => !refsProtected(flattenFoldRefs(fold, state), state, snapshot));
+    .filter(({ fold, end }) => end < snapshot.staleBoundary &&
+      !refsProtected(flattenFoldRefs(fold, state), state, snapshot));
 }
 
 /** Whether fold placeholders currently count as ordinary material for an automatic span. */
@@ -401,7 +400,7 @@ export function foldsAreSpanMaterial(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
 ): boolean {
-  return unpinnedStaleFolds(snapshot, state).length >= CONSOLIDATE_AFTER;
+  return unpinnedStaleFolds(snapshot, state).length >= snapshot.thresholds.consolidateAfter;
 }
 
 /**
@@ -462,10 +461,8 @@ export function selectAutomaticFoldRun(
 export function selectAutomaticToolBatch(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
-  ratio: number,
   claimed: ReadonlySet<string> = new Set<string>(),
 ): FoldCandidate[] {
-  if (!Number.isFinite(ratio) || ratio < snapshot.policy.toolFoldRatio) return [];
   const owned = new Set([...claimed, ...state.folds.flatMap((fold) => fold.parts.flatMap((part) =>
     part.kind === "raw" ? [objectRefKey(part.ref)] : []))]);
   const groups = new Map<number, Array<{ item: MappedMessage; call: NonNullable<ReturnType<typeof resultCall>> }>>();
@@ -485,6 +482,7 @@ export function selectAutomaticToolBatch(
         refs.some((ref) => !ref || ref.role !== "toolResult")) continue;
     const exactRefs = refs as EvidenceRef[];
     if (exactRefs.length > snapshot.policy.maxFoldSourceRefs ||
+        group.some(({ item }) => item.index >= snapshot.staleBoundary) ||
         exactRefs.some((ref) => owned.has(objectRefKey(ref))) ||
         toolRefsProtected(exactRefs, state, snapshot) || refsInOrder(snapshot, exactRefs) === null ||
         group.reduce((total, { item }) => total + bytes(item.message), 0) < snapshot.policy.minToolChars) continue;
@@ -497,13 +495,18 @@ export function selectAutomaticToolBatch(
   return [];
 }
 
+/**
+ * The re-fold path, re-pointed at the stale zone.
+ *
+ * An expansion is a deliberate act, so it PERSISTS in the middle: no pressure reading
+ * undoes it there. Once the span it covers has aged into the stale tail, automation may
+ * return it to its placeholder like any other stale foldable, pins excepted.
+ */
 export function selectAutomaticRefold(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
-  ratio: number,
   claimedFoldIds: ReadonlySet<string> = new Set<string>(),
 ): string | null {
-  if (!Number.isFinite(ratio) || ratio < snapshot.policy.refoldRatio) return null;
   const candidates = state.expanded.flatMap((id) => {
     if (claimedFoldIds.has(id)) return [];
     const fold = state.folds.find((item) => item.id === id);
@@ -511,22 +514,11 @@ export function selectAutomaticRefold(
     const protectedSource = fold && (fold.kind === "tool-result"
       ? toolRefsProtected(flattenFoldRefs(fold, state), state, snapshot)
       : refsProtected(flattenFoldRefs(fold, state), state, snapshot));
-    return fold && interval && !protectedSource && !state.leases[id] ? [{ id, ...interval }] : [];
+    return fold && interval && interval.end < snapshot.staleBoundary && !protectedSource && !state.leases[id]
+      ? [{ id, ...interval }]
+      : [];
   }).sort((left, right) => left.end - right.end || (left.end - left.start) - (right.end - right.start));
   return candidates[0]?.id ?? null;
-}
-
-export function selectAutomaticToolForRung(
-  snapshot: ActiveContextSnapshot,
-  state: ActiveContextState,
-  ratio: number,
-  cadenceWaived = false,
-  claimed: ReadonlySet<string> = new Set<string>(),
-): FoldCandidate | null {
-  const cadenceSatisfied = state.tokensSinceToolFold >= toolFoldCadence(snapshot.contextWindow);
-  if (!cadenceWaived && (!Number.isFinite(ratio) ||
-      (ratio < snapshot.policy.toolFoldRatio && !cadenceSatisfied))) return null;
-  return selectAutomaticToolBatch(snapshot, state, 1, claimed)[0] ?? null;
 }
 
 export function resolveFoldInputIds(

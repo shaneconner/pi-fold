@@ -23,8 +23,7 @@ import {
 import {
   ACTIVE_CONTEXT_POLICY,
   DEFAULT_CONTEXT_WINDOW,
-  TOOL_FOLD_CADENCE_MIN_TOKENS,
-  TOOL_FOLD_CADENCE_WINDOW_FRACTION,
+  servingBudgetTokens,
 } from "./policy.ts";
 import type {
   ActiveContextSnapshot,
@@ -90,6 +89,22 @@ export function contextUsageRatio(value: unknown): number | null {
   return tokens / contextWindow;
 }
 
+/**
+ * A measured WINDOW ratio, restated as occupancy of the serving budget.
+ *
+ * The provider reports tokens against its total window and the thermostat is declared
+ * against the serving budget, so exactly one conversion stands between them and it is
+ * written here rather than inferred at each reader. Before this build the trigger
+ * divided by the budget while the freeing target and the backstop divided by the
+ * window, which at a 383,616-token budget behind a 400,000-token window is a 4.5-point
+ * disagreement, and 10 points at a 100,000-token fixture.
+ */
+export function budgetOccupancy(snapshot: ActiveContextSnapshot, windowRatio: number | null): number | null {
+  if (typeof windowRatio !== "number" || !Number.isFinite(windowRatio)) return null;
+  if (!(snapshot.budgetTokens > 0) || !(snapshot.contextWindow > 0)) return null;
+  return windowRatio * snapshot.contextWindow / snapshot.budgetTokens;
+}
+
 export function hardFenceRatio(value?: unknown, ctx?: any): number {
   const direct = ownValue(value, "contextWindow");
   const reported = ownValue(ctx?.getContextUsage?.(), "contextWindow");
@@ -139,11 +154,8 @@ export function capacityAccounting(input: {
   usedTokens: number | null;
 }): CapacityAccounting {
   const window = Number.isFinite(input.window) && input.window > 0 ? input.window : DEFAULT_CONTEXT_WINDOW;
-  const outputReservation = Math.min(
-    ACTIVE_CONTEXT_POLICY.responseReserve,
-    Math.floor(window * 0.1),
-  );
-  const budgetTokens = window - outputReservation;
+  const budgetTokens = servingBudgetTokens(window);
+  const outputReservation = window - budgetTokens;
   const usedTokens = typeof input.usedTokens === "number" && Number.isFinite(input.usedTokens) &&
     input.usedTokens >= 0 ? input.usedTokens : null;
   return {
@@ -269,13 +281,6 @@ export function contextWindowFor(ctx: any): number | null {
   if (typeof hostWindow === "number" && Number.isFinite(hostWindow) && hostWindow > 0) return hostWindow;
   const modelWindow = ownValue(ctx?.model, "contextWindow");
   return typeof modelWindow === "number" && Number.isFinite(modelWindow) && modelWindow > 0 ? modelWindow : null;
-}
-
-export function toolFoldCadence(contextWindow: number): number {
-  if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
-    throw new Error("Tool-fold cadence requires a positive context window");
-  }
-  return Math.max(TOOL_FOLD_CADENCE_MIN_TOKENS, TOOL_FOLD_CADENCE_WINDOW_FRACTION * contextWindow);
 }
 
 export function rootFolds(state: ActiveContextState): ActiveFold[] {

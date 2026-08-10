@@ -64,8 +64,11 @@ function guidanceRungs(
       ? [{ milestone: "orientation" as const, threshold: 0.25, budget: ADVISORY_BUDGETS.orientation }]
       : []),
     { milestone: "notice" as const, threshold: 0.50, budget: ADVISORY_BUDGETS.notice },
-    { milestone: "tools" as const, threshold: snapshot.policy.toolFoldRatio - 0.04,
-      budget: ADVISORY_BUDGETS.tools },
+    // An advisory DELIVERY point, stated as its own literal. It used to be derived
+    // from the tool-fold rung (0.75 - 0.04); that rung was a door on when automation
+    // marked tool batches, the zone law replaced it, and an advisory threshold anchored
+    // to a deleted door is drift waiting to happen.
+    { milestone: "tools" as const, threshold: 0.71, budget: ADVISORY_BUDGETS.tools },
     { milestone: "chapters" as const, threshold: snapshot.policy.prepareRatio - 0.05,
       budget: ADVISORY_BUDGETS.chapters },
     urgent,

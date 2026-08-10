@@ -17,6 +17,7 @@ import {
 import type { AutomaticRungSelection } from "./folding.ts";
 import {
   foldInterval,
+  budgetOccupancy,
   hardFenceRatio,
   orderedRoots,
   refsProtected,
@@ -31,8 +32,6 @@ import {
 } from "./persistence.ts";
 import { currentTurnRefKeys } from "./transcript.ts";
 import {
-  EPOCH_COMMIT_TARGET_WINDOW_SHARE,
-  EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD,
   EPOCH_MAX_TOPUP_MARKS,
   ESTIMATED_BYTES_PER_TOKEN,
   MAX_WEDGE_ABSORB_TOKENS,
@@ -220,7 +219,8 @@ export function guardWaiverCount(input: {
   const { snapshot, ratio, guardedMarks, otherApplicableMarks } = input;
   if (guardedMarks <= 0 || typeof ratio !== "number" || !Number.isFinite(ratio)) return 0;
   if (ratio >= hardFenceRatio(snapshot)) return guardedMarks;
-  if (ratio < snapshot.policy.refoldRatio || otherApplicableMarks > 0) return 0;
+  const occupancy = budgetOccupancy(snapshot, ratio);
+  if (occupancy === null || occupancy < snapshot.policy.refoldRatio || otherApplicableMarks > 0) return 0;
   if (guardedMarks < GUARD_WAIVER_MINIMUM_MARKS) return 0;
   return Math.max(1, guardedMarks - GUARD_WAIVER_PROTECTED_MARKS);
 }
@@ -261,7 +261,7 @@ export interface MarkAccounting {
   ladderMarks: number;
   freedBytes: number;
   freedTokens: number;
-  freedWindowShare: number;
+  freedBudgetShare: number;
   rewriteTokens: number;
   /** Marks a commit could apply right now. */
   eligibleMarks: number;
@@ -270,7 +270,7 @@ export interface MarkAccounting {
   eligibleFreedBytes: number;
   eligibleFreedTokens: number;
   /** The ROI signal: eligible marked mass as a share of the truthful window. */
-  eligibleFreedWindowShare: number;
+  eligibleFreedBudgetShare: number;
   /** Raw peek mass no reclamation can take: pinned reads and protected results. */
   pinnedBytes: number;
   /** How many peek results that mass is spread over. */
@@ -324,14 +324,14 @@ export function markAccounting(
     ladderMarks: marks.filter((mark) => mark.origin === "ladder").length,
     freedBytes,
     freedTokens,
-    freedWindowShare: snapshot.contextWindow > 0 ? freedTokens / snapshot.contextWindow : 0,
+    freedBudgetShare: snapshot.budgetTokens > 0 ? freedTokens / snapshot.budgetTokens : 0,
     rewriteTokens: estimatedTokens(rewriteBytes),
     eligibleMarks,
     retainedMarks,
     eligibleFreedBytes,
     eligibleFreedTokens,
-    eligibleFreedWindowShare: snapshot.contextWindow > 0
-      ? eligibleFreedTokens / snapshot.contextWindow
+    eligibleFreedBudgetShare: snapshot.budgetTokens > 0
+      ? eligibleFreedTokens / snapshot.budgetTokens
       : 0,
     pinnedBytes: pinned.bytes,
     pinnedResults: pinned.results,
@@ -348,14 +348,25 @@ export function markAccounting(
  * marks are worth nothing (the rep4 abort fired there with zero pending marks). The
  * agent's own commit is authoritative and immediate regardless of either.
  */
-export function epochCommitDue(
-  snapshot: ActiveContextSnapshot,
-  ratio: number | null,
-  eligibleShare: number | null = null,
-): boolean {
-  if (typeof eligibleShare === "number" && Number.isFinite(eligibleShare) &&
-      eligibleShare >= EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD) return true;
-  return typeof ratio === "number" && Number.isFinite(ratio) && ratio >= snapshot.policy.refoldRatio;
+/**
+ * THE commit trigger. There is exactly one.
+ *
+ * Occupancy of the serving budget reaches maxTarget and a commit fires. Nothing else
+ * fires one automatically: the user command and the fence/recovery lane are the only
+ * other paths into a commit, and both are authority rather than economics.
+ *
+ * Two arms used to sit here. The eligible-share arm asked whether accumulated marks
+ * were worth a rewrite and fired 164 commits from ordinal 17 in rep 15, each a fresh
+ * cache rebuild bought with marks that had not yet earned one; worse, it could fire
+ * BELOW maxTarget, which is the quiet-runtime law it was sitting underneath. The
+ * pressure arm read a window ratio against the refold rung, which after
+ * re-denomination is simply a second line above this one. Both are gone. Marking is
+ * doorless in the stale zone and costs nothing, so what a pass accumulates is never a
+ * reason to commit; crossing the band top is.
+ */
+export function epochCommitDue(snapshot: ActiveContextSnapshot, ratio: number | null): boolean {
+  const occupancy = budgetOccupancy(snapshot, ratio);
+  return occupancy !== null && occupancy >= snapshot.thresholds.maxTarget;
 }
 
 export function foldMarkFor(input: {
@@ -596,21 +607,22 @@ export function topUpMarks(input: {
   snapshot: ActiveContextSnapshot;
   state: ActiveContextState;
   ordinal: number;
-  targetShare?: number;
+  /** Freeing target as a share of the SERVING BUDGET. Required: there is no second default. */
+  targetShare: number;
   /** Evidence keys the top-up may never propose, e.g. the current excursion's reads. */
   excludeRefKeys?: ReadonlySet<string>;
   /** Measure progress against ELIGIBLE mass, so pinned or protected marks never count. */
   eligibleOnly?: boolean;
 }): PendingFoldMark[] {
   const { snapshot } = input;
-  const target = input.targetShare ?? EPOCH_COMMIT_TARGET_WINDOW_SHARE;
+  const target = input.targetShare;
   const claimed = claimedRefKeys(input.state);
   for (const key of input.excludeRefKeys ?? []) claimed.add(key);
   const marks: PendingFoldMark[] = [];
   let state = input.state;
   const progress = (value: ActiveContextState): number => {
     const accounting = markAccounting(snapshot, value);
-    return input.eligibleOnly ? accounting.eligibleFreedWindowShare : accounting.freedWindowShare;
+    return input.eligibleOnly ? accounting.eligibleFreedBudgetShare : accounting.freedBudgetShare;
   };
   let share = progress(state);
   for (let attempt = 0; attempt < EPOCH_MAX_TOPUP_MARKS && share < target; attempt += 1) {
@@ -636,6 +648,12 @@ export function topUpMarks(input: {
 export interface AbsorbedWedge {
   /** The mark that grew backward to cover it. */
   intoMarkId: string;
+  /**
+   * The id that mark carried BEFORE it grew. A mark's id is derived from its span, so
+   * growing the span mints a new one; without this the trail from the decision the
+   * agent made to the fold that carries it is broken, and a mark appears to vanish.
+   */
+  fromMarkId: string;
   startId: string;
   endId: string;
   entries: number;
@@ -735,6 +753,7 @@ export function absorbWedgeMarks(input: {
       state = withPendingMarks(state, [...kept, grown]);
       absorbed.push({
         intoMarkId: grown.id,
+        fromMarkId: mark.id,
         startId: gapRefs[0].entryId,
         endId: gapRefs.at(-1)!.entryId,
         entries: gapRefs.length,
@@ -924,22 +943,23 @@ export function schedulingStatus(input: {
   ratio: number | null;
 }): Record<string, unknown> {
   const accounting = markAccounting(input.snapshot, input.state);
-  const threshold = EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD;
   return {
     // A literal, not a setting: epoch is the only scheduler there is.
     mode: "epoch",
     ...accounting,
-    targetWindowShare: EPOCH_COMMIT_TARGET_WINDOW_SHARE,
-    commitDue: epochCommitDue(input.snapshot, input.ratio, accounting.eligibleFreedWindowShare),
+    // The declared policy, reported never mutable.
+    thresholds: { ...input.snapshot.thresholds },
+    budgetTokens: input.snapshot.budgetTokens,
+    commitDue: epochCommitDue(input.snapshot, input.ratio),
+    // One trigger, reported as one line. The eligible share is still reported above in
+    // the accounting because it is what a commit WOULD free; it is no longer a reason
+    // to fire one.
     commitTrigger: {
-      mode: "eligible-share",
-      eligibleShareThreshold: threshold,
-      eligibleShare: accounting.eligibleFreedWindowShare,
-      backstopRatio: input.snapshot.policy.refoldRatio,
-      pressureDue: epochCommitDue(input.snapshot, input.ratio),
-      roiDue: accounting.eligibleFreedWindowShare >= threshold,
+      mode: "band-top",
+      commitOccupancy: input.snapshot.thresholds.maxTarget,
+      occupancy: budgetOccupancy(input.snapshot, input.ratio),
+      due: epochCommitDue(input.snapshot, input.ratio),
     },
-    commitRatio: input.snapshot.policy.refoldRatio,
     marks: pendingMarks(input.state).map((mark) => ({
       mark: mark.mark,
       id: mark.id,

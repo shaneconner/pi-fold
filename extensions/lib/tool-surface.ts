@@ -120,7 +120,8 @@ export function buildActiveContextCommands(input: {
     },
     {
       name: input.foldName,
-      description: "Losslessly fold a stale context span; works without a main-model request",
+      description: "Losslessly fold a stale context span, or \"commit\" to apply every eligible mark now; " +
+        "works without a main-model request",
       handler: input.foldHandler,
     },
   ];

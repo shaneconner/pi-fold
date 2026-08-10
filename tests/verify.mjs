@@ -77,6 +77,17 @@ const DEPLOYMENT_IDENTITY_FIXTURE = Object.freeze({
   mcpFallbackServer: "acme",
 });
 
+/**
+ * The fixture idiom for "nothing is protected by recency", stated in the one unit the
+ * thermostat has. The protected tail is a SHARE of the serving budget, so a share that
+ * rounds to zero bytes is how a fixture asks for no fresh tail: the old two-key
+ * `{ freshTurns: 1, freshBytes: 0 }` override no longer exists to say it with.
+ */
+const NO_FRESH_TAIL = Object.freeze({ ...context.DEFAULT_THRESHOLDS, freshTail: 1e-9 });
+
+/** A fresh tail wide enough that the newest turns are unfoldable at fixture scale. */
+const WIDE_FRESH_TAIL = Object.freeze({ ...context.DEFAULT_THRESHOLDS, freshTail: 0.10, staleTail: 0.70 });
+
 const MODEL_BRIEF = async () => ({
   brief: "The exact stale evidence records the completed inspection and its factual result.",
   provider: "openai-codex",
@@ -107,6 +118,7 @@ function makeFixture({
   resultTail = null,
   readArguments = null,
   policy = {},
+  thresholds,
   contextWindow = 272_000,
 } = {}) {
   const peekAt = new Set(peekTurns);
@@ -177,6 +189,7 @@ function makeFixture({
     contextEntries: entries,
     policy,
     contextWindow,
+    ...(thresholds ? { thresholds } : {}),
   });
   return { sessionId, entries, messages, snapshot, turnEntries, contextWindow };
 }
@@ -208,7 +221,8 @@ function makeRuntime(built, {
   summarizeContextSpan,
   initialEntries,
   readOnlyTools,
-  blockingTools,
+  thresholds,
+  retiredOptions,
   isMcpTool,
   evidenceIngestion,
   summarizer,
@@ -297,7 +311,8 @@ function makeRuntime(built, {
     ...(commandNames ? { commandNames } : {}),
     ...(summarizeContextSpan ? { summarizeContextSpan } : {}),
     ...(readOnlyTools ? { readOnlyTools } : {}),
-    ...(blockingTools ? { blockingTools } : {}),
+    ...(thresholds ? { thresholds } : {}),
+    ...(retiredOptions ?? {}),
     ...(isMcpTool ? { isMcpTool } : {}),
     ...(evidenceIngestion === undefined ? {} : { evidenceIngestion }),
     ...(summarizer === undefined ? {} : { summarizer }),
@@ -488,7 +503,8 @@ async function smallChapterForest(count) {
     turns: Math.max(16, count + 10),
     tools: false,
     chapterChars: 900,
-    policy: { freshTurns: 1, freshBytes: 0, minChapterChars: 1 },
+    policy: { minChapterChars: 1 },
+    thresholds: NO_FRESH_TAIL,
     contextWindow: 100_000,
   });
   let state = context.emptyActiveContextState(built.sessionId);
@@ -511,7 +527,8 @@ async function chapterForest(count, chapterChars = 3_500) {
     turns: Math.max(9, count + 4),
     tools: false,
     chapterChars,
-    policy: { freshTurns: 1, freshBytes: 0, minChapterChars: 1 },
+    policy: { minChapterChars: 1 },
+    thresholds: NO_FRESH_TAIL,
     contextWindow: 100_000,
   });
   let state = context.emptyActiveContextState(built.sessionId);
@@ -868,7 +885,8 @@ async function gateFoldLattice() {
     sessionId: "batch-session",
     eventMessages: validBatchMessages,
     contextEntries: entries,
-    policy: { freshTurns: 1, freshBytes: 0, minToolChars: 100 },
+    policy: { minToolChars: 100 },
+    thresholds: NO_FRESH_TAIL,
   });
   assert.equal(context.validateTurnToolBatch(validBatchMessages, { start: 0, end: 5 }).calls.length, 2);
   const missingResult = structuredClone(validBatchMessages);
@@ -880,7 +898,7 @@ async function gateFoldLattice() {
   assert.equal(context.validateTurnToolBatch(mutating, { start: 0, end: 5 }), null);
 
   const empty = context.emptyActiveContextState("batch-session");
-  const [candidate] = context.selectAutomaticToolBatch(snapshot, empty, 0.80);
+  const [candidate] = context.selectAutomaticToolBatch(snapshot, empty);
   assert.equal(candidate.sourceRefs.length, 2);
   const committed = await commitCandidate(empty, snapshot, candidate, {
     brief: context.automaticToolBrief(snapshot, candidate),
@@ -940,16 +958,24 @@ async function gateAutonomousLadder() {
   await measure(toolRuntime, 50_000, 100_000);
   const milestoneState = materialized(toolRuntime);
   assert.equal(milestoneState.folds.length, 0);
+  // ONE TRIGGER: 80,000 tokens of a 100,000-token window is 0.889 of the 90,000-token
+  // serving budget, which is the band top crossed, so THIS pass commits. The invariant
+  // is unchanged and still counted at full strength: one structural mutation, however
+  // many marks it carries, and every fold it created is a tool-result fold. What moved
+  // is which pass pays for it, because the trigger no longer waits for a projection.
+  const beforeCrossing = toolRuntime.appended.length;
   const measurement = await measure(toolRuntime, 80_000, 100_000);
-  // The pass that MEASURES marks; the pass that projects commits. The invariant is
-  // unchanged and still counted at full strength: one structural mutation, however many
-  // marks it carries, and every fold it created is a tool-result fold.
+  const crossingCommits = contextEvents(toolRuntime, beforeCrossing)
+    .filter((record) => record.kind === "context.commit" && record.deferred === false);
   const toolCommit = await runtimeCommit(toolRuntime, { measured: false });
   const toolState = materialized(toolRuntime);
+  assert.equal(crossingCommits.length, 1,
+    "The band-top crossing performed more than one structural action");
+  assert.equal(crossingCommits[0].trigger, "band-top");
   assert.equal(
     toolCommit.commits.filter((record) => record.deferred === false).length,
-    1,
-    "One pass performed more than one structural action",
+    0,
+    "A window still parked on the band top committed a second time",
   );
   assert(toolState.folds.some((fold) => fold.kind === "tool-result"),
     `The commit epoch folded no completed tool batch: ${JSON.stringify(
@@ -1072,7 +1098,7 @@ async function gateAutonomousLadder() {
     oneActionFolds: toolState.folds.length,
     staleMeasurement: "no-op",
     refoldAt: 0.85,
-    consolidateAfter: context.CONSOLIDATE_AFTER,
+    consolidateAfter: context.DEFAULT_THRESHOLDS.consolidateAfter,
     preparedAt: 0.90,
     committedAtFence: fenceTokens / 272_000,
   };
@@ -1161,7 +1187,7 @@ async function gateLegacyLunaRegression() {
   assert.equal(loaded.folds[0].provenance.kind, "luna");
   const slate = context.projectionSlateCandidates(loaded, built.snapshot);
   assert.equal(slate.find((item) => item.source_id === legacyFold.id).generator, "projection-model");
-  const next = context.selectAutomaticToolBatch(built.snapshot, loaded, 1)[0];
+  const next = context.selectAutomaticToolBatch(built.snapshot, loaded)[0];
   assert(next, "Legacy fixture lacked a second tool fold for round-trip persistence");
   const response = await runtime.tools.get("active_context").execute(
     "legacy-round-trip",
@@ -1384,54 +1410,87 @@ async function gatePersistenceChain() {
   };
 }
 
-async function gateCadenceToolFolds() {
+async function gateDoorlessMarking() {
+  // Gate 11 was the tool-fold cadence: a second scheduler, blind to occupancy, that
+  // decided WHEN automation could mark a tool batch. It is deleted with its two
+  // constants. Marking is doorless in the stale zone now: any pass may mark eligible
+  // stale material, a mark moves no projection byte, and the only cap is the pending
+  // bound. What decides when bytes move is the one commit trigger, and nothing else.
   const built = makeFixture({ turns: 8, resultChars: 10_000, contextWindow: 100_000 });
   const runtime = makeRuntime(built);
   await startRuntime(runtime);
-  await measure(runtime, 10_000, 100_000);
-  assert.equal(materialized(runtime).tokensSinceToolFold, 0);
-  await measure(runtime, 20_000, 100_000);
-  assert.equal(materialized(runtime).tokensSinceToolFold, 10_000);
-  // The cadence is satisfied, so the tool rung fires: under the epoch that is a MARK.
-  // A mark frees nothing yet, so the counter the fold resets is still running.
-  await measure(runtime, 40_000, 100_000);
-  let state = materialized(runtime);
-  assert.equal(state.folds.length, 0, "A cadence decision folded before any commit");
-  assert.equal((state.pendingMarks ?? []).length, 1);
-  assert.equal(state.pendingMarks[0].kind, "tool-result");
-  assert.equal(state.pendingMarks[0].origin, "ladder");
-  assert.deepEqual(state.pendingMarks[0].parts.map((part) => part.ref.entryId),
-    [built.turnEntries[0][2]]);
-  assert.equal(state.tokensSinceToolFold, 30_000);
-  const markId = state.pendingMarks[0].id;
 
-  await measure(runtime, 45_000, 100_000);
-  assert.equal(materialized(runtime).tokensSinceToolFold, 35_000);
-  await runtime.handlers.get("model_select")({}, runtime.ctx);
-  await measure(runtime, 55_000, 100_000);
-  assert.equal(materialized(runtime).tokensSinceToolFold, 35_000,
-    "First measurement after model_select inflated cadence from a null baseline");
-  await measure(runtime, 60_000, 100_000);
-  state = materialized(runtime);
-  assert.equal(state.tokensSinceToolFold, 40_000);
-  assert.equal(state.folds.length, 0, "A measurement folded outside a commit");
+  // Three quiet passes, all far below the band top (0.80 of the 90,000-token budget is
+  // 72,000 tokens). Marks accumulate on every one of them and no byte moves.
+  const marksAfter = async (tokens) => {
+    await measure(runtime, tokens, 100_000);
+    const state = materialized(runtime);
+    return { marks: (state.pendingMarks ?? []).length, folds: state.folds.length, state };
+  };
+  const first = await marksAfter(10_000);
+  assert.equal(first.folds, 0);
+  const second = await marksAfter(20_000);
+  assert.equal(second.folds, 0, "A quiet pass folded");
+  const third = await marksAfter(40_000);
+  assert.equal(third.folds, 0, "A quiet pass folded");
+  assert(third.marks >= second.marks && second.marks >= first.marks,
+    "Marking went backwards below the band top");
+  assert(third.marks > 0, "No pass below the band top marked anything");
+  assert(third.state.pendingMarks.some((mark) => mark.kind === "tool-result" && mark.origin === "ladder"),
+    "The doorless path never marked a completed tool batch");
+  assert(third.state.pendingMarks.every((mark) => mark.origin === "ladder"),
+    "A mark below the band top came from somewhere other than the ladder");
+  // The stalest batch first: the law walks forward, it does not re-propose.
+  const firstMark = third.state.pendingMarks.find((mark) => mark.kind === "tool-result");
+  assert.deepEqual(firstMark.parts.map((part) => part.ref.entryId), [built.turnEntries[0][2]]);
+  const markIds = third.state.pendingMarks.map((mark) => mark.id);
+  assert.equal(new Set(markIds).size, markIds.length, "The doorless path proposed a span twice");
+  assert(markIds.length <= context.MAX_PENDING_MARKS);
 
-  // The commit applies the mark. The fold id is derived from the marked span, so
-  // finding it in the fold set IS the assertion that the span survived unchanged.
-  state = await measureAndCommit(runtime, 86_500, 100_000, "cadence-commit");
-  const folded = state.folds.find((fold) => fold.id === markId);
-  assert(folded, "The cadence mark never became a fold");
-  assert.equal(folded.kind, "tool-result");
-  assert.equal(state.tokensSinceToolFold, 0, "The applied fold did not reset the cadence counter");
+  // The projection has not moved through any of it: marks are decisions, not edits.
+  assert.equal(runtime.appended.filter((entry) =>
+    entry.customType === context.ACTIVE_CONTEXT_FOLD_RECORD_ENTRY).length, 0,
+    "A mark wrote a fold record before any commit");
 
-  // With the counter reset the next measurement sits inside the cadence window, and an
-  // unsatisfied cadence authorizes no second tool fold: no mark, so nothing to commit.
+  // Crossing the band top applies them, in one rewrite, and the ids are unchanged: a
+  // fold id derives from its marked span, so finding them IS the assertion that the
+  // spans survived the wait intact.
+  const beforeCommit = runtime.appended.length;
+  const committed = await measureAndCommit(runtime, 86_500, 100_000, "band-top-commit");
+  // THE RECEIPT TRAIL. Every accumulated mark is accounted for by id, three ways and no
+  // fourth: applied as a fold under the id it was made with, still standing because the
+  // commit found it ineligible, or absorbed -- wedge absorption grows a mark backward to
+  // swallow a sliver, and a mark's id is derived from its span, so growing the span
+  // mints a new id. The absorb record carries both ends of that rename, so the decision
+  // the ladder made is followable to the fold that ended up holding it.
+  const absorbs = contextEvents(runtime, beforeCommit)
+    .filter((record) => record.kind === "context.absorb");
+  const absorbedFrom = new Map(absorbs.map((record) => [record.from_mark_id, record.into_fold_id]));
+  const stillPending = new Set((committed.pendingMarks ?? []).map((mark) => mark.id));
+  for (const id of markIds) {
+    if (committed.folds.some((fold) => fold.id === id) || stillPending.has(id)) continue;
+    const renamed = absorbedFrom.get(id);
+    assert(renamed,
+      `A mark accumulated below the band top was neither applied, retained nor absorbed: ${id}`);
+    assert(committed.folds.some((fold) => fold.id === renamed) || stillPending.has(renamed),
+      `An absorbed mark's grown id ${renamed} leads nowhere`);
+  }
+  for (const record of absorbs) {
+    assert.notEqual(record.from_mark_id, record.into_fold_id,
+      "An absorb record reported a rename that renamed nothing");
+    assert(record.entries >= 1 && record.tokens >= 0);
+    assert(record.tokens <= record.threshold_tokens,
+      "An absorption swallowed a gap above the wedge threshold");
+  }
+  assert(committed.folds.some((fold) => fold.id === firstMark.id),
+    "The stalest accumulated tool batch never became a fold");
+  assert(committed.folds.length >= 1);
+  assert.equal(committed.tokensSinceToolFold, 0,
+    "The applied fold did not reset the persisted counter");
+
+  // The counter is still durable state on the wire; it just no longer gates anything.
   await measure(runtime, 89_000, 100_000);
-  state = materialized(runtime);
-  assert.equal(state.tokensSinceToolFold, 2_500);
-  assert.equal((state.pendingMarks ?? []).filter((mark) => mark.kind === "tool-result").length, 0,
-    "Unsatisfied cadence authorized a second tool fold");
-
+  assert.equal(materialized(runtime).tokensSinceToolFold, 2_500);
   const reloaded = makeRuntime(
     { ...built, messages: runtime.messages },
     { initialEntries: runtime.branch },
@@ -1439,12 +1498,13 @@ async function gateCadenceToolFolds() {
   await startRuntime(reloaded);
   assert.equal(materialized(reloaded).tokensSinceToolFold, 2_500);
   return {
-    markedAtRatio: 0.40,
-    monotonicTokens: [10_000, 20_000, 40_000, 45_000, 55_000, 60_000, 86_500, 89_000],
-    cadenceNeed: context.toolFoldCadence(100_000),
-    resetAfterCommittedFold: 0,
-    unsatisfiedToolMarks: 0,
-    postModelSelectSeed: 35_000,
+    quietPassMarks: [first.marks, second.marks, third.marks],
+    quietPassFolds: 0,
+    foldRecordsBeforeCommit: 0,
+    accumulatedBeforeCrossing: markIds.length,
+    absorbedRenames: absorbs.length,
+    appliedAtCrossing: committed.folds.length,
+    pendingCap: context.MAX_PENDING_MARKS,
     reloadedCounter: materialized(reloaded).tokensSinceToolFold,
   };
 }
@@ -1525,7 +1585,7 @@ async function gateExpandLeases() {
 async function gateConsolidationCountingRule() {
   // ONE counting rule replaces the width rung: at or above CONSOLIDATE_AFTER unpinned
   // folds in the stale region, placeholders are ordinary span material.
-  const belowRule = await chapterForest(context.CONSOLIDATE_AFTER - 1);
+  const belowRule = await chapterForest(context.DEFAULT_THRESHOLDS.consolidateAfter - 1);
   const belowSnapshot = context.mapActiveContext({
     sessionId: belowRule.sessionId,
     eventMessages: belowRule.messages,
@@ -1534,7 +1594,7 @@ async function gateConsolidationCountingRule() {
   });
   assert.equal(
     context.unpinnedStaleFolds(belowSnapshot, belowRule.state).length,
-    context.CONSOLIDATE_AFTER - 1,
+    context.DEFAULT_THRESHOLDS.consolidateAfter - 1,
   );
   assert.equal(context.foldsAreSpanMaterial(belowSnapshot, belowRule.state), false);
   assert.equal(context.selectAutomaticFoldRun(belowSnapshot, belowRule.state), null,
@@ -1549,7 +1609,7 @@ async function gateConsolidationCountingRule() {
 
   // At the rule the same forest, one fold wider, nests. The rule counts folds and
   // nothing else: no pressure term, no width shaping, no boundary walk.
-  const wide = await chapterForest(context.CONSOLIDATE_AFTER);
+  const wide = await chapterForest(context.DEFAULT_THRESHOLDS.consolidateAfter);
   const originalRoots = wide.state.folds.filter((fold) => fold.parentId === null).map((fold) => fold.id);
   const wideSnapshot = context.mapActiveContext({
     sessionId: wide.sessionId,
@@ -1579,7 +1639,7 @@ async function gateConsolidationCountingRule() {
 
   // Pins are the only exemption. One pinned root is neither counted by the rule nor
   // included by the span that the remaining roots compose.
-  const pinnedForest = await chapterForest(context.CONSOLIDATE_AFTER + 1);
+  const pinnedForest = await chapterForest(context.DEFAULT_THRESHOLDS.consolidateAfter + 1);
   const pinnedRoots = pinnedForest.state.folds
     .filter((fold) => fold.parentId === null).map((fold) => fold.id);
   const pinnedFold = pinnedForest.state.folds.find((fold) => fold.id === pinnedRoots[0]);
@@ -1595,7 +1655,7 @@ async function gateConsolidationCountingRule() {
   });
   assert.equal(
     context.unpinnedStaleFolds(pinnedSnapshot, pinnedState).length,
-    context.CONSOLIDATE_AFTER,
+    context.DEFAULT_THRESHOLDS.consolidateAfter,
     "The pinned fold is still counted by the rule",
   );
   const pinnedRun = context.selectAutomaticFoldRun(pinnedSnapshot, pinnedState);
@@ -1614,8 +1674,8 @@ async function gateConsolidationCountingRule() {
     brief: `A factual but deliberately non-shrinking consolidation ${"x".repeat(1_100)}`,
   }), /materially reduce/);
   return {
-    consolidateAfter: context.CONSOLIDATE_AFTER,
-    belowRuleFolds: context.CONSOLIDATE_AFTER - 1,
+    consolidateAfter: context.DEFAULT_THRESHOLDS.consolidateAfter,
+    belowRuleFolds: context.DEFAULT_THRESHOLDS.consolidateAfter - 1,
     belowRuleConsolidations: 0,
     selectedRoots: consolidation.parts.map((part) => part.foldId),
     nestedChildren: originalRoots.length,
@@ -1769,83 +1829,105 @@ async function gateFoldCandidatesDetail() {
   };
 }
 
-async function gateBlockingToolHarvest() {
+async function gateNoToolCallRewrite() {
+  // Gate 16 was the blocking-tool free harvest: a `tool_call` listener that folded one
+  // batch while the agent blocked on a subagent. It is deleted with `blockingTools`, and
+  // this is Sol's replacement: no tool call may cause a projection mutation of its own.
+  // The published mechanism is event-driven batching at occupancy, so the commit epoch
+  // is the only path that moves a byte.
   const built = makeFixture({ turns: 8, resultChars: 10_000, contextWindow: 100_000 });
   const runtime = makeRuntime(built);
   await startRuntime(runtime);
   await measure(runtime, 20_000, 100_000);
   await measure(runtime, 25_000, 100_000);
   await measure(runtime, 30_000, 100_000);
-  const hook = runtime.handlers.get("tool_call");
-  // The free harvest is a DECISION taken while the agent blocks, so under the epoch it
-  // lands as a mark. Every count below is a set difference snapshotted immediately
-  // around the hook call, so a ladder mark from an intervening measurement can never be
-  // mistaken for a harvest.
-  const markIds = () => new Set((materialized(runtime).pendingMarks ?? []).map((mark) => mark.id));
-  const harvestedBy = async (call) => {
-    const before = markIds();
-    assert.equal(call(), undefined);
-    await settle(8);
-    return [...markIds()].filter((id) => !before.has(id));
-  };
-  assert.deepEqual(await harvestedBy(() => hook({ toolName: "read" }, runtime.ctx)), [],
-    "A read-only tool call harvested context");
-  const firstHarvest = await harvestedBy(() => hook({ toolName: "Agent" }, runtime.ctx));
-  assert.equal(firstHarvest.length, 1);
-  assert.deepEqual(await harvestedBy(() => hook({ toolName: "Agent" }, runtime.ctx)), [],
-    "The latch let a second blocking call in the same turn harvest again");
-  assert.equal((await toolStatus(runtime)).details.automatic.pressureRatio, 0.30);
-  await measure(runtime, 31_000, 100_000);
-  await runtime.handlers.get("turn_end")({}, runtime.ctx);
-  const secondHarvest = await harvestedBy(() => hook({ toolName: "Agent" }, runtime.ctx));
-  assert.equal(secondHarvest.length, 1, "turn_end did not reset the blocking-tool harvest latch");
+  assert.equal(runtime.handlers.get("tool_call"), undefined,
+    "A tool_call listener survived the free-harvest deletion");
+  const revisionBefore = materialized(runtime).revision;
+  const foldsBefore = materialized(runtime).folds.length;
+  for (const toolName of ["read", "Agent", "grep"]) {
+    await runtime.tools.get("active_context").execute(
+      `tool-${toolName}`, { action: "status" }, new AbortController().signal, undefined, runtime.ctx,
+    );
+  }
+  await settle(8);
+  assert.equal(materialized(runtime).revision, revisionBefore,
+    "A tool call moved the durable revision without a commit");
+  assert.equal(materialized(runtime).folds.length, foldsBefore);
 
-  // The harvest is real reclamation, not bookkeeping: both harvested marks are
-  // tool-result folds after the commit, under the ids their spans derive.
-  const harvestState = await measureAndCommit(runtime, 86_000, 100_000, "harvest-commit");
-  const foldedAs = (id) => harvestState.folds
-    .some((entry) => entry.id === id && entry.kind === "tool-result");
-  assert(foldedAs(firstHarvest[0]), "The harvested span never became a tool-result fold");
+  // The option itself is REFUSED by name, never ignored: a deployment still passing it
+  // asked for per-tool-call folding and silence would hand it the opposite.
+  assert.throws(
+    () => makeRuntime(makeFixture({ turns: 3, tools: false, contextWindow: 100_000 }),
+      { retiredOptions: { blockingTools: ["Agent"] } }),
+    /blockingTools is no longer an option/,
+  );
 
-  let warmStarted = false;
-  let warmAborted = false;
-  const warmRuntime = makeRuntime(
+  // THE ACCEPTED CONSEQUENCE, pinned so it stays a decision rather than a surprise.
+  //
+  // The tool rung has no door of its own any more, so it wins every automatic
+  // selection ahead of chapter preparation. In a TOOL-BEARING session that means warm
+  // model briefs never start and the commit's chapters carry deterministic briefs.
+  // That is a brief-quality question for the brief-quality iteration, not a scheduling
+  // one, and nothing here works around it.
+  let toolBearingWarmCalls = 0;
+  const toolBearing = makeRuntime(
     makeFixture({ turns: 8, resultChars: 10_000, contextWindow: 100_000 }),
     {
-      summarizeContextSpan: ({ signal }) => new Promise((_resolve, reject) => {
-        warmStarted = true;
-        signal.addEventListener("abort", () => {
-          warmAborted = true;
-          reject(new Error("warm preparation canceled for deterministic harvest"));
-        }, { once: true });
-      }),
+      summarizeContextSpan: async () => {
+        toolBearingWarmCalls += 1;
+        return { brief: "A model brief that a tool-bearing session never asks for." };
+      },
     },
   );
-  await startRuntime(warmRuntime);
-  await measure(warmRuntime, 50_000, 100_000);
-  await measure(warmRuntime, 60_000, 100_000);
-  assert.equal(warmStarted, true);
-  assert.equal((await toolStatus(warmRuntime)).details.automatic.preparing, true);
-  assert.equal(warmRuntime.handlers.get("tool_call")({ toolName: "Agent" }, warmRuntime.ctx), undefined);
+  await startRuntime(toolBearing);
+  await measure(toolBearing, 50_000, 100_000);
+  await measure(toolBearing, 60_000, 100_000);
+  const toolCommitted = await measureAndCommit(toolBearing, 86_000, 100_000, "tool-commit");
+  assert.equal(toolBearingWarmCalls, 0,
+    "A tool-bearing session started a warm preparation the tool rung outranks");
+  assert(toolCommitted.folds.length >= 1, "The tool-bearing commit folded nothing");
+  assert(toolCommitted.folds.every((fold) => fold.provenance.kind === "deterministic"),
+    `A tool-bearing commit produced a non-deterministic brief: ${JSON.stringify(
+      toolCommitted.folds.map((fold) => fold.provenance.kind))}`);
+
+  // THE WARM PATH STILL RUNS, and here is the fixture that keeps it pinned. With no
+  // tool results there is no tool rung to outrank the chapter, so preparation warms,
+  // the model brief is asked for, and the commit carries it.
+  let noToolWarmCalls = 0;
+  const noTool = makeRuntime(
+    makeFixture({ turns: 8, tools: false, chapterChars: 3_500, contextWindow: 100_000 }),
+    {
+      summarizeContextSpan: async () => {
+        noToolWarmCalls += 1;
+        return {
+          brief: "The exact completed chapter records its factual result and stays recoverable.",
+          provider: "openai-codex",
+          model: "gpt-5.6-luna",
+          effort: "medium",
+          toolCalls: 0,
+        };
+      },
+    },
+  );
+  await startRuntime(noTool);
+  await measure(noTool, 60_000, 100_000);
   await settle(8);
-  assert.equal(warmAborted, true);
-  const warmHarvest = (materialized(warmRuntime).pendingMarks ?? [])
-    .filter((mark) => mark.kind === "tool-result");
-  assert.equal(warmHarvest.length, 1,
-    "Canceling the warm preparation did not leave exactly one deterministic harvest");
-  const warmCommitted = await measureAndCommit(warmRuntime, 86_000, 100_000, "warm-harvest-commit");
-  const warmFold = warmCommitted.folds.find((fold) => fold.id === warmHarvest[0].id);
-  assert(warmFold, "The deterministic harvest that replaced the warm brief never folded");
-  assert.equal(warmFold.kind, "tool-result");
-  assert.equal(warmFold.provenance.kind, "deterministic");
+  const noToolCommitted = await measureAndCommit(noTool, 86_000, 100_000, "warm-commit");
+  assert(noToolWarmCalls >= 1, "The warm preparation never started in a session with no tool rung");
+  assert(noToolCommitted.folds.length >= 1, "The warm commit folded nothing");
+  assert(noToolCommitted.folds.some((fold) => fold.provenance.kind === "model"),
+    `The warm path produced no model brief: ${JSON.stringify(
+      noToolCommitted.folds.map((fold) => fold.provenance.kind))}`);
   return {
-    ratio: 0.30,
-    monotonicTokens: [20_000, 25_000, 30_000, 31_000],
-    firstBlockingCallMarks: 1,
-    secondBlockingCallMarks: 0,
-    nonBlockingCallMarks: 0,
-    turnEndResetMarks: 1,
-    warmInFlightHarvest: "committed",
+    toolCallListener: "absent",
+    blockingToolsOption: "refused",
+    revisionMovedByToolCall: false,
+    toolBearingWarmCalls,
+    toolBearingBriefs: "deterministic",
+    noToolWarmCalls,
+    noToolModelBriefs: noToolCommitted.folds.filter((fold) =>
+      fold.provenance.kind === "model").length,
   };
 }
 
@@ -1935,12 +2017,6 @@ async function gateFollowupFencesAndAnchors() {
   assert.equal(stale.appended.filter((entry) =>
     entry.customType === context.PROVIDER_CONTEXT_MEASUREMENT_ENTRY).length, 0);
 
-  const harvestDisabled = makeRuntime(
-    makeFixture({ turns: 3, tools: false, contextWindow: 100_000 }),
-    { blockingTools: [] },
-  );
-  await startRuntime(harvestDisabled);
-  assert.equal((await toolStatus(harvestDisabled)).details.automatic.freeHarvest, "disabled");
   return {
     tiny,
     fallback: {
@@ -1948,49 +2024,70 @@ async function gateFollowupFencesAndAnchors() {
       windowSource: fallbackAutomatic.windowSource,
     },
     unboundMeasurement: "stale-no-rebind",
-    freeHarvest: "disabled",
   };
 }
 
 async function gateFreshTailShareCap() {
-  // One fixture shape, two windows. Total projection ~<24k bytes, so the legacy
-  // fixed floor protects EVERYTHING at a wide window, while the share cap
-  // (min(24k, window × 0.25 × 2 bytes/token)) frees the oldest turns at 16k.
+  // One fixture shape, two windows, one rule. The protected tail used to be a fixed
+  // 24,000-byte floor with a separate small-window cap at a quarter of the window; it is
+  // now `freshTail` of the SERVING BUDGET, converted once at the estimator's 4 bytes per
+  // token, so the tail scales with the budget instead of meeting a floor. At the
+  // reference deployment the two agree within rounding (24,000 bytes was 6,000 tokens of
+  // a 383,616-token budget, 1.56%, and freshTail is 0.02); at fixture scale the
+  // proportion is what binds.
+  const tailBytesFor = (window) => context.zoneBytes(
+    context.DEFAULT_THRESHOLDS.freshTail, context.servingBudgetTokens(window),
+  );
   const shape = { turns: 6, resultChars: 2_200 };
-  const small = makeRuntime(makeFixture({ ...shape, contextWindow: 16_000 }));
+  const small = makeRuntime(makeFixture({ ...shape, contextWindow: 30_000 }));
   await startRuntime(small);
   const smallDetail = (await toolStatus(small, undefined, "fold_candidates")).details;
-  assert.equal(smallDetail.rawTailMinimumBytes, 8_000);
+  assert.equal(smallDetail.rawTailMinimumBytes, tailBytesFor(30_000));
+  assert.equal(smallDetail.rawTailMinimumBytes, 2_160);
 
   const wide = makeRuntime(makeFixture({ ...shape, contextWindow: 272_000 }));
   await startRuntime(wide);
   const wideDetail = (await toolStatus(wide, undefined, "fold_candidates")).details;
-  assert.equal(wideDetail.rawTailMinimumBytes, 24_000);
+  assert.equal(wideDetail.rawTailMinimumBytes, tailBytesFor(272_000));
+  assert.equal(wideDetail.rawTailMinimumBytes, 20_449);
   // The object list lives behind its own paged query now that the index is dieted.
   const smallObjects = (await toolStatus(small, undefined, "objects")).details.objects;
   const wideObjects = (await toolStatus(wide, undefined, "objects")).details.objects;
 
-  // Behavioral: identical content, small window → the three oldest turns escape
-  // the capped tail and form an eligible chapter; wide window → the uncapped
-  // floor covers the whole projection and nothing is foldable.
+  // Behavioral: identical content, small budget → the older turns fall outside the
+  // proportional tail and form an eligible chapter; wide budget → the tail covers the
+  // whole projection and nothing is foldable.
   const smallFree = smallObjects.filter((object) => !object.protected).length;
   const wideFree = wideObjects.filter((object) => !object.protected).length;
-  assert.equal(smallFree, 12, "small window must free the three oldest turns");
-  assert.equal(wideFree, 0, "wide window floor must keep this projection fully protected");
-  assert.notEqual(smallDetail.candidates.chapter, null, "small window must expose an eligible chapter");
-  assert.equal(wideDetail.candidates.chapter, null, "wide window must expose no chapter");
+  assert(smallFree > 0, "small budget must free the oldest turns");
+  assert.equal(wideFree, 0, "wide budget tail must keep this projection fully protected");
+  assert.notEqual(smallDetail.candidates.chapter, null, "small budget must expose an eligible chapter");
+  assert.equal(wideDetail.candidates.chapter, null, "wide budget must expose no chapter");
 
-  // Fallback window (unknown) keeps the legacy floor untouched.
+  // An undeclared window falls back to the default, and the tail is that budget's share.
   const fallback = makeRuntime(makeFixture({ ...shape, contextWindow: 0 }));
   await startRuntime(fallback);
   const fallbackDetail = (await toolStatus(fallback, undefined, "fold_candidates")).details;
-  assert.equal(fallbackDetail.rawTailMinimumBytes, 24_000);
+  assert.equal(fallbackDetail.rawTailMinimumBytes, tailBytesFor(context.DEFAULT_CONTEXT_WINDOW));
+
+  // A window too small to carry the policy is REFUSED at registration, never clamped.
+  assert.throws(
+    () => makeRuntime(makeFixture({ ...shape, contextWindow: 16_000 }),
+      { providerTotalWindow: 16_000 }),
+    /below the 500-token minimum one foldable unit needs/,
+  );
+  assert.throws(
+    () => makeRuntime(makeFixture({ ...shape, contextWindow: 10_000 }),
+      { providerTotalWindow: 10_000 }),
+    /below the 10000-token minimum this package supports/,
+  );
   return {
     smallWindowTailBytes: smallDetail.rawTailMinimumBytes,
     wideWindowTailBytes: wideDetail.rawTailMinimumBytes,
     smallWindowFreedObjects: smallFree,
     wideWindowFreedObjects: wideFree,
     fallbackTailBytes: fallbackDetail.rawTailMinimumBytes,
+    tinyWindowRegistration: "refused",
   };
 }
 
@@ -2300,11 +2397,12 @@ async function gatePeekAndFoldIndex() {
   const big = makeFixture({
     turns: 3,
     resultChars: 150_000,
-    policy: { freshTurns: 1, freshBytes: 0, minToolChars: 100 },
+    policy: { minToolChars: 100 },
+    thresholds: NO_FRESH_TAIL,
     contextWindow: 1_000_000,
   });
   const emptyBig = context.emptyActiveContextState(big.sessionId);
-  const [batch] = context.selectAutomaticToolBatch(big.snapshot, emptyBig, 0.80);
+  const [batch] = context.selectAutomaticToolBatch(big.snapshot, emptyBig);
   const oversized = await commitCandidate(emptyBig, big.snapshot, batch, {
     brief: context.automaticToolBrief(big.snapshot, batch),
   });
@@ -2723,11 +2821,11 @@ async function gateEpochMarkCommit() {
   const rawBytes = bytesOf((await project(runtime)).messages);
   assert.deepEqual([...[...runtime.tools.values()][0].parameters.properties.action.enum],
     [...context.ACTIVE_CONTEXT_TOOL_ACTIONS]);
-  // 68,000 against the 90,000-token serving budget: above the tool-fold rung so the
-  // ladder marks, below the 0.80 curation trigger so nothing commits. Mark inertness
-  // is only a claim about passes where the runtime was NOT going to rewrite anyway;
-  // over the trigger the rewrite belongs to the commit, not to the mark.
-  await measure(runtime, 76_000, 100_000);
+  // 68,000 against the 90,000-token serving budget is 0.756 occupancy: below the
+  // band top at 0.80 (72,000 tokens), so the ladder marks and nothing commits. Mark
+  // inertness is only a claim about passes where the runtime was NOT going to rewrite
+  // anyway; over the trigger the rewrite belongs to the commit, not to the mark.
+  await measure(runtime, 68_000, 100_000);
   const marked = materialized(runtime);
   assert.equal(marked.folds.length, 0, "A mark folded evidence");
   assert.equal(marked.pendingMarks.length, 1);
@@ -2741,7 +2839,7 @@ async function gateEpochMarkCommit() {
   const pendingStatus = (await toolStatus(runtime)).details.automatic.scheduling;
   assert.equal(pendingStatus.mode, "epoch");
   assert(pendingStatus.pending >= 1, "The ladder mark was not pending before any context pass");
-  assert(pendingStatus.freedWindowShare > 0);
+  assert(pendingStatus.freedBudgetShare > 0);
   assert(pendingStatus.rewriteTokens > 0);
 
   // The whole point: marking moves no projection byte. The durable projection is still
@@ -2796,7 +2894,7 @@ async function gateEpochMarkCommit() {
 
   // A protected span refuses at commit with a message rather than folding.
   const blocked = await epochToolRuntime();
-  await measure(blocked, 80_000, 100_000);
+  await measure(blocked, 68_000, 100_000);
   const pending = materialized(blocked).pendingMarks[0];
   const sourceIds = pending.parts.map((part) => part.ref.entryId);
   await toolCall(blocked, { action: "protect", ids: sourceIds });
@@ -2858,8 +2956,8 @@ async function gateEpochQuotaTopUp() {
   // Adjudication visibility: a bound-out top-up or a dropped agent mark must be
   // readable from the epoch record alone, without re-deriving it from applied[].
   for (const key of ["pendingMarks", "agentMarks", "ladderMarks", "peekMarks", "topUpMarks",
-    "appliedMarks", "refusedMarks", "freedWindowShare", "estimatedFreedTokens",
-    "actualFreedWindowShare", "sourceBytesSaved", "targetWindowShare"]) {
+    "appliedMarks", "refusedMarks", "freedBudgetShare", "estimatedFreedTokens",
+    "actualFreedBudgetShare", "sourceBytesSaved", "targetBudgetShare"]) {
     assert.equal(typeof epoch[key], "number", `epoch accounting is missing ${key}`);
   }
   assert.equal(epoch.appliedMarks, epoch.applied.length);
@@ -2868,13 +2966,18 @@ async function gateEpochQuotaTopUp() {
   assert(epoch.topUpMarks >= 1 && epoch.topUpMarks < context.EPOCH_MAX_TOPUP_MARKS);
   // This fixture runs the candidate pool dry before the floor, which is the other
   // legitimate exit; what must never happen silently is the mark CAP binding.
-  assert(epoch.freedWindowShare > 0);
+  assert(epoch.freedBudgetShare > 0);
   assert(epoch.sourceBytesSaved > 0);
-  // The freeing target is the thermostat's: at least the standing floor, and deeper
-  // when occupancy is above the lower line the commit is folding down to.
-  assert(epoch.targetWindowShare >= context.EPOCH_COMMIT_TARGET_WINDOW_SHARE);
-  assert.equal(epoch.targetWindowShare, Math.max(
-    context.EPOCH_COMMIT_TARGET_WINDOW_SHARE, epoch.hysteresisTargetShare));
+  // The freeing target IS the hysteresis, on one denominator: what is used, less where
+  // the thermostat lands, over the serving budget. The separate window-share floor is
+  // gone, so this asserts equality rather than a maximum against a number that could
+  // never bind: at maxTarget 0.80 and minTarget 0.35 the hysteresis share bottoms out
+  // at 0.45 of budget, and the retired floor was 0.40 of the WINDOW (0.405 of budget at
+  // the fixture's 90,000-token budget behind a 100,000-token window).
+  assert.equal(epoch.targetBudgetShare, epoch.hysteresisTargetShare);
+  near(epoch.targetBudgetShare,
+    Math.max(0, (epoch.occupancyTokensBefore - context.DEFAULT_THRESHOLDS.minTarget * 90_000) / 90_000),
+    1e-12, "freeing target");
   const committed = materialized(runtime);
   assert.equal(committed.pendingMarks, undefined);
   // Every applied mark became a fold. The count is a floor rather than an equality: a
@@ -2900,12 +3003,12 @@ async function gateEpochQuotaTopUp() {
   return {
     agentMarks: epoch.agentMarks,
     topUpMarks: epoch.topUpMarks,
-    freedWindowShare: epoch.freedWindowShare,
+    freedBudgetShare: epoch.freedBudgetShare,
     ladderTopUps: epoch.ladderMarks,
     appliedInOneEpoch: epoch.applied.length,
     metQuotaAddsNothing: true,
     hungryTopUps: hungry.length,
-    targetWindowShare: context.EPOCH_COMMIT_TARGET_WINDOW_SHARE,
+    targetBudgetShare: epoch.targetBudgetShare,
   };
 }
 
@@ -3471,7 +3574,13 @@ async function gateTruthfulCapacityAdmission() {
   // The narrowing the refusal offered is real: it executes and it fits.
   const slice = alternatives.find((item) => item.action === "peek" && item.bytes);
   assert(slice, "The refusal offered no bounded slice");
-  assert(slice.bytes / bytesPerToken <= headroom);
+  // Sized against the estimator the ADMISSION VERDICT used, which is the conservative
+  // fixed constant rather than the session's measured calibration: the verdict runs
+  // before the read, where the only honest number is the bound. The session's own
+  // chars-per-token is reported separately and is what the projection estimate uses.
+  assert(slice.bytes <= headroom * context.ESTIMATED_BYTES_PER_TOKEN,
+    `The offered slice of ${slice.bytes} bytes exceeds ${headroom} tokens of headroom`);
+  assert(bytesPerToken > 0);
   const narrowed = await toolCall(runtime, slice);
   assert.equal(narrowed.details.returnedBytes, slice.bytes);
   assert.equal(narrowed.details.truncated, true);
@@ -3518,23 +3627,44 @@ async function gateTruthfulCapacityAdmission() {
 
 async function gateCommitOnThreshold() {
   const runtime = await epochToolRuntime({ turns: 12 });
-  await measure(runtime, 78_000, 100_000);
+  // 68,000 of a 90,000-token budget is 0.756: inside the quiet band below the 0.80
+  // band top, which at this fixture is 72,000 tokens.
+  await measure(runtime, 68_000, 100_000);
   const belowStatus = await toolStatus(runtime);
   assert.equal(belowStatus.details.automatic.lastAutomaticAction.kind, "mark");
   assert.equal(belowStatus.details.automatic.scheduling.commitDue, false);
   assert.equal(
-    belowStatus.details.automatic.scheduling.commitRatio,
-    context.ACTIVE_CONTEXT_POLICY.refoldRatio,
+    belowStatus.details.automatic.scheduling.commitTrigger.commitOccupancy,
+    context.DEFAULT_THRESHOLDS.maxTarget,
   );
+  assert.equal(belowStatus.details.automatic.scheduling.commitTrigger.mode, "band-top");
   assert.equal(materialized(runtime).folds.length, 0);
   const marksBelow = materialized(runtime).pendingMarks.length;
   assert(marksBelow >= 1);
 
-  // Crossing the ladder's own refold/consolidation rung is the commit trigger; no
-  // new threshold was introduced for scheduling.
+  // Crossing the band top is the whole trigger. There is no second line.
   await measure(runtime, 86_000, 100_000);
   const aboveStatus = await toolStatus(runtime);
-  assert.equal(aboveStatus.details.automatic.lastAutomaticAction.kind, "epoch-commit");
+  const aboveAction = aboveStatus.details.automatic.lastAutomaticAction;
+  // The crossing commits. It may also carry an INLINE rung inside the rewrite it just
+  // paid for, and under the counting rule that rung can be a consolidation: with the
+  // tool door gone the stale zone reaches consolidateAfter in ordinary sessions. Either
+  // way the action carries the epoch, and the epoch is what fired.
+  assert(["epoch-commit", "consolidation", "chapter-fold", "tool-fold", "refold"]
+    .includes(aboveAction.kind), aboveAction.kind);
+  assert.equal(typeof aboveAction.epoch, "object",
+    "The inline rung replaced the commit instead of riding it");
+  if (aboveAction.kind === "consolidation") {
+    // Exactly the counting rule: a consolidation only composes once the stale region
+    // carried consolidateAfter unpinned folds, and what it produced is a parent whose
+    // parts are those children. Counting the children IS counting the rule.
+    const parent = materialized(runtime).folds
+      .find((fold) => fold.kind === "consolidation" && fold.parentId === null);
+    assert(parent, "The action reported a consolidation and the forest holds none");
+    assert(parent.parts.filter((part) => part.kind === "fold").length >=
+      context.DEFAULT_THRESHOLDS.consolidateAfter,
+      "A consolidation nested fewer children than the counting rule admits");
+  }
   assert.equal(aboveStatus.details.automatic.scheduling.commitDue, true);
   assert.equal(aboveStatus.details.automatic.scheduling.pending, 0);
   const committed = materialized(runtime);
@@ -3542,13 +3672,13 @@ async function gateCommitOnThreshold() {
   assert(committed.folds.length >= marksBelow);
   assert.equal(
     aboveStatus.details.automatic.lastAutomaticAction.epoch.trigger,
-    "window-pressure",
+    "band-top",
   );
 
   // An expand with marks pending opens the epoch, so the restore plus the batch of
   // folds cost one rewrite rather than two.
   const rider = await epochToolRuntime({ turns: 40 });
-  await measure(rider, 78_000, 100_000);
+  await measure(rider, 68_000, 100_000);
   const pendingId = materialized(rider).pendingMarks[0].id;
   await runtimeCommit(rider, { tokens: 88_000, contextWindow: 100_000 });
   const riderState = materialized(rider);
@@ -3666,7 +3796,9 @@ async function gateSchedulingWireRoundTrip() {
 async function gateMarkAccumulation() {
   const runtime = await epochToolRuntime({ turns: 40 });
   const growth = [];
-  for (const tokens of [76_000, 78_000, 80_000, 82_000, 84_000]) {
+  // Five quiet passes: 60,000 to 68,000 against a 90,000-token budget is 0.667 to
+  // 0.756 occupancy, all below the band top at 0.80 (72,000 tokens).
+  for (const tokens of [60_000, 62_000, 64_000, 66_000, 68_000]) {
     await measure(runtime, tokens, 100_000);
     growth.push(materialized(runtime).pendingMarks?.length ?? 0);
   }
@@ -3679,7 +3811,7 @@ async function gateMarkAccumulation() {
   assert.equal(materialized(runtime).folds.length, 0);
   const claimed = context.claimedRefKeys(materialized(runtime));
   assert.equal(
-    context.selectAutomaticToolBatch(epochSnapshot(runtime.built), materialized(runtime), 1, claimed)
+    context.selectAutomaticToolBatch(epochSnapshot(runtime.built), materialized(runtime), claimed)
       .some((candidate) => candidate.sourceRefs.some((ref) => claimed.has(json.objectRefKey(ref)))),
     false,
     "The selector still returns evidence a pending mark covers",
@@ -3692,8 +3824,8 @@ async function gateMarkAccumulation() {
   assert.equal(epoch.refusedMarks, 0);
   assert.equal(epoch.appliedMarks, epoch.pendingMarks);
   assert(epoch.pendingMarks > epoch.topUpMarks, "The top-up out-marked the accumulated epoch");
-  assert(epoch.freedWindowShare >= context.EPOCH_COMMIT_TARGET_WINDOW_SHARE,
-    "A full epoch freed less than the top-up floor alone");
+  assert(epoch.freedBudgetShare >= epoch.targetBudgetShare,
+    "A full epoch freed less than the thermostat's own freeing target");
   assert(epoch.appliedMarks >= marks.length + 1,
     "The accumulated marks did not all reach the commit");
   assert.equal(materialized(runtime).pendingMarks, undefined);
@@ -3702,8 +3834,8 @@ async function gateMarkAccumulation() {
     accumulatedMarks: marks.length,
     appliedMarks: epoch.appliedMarks,
     topUpMarks: epoch.topUpMarks,
-    freedWindowShare: epoch.freedWindowShare,
-    actualFreedWindowShare: epoch.actualFreedWindowShare,
+    freedBudgetShare: epoch.freedBudgetShare,
+    actualFreedBudgetShare: epoch.actualFreedBudgetShare,
   };
 }
 
@@ -3726,7 +3858,9 @@ async function gateEpochInlineRungs() {
 
   const runtime = await epochToolRuntime({ turns: 12 });
   await measure(runtime, 86_000, 100_000);
-  const target = materialized(runtime).folds[0].id;
+  // A ROOT. Under the counting rule a commit may nest what it folds, and a child is
+  // not expandable while its parent is still a placeholder.
+  const target = materialized(runtime).folds.find((fold) => fold.parentId === null).id;
   await toolCall(runtime, { action: "expand", id: target });
   assert(materialized(runtime).expanded.includes(target));
   let kinds = [];
@@ -3829,12 +3963,14 @@ async function gateStageIdentifiedBriefs() {
   // A brief is fixed at the DECISION, so the decisions are what this gate reads: the
   // tool results this session committed plus the ones it has marked and not yet
   // committed. Both carry the brief and the span, and the claim is about the brief.
+  // A decision is identified by its BRIEF, not by the kind the commit ended up giving
+  // it. A tool batch marked in the quiet band can be grown into a chapter by wedge
+  // absorption before it commits, and the brief it was decided with rides along; the
+  // claim under test is that the brief still names its stage.
   const toolDecisions = (runtime) => {
     const state = materialized(runtime);
-    return [
-      ...state.folds.filter((fold) => fold.kind === "tool-result"),
-      ...(state.pendingMarks ?? []).filter((mark) => mark.kind === "tool-result"),
-    ];
+    return [...state.folds, ...(state.pendingMarks ?? [])]
+      .filter((decision) => typeof decision.brief === "string" && /^Read read\(/.test(decision.brief));
   };
   const identified = toolDecisions(identifiedRuntime);
   assert(identified.length >= 2, "The identified fixture decided fewer than two tool results");
@@ -3863,13 +3999,23 @@ async function gateStageIdentifiedBriefs() {
     .map((decision) => ({ decision, named: /NEXT_KEY=stage-(\d+)-7f3a/.exec(decision.brief) }))
     .filter((item) => item.named);
   assert(anchored.length >= 2, "Fewer than two decisions identified their stage by tail token");
+  const stageResultIds = new Map(identifiedRuntime.built.turnEntries
+    .map((entries, turn) => [entries[2], turn]));
   for (const { decision, named } of anchored) {
     const stage = Number(named[1]);
     const sourceIds = decision.parts
       .filter((part) => part.kind === "raw")
       .map((part) => part.ref.entryId);
-    assert.deepEqual(sourceIds, [identifiedRuntime.built.turnEntries[stage][2]],
+    // The stage the brief names is in there, and no OTHER stage's result is: a
+    // decision that grew by absorption swallowed short adjacent entries, never another
+    // tool result, so the brief and the bytes still describe the same stage.
+    assert(sourceIds.includes(identifiedRuntime.built.turnEntries[stage][2]),
       `The brief that named stage ${stage} does not hold stage ${stage}'s result`);
+    const otherStages = sourceIds
+      .map((id) => stageResultIds.get(id))
+      .filter((turn) => turn !== undefined && turn !== stage);
+    assert.deepEqual(otherStages, [],
+      `The brief that named stage ${stage} also holds stage(s) ${otherStages.join(",")}`);
   }
 
   return {
@@ -3902,13 +4048,16 @@ async function currentTurnRuntime() {
     {},
   );
   await startRuntime(runtime);
-  for (const tokens of [152_000, 156_000, 160_000, 164_000, 168_000]) {
+  // The quiet band: 0.80 of the 180,000-token serving budget is 144,000 tokens, so
+  // these five passes accumulate marks and none of them commits.
+  for (const tokens of [110_000, 118_000, 126_000, 134_000, 142_000]) {
     await measure(runtime, tokens, 200_000);
   }
   const before = (materialized(runtime).pendingMarks ?? []).map((mark) => mark.id);
 
   // The current excursion: ten read batches gathered since the last reply, far past
-  // the 24,000-byte fresh tail, so nothing but the turn boundary protects them.
+  // the protected tail (freshTail 0.02 of a 180,000-token budget is 14,400 bytes), so
+  // nothing but the turn boundary protects them.
   const excursion = [];
   for (let step = 0; step < 10; step += 1) {
     runtime.appendMessage({
@@ -4049,7 +4198,7 @@ async function gatePinnedMassBackstop() {
   });
   const seed = context.emptyActiveContextState(probe.sessionId);
   const foldId = (await commitCandidate(
-    seed, peekSnapshot(probe), context.selectAutomaticToolBatch(peekSnapshot(probe), seed, 1)[0],
+    seed, peekSnapshot(probe), context.selectAutomaticToolBatch(peekSnapshot(probe), seed)[0],
     { brief: "The exact stale inspection result stays recoverable behind this fold." },
   )).prepared.id;
   const built = makeFixture({
@@ -4058,7 +4207,7 @@ async function gatePinnedMassBackstop() {
   const empty = context.emptyActiveContextState(built.sessionId);
   const snapshot = peekSnapshot(built);
   const folded = (await commitCandidate(
-    empty, snapshot, context.selectAutomaticToolBatch(snapshot, empty, 1)[0],
+    empty, snapshot, context.selectAutomaticToolBatch(snapshot, empty)[0],
     { brief: "The exact stale inspection result stays recoverable behind this fold." },
   )).state;
   assert.equal(folded.folds[0].id, foldId, "The peeked fold id shifted with the peek argument");
@@ -4100,12 +4249,19 @@ async function gatePinnedMassBackstop() {
   starved = { ...starved, protected: ineligible.map((ref) => structuredClone(ref)) };
   const starvedAccounting = context.markAccounting(wideSnapshot, starved);
   assert.equal(starvedAccounting.eligibleMarks, 0, "The fixture left an applicable mark");
-  assert(starvedAccounting.freedWindowShare >= context.EPOCH_COMMIT_TARGET_WINDOW_SHARE,
-    `Ineligible marks reached only ${starvedAccounting.freedWindowShare} of the target`);
+  // The fixture's whole point: these marks would free real mass on the WINDOW-share
+  // reading, and none of it is eligible. The number is re-derived on the one
+  // denominator, so it is stated against the hysteresis gap rather than the retired
+  // window floor: maxTarget - minTarget is the shallowest freeing target that can fire.
+  assert(starvedAccounting.freedBudgetShare >=
+    context.DEFAULT_THRESHOLDS.maxTarget - context.DEFAULT_THRESHOLDS.minTarget,
+    `Ineligible marks reached only ${starvedAccounting.freedBudgetShare} of the target`);
 
-  const anchorTopUp = context.topUpMarks({ snapshot: wideSnapshot, state: starved, ordinal: 100 });
+  const anchorTopUp = context.topUpMarks({
+    snapshot: wideSnapshot, state: starved, ordinal: 100, targetShare: 0.40,
+  });
   const eligibleTopUp = context.topUpMarks({
-    snapshot: wideSnapshot, state: starved, ordinal: 100, eligibleOnly: true,
+    snapshot: wideSnapshot, state: starved, ordinal: 100, eligibleOnly: true, targetShare: 0.40,
   });
   assert.equal(anchorTopUp.length, 0, "The anchor top-up is no longer starved; the fixture proves nothing");
   assert(eligibleTopUp.length >= 1, "The backstop top-up stayed starved by ineligible mass");
@@ -4113,7 +4269,7 @@ async function gatePinnedMassBackstop() {
   for (const mark of eligibleTopUp) toppedUp = context.addPendingMark(toppedUp, mark).state;
   const toppedUpAccounting = context.markAccounting(wideSnapshot, toppedUp);
   assert(toppedUpAccounting.eligibleMarks >= 1);
-  assert(toppedUpAccounting.eligibleFreedWindowShare > 0,
+  assert(toppedUpAccounting.eligibleFreedBudgetShare > 0,
     "The topped-up commit would still free nothing");
   // The pressure backstop itself is untouched and still fires on ratio alone.
   assert.equal(context.epochCommitDue(wideSnapshot, 0.85, { eligibleShareThreshold: 0.30, eligibleShare: 0 }), true);
@@ -4127,17 +4283,17 @@ async function gatePinnedMassBackstop() {
   await measure(runtime, 88_000, 100_000);
   const epoch = (await toolStatus(runtime)).details.automatic.lastAutomaticAction?.epoch;
   assert(epoch, "The pressure backstop did not commit");
-  assert.equal(epoch.trigger, "window-pressure");
+  assert.equal(epoch.trigger, "band-top");
   assert(epoch.appliedMarks >= 1, "The backstop commit applied nothing");
   assert.equal(typeof epoch.pinnedBytes, "number");
 
   return {
     pinnedBytes: heldAccounting.pinnedBytes,
     pinnedResults: heldAccounting.pinnedResults,
-    ineligibleFreedShare: Number(starvedAccounting.freedWindowShare.toFixed(3)),
+    ineligibleFreedShare: Number(starvedAccounting.freedBudgetShare.toFixed(3)),
     anchorTopUpMarks: anchorTopUp.length,
     backstopTopUpMarks: eligibleTopUp.length,
-    backstopEligibleShare: Number(toppedUpAccounting.eligibleFreedWindowShare.toFixed(3)),
+    backstopEligibleShare: Number(toppedUpAccounting.eligibleFreedBudgetShare.toFixed(3)),
     backstopAppliedMarks: epoch.appliedMarks,
   };
 }
@@ -4226,9 +4382,10 @@ async function gateEpochBatchingUnderFullLevers() {
     return passes.at(-1);
   };
 
-  // Below the commit threshold every pass MARKS and moves no byte.
+  // Below the band top every pass MARKS and moves no byte. The band top is 0.80 of the
+  // 90,000-token serving budget, so the quiet band on this fixture is under 72,000.
   const below = [];
-  for (const tokens of [76_000, 77_000, 78_000, 79_000, 80_000, 81_000, 82_000, 83_000, 84_000]) {
+  for (const tokens of [60_000, 64_000]) {
     below.push(await step(tokens));
   }
   assert(below.every((pass) => pass.kind === "mark"),
@@ -4237,26 +4394,32 @@ async function gateEpochBatchingUnderFullLevers() {
   assert.equal(below.at(-1).marks - below[0].marks, below.length - 1,
     "Marks did not accumulate one per pass below the threshold");
 
-  // Above the backstop, with the turn still OPEN, the guard would retain every mark
-  // and starve the commit. Survivability outranks the guard there: the waiver releases
-  // the OLDEST guarded marks, so the accumulated batch lands in ONE commit instead of
-  // dribbling out as one inline fold per pass, and the waiver is in the accounting.
+  // ABOVE THE BAND TOP, BELOW THE FENCE, WITH THE TURN STILL OPEN.
+  //
+  // The accumulated batch lands in ONE commit rather than dribbling out as an inline
+  // fold per pass, and then the session goes quiet: the open excursion is inside the
+  // unfinished turn, the zone law does not offer automation anything there, and no
+  // further commit fires on a window with nothing left it may reach.
+  //
+  // The guard waiver does NOT fire here, and that is the change the zone law made. The
+  // waiver exists to keep a request sendable when every applicable mark belongs to the
+  // open turn; below the fence there is nothing to keep sendable, so the runtime defers
+  // instead of reaching into the turn. Gate 56 holds the other half: at the fence the
+  // stale zone deepens past the turn clamp, the excursion becomes markable, and the
+  // waiver releases it.
   const accumulated = below.at(-1).marks;
+  const foldsAtCrossing = below.at(-1).folds;
   const above = [];
   for (let index = 0; index < 8; index += 1) above.push(await step(86_000 + index * 100));
-  const waivers = above.filter((pass) => pass.guardWaived === true);
-  assert(waivers.length >= 1,
-    `The starved commit never waived the guard: ${
-      above.map((pass) => `${pass.kind}/applied=${pass.appliedMarks}`).join(",")}`);
-  const firstWaiver = waivers[0];
-  assert(firstWaiver.waivedMarks >= 1, "The waiver released no mark");
-  assert(firstWaiver.appliedMarks >= 1, "The waived commit still applied nothing");
-  assert(firstWaiver.retainedMarks >= 1,
-    "The waiver surrendered the newest reads instead of keeping them protected");
-  assert(firstWaiver.appliedMarks >= 4,
-    `The waived commit applied ${firstWaiver.appliedMarks} marks; the batch did not land together`);
-  assert(above.every((pass) => pass.guardWaived !== true || pass.waivedMarks > 0),
-    "A commit reported a waiver that released nothing");
+  assert(above[0].appliedMarks >= accumulated,
+    `The crossing applied ${above[0].appliedMarks} of ${accumulated} accumulated marks; the batch did not land together`);
+  assert(above.every((pass) => pass.guardWaived !== true),
+    `A commit below the fence waived the current-turn guard: ${
+      above.map((pass) => `${pass.kind}/waived=${pass.guardWaived}`).join(",")}`);
+  assert.equal(above.at(-1).marks, 0,
+    "The open excursion was marked by automation the zone law does not admit there");
+  assert(above.at(-1).folds > foldsAtCrossing,
+    "The crossing folded nothing at all");
 
   // The rep10 property still holds everywhere: no pass folds unless a commit epoch
   // applied at least one mark, so folds never dribble out one rewrite at a time.
@@ -4268,13 +4431,14 @@ async function gateEpochBatchingUnderFullLevers() {
   assert(foldingPasses.length <= Math.ceil(above.length / 2),
     `${foldingPasses.length} of ${passes.length} passes moved bytes; batching degraded to per-pass folding`);
   assert(foldingPasses.length >= 1, "Nothing ever reduced the window above the backstop");
-  // The waiver releases a BATCH or nothing: a lone guarded mark never buys a rewrite.
-  assert(waivers.every((pass) => pass.waivedMarks >= 2),
-    `A waiver released ${waivers.map((pass) => pass.waivedMarks).join(",")} marks; the batch floor is not holding`);
+  // No waiver fired at all below the fence, so the batch floor it used to enforce has
+  // nothing to enforce here; gate 56 carries that assertion at fence level, where the
+  // waiver is now the only place it lives.
+  assert.deepEqual(above.filter((pass) => pass.waivedMarks > 0), []);
 
   // The turn closes and its evidence ages past the fresh window. Now ONE commit
   // applies the whole accumulated batch in a single rewrite.
-  const marksAtCloseIds = new Set(materialized(runtime).pendingMarks.map((mark) => mark.id));
+  const marksAtCloseIds = new Set((materialized(runtime).pendingMarks ?? []).map((mark) => mark.id));
   const pendingAtClose = marksAtCloseIds.size;
   const foldsAtClose = materialized(runtime).folds.length;
   for (let turn = 0; turn < 3; turn += 1) {
@@ -4318,9 +4482,9 @@ async function gateEpochBatchingUnderFullLevers() {
     belowThresholdPasses: below.length,
     belowThresholdFolds: below.at(-1).folds,
     accumulatedMarks: accumulated,
-    waivedCommits: waivers.length,
-    marksReleasedByFirstWaiver: firstWaiver.waivedMarks,
-    marksKeptProtected: firstWaiver.retainedMarks,
+    waivedCommitsBelowFence: 0,
+    accumulatedBeforeCrossing: accumulated,
+    appliedAtCrossing: above[0].appliedMarks,
     passesThatMovedBytes: foldingPasses.length,
     passesTotal: passes.length,
     marksAtClose: pendingAtClose,
@@ -4473,7 +4637,7 @@ async function gateProjectionBudgetFence() {
       timestamp: 850 + step,
     }, "excursion");
   }
-  await measure(guardedOnly, 24_000, 34_000, undefined, "toolUse");
+  await measure(guardedOnly, 25_000, 34_000, undefined, "toolUse");
   await project(guardedOnly);
   const guardedStatus = (await toolStatus(guardedOnly)).details.automatic;
   const guardedEpoch = guardedStatus.lastAutomaticAction?.epoch;
@@ -4592,8 +4756,12 @@ async function gateProjectionCalibration() {
   // Now force the fence with a genuinely oversized projection and keep going. Whatever
   // it does, the next projection is built FROM THE FOLD STATE and is never the corpus.
   const dense = makeRuntime(
-    makeFixture({ turns: 12, resultChars: 8_000, contextWindow: 12_000 }),
-    { ...SEALED_SPINE, providerTotalWindow: 12_000 },
+    makeFixture({ turns: 12, resultChars: 8_000, contextWindow: 12_000, thresholds: WIDE_FRESH_TAIL }),
+    // A 12,000-token window can be served, but not by the default 2% fresh tail: at a
+    // 10,800-token budget that is 216 tokens, under the one-foldable-unit floor. The
+    // deployment declares a policy the window can carry, which is the designed answer to
+    // a tiny window: reject the impossible one, do not silently clamp it.
+    { ...SEALED_SPINE, providerTotalWindow: 12_000, thresholds: WIDE_FRESH_TAIL },
   );
   await startRuntime(dense);
   // Calibrate on a healthy pass, then let the excursion outgrow that baseline by half.
@@ -4697,9 +4865,12 @@ async function gateProjectionCalibration() {
 async function gateFenceMarginAndDepth() {
   const window = 20_000;
   const sevenChars = (chars) => Math.round(chars / 7);
+  // An 18,000-token budget cannot carry the default 2% fresh tail (360 tokens, under
+  // the one-foldable-unit floor), so this deployment declares a policy its window can
+  // serve. That is the tiny-window contract: refuse the impossible, never clamp it.
   const runtime = makeRuntime(
-    makeFixture({ turns: 8, resultChars: 10_000, contextWindow: window }),
-    { ...SEALED_SPINE, providerTotalWindow: window },
+    makeFixture({ turns: 8, resultChars: 10_000, contextWindow: window, thresholds: WIDE_FRESH_TAIL }),
+    { ...SEALED_SPINE, providerTotalWindow: window, thresholds: WIDE_FRESH_TAIL },
   );
   await startRuntime(runtime);
   const budgetTokens = (await toolStatus(runtime)).details.automatic.projectionBudgetTokens;
@@ -4850,7 +5021,7 @@ async function gateFenceMarginAndDepth() {
   }
   assert(epochs.length >= 3, `Only ${epochs.length} commit epochs ran; the ratchet is not being measured`);
   const shallow = epochs.filter((epoch) =>
-    epoch.preDeepenFreedShare < Math.max(epoch.depthFloorShare, epoch.targetWindowShare));
+    epoch.preDeepenFreedShare < Math.max(epoch.depthFloorShare, epoch.targetBudgetShare));
   assert(shallow.length >= 1,
     "No commit was ever shallow, so the crumb-commit pattern is not being measured");
   for (const epoch of shallow) {
@@ -4902,7 +5073,7 @@ async function gateCurationTrigger() {
   const mass = context.staleToolMass(snapshot, state);
   assert(mass.results >= 1 && mass.bytes > 0, "The fixture carries no stale tool mass");
   const folded = (await commitCandidate(
-    state, snapshot, context.selectAutomaticToolBatch(snapshot, state, 1)[0],
+    state, snapshot, context.selectAutomaticToolBatch(snapshot, state)[0],
     { brief: "The exact stale inspection result stays recoverable behind this fold." },
   )).state;
   const afterFold = context.staleToolMass(snapshot, folded);
@@ -4911,6 +5082,7 @@ async function gateCurationTrigger() {
 
   const signals = (occupancyTokens, staleBytes) => ({
     occupancy: occupancyTokens === null ? null : occupancyTokens / 90_000,
+    maxTarget: context.DEFAULT_THRESHOLDS.maxTarget,
     occupancyTokens,
     budgetTokens: 90_000,
     window: 100_000,
@@ -4924,13 +5096,16 @@ async function gateCurationTrigger() {
   const fires = (occupancyShare, staleShare) =>
     context.curationTriggerFires(signals(occupancyAt(occupancyShare), staleAt(staleShare)));
 
-  // Each side of each threshold, and the AND between them.
-  assert.equal(context.CURATION_OCCUPANCY_SHARE, 0.80);
-  assert.equal(context.CURATION_STALE_TOOL_SHARE, 0.20);
-  assert.equal(fires(0.80, 0.20), true, "The trigger did not fire at both thresholds");
-  assert.equal(fires(0.79, 0.20), false, "The trigger fired below the occupancy threshold");
-  assert.equal(fires(0.80, 0.19), false, "The trigger fired below the stale-mass threshold");
-  assert.equal(fires(0.99, 0.19), false, "Occupancy alone fired the trigger");
+  // ONE signal, and both sides of the one line. The stale-mass AND-condition is gone:
+  // it guarded an ANNOUNCEMENT, and announcing a commit that has nothing stale to fold
+  // is a false statement in the window. There is no announcement now, so a commit with
+  // nothing eligible applies nothing and reports it, which is a truthful outcome rather
+  // than a suppressed trigger. Stale mass is still measured and still reported.
+  assert.equal(context.DEFAULT_THRESHOLDS.maxTarget, 0.80);
+  assert.equal(fires(0.80, 0.20), true, "The trigger did not fire at the band top");
+  assert.equal(fires(0.79, 0.20), false, "The trigger fired below the band top");
+  assert.equal(fires(0.80, 0.00), true, "Stale mass still gated the trigger");
+  assert.equal(fires(0.99, 0.19), true, "Occupancy alone did not fire the trigger");
   assert.equal(fires(0.10, 0.99), false, "Stale mass alone fired the trigger");
   assert.equal(fires(0.90, 0.60), true);
   assert.equal(
@@ -4938,6 +5113,8 @@ async function gateCurationTrigger() {
     false,
     "An unmeasured window fired the trigger",
   );
+  assert.equal(context.CURATION_STALE_TOOL_SHARE, undefined,
+    "The stale-mass threshold survived its condition");
 
   // Live: the signals the runtime reports come from the same measurement the fence uses.
   const runtime = makeRuntime(built, { ...SEALED_SPINE });
@@ -4946,7 +5123,7 @@ async function gateCurationTrigger() {
   await project(runtime);
   const live = (await toolStatus(runtime)).details.automatic.curation;
   assert.equal(live.occupancyThreshold, 0.80);
-  assert.equal(live.staleToolThreshold, 0.20);
+  assert.equal(live.staleToolThreshold, undefined);
   assert(live.signals, "The runtime reported no curation signals");
   assert(live.signals.occupancy > 0.8, "The live fixture did not reach the occupancy threshold");
   assert(live.signals.staleToolTokens > 0);
@@ -4954,8 +5131,8 @@ async function gateCurationTrigger() {
   return {
     staleResultsBefore: mass.results,
     staleResultsAfterFold: afterFold.results,
-    occupancyThreshold: context.CURATION_OCCUPANCY_SHARE,
-    staleThreshold: context.CURATION_STALE_TOOL_SHARE,
+    occupancyThreshold: context.DEFAULT_THRESHOLDS.maxTarget,
+    staleThreshold: "deleted-with-the-announcement",
     liveOccupancy: Number(live.signals.occupancy.toFixed(3)),
     liveStaleShare: Number(live.signals.staleToolShare.toFixed(3)),
   };
@@ -5375,7 +5552,8 @@ async function gateWedgeAbsorption() {
   assert.equal(context.MAX_WEDGE_ABSORB_TOKENS, 256);
   const built = makeFixture({
     turns: 20, tools: false, chapterChars: 40, contextWindow: 100_000,
-    policy: { freshTurns: 1, freshBytes: 0, minChapterChars: 1 },
+    policy: { minChapterChars: 1 },
+    thresholds: NO_FRESH_TAIL,
   });
   const snapshot = built.snapshot;
   const empty = context.emptyActiveContextState(built.sessionId);
@@ -5415,7 +5593,8 @@ async function gateWedgeAbsorption() {
   // any number of commits. Only a sub-threshold sliver is ever taken.
   const wide = makeFixture({
     turns: 20, tools: false, chapterChars: 900, contextWindow: 100_000,
-    policy: { freshTurns: 1, freshBytes: 0, minChapterChars: 1 },
+    policy: { minChapterChars: 1 },
+    thresholds: NO_FRESH_TAIL,
   });
   const wideEmpty = context.emptyActiveContextState(wide.sessionId);
   const wideSpan = (turn) => [wide.turnEntries[turn][0], wide.turnEntries[turn].at(-1)];
@@ -5865,8 +6044,15 @@ async function gateQuietRuntimeStormReplay() {
     })),
   });
   const marked = (await toolStatus(runtime)).details.automatic.scheduling;
-  assert(marked.eligibleFreedWindowShare >= context.EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD,
-    `The replay needs mass over the old cadence threshold; it carried ${marked.eligibleFreedWindowShare}`);
+  // The rep-15 shape needs a marked pile large enough that the DELETED eligible-share
+  // arm would have fired on it. That arm sat at 0.30 of the freed share, so the
+  // precondition is stated as the literal it used to read, and the point of the gate is
+  // that nothing fires on it now: the band top is the only trigger there is.
+  assert.equal(context.EPOCH_ELIGIBLE_SHARE_COMMIT_THRESHOLD, undefined,
+    "The eligible-share commit arm survived");
+  assert(marked.eligibleFreedBudgetShare >= 0.30,
+    `The replay needs mass the retired eligible-share arm would have fired on; it carried ${
+      marked.eligibleFreedBudgetShare}`);
 
   // The whole climb below the threshold: not one automatic commit, not one new fold.
   const foldsBefore = materialized(runtime).folds.length;
@@ -5915,7 +6101,7 @@ async function gateQuietRuntimeStormReplay() {
   const afterGate = commits().length;
   assert.equal(afterGate, 1, `The crossing produced ${afterGate} commit events instead of one`);
   const commit = commits()[0];
-  assert.match(String(commit.trigger), /^(curation-trigger|window-pressure)$/);
+  assert.equal(commit.trigger, "band-top");
   assert(commit.applied_marks >= 5,
     `The commit applied ${commit.applied_marks} marks; it was not the ONE deep event`);
 
@@ -5925,9 +6111,11 @@ async function gateQuietRuntimeStormReplay() {
   await settle();
   assert.equal(commits().length, 1, "The runtime kept folding after the commit");
 
-  // The retune itself, and the parts of the thermostat that did NOT move.
-  assert.equal(context.CURATION_OCCUPANCY_SHARE, 0.80);
-  assert.equal(context.CURATION_TARGET_OCCUPANCY_SHARE, 0.35);
+  // The retune itself, and the parts of the thermostat that did NOT move. The two
+  // occupancy constants are fields of the declared object now; their values are the
+  // proven ones, unchanged.
+  assert.equal(context.DEFAULT_THRESHOLDS.maxTarget, 0.80);
+  assert.equal(context.DEFAULT_THRESHOLDS.minTarget, 0.35);
   assert.equal(context.COMMIT_RECLAIM_FLOOR_SHARE, 0.02);
 
   // Plain epoch scheduling is unchanged: the cadence trigger is the guided-mode deletion.
@@ -6034,9 +6222,15 @@ async function gateOneTruthfulBudget() {
  * folds in a LATER commit once the span ages out -- never in the commit while fresh.
  */
 async function gateAcceptAndHold() {
-  const fixture = { turns: 10, resultChars: 8_000, contextWindow: 100_000 };
+  // The fresh tail is a SHARE now, and at fixture scale the default 2% of a
+  // 90,000-token budget is 7,200 bytes, which one 8,000-char result already exceeds.
+  // This gate is about what happens to a mark INSIDE the tail, so the deployment
+  // declares a tail wide enough to hold the closing turn.
+  const fixture = {
+    turns: 10, resultChars: 8_000, contextWindow: 100_000, thresholds: WIDE_FRESH_TAIL,
+  };
   const built = makeFixture(fixture);
-  const runtime = makeRuntime(built);
+  const runtime = makeRuntime(built, { thresholds: WIDE_FRESH_TAIL });
   await startRuntime(runtime);
 
   const freshSpan = [built.turnEntries[9][0], built.turnEntries[9].at(-1)];
@@ -6071,7 +6265,7 @@ async function gateAcceptAndHold() {
     "The held mark did not survive its commit");
 
   // Age the span out with new turns, and the LATER commit folds it.
-  const aged = makeFixture({ ...fixture, turns: 14, sessionId: built.sessionId });
+  const aged = makeFixture({ ...fixture, turns: 24, sessionId: built.sessionId });
   for (const entry of aged.entries.slice(built.entries.length)) runtime.branch.push(entry);
   runtime.messages.length = 0;
   runtime.messages.push(...aged.messages);
@@ -6273,10 +6467,55 @@ async function gateNoAgentCommitVerb() {
   assert.equal(materialized(runtime).pendingMarks, undefined);
   assert(materialized(runtime).folds.length >= 1);
 
+  // THE COMPLEMENT: the USER can commit, and can do it below the band top.
+  //
+  // The model has no commit verb because a verb the runtime is entitled to overrule is
+  // surface without function. A user is not overruled, so the one user command exists
+  // and it is authoritative: below maxTarget it applies the eligible marks in hand with
+  // no automatic top-up, which is banking the curation the session already made rather
+  // than asking the runtime to pick more.
+  const user = await epochToolRuntime({ turns: 14, resultChars: 8_000 });
+  const command = user.commands.get("fold-context");
+  assert(command, "The user fold command is not registered");
+  assert(/commit/.test(command.description),
+    `The user command does not advertise its commit form: ${command.description}`);
+  // Quiet: 60,000 of a 90,000-token budget is 0.667, well below the 0.80 band top.
+  await measure(user, 60_000, 100_000);
+  await toolCall(user, {
+    action: "fold",
+    ids: [user.built.turnEntries[1][0], user.built.turnEntries[1].at(-1)],
+    brief: "An early completed task stays exactly recoverable behind this fold.",
+  });
+  const pendingBefore = (materialized(user).pendingMarks ?? []).length;
+  assert(pendingBefore >= 1, "The fixture had no mark for the user command to commit");
+  const foldsBefore = materialized(user).folds.length;
+  const quietStatus = (await toolStatus(user)).details.automatic.scheduling;
+  assert.equal(quietStatus.commitDue, false,
+    "The fixture was already over the band top; the user command proves nothing there");
+  const beforeCommand = user.appended.length;
+  await command.handler("commit", user.ctx);
+  await settle();
+  const userCommits = contextEvents(user, beforeCommand)
+    .filter((record) => record.kind === "context.commit" && record.deferred === false);
+  assert.equal(userCommits.length, 1,
+    `The user command fired ${userCommits.length} commits below the band top`);
+  assert(userCommits[0].applied_marks >= 1, "The user commit applied nothing");
+  assert.equal(userCommits[0].trigger, "user-command",
+    `The user commit reported trigger ${userCommits[0].trigger}`);
+  // No automatic top-up below the band top: it banks what is in hand and stops.
+  assert.equal(userCommits[0].topup_marks, 0,
+    `The user commit topped up ${userCommits[0].topup_marks} marks below the band top`);
+  assert(materialized(user).folds.length > foldsBefore, "The user commit created no fold");
+  // The model still cannot reach it, on the same runtime, at the same moment.
+  await assert.rejects(() => toolCall(user, { action: "commit" }), /'commit' is not enabled/);
+
   return {
     epochActions: context.ACTIVE_CONTEXT_TOOL_ACTIONS.length,
     commitInSurface: false,
     internalCommitApplied: committed.applied.length,
+    userCommandCommitsBelowBandTop: userCommits[0].applied_marks,
+    userCommandTopUpBelowBandTop: 0,
+    modelCommitStillRefused: true,
   };
 }
 
@@ -6399,9 +6638,12 @@ async function gateFrozenSurface() {
   // A mark: several spans in one call, which is the shape the copy now asks for.
   const marked = await toolCall(runtime, {
     action: "fold",
+    // Spans the ladder has not already spoken for. Marking is doorless now, so the
+    // automatic path has claimed the stalest batches by the time the agent reaches for
+    // one, and a span another mark already covers is correctly refused.
     marks: [
-      { ids: [built.turnEntries[0][2]], brief: "The first completed inspection stays exactly recoverable." },
-      { ids: [built.turnEntries[1][2]], brief: "The second completed inspection stays exactly recoverable." },
+      { ids: [built.turnEntries[10][2]], brief: "A later completed inspection stays exactly recoverable." },
+      { ids: [built.turnEntries[11][2]], brief: "The next completed inspection stays exactly recoverable." },
     ],
   });
   assert.equal(marked.details.ok, true);
@@ -6493,9 +6735,12 @@ async function gateMarkResponseAwareness() {
   const built = runtime.built;
   const reply = await toolCall(runtime, {
     action: "fold",
+    // Spans the ladder has not already spoken for. Marking is doorless now, so the
+    // automatic path has claimed the stalest batches by the time the agent reaches for
+    // one, and a span another mark already covers is correctly refused.
     marks: [
-      { ids: [built.turnEntries[0][2]], brief: "The first completed inspection stays exactly recoverable." },
-      { ids: [built.turnEntries[1][2]], brief: "The second completed inspection stays exactly recoverable." },
+      { ids: [built.turnEntries[10][2]], brief: "A later completed inspection stays exactly recoverable." },
+      { ids: [built.turnEntries[11][2]], brief: "The next completed inspection stays exactly recoverable." },
     ],
   });
   const details = reply.details;
@@ -6785,7 +7030,7 @@ async function gateStatusResultsAreLadderFood() {
 
   // Once stale, the automatic tool rung selects and folds it.
   const state = context.emptyActiveContextState(built.sessionId);
-  const candidate = context.selectAutomaticToolForRung(built.snapshot, state, 0.80);
+  const candidate = context.selectAutomaticToolBatch(built.snapshot, state)[0];
   assert(candidate, "The stale status batch was not selected by the tool rung");
   assert.equal(candidate.kind, "tool-result");
   assert.deepEqual(candidate.sourceRefs.map((ref) => ref.entryId), [built.statusResultIds[0]]);
@@ -6999,7 +7244,7 @@ async function gatePeekIsAppendOnly() {
   });
   const seed = context.emptyActiveContextState(probe.sessionId);
   const foldId = (await commitCandidate(
-    seed, epochSnapshot(probe), context.selectAutomaticToolBatch(epochSnapshot(probe), seed, 1)[0],
+    seed, epochSnapshot(probe), context.selectAutomaticToolBatch(epochSnapshot(probe), seed)[0],
     { brief: "The exact stale inspection result stays recoverable behind this fold." },
   )).prepared.id;
   const built = makeFixture({
@@ -7008,7 +7253,7 @@ async function gatePeekIsAppendOnly() {
   const snapshot = epochSnapshot(built);
   const state = (await commitCandidate(
     context.emptyActiveContextState(built.sessionId), snapshot,
-    context.selectAutomaticToolBatch(snapshot, context.emptyActiveContextState(built.sessionId), 1)[0],
+    context.selectAutomaticToolBatch(snapshot, context.emptyActiveContextState(built.sessionId))[0],
     { brief: "The exact stale inspection result stays recoverable behind this fold." },
   )).state;
 
@@ -7127,7 +7372,7 @@ async function gateRep19ShapeResolves() {
   await startRuntime(runtime);
   const committed = await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
   assert(committed.fired, "The window-pressure commit never fired");
-  assert.equal(committed.commit.trigger, "window-pressure");
+  assert.equal(committed.commit.trigger, "band-top");
 
   // The eligible share is an order of magnitude over the reclaim floor: the status
   // mass is ladder food now, not immortal weight.
@@ -7189,8 +7434,10 @@ async function gateProtectIsDurablePin() {
     await project(runtime);
   }
   await settle();
-  const folds = materialized(runtime).folds;
-  assert(folds.length >= 2, "Pressure must have produced at least two committed folds");
+  // Roots only: consolidation nests under the counting rule, and a child cannot be
+  // expanded while its parent is still a placeholder.
+  const folds = materialized(runtime).folds.filter((fold) => fold.parentId === null);
+  assert(folds.length >= 2, "Pressure must have produced at least two committed root folds");
   const foldId = folds[0].id;
   // A second expanded fold stays UNpinned, so the refold rung has work to commit
   // while the pin is live and the pinned-mass accounting has a commit to ride.
@@ -7369,8 +7616,13 @@ async function gatePinnedShareCap() {
     "The refusal must name the cap");
   assert.match(String(refusal), /unprotect/, "The refusal must name the release valve");
   assert.equal(materialized(runtime).protected.length, 0, "A refused protect must pin nothing");
-  const smallest = [...folds].sort((left, right) =>
-    (left.sourceChars ?? 0) - (right.sourceChars ?? 0))[0];
+  // The smallest LEAF. Consolidation nests under the counting rule, so a root fold can
+  // now hold the whole stale region and pinning it would exceed the cap on its own;
+  // what the under-the-cap leg is about is that a modest pin still lands.
+  const smallest = [...folds]
+    .filter((fold) => !fold.parts.some((part) => part.kind === "fold"))
+    .sort((left, right) => (left.sourceChars ?? 0) - (right.sourceChars ?? 0))[0];
+  assert(smallest, "The fixture produced no leaf fold to pin");
   await toolCall(runtime, { action: "protect", ids: [smallest.id] });
   const pinned = materialized(runtime).protected.length;
   assert(pinned > 0, "A pin under the cap must still land");
@@ -7418,7 +7670,7 @@ async function gateRiderContentLaw() {
  * children as placeholders rather than swallowing their bytes.
  */
 async function gateUnifiedSpanLaw() {
-  const below = await chapterForest(context.CONSOLIDATE_AFTER - 1);
+  const below = await chapterForest(context.DEFAULT_THRESHOLDS.consolidateAfter - 1);
   const belowSnapshot = context.mapActiveContext({
     sessionId: below.sessionId,
     eventMessages: below.messages,
@@ -7432,7 +7684,7 @@ async function gateUnifiedSpanLaw() {
   assert.equal(context.selectAutomaticFoldRun(belowSnapshot, below.state), null);
 
   // At the rule, one pinned fold and the rest as material.
-  const forest = await chapterForest(context.CONSOLIDATE_AFTER + 1);
+  const forest = await chapterForest(context.DEFAULT_THRESHOLDS.consolidateAfter + 1);
   const roots = forest.state.folds.filter((fold) => fold.parentId === null).map((fold) => fold.id);
   const pinnedId = roots[0];
   const pinnedRefs = context.flattenFoldRefs(
@@ -7514,7 +7766,7 @@ async function gateUnifiedSpanLaw() {
     "Peek of a nested parent rewrote the window",
   );
   return {
-    consolidateAfter: context.CONSOLIDATE_AFTER,
+    consolidateAfter: context.DEFAULT_THRESHOLDS.consolidateAfter,
     belowRuleSpanParts: belowSpan.parts.length,
     nestedChildren: childIds.length,
     pinnedExcluded: true,
@@ -7532,6 +7784,388 @@ async function gateUnifiedSpanLaw() {
  * the chapters automation made could not curate its own history. Nesting removes
  * nothing, so the only refusal left is the pin.
  */
+/**
+ * THE THERMOSTAT, VALIDATED AT CONSTRUCTION.
+ *
+ * The five numbers are five halves of one decision, so they are checked together and a
+ * violation is REFUSED by the name of the invariant it broke. Never clamped: a policy a
+ * deployment cannot serve is a registration error, not a value to quietly rewrite, and
+ * a governor that silently became something else is worse than one that never started.
+ */
+async function gateThresholdConstruction() {
+  const withField = (overrides) => ({ ...context.DEFAULT_THRESHOLDS, ...overrides });
+  const refuses = (thresholds, invariant) => {
+    let thrown = null;
+    try {
+      context.resolveThresholds(thresholds);
+    } catch (error) {
+      thrown = error;
+    }
+    assert(thrown, `A policy violating ${invariant} was accepted`);
+    assert.equal(thrown.name, "ThresholdPolicyError",
+      `${invariant} threw ${thrown.name} rather than the named policy error`);
+    assert.equal(thrown.invariant, invariant,
+      `Expected invariant ${invariant}, got ${thrown.invariant}: ${thrown.message}`);
+    assert(thrown.message.length > 0, `${invariant} refused without saying why`);
+    return thrown.invariant;
+  };
+
+  // The defaults are a valid policy, and resolving nothing yields exactly them.
+  assert.deepEqual(context.resolveThresholds(undefined), { ...context.DEFAULT_THRESHOLDS });
+  assert.deepEqual(context.resolveThresholds({ ...context.DEFAULT_THRESHOLDS }),
+    { ...context.DEFAULT_THRESHOLDS });
+
+  // Shape: set whole or not at all, and no field the object does not have.
+  const shape = [
+    refuses(null, "shape"),
+    refuses([0.8, 0.35], "shape"),
+    refuses({ maxTarget: 0.8 }, "shape"),
+    refuses(withField({ extra: 1 }), "shape"),
+  ];
+  assert.equal(new Set(shape).size, 1);
+
+  // Every proportion is a proportion, and the count is a count.
+  const named = [];
+  for (const field of ["maxTarget", "minTarget", "freshTail", "staleTail"]) {
+    named.push(refuses(withField({ [field]: 0 }), field));
+    named.push(refuses(withField({ [field]: 1 }), field));
+    named.push(refuses(withField({ [field]: -0.1 }), field));
+    named.push(refuses(withField({ [field]: "0.5" }), field));
+    named.push(refuses(withField({ [field]: Number.NaN }), field));
+  }
+  named.push(refuses(withField({ consolidateAfter: 0 }), "consolidateAfter"));
+  named.push(refuses(withField({ consolidateAfter: 2.5 }), "consolidateAfter"));
+  named.push(refuses(withField({ consolidateAfter: "10" }), "consolidateAfter"));
+
+  // ONE ASSERTION PER ORDERING INVARIANT, each by the name it refuses under.
+  const orderings = [
+    // L < M: the thermostat needs a gap to fold down into.
+    refuses(withField({ minTarget: 0.80, maxTarget: 0.80 }), "minTarget<maxTarget"),
+    // F < M: a fresh tail wider than the trigger triggers on protection alone.
+    refuses(withField({ maxTarget: 0.40, minTarget: 0.30, freshTail: 0.40, staleTail: 0.05 }),
+      "freshTail<maxTarget"),
+    // S <= M - F: the zones may not overlap at the trigger.
+    refuses(withField({ staleTail: 0.79 }), "staleTail<=maxTarget-freshTail"),
+    // G >= F: one refill of the protected tail must not re-arm the trigger by itself.
+    refuses(withField({ maxTarget: 0.60, minTarget: 0.58, freshTail: 0.10, staleTail: 0.30 }),
+      "gap>=freshTail"),
+    // P + F < M: the pin ceiling plus the structurally fresh tail is the floor a commit
+    // can never get under, and a trigger at or below it announces nothing reclaimable.
+    // Ordered so only the pin sum fails: 0.20 <= 0.30 - 0.06 and 0.20 >= 0.06 both hold,
+    // while 0.25 + 0.06 does not stay under 0.30.
+    refuses(withField({ maxTarget: 0.30, minTarget: 0.10, freshTail: 0.06, staleTail: 0.20 }),
+      "pinnedPlusFreshTail<maxTarget"),
+  ];
+  assert.equal(new Set(orderings).size, orderings.length,
+    "Two ordering violations refused under the same invariant name");
+
+  // Servability, evaluated at REGISTRATION against the declared window.
+  const serving = [];
+  for (const [budget, invariant] of [[9_000, "minimumBudget"], [14_400, "freshTailTokens"]]) {
+    let thrown = null;
+    try {
+      context.assertThresholdsServable(context.DEFAULT_THRESHOLDS, budget);
+    } catch (error) {
+      thrown = error;
+    }
+    assert(thrown, `A ${budget}-token budget was accepted`);
+    assert.equal(thrown.invariant, invariant, thrown.message);
+    serving.push(invariant);
+  }
+  context.assertThresholdsServable(context.DEFAULT_THRESHOLDS, 25_000);
+
+  // And the same refusal reaches a real registration, by name, never clamped.
+  assert.throws(
+    () => makeRuntime(makeFixture({ turns: 3, tools: false, contextWindow: 100_000 }),
+      { thresholds: withField({ staleTail: 0.79 }) }),
+    /staleTail must not overlap the fresh tail/,
+  );
+  const clamped = makeRuntime(makeFixture({ turns: 3, tools: false, contextWindow: 100_000 }));
+  await startRuntime(clamped);
+  assert.deepEqual((await toolStatus(clamped)).details.automatic.thresholds,
+    { ...context.DEFAULT_THRESHOLDS });
+  return {
+    defaults: { ...context.DEFAULT_THRESHOLDS },
+    shapeRefusals: shape.length,
+    fieldRefusals: named.length,
+    orderingInvariants: orderings,
+    servabilityInvariants: serving,
+    clampedEver: false,
+  };
+}
+
+/**
+ * THE THREE ZONES.
+ *
+ * fresh tail: nothing folds, marked or not.
+ * middle:     agent judgment only. No automatic path proposes anything there.
+ * stale tail: the one span law operates, and folds every foldable it finds.
+ * Pins are exempt in all three.
+ */
+async function gateThreeZones() {
+  // A budget whose zones cut the fixture into three visible regions: freshTail 0.05 and
+  // staleTail 0.35 of a 90,000-token budget is 18,000 protected bytes at the new end,
+  // 126,000 automation-eligible bytes at the old end, and a real middle between them.
+  const thresholds = Object.freeze({
+    maxTarget: 0.80, minTarget: 0.35, freshTail: 0.05, staleTail: 0.35, consolidateAfter: 10,
+  });
+  const built = makeFixture({
+    turns: 30, resultChars: 8_000, contextWindow: 100_000, thresholds,
+  });
+  const snapshot = built.snapshot;
+  const state = context.emptyActiveContextState(built.sessionId);
+  assert(snapshot.staleBoundary > 0, "The fixture has no stale zone");
+  assert(snapshot.staleBoundary < snapshot.freshBoundary,
+    `The fixture has no middle: stale ${snapshot.staleBoundary}, fresh ${snapshot.freshBoundary}`);
+  assert(snapshot.freshBoundary < snapshot.messages.length, "The fixture has no fresh tail");
+  const zoneOf = (index) => index < snapshot.staleBoundary
+    ? "stale"
+    : index < snapshot.freshBoundary ? "middle" : "fresh";
+
+  // STALE: the law proposes, repeatedly, and everything it proposes is stale.
+  const claimed = new Set();
+  const proposed = [];
+  for (let round = 0; round < 24; round += 1) {
+    const candidate = context.selectAutomaticSpan(snapshot, state, claimed);
+    if (!candidate) break;
+    for (const ref of candidate.sourceRefs) {
+      const item = snapshot.mapped.find((entry) => entry.ref &&
+        json.objectRefKey(entry.ref) === json.objectRefKey(ref));
+      assert(item, "An automatic span named evidence the snapshot does not hold");
+      assert.equal(zoneOf(item.index), "stale",
+        `Automation proposed index ${item.index} from the ${zoneOf(item.index)} zone`);
+      claimed.add(json.objectRefKey(ref));
+    }
+    proposed.push(candidate.kind);
+  }
+  assert(proposed.length >= 2, "The stale zone offered automation almost nothing");
+
+  // MIDDLE and FRESH: once the stale zone is claimed, automation has nothing left. It
+  // does not walk forward into the middle, however full the window is.
+  assert.equal(context.selectAutomaticSpan(snapshot, state, claimed), null,
+    "Automation walked out of the stale zone once it was exhausted");
+  assert.deepEqual(context.selectAutomaticToolBatch(snapshot, state, claimed), []);
+
+  // FRESH TAIL: a mark inside it does not commit, and the SAME span outside it does.
+  const freshEntry = built.turnEntries.at(-1)[2];
+  const staleEntry = built.turnEntries[1][2];
+  const markFor = (entryId) => {
+    const item = snapshot.mapped.find((entry) => entry.ref?.entryId === entryId);
+    assert(item, `The fixture has no entry ${entryId}`);
+    return {
+      mark: "fold",
+      id: `mark_${entryId}`,
+      kind: "tool-result",
+      parts: [{ kind: "raw", ref: item.ref }],
+      brief: "The exact completed inspection stays recoverable behind this fold.",
+      briefProvenance: { kind: "deterministic" },
+      origin: "agent",
+      ordinal: 1,
+      index: item.index,
+    };
+  };
+  const freshMark = markFor(freshEntry);
+  const staleMark = markFor(staleEntry);
+  assert.equal(zoneOf(freshMark.index), "fresh");
+  assert.equal(zoneOf(staleMark.index), "stale");
+  // The fresh tail refuses by the same label protection uses, which is the point: from
+  // the commit's side a fresh span and a pinned span are both simply unavailable.
+  assert.notEqual(context.markEligibility(snapshot, state, freshMark), "eligible",
+    "A mark inside the fresh tail was eligible to commit");
+  assert.equal(context.markEligibility(snapshot, state, staleMark), "eligible",
+    "A mark outside the fresh tail could not commit");
+  // The same span, in a snapshot whose tail no longer covers it, commits.
+  const narrowTail = context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: built.messages,
+    contextEntries: built.entries,
+    contextWindow: 100_000,
+    thresholds: NO_FRESH_TAIL,
+  });
+  assert.equal(context.markEligibility(narrowTail, state, freshMark), "eligible",
+    "The same mark stayed unfoldable once it was outside the tail");
+
+  // PINS ARE EXEMPT EVERYWHERE. Protect the stale span and the law steps over it.
+  const pinnedRef = snapshot.mapped.find((entry) => entry.ref?.entryId === staleEntry).ref;
+  const pinned = { ...state, protected: [structuredClone(pinnedRef)] };
+  assert.equal(context.markEligibility(snapshot, pinned, staleMark), "protected",
+    "A pinned stale span was still eligible");
+  const pinnedKey = json.objectRefKey(pinnedRef);
+  const pinnedClaims = new Set();
+  for (let round = 0; round < 24; round += 1) {
+    const candidate = context.selectAutomaticSpan(snapshot, pinned, pinnedClaims);
+    if (!candidate) break;
+    for (const ref of candidate.sourceRefs) {
+      assert.notEqual(json.objectRefKey(ref), pinnedKey,
+        "An automatic span in the stale zone swallowed a pinned entry");
+      pinnedClaims.add(json.objectRefKey(ref));
+    }
+  }
+  return {
+    staleBoundary: snapshot.staleBoundary,
+    freshBoundary: snapshot.freshBoundary,
+    messages: snapshot.messages.length,
+    staleSpansProposed: proposed.length,
+    middleProposals: 0,
+    freshMarkEligibility: context.markEligibility(snapshot, state, freshMark),
+    staleMarkEligibility: "eligible",
+    pinnedMarkEligibility: "protected",
+  };
+}
+
+/**
+ * THE FENCE OPENS THE MIDDLE, AND IT IS NOT LATCHED.
+ *
+ * Three separate behaviors, each pinned by name, because each one was a defect this
+ * build introduced and fixed, and a silent return of any of them costs the fence its
+ * ability to reduce at all.
+ */
+async function gateFenceOpensTheMiddle() {
+  const thresholds = Object.freeze({
+    maxTarget: 0.80, minTarget: 0.35, freshTail: 0.05, staleTail: 0.35, consolidateAfter: 10,
+  });
+  const built = makeFixture({
+    turns: 30, resultChars: 8_000, contextWindow: 100_000, thresholds,
+  });
+  const snapshot = built.snapshot;
+  const state = context.emptyActiveContextState(built.sessionId);
+
+  // (a) At the fence the stale zone extends to everything outside the NARROWED fresh
+  // tail, so the middle stops being off limits and the reduction has mass to reach.
+  const deepened = context.deepenedFenceSnapshot(snapshot, thresholds.freshTail * 0.25);
+  assert(deepened.staleBoundary > snapshot.staleBoundary,
+    `The fence did not open the middle: ${snapshot.staleBoundary} to ${deepened.staleBoundary}`);
+  assert(deepened.staleBoundary >= snapshot.freshBoundary,
+    "The fence stale zone stopped short of the ordinary fresh boundary");
+  assert(deepened.staleBoundary < snapshot.messages.length,
+    "The fence stale zone swallowed the whole window; the narrowed tail protects nothing");
+  const ordinaryClaims = new Set();
+  let ordinarySpans = 0;
+  for (let round = 0; round < 40; round += 1) {
+    const candidate = context.selectAutomaticSpan(snapshot, state, ordinaryClaims);
+    if (!candidate) break;
+    for (const ref of candidate.sourceRefs) ordinaryClaims.add(json.objectRefKey(ref));
+    ordinarySpans += 1;
+  }
+  const fenceClaims = new Set();
+  let fenceSpans = 0;
+  for (let round = 0; round < 40; round += 1) {
+    const candidate = context.selectAutomaticSpan(deepened, state, fenceClaims);
+    if (!candidate) break;
+    for (const ref of candidate.sourceRefs) fenceClaims.add(json.objectRefKey(ref));
+    fenceSpans += 1;
+  }
+  assert(fenceSpans > ordinarySpans,
+    `The fence reached ${fenceSpans} spans against the ordinary ${ordinarySpans}; the middle stayed shut`);
+
+  // (c) THE CLAMP REGRESSION, pinned. The deepened stale boundary is the BYTE tail's
+  // complement, never freshBoundary's, because freshBoundary also clamps to the
+  // unfinished turn. A session with an open excursion and no terminal assistant has its
+  // ordinary fresh boundary at the top of that turn, and deriving the fence zone from it
+  // would leave the excursion unmarkable, the waiver with nothing to release and the
+  // fence with nothing to reduce.
+  const openMessages = built.messages.slice(0, 20);
+  openMessages.push({
+    role: "user", content: [{ type: "text", text: "Start the long excursion." }], timestamp: 900,
+  });
+  for (let step = 0; step < 8; step += 1) {
+    openMessages.push({
+      role: "assistant",
+      content: [{ type: "toolCall", id: `open-${step}`, name: "read", arguments: { path: `open-${step}.txt` } }],
+      stopReason: "toolUse",
+      timestamp: 901 + step,
+    });
+    openMessages.push({
+      role: "toolResult",
+      toolCallId: `open-${step}`,
+      toolName: "read",
+      content: [{ type: "text", text: `Open ${step}: ${"x".repeat(9_000)}` }],
+      isError: false,
+      timestamp: 901 + step,
+    });
+  }
+  const openSnapshot = context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: openMessages,
+    contextEntries: built.entries,
+    contextWindow: 100_000,
+    thresholds,
+  });
+  // The excursion is still running: the last user message never became a complete turn,
+  // so the ORDINARY fresh boundary clamps to it and everything after it is structurally
+  // protected. That clamp is correct, and it is exactly what the fence zone must not
+  // inherit.
+  const excursionStart = openMessages.findIndex((message) =>
+    message.role === "user" && message.content?.[0]?.text === "Start the long excursion.");
+  assert(excursionStart > 0);
+  assert.equal(openSnapshot.freshBoundary, excursionStart,
+    `The ordinary fresh boundary is ${openSnapshot.freshBoundary}, not the open turn at ${excursionStart}`);
+  const openDeepened = context.deepenedFenceSnapshot(openSnapshot, thresholds.freshTail * 0.25);
+  assert(openDeepened.staleBoundary > openSnapshot.freshBoundary,
+    `The fence zone clamped to the unfinished turn at ${openDeepened.staleBoundary}; ` +
+    "the excursion is unmarkable and the waiver has nothing to release");
+  assert(openDeepened.staleBoundary >= openMessages.length - 6,
+    "The fence zone stopped well short of the byte tail's complement");
+
+  // (b) THE FENCE IS NOT LATCHED. The reopen latch is an economy rule: it keeps a window
+  // parked on the band top from buying a prefix rewrite per pass. A request that does
+  // not fit is not economy, and waiting for new eligible mass there spends the session's
+  // transmissibility to save a rewrite.
+  const runtime = makeRuntime(
+    makeFixture({ turns: 20, resultChars: 9_000, contextWindow: 34_000, thresholds }),
+    { ...SEALED_SPINE, providerTotalWindow: 34_000, thresholds },
+  );
+  await startRuntime(runtime);
+  // First crossing: commits, and latches.
+  await measureAndCommit(runtime, 26_000, 34_000, "latch-arm");
+  const afterFirst = runtime.appended.length;
+  // A second crossing with nothing new: the latch holds it.
+  await measure(runtime, 26_100, 34_000);
+  await project(runtime);
+  await settle();
+  const latched = contextEvents(runtime, afterFirst)
+    .filter((record) => record.kind === "context.commit" && record.deferred === false);
+  assert.equal(latched.length, 0,
+    "A window parked on the band top committed again with no new eligible mass");
+  // The fence: same window, and now it does not fit. The latch does not hold it.
+  const beforeFence = runtime.appended.length;
+  for (let step = 0; step < 8; step += 1) {
+    runtime.appendMessage({
+      role: "assistant",
+      content: [{ type: "toolCall", id: `fence-${step}`, name: "read", arguments: { path: `fence-${step}.txt` } }],
+      stopReason: "toolUse",
+      timestamp: 960 + step,
+    }, "fence-inflow");
+    runtime.appendMessage({
+      role: "toolResult",
+      toolCallId: `fence-${step}`,
+      toolName: "read",
+      content: [{ type: "text", text: `Fence ${step}: ${"f".repeat(24_000)}` }],
+      isError: false,
+      timestamp: 960 + step,
+    }, "fence-inflow");
+  }
+  await measure(runtime, 30_000, 34_000, undefined, "toolUse");
+  await project(runtime);
+  await settle();
+  const fenceCommits = contextEvents(runtime, beforeFence)
+    .filter((record) => record.kind === "context.commit" && record.deferred === false);
+  assert(fenceCommits.length >= 1,
+    "The reopen latch held the fence back; the request stayed untransmittable");
+  assert(fenceCommits.some((record) => record.applied_marks >= 1),
+    "The unlatched fence commit applied nothing");
+  return {
+    ordinaryStaleBoundary: snapshot.staleBoundary,
+    fenceStaleBoundary: deepened.staleBoundary,
+    ordinarySpans,
+    fenceSpans,
+    openTurnFreshBoundary: openSnapshot.freshBoundary,
+    openTurnFenceBoundary: openDeepened.staleBoundary,
+    latchedCommits: latched.length,
+    unlatchedFenceCommits: fenceCommits.length,
+  };
+}
+
 async function gateAgentSpansNest() {
   const forest = await chapterForest(2);
   const roots = forest.state.folds.filter((fold) => fold.parentId === null);
@@ -7617,15 +8251,15 @@ const gates = [
   [8, "Historical tolerance", gateHistoricalTolerance],
   [9, "Compaction policy", gateCompactionPolicy],
   [10, "Persistence chain", gatePersistenceChain],
-  [11, "B1 cadence tool folds", gateCadenceToolFolds],
+  [11, "Marking is doorless below the band top", gateDoorlessMarking],
   [12, "B2 expand leases", gateExpandLeases],
   [13, "Consolidation counting rule", gateConsolidationCountingRule],
   [14, "B4 quiet warming", gateQuietWarming],
   [15, "B5 fold_candidates detail", gateFoldCandidatesDetail],
-  [16, "B6 blocking-tool harvest", gateBlockingToolHarvest],
+  [16, "No tool call causes a rewrite", gateNoToolCallRewrite],
   [17, "Phase-B wire forward/backward note", gateWireForwardBackwardNote],
   [18, "Follow-up fences & stale anchors", gateFollowupFencesAndAnchors],
-  [19, "Fresh-tail share cap", gateFreshTailShareCap],
+  [19, "Fresh tail is one proportion", gateFreshTailShareCap],
   [20, "Neutral default branding", gateNeutralDefaultBranding],
   [21, "Deployment branding reproduction", gateDeploymentBrandingReproduction],
   [22, "Evidence ingestion switch", gateEvidenceIngestionSwitch],
@@ -7656,7 +8290,7 @@ const gates = [
   [56, "Projection budget fence & guard waiver", gateProjectionBudgetFence],
   [57, "Fixed-constant misjudgement & post-fence integrity", gateProjectionCalibration],
   [58, "Fence margin, calibration recency & commit depth", gateFenceMarginAndDepth],
-  [59, "Two-signal curation trigger", gateCurationTrigger],
+  [59, "One-signal commit trigger", gateCurationTrigger],
   [61, "Context action receipts", gateContextReceipts],
   [62, "Batched marks & loud auto-snap", gateAutoSnapAndCorrections],
   [63, "Symmetric re-boundary", gateSymmetricReboundary],
@@ -7688,6 +8322,9 @@ const gates = [
   [93, "The rider carries decisions, not readouts", gateRiderContentLaw],
   [94, "One span law: raw, nested, pinned", gateUnifiedSpanLaw],
   [95, "Agent spans nest; pins refuse", gateAgentSpansNest],
+  [96, "Thresholds are validated at construction", gateThresholdConstruction],
+  [97, "The three zones", gateThreeZones],
+  [98, "The fence opens the middle, unlatched", gateFenceOpensTheMiddle],
 ];
 
 const gateFilter = (process.env.GATES ?? "")
