@@ -1,5 +1,6 @@
 import { objectRefKey } from "../json.ts";
 import {
+  boundedUtf8,
   bytes,
   messageRole,
 } from "./canonical.ts";
@@ -11,6 +12,7 @@ import {
   DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
   MAX_CONTEXT_RECEIPTS,
   MAX_LAST_CALL_TEXT_BYTES,
+  MAX_SURFACING_LINE_BYTES,
   MAX_THRESHOLD_NOTICE_TEXT_BYTES,
 } from "./policy.ts";
 import type {
@@ -187,6 +189,8 @@ export function contextRiderText(input: {
   anchors: string[];
   pinnedShare: number;
   maxPinnedShare: number;
+  /** The surfacing slate, already bounded and already logged; null on a silent pass. */
+  suggestion?: string | null;
 }): string {
   const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
   const anchors = input.anchors.length
@@ -194,7 +198,10 @@ export function contextRiderText(input: {
     : "none";
   const pinnedPercent = Math.round(input.pinnedShare * 100);
   const capPercent = Math.round(input.maxPinnedShare * 100);
-  return boundReceiptText(
+  // The slate carries its OWN bound and is joined after this text is bounded, so the
+  // carrier's overhead is its bound plus the line's, and neither can eat the other: a
+  // long rider must never truncate the one sentence a suggestion consists of.
+  return joinSurfacing(boundReceiptText(
     [
       `[${brand} notice] A fold commit just landed; the next one will batch every pending mark ` +
         "into one rewrite, and marks are free until then.",
@@ -212,7 +219,13 @@ export function contextRiderText(input: {
     ].join("\n"),
     2_048,
     `[${brand} notice] Post-commit curation details are unavailable this pass.`,
-  );
+  ), input.suggestion);
+}
+
+/** One carrier, one optional slate line, appended last and bounded on its own. */
+export function joinSurfacing(text: string, suggestion?: string | null): string {
+  if (!suggestion) return text;
+  return `${text}\n${boundedUtf8(suggestion, MAX_SURFACING_LINE_BYTES)}`;
 }
 
 /** The ruled last-call sentence (Shane, 2026-08-09 13:23), verbatim. */
@@ -235,6 +248,8 @@ export function lastCallText(input: {
   pendingMarks: number;
   /** Peek copies this exposure marked for reclaim, so the pin that vetoes one is timely. */
   peekReclaims?: number;
+  /** The surfacing slate, already bounded and already logged; null on a silent pass. */
+  suggestion?: string | null;
   toolName: string;
   brandNoun?: string;
 }): string {
@@ -242,7 +257,7 @@ export function lastCallText(input: {
   const { signals } = input;
   const occupancy = signals.occupancy === null ? "unmeasured" : `${Math.round(signals.occupancy * 100)}%`;
   const peekReclaims = input.peekReclaims ?? 0;
-  return boundReceiptText([
+  return joinSurfacing(boundReceiptText([
     `[${brand} last call] ${LAST_CALL_WORDING}`,
     `Occupancy is ${occupancy} of the ${signals.budgetTokens}-token serving budget, at or past the ` +
       `${Math.round(signals.maxTarget * 100)}% commit line. Unmarked foldable mass in the stale zone: ` +
@@ -262,7 +277,7 @@ export function lastCallText(input: {
     "This is one round: the commit proceeds on the pass after your next response with whatever marks " +
       "exist. Continuing the task is the default; nothing here needs a reply.",
   ].filter(Boolean).join("\n"), MAX_LAST_CALL_TEXT_BYTES,
-  `[${brand} last call] ${LAST_CALL_WORDING}`);
+  `[${brand} last call] ${LAST_CALL_WORDING}`), input.suggestion);
 }
 
 /**

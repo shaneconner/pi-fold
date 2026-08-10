@@ -2294,6 +2294,81 @@ export function usageSeriesFromLedger(ledger) {
 // ---------------------------------------------------------------------------
 export const CONTEXT_EVENT_SUFFIX = "context-event";
 
+/**
+ * THE SURFACING LENS. One row per suggestion issued, joined to the grade the runtime
+ * gave it, so first-hop peek precision is derivable per arm rather than reconstructed
+ * by hand after the run. memex's fold lane accepted at 2.2%, and that lane is the one
+ * closest to this problem: it is the floor this design exists to beat, and it travels
+ * with the number so nobody has to remember it.
+ */
+export const MEMEX_FOLD_LANE_ACCEPT_RATE = 0.022;
+
+export function surfacingLens(events) {
+  const suggestions = events.filter((event) => event.kind === "context.suggestion");
+  const outcomes = events.filter((event) => event.kind === "context.outcome");
+  const table = suggestions.map((suggestion, position) => {
+    // The grade THIS offer earned: the LAST outcome for its fold before the same fold is
+    // offered again. shown->acted->used is one offer walking to its terminal grade, so
+    // taking the first transition would report every used suggestion as merely acted.
+    const reoffered = suggestions.slice(position + 1)
+      .find((later) => later.fold_id === suggestion.fold_id)?.seq ?? Infinity;
+    const window = outcomes.filter((outcome) => outcome.fold_id === suggestion.fold_id &&
+      outcome.seq > suggestion.seq && outcome.seq < reoffered);
+    const graded = window.length ? window[window.length - 1] : null;
+    return {
+      seq: suggestion.seq,
+      ordinal: Number.isFinite(suggestion.ordinal) ? suggestion.ordinal : null,
+      carrier: typeof suggestion.carrier === "string" ? suggestion.carrier : null,
+      foldId: typeof suggestion.fold_id === "string" ? suggestion.fold_id : null,
+      contentScore: Number.isFinite(suggestion.content_score) ? suggestion.content_score : null,
+      briefScore: Number.isFinite(suggestion.brief_score) ? suggestion.brief_score : null,
+      margin: Number.isFinite(suggestion.margin) ? suggestion.margin : null,
+      slot: Number.isFinite(suggestion.slot) ? suggestion.slot : null,
+      considered: Number.isFinite(suggestion.considered) ? suggestion.considered : null,
+      divergent: Number.isFinite(suggestion.divergent) ? suggestion.divergent : null,
+      suppressed: Number.isFinite(suggestion.suppressed) ? suggestion.suppressed : null,
+      chars: Number.isFinite(suggestion.chars) ? suggestion.chars : null,
+      // "open" is a real state, not missing data: the run ended inside the window.
+      outcome: graded ? graded.outcome ?? null : "open",
+      outcomeOrdinal: graded && Number.isFinite(graded.outcome_ordinal) ? graded.outcome_ordinal : null,
+    };
+  });
+  const count = (outcome) => table.filter((row) => row.outcome === outcome).length;
+  const acted = count("acted");
+  const used = count("used");
+  const byCarrier = {};
+  for (const row of table) {
+    const bucket = byCarrier[row.carrier ?? "unknown"]
+      ?? (byCarrier[row.carrier ?? "unknown"] = { issued: 0, acted: 0, used: 0, ignored: 0, chars: 0 });
+    bucket.issued += 1;
+    if (row.outcome === "acted" || row.outcome === "used") bucket.acted += 1;
+    if (row.outcome === "used") bucket.used += 1;
+    if (row.outcome === "ignored") bucket.ignored += 1;
+    bucket.chars += row.chars ?? 0;
+  }
+  return {
+    issued: suggestions.length,
+    acted: acted + used,
+    used,
+    ignored: count("ignored"),
+    open: count("open"),
+    // A suggestion is one first hop offered; peeking or expanding the named fold inside
+    // the window is that hop landing. This is the arm-(c) headline.
+    firstHopPeekPrecision: suggestions.length > 0 ? (acted + used) / suggestions.length : null,
+    usedRate: suggestions.length > 0 ? used / suggestions.length : null,
+    memexFoldLaneAcceptRate: MEMEX_FOLD_LANE_ACCEPT_RATE,
+    beatsMemexFoldLane: suggestions.length > 0
+      ? (acted + used) / suggestions.length > MEMEX_FOLD_LANE_ACCEPT_RATE : null,
+    suppressionTransitions: outcomes.length,
+    byCarrier,
+    table,
+    definition: "one row per context.suggestion, joined to the LAST context.outcome for the " +
+      "same fold_id before that fold is offered again; firstHopPeekPrecision is " +
+      "acted-or-used over issued, and " +
+      "\"open\" means the run ended before the outcome window closed",
+  };
+}
+
 export function contextEventMetrics(entries) {
   assertExperiment(Array.isArray(entries), "Context event metrics require session entries");
   const events = entries
@@ -2446,13 +2521,17 @@ export function contextEventMetrics(entries) {
       definition: "context.notice records; a share appearing twice means a commit re-armed it " +
         "and the window crossed it again",
     },
+    surfacing: surfacingLens(events),
     carrierBytes: {
       riderChars: carrierChars(riders),
       lastCallChars: carrierChars(lastCalls),
       noticeChars: carrierChars(notices),
+      surfacingChars: carrierChars(events.filter((event) => event.kind === "context.suggestion")),
       totalChars: carrierChars(riders) + carrierChars(lastCalls) + carrierChars(notices),
       definition: "per-carrier byte overhead from each carrier event's own chars field; " +
-        "the economics guardrail the 21.9% ephemeral-slate tax is measured against",
+        "the economics guardrail the 21.9% ephemeral-slate tax is measured against. " +
+        "surfacingChars is counted separately and is ALREADY INSIDE riderChars and " +
+        "lastCallChars, because the slate rides those carriers rather than one of its own",
     },
   };
   return {

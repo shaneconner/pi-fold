@@ -26,7 +26,7 @@ import {
   MAX_PENDING_MARKS,
   MAX_THRESHOLD_NOTICE_TEXT_BYTES,
   MAX_THRESHOLD_NOTICES,
-  SURFACING_MAX_LOG_RECORDS,
+  SURFACING_MAX_LEDGER_RECORDS,
 } from "./policy.ts";
 import type {
   ActiveContextCheckpointV2,
@@ -57,8 +57,8 @@ export const PREPARED_FOLD_KEYS = [
 export const ACTIVE_STATE_KEYS = ["version", "sessionId", "revision", "folds", "expanded", "protected"] as const;
 export const FOLD_RECORD_REF_KEYS = ["id", "sha256"] as const;
 export const FOLD_RECORD_ENTRY_KEYS = ["version", "sessionId", "foldId", "recordSha256", "fold"] as const;
-export const SURFACING_RECORD_KEYS = ["source", "id", "score", "ordinal", "outcome"] as const;
-export const SURFACING_OUTCOMES = Object.freeze(["shown", "accept", "reject"] as const);
+export const SURFACING_RECORD_KEYS = ["id", "surfaced", "taken", "ordinal", "outcome"] as const;
+export const SURFACING_OUTCOMES = Object.freeze(["shown", "acted", "used", "ignored"] as const);
 export const PENDING_FOLD_MARK_KEYS = [
   "mark", "id", "kind", "parts", "brief", "briefProvenance", "origin", "ordinal",
 ] as const;
@@ -84,18 +84,21 @@ export function validTokensSinceToolFold(value: unknown): value is number {
 
 export function validSurfacingRecord(value: unknown): value is SurfacingRecord {
   if (!exactRecord(value, SURFACING_RECORD_KEYS)) return false;
-  const score = ownValue(value, "score");
-  return typeof ownValue(value, "source") === "string" && Boolean(ownValue(value, "source")) &&
-    typeof ownValue(value, "id") === "string" && Boolean(ownValue(value, "id")) &&
-    typeof score === "number" && Number.isFinite(score) && Number(score) >= 0 && Number(score) <= 1 &&
+  const surfaced = ownValue(value, "surfaced");
+  const taken = ownValue(value, "taken");
+  return typeof ownValue(value, "id") === "string" && Boolean(ownValue(value, "id")) &&
+    Number.isSafeInteger(surfaced) && Number(surfaced) > 0 &&
+    Number.isSafeInteger(taken) && Number(taken) >= 0 && Number(taken) <= Number(surfaced) &&
     Number.isSafeInteger(ownValue(value, "ordinal")) && Number(ownValue(value, "ordinal")) >= 0 &&
     SURFACING_OUTCOMES.includes(ownValue(value, "outcome") as SurfacingRecord["outcome"]);
 }
 
+/** One record per fold: a duplicate id is a ledger that forgot an ignore. */
 export function parseSurfacingLog(value: unknown): SurfacingRecord[] {
   const records = denseOwnArrayValues(value);
-  if (!records || records.length > SURFACING_MAX_LOG_RECORDS || !records.every(validSurfacingRecord)) {
-    throw new Error("Invalid active-context surfacing log");
+  if (!records || records.length > SURFACING_MAX_LEDGER_RECORDS || !records.every(validSurfacingRecord) ||
+      new Set(records.map((record) => (record as SurfacingRecord).id)).size !== records.length) {
+    throw new Error("Invalid active-context surfacing ledger");
   }
   return clone(records) as SurfacingRecord[];
 }

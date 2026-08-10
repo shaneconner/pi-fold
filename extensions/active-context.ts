@@ -112,6 +112,11 @@ import {
   PEEK_MIN_SLICE_BYTES,
   PEEK_READ_ONLY_CONTEXT_ACTIONS,
   READ_ONLY_TOOLS_DEFAULT,
+  SURFACING_BRIEF_HIT,
+  SURFACING_CONTENT_HIT,
+  SURFACING_DIVERGENCE_MARGIN,
+  SURFACING_OUTCOME_WINDOW_ORDINALS,
+  SURFACING_SLATE_SIZE,
   USER_RESCUE_MAX_SOURCE_CHARS,
 } from "./lib/policy.ts";
 import type {
@@ -179,8 +184,13 @@ import {
 } from "./lib/selection.ts";
 import type { SpanCorrection } from "./lib/selection.ts";
 import {
-  acceptSurfacingSuggestion,
-  surfacingOrdinal,
+  issueSurfacing,
+  noteSurfacingAction,
+  resolveSurfacing,
+  selectSurfacingSlate,
+  surfacingLedger,
+  surfacingSilenced,
+  surfacingSlateText,
 } from "./lib/surfacing.ts";
 import {
   compareProjections,
@@ -2437,6 +2447,7 @@ export function registerActiveContext(pi: any, options: {
       const riderText = contextRiderText({
         toolName,
         brandNoun,
+        suggestion: deliverSurfacing(snapshot, "rider"),
         pendingAgentMarks: postAccounting.agentMarks,
         eligibleMarks: postAccounting.eligibleMarks,
         freedTokens: postAccounting.freedTokens,
@@ -2698,6 +2709,102 @@ export function registerActiveContext(pi: any, options: {
   };
 
   /**
+   * The same selection, read rather than delivered: what the next carrier WOULD say,
+   * with the ledger that decides whether it says anything at all.
+   */
+  const statusSurfacing = (snapshot: ActiveContextSnapshot): Record<string, unknown> => {
+    const ledger = persistence.state ? surfacingLedger(persistence.state) : [];
+    if (!persistence.state) return { slate: [], line: null, ledger, silenced: [] };
+    const selection = selectSurfacingSlate({
+      state: persistence.state,
+      snapshot,
+      toolName,
+      ordinal: markOrdinal(snapshot),
+    });
+    return {
+      slate: selection.slate.map((suggestion) => ({
+        id: suggestion.id,
+        route: suggestion.route,
+        contentScore: suggestion.contentScore,
+        briefScore: suggestion.briefScore,
+        margin: suggestion.margin,
+        slot: suggestion.slot,
+      })),
+      line: surfacingSlateText({ slate: selection.slate, queryTerms: selection.queryTerms, brandNoun }),
+      considered: selection.considered,
+      divergent: selection.divergent,
+      suppressed: selection.suppressed,
+      intentTerms: selection.queryTerms.size,
+      contentHit: SURFACING_CONTENT_HIT,
+      briefHit: SURFACING_BRIEF_HIT,
+      divergenceMargin: SURFACING_DIVERGENCE_MARGIN,
+      slateSize: SURFACING_SLATE_SIZE,
+      silenced: [...surfacingSilenced(ledger)],
+      ledger,
+    };
+  };
+
+  /**
+   * THE SURFACING SLATE, delivered.
+   *
+   * The agent cannot peek a fold it does not know to want, so one line names the fold
+   * whose stored content matches the task in hand when its brief does not. Where it
+   * lands is the whole economics: only carriers that ride a rewrite the runtime is
+   * already paying for (the pre-commit last call and the post-commit rider) plus the
+   * on-demand status surface, which the agent asked for. The per-request ephemeral
+   * carrier stays dead; it cost 21.9% of every input token in rep 21 and nothing else
+   * about this build changes that verdict.
+   *
+   * One suggestion per delivery point, and most delivery points get none. Every
+   * delivery first resolves whatever offers have run out of window, so the ignore that
+   * silences a fold is recorded before the next selection reads the ledger.
+   */
+  const deliverSurfacing = (snapshot: ActiveContextSnapshot, carrier: string): string | null => {
+    if (!persistence.state) return null;
+    const ordinal = markOrdinal(snapshot);
+    const resolved = resolveSurfacing({ state: persistence.state, snapshot, ordinal });
+    persistence.state = resolved.state;
+    for (const transition of resolved.transitions) {
+      emit("context.outcome", {
+        fold_id: transition.id,
+        from_outcome: transition.from,
+        outcome: transition.to,
+        outcome_ordinal: transition.ordinal,
+        window_ordinals: SURFACING_OUTCOME_WINDOW_ORDINALS,
+      });
+    }
+    const selection = selectSurfacingSlate({ state: persistence.state, snapshot, toolName, ordinal });
+    const suggestion = selection.slate[0];
+    if (!suggestion) return null;
+    const text = surfacingSlateText({
+      slate: selection.slate,
+      queryTerms: selection.queryTerms,
+      brandNoun,
+    });
+    if (!text) return null;
+    persistence.state = issueSurfacing(persistence.state, suggestion.id, ordinal);
+    emit("context.suggestion", {
+      carrier,
+      fold_id: suggestion.id,
+      content_score: suggestion.contentScore,
+      brief_score: suggestion.briefScore,
+      margin: suggestion.margin,
+      content_hit: SURFACING_CONTENT_HIT,
+      brief_hit: SURFACING_BRIEF_HIT,
+      divergence_margin: SURFACING_DIVERGENCE_MARGIN,
+      slot: suggestion.slot,
+      slate_size: SURFACING_SLATE_SIZE,
+      fold_depth: suggestion.depth,
+      considered: selection.considered,
+      divergent: selection.divergent,
+      suppressed: selection.suppressed,
+      intent_terms: selection.queryTerms.size,
+      chars: text.length,
+    });
+    return text;
+  };
+
+  /**
    * THE PRE-COMMIT LAST-CALL GATE. When the band-top trigger fires, the commit defers
    * exactly one gated round behind one exposure of the ruled prompt; then it proceeds
    * with whatever marks exist. A request whose projection exceeds the provider input
@@ -2753,6 +2860,7 @@ export function registerActiveContext(pi: any, options: {
       unmarked: { spans: remainder.spans, tokens: remainder.tokens },
       pendingMarks: accounting.pending,
       peekReclaims,
+      suggestion: deliverSurfacing(snapshot, "lastcall"),
       toolName,
       brandNoun,
     });
@@ -3665,10 +3773,12 @@ export function registerActiveContext(pi: any, options: {
         available: true,
         automatic: {
           pressureRatio: measurements.latestRatio,
-          surfacing: {
-            rendered: false,
-            log: clone(persistence.state.surfacing ?? []),
-          },
+          // Status is a READ of the slate, never a delivery of one. `status` is a
+          // read-only context action and the tool-batch safety scan is built on
+          // read-only actions not writing durable state, so asking must not issue a
+          // suggestion, spend the precision budget, or move a suppression counter. An
+          // agent that asks gets the answer; only the push carriers are metered.
+          surfacing: statusSurfacing(snapshot),
           refoldRatio: snapshot.policy.refoldRatio,
           chapterPrepareRatio: snapshot.policy.prepareRatio,
           hardFenceRatio: hardFenceRatio(snapshot),
@@ -3772,12 +3882,12 @@ export function registerActiveContext(pi: any, options: {
         ...(detail === "tree" ? { tree: foldTreeDetail(snapshot, persistence.state).slice(statusOffset) } : {}),
       }, typeof detail === "string" ? detail : null, statusOffset));
     }
-    // Peeking or expanding a suggested fold is the accept signal, recorded for the
-    // retrieval build even though nothing suggests anything today. It stays ephemeral:
-    // the mark rides the next persisted state, never an entry of its own.
+    // Peeking or expanding a surfaced fold is the ACTED label, joined to the offer that
+    // named it. It stays ephemeral: the ledger rides the next persisted state, never an
+    // entry of its own, and the used/ignored grades land when the window closes.
     const noteSurfacingAccept = (id: string): void => {
       if (!persistence.state) return;
-      persistence.state = acceptSurfacingSuggestion(persistence.state, id, surfacingOrdinal(snapshot));
+      persistence.state = noteSurfacingAction(persistence.state, id, markOrdinal(snapshot));
     };
     if (action === "peek") {
       const id = String(params.id ?? "").trim();

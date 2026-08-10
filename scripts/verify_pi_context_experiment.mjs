@@ -39,6 +39,7 @@ import {
   codeWordSentence,
   computeRereadTax,
   contextEventMetrics,
+  MEMEX_FOLD_LANE_ACCEPT_RATE,
   corpusManifestSha256,
   deliverableTranscripts,
   estimateTokens,
@@ -1566,6 +1567,71 @@ try {
   assert(adjudicator.includes("contextEventMetrics(runEntries)"),
     "the adjudicator must compute the guidance-carrier lenses from the event stream");
   checks.guidanceCarrierLensesAdjudicated = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 47 - the surfacing lens, under the same contract. A carrier without its lens is
+// a carrier nobody can grade, so the slate ships with one row per suggestion joined to
+// the outcome the runtime gave it, and first-hop peek precision is derivable per arm.
+// memex's fold lane accepted at 2.2%; that number travels with the metric because it is
+// the floor this design exists to beat, not a trophy.
+// ---------------------------------------------------------------------------
+{
+  const custom = (data) => ({ type: "custom", customType: "pi-fold-context-event", data });
+  const suggestion = (seq, ordinal, foldId, carrier, chars) => custom({
+    kind: "context.suggestion", seq, ordinal, carrier, fold_id: foldId,
+    content_score: 0.42, brief_score: 0.05, margin: 0.37, content_hit: 0.25, brief_hit: 0.15,
+    divergence_margin: 0.1, slot: 0, slate_size: 1, fold_depth: 0,
+    considered: 12, divergent: 2, suppressed: 1, intent_terms: 9, chars,
+  });
+  const entries = [
+    suggestion(1, 10, "fold_a", "lastcall", 300),
+    custom({ kind: "context.outcome", seq: 2, ordinal: 14, fold_id: "fold_a",
+      from_outcome: "shown", outcome: "acted", outcome_ordinal: 14, window_ordinals: 12 }),
+    custom({ kind: "context.outcome", seq: 3, ordinal: 27, fold_id: "fold_a",
+      from_outcome: "acted", outcome: "used", outcome_ordinal: 27, window_ordinals: 12 }),
+    suggestion(4, 30, "fold_b", "rider", 280),
+    custom({ kind: "context.outcome", seq: 5, ordinal: 43, fold_id: "fold_b",
+      from_outcome: "shown", outcome: "ignored", outcome_ordinal: 43, window_ordinals: 12 }),
+    // Issued late: the run ended inside its window, which is an open row, not a miss.
+    suggestion(6, 50, "fold_c", "lastcall", 290),
+  ];
+  const lens = contextEventMetrics(entries).guidanceCarriers.surfacing;
+  assert.equal(lens.issued, 3);
+  assert.equal(lens.acted, 1);
+  assert.equal(lens.used, 1);
+  assert.equal(lens.ignored, 1);
+  assert.equal(lens.open, 1);
+  assert.equal(lens.firstHopPeekPrecision, 1 / 3);
+  assert.equal(lens.usedRate, 1 / 3);
+  assert.equal(lens.memexFoldLaneAcceptRate, MEMEX_FOLD_LANE_ACCEPT_RATE);
+  assert.equal(lens.beatsMemexFoldLane, true);
+  assert.equal(lens.suppressionTransitions, 3);
+  // Both channel scores, the divergence and the slate position are on every row: this
+  // IS the bandit's training data, and a row that dropped them would be unlearnable.
+  const [first] = lens.table;
+  assert.equal(first.foldId, "fold_a");
+  assert.equal(first.carrier, "lastcall");
+  assert.equal(first.contentScore, 0.42);
+  assert.equal(first.briefScore, 0.05);
+  assert.equal(first.margin, 0.37);
+  assert.equal(first.slot, 0);
+  assert.equal(first.outcome, "used", "the grade must be the offer's TERMINAL outcome");
+  assert.equal(lens.table[2].outcome, "open");
+  assert.equal(lens.byCarrier.lastcall.issued, 2);
+  assert.equal(lens.byCarrier.lastcall.used, 1);
+  assert.equal(lens.byCarrier.rider.ignored, 1);
+  // Per-carrier byte overhead: the slate's bytes are counted, and counted as riding the
+  // carriers rather than as a carrier of their own, because that is what they do.
+  const carrierBytes = contextEventMetrics(entries).guidanceCarriers.carrierBytes;
+  assert.equal(carrierBytes.surfacingChars, 870);
+  assert(carrierBytes.definition.includes("ALREADY INSIDE"));
+  // The empty run reports the lens, not its absence.
+  assert.equal(contextEventMetrics([]).guidanceCarriers.surfacing.issued, 0);
+  assert.equal(contextEventMetrics([]).guidanceCarriers.surfacing.firstHopPeekPrecision, null);
+  assert(adjudicator.includes("contextEventMetrics(runEntries)"),
+    "the adjudicator must compute the surfacing lens from the event stream");
+  checks.surfacingLensAdjudicated = true;
 }
 
 // ---------------------------------------------------------------------------

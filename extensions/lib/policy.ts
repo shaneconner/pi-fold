@@ -75,23 +75,45 @@ export const MAX_ADVISORY_DELIVERIES_PER_MILESTONE = 16;
 
 // Surfacing SELECTOR structure. These stay INTERNAL constants rather than public
 // options: they are the knobs the surfacing experiment is meant to settle, and an
-// option surface fixed before the accept/reject data exists would freeze a guess.
+// option surface fixed before the acted/used/ignored data exists would freeze a guess.
 // The per-request ephemeral carrier that once rendered the slate is deleted, and its
-// enable flag with it; the selector is retained for the commit-boundary carriers.
-export const SURFACING_TOP_K = 3;
-export const SURFACING_MIN_SCORE = 0.30;
-export const SURFACING_CHAR_BUDGET = 1_000;
-export const SURFACING_COOLDOWN_ORDINALS = 8;
+// enable flag with it; the slate rides the commit-boundary carriers and status only.
+
+/** BM25's canonical parameters, and memex's fold lane runs on exactly these. */
+export const SURFACING_BM25_K1 = 1.5;
+export const SURFACING_BM25_B = 0.75;
+/**
+ * The divergence trigger, as three numbers on one 0..1 scale.
+ *
+ * The scale is the share of the query's own saturation ceiling a document reaches, so
+ * 1.0 would be every query term saturated in one document and a strong real match lands
+ * in the third of the range these numbers sit in. CONTENT_HIT is the cry-wolf guard:
+ * below it the fold does not match the task at all and nothing else matters. BRIEF_HIT
+ * is the visibility line: at or above it the placeholder already says what the fold
+ * holds, so the agent can see it and a suggestion repeats the window back to itself.
+ * The MARGIN keeps the pair from meeting in the middle, where both readings are weak
+ * and neither says anything.
+ */
+export const SURFACING_CONTENT_HIT = 0.25;
+export const SURFACING_BRIEF_HIT = 0.15;
+export const SURFACING_DIVERGENCE_MARGIN = 0.10;
+/** Precision budget, not a rate limit: at most one suggestion per delivery point. */
+export const SURFACING_SLATE_SIZE = 1;
+/** One clock. It is the outcome window AND the cooldown: no re-offer before an answer. */
 export const SURFACING_OUTCOME_WINDOW_ORDINALS = 12;
-export const SURFACING_RECENT_TASK_SPANS = 6;
-export const SURFACING_MAX_TASK_CHARS = 12_000;
-export const SURFACING_MAX_LOG_RECORDS = 128;
-export const SURFACING_LEXICAL_WEIGHT = 0.80;
-export const SURFACING_RECENCY_WEIGHT = 0.14;
-export const SURFACING_DEPTH_WEIGHT = 0.06;
-export const SURFACING_MAX_DEPTH = 4;
-export const SURFACING_MAX_TEXT_CHARS = 220;
-export const SURFACING_SOURCE_ID = "fold-brief";
+/** Offered this many times and never taken, and the fold leaves the candidate set. */
+export const SURFACING_IGNORE_LIMIT = 2;
+/** Distinct content-only terms downstream that grade an acted suggestion as used. */
+export const SURFACING_PROVENANCE_TERMS = 3;
+export const SURFACING_INTENT_CHARS = 1_200;
+export const SURFACING_INTENT_ARGUMENT_CHARS = 120;
+export const SURFACING_INTENT_RECENCY_SHARE = 0.5;
+export const SURFACING_INTENT_ARGUMENT_KEYS: readonly string[] = Object.freeze([
+  "path", "file_path", "query", "pattern", "command", "brief", "id",
+]);
+export const SURFACING_MAX_CONTENT_CHARS = 20_000;
+export const SURFACING_MAX_LEDGER_RECORDS = 256;
+export const SURFACING_HOOK_CHARS = 160;
 
 // Conservative LOWER bound on UTF-8 bytes per provider token, used only to cap
 // the protected byte tail as a share of a small window; never to estimate usage.
@@ -472,6 +494,13 @@ export function resolveGuidance(value: unknown): ActiveContextGuidance {
 export const MAX_LAST_CALL_TEXT_BYTES = 2_048;
 /** One notice is one waypoint line; a waypoint that becomes a paragraph is bloat. */
 export const MAX_THRESHOLD_NOTICE_TEXT_BYTES = 512;
+/**
+ * The surfacing line's own bound, applied to the line and not to the carrier that
+ * carries it, so a carrier's total overhead is its own bound plus this one and stays a
+ * number a gate can pin. The 21.9% ephemeral-slate tax is what this is measured
+ * against: one bounded line landing inside a rewrite the commit already paid for.
+ */
+export const MAX_SURFACING_LINE_BYTES = 384;
 
 /** How many automatic-action receipts stay in the window; the oldest ages out. */
 export const MAX_CONTEXT_RECEIPTS = 3;
@@ -657,42 +686,55 @@ export interface PreparedFold {
   fold: ActiveFold;
 }
 
-export type SurfacingOutcome = "shown" | "accept" | "reject";
+/**
+ * The graded success labels. `shown` is the open offer; the other three are terminal.
+ * `acted` is a context verb on the surfaced fold inside the window, `used` is that plus
+ * the retrieved content showing up in what the agent went on to say or call, and
+ * `ignored` is a closed window with neither.
+ */
+export type SurfacingOutcome = "shown" | "acted" | "used" | "ignored";
 
-/** One durable surfacing observation: what was shown, how it scored, and what the agent did. */
+/**
+ * The durable SUPPRESSION ledger: one record per fold, not one per showing. The
+ * per-suggestion detail a bandit trains on is the event stream, which is durable and
+ * unbounded; this is only what the next selection pass must not forget.
+ */
 export interface SurfacingRecord {
-  source: string;
   id: string;
-  score: number;
+  surfaced: number;
+  taken: number;
+  /** Transcript ordinal of the last state change; the cooldown and the window read it. */
   ordinal: number;
   outcome: SurfacingOutcome;
 }
 
-/** One item a suggestion source offers for the shared carrier. */
-export interface SurfacingCandidate {
-  source: string;
+/** One suppression-state change, returned so the caller emits it rather than inferring it. */
+export interface SurfacingTransition {
   id: string;
-  text: string;
+  from: SurfacingOutcome;
+  to: SurfacingOutcome;
+  ordinal: number;
+}
+
+/** One collapsed fold, scored on both channels. */
+export interface SurfacingCandidate {
+  id: string;
+  /** What the placeholder shows: the brief channel. */
+  brief: string;
+  /** What the fold stores, descendants included: the content channel. */
+  content: string;
   route: string;
-  alternateRoute?: string;
-  /** Transcript position used for recency; higher is more recent. Never a wall clock. */
-  position?: number;
-  depth?: number;
+  /** Transcript position of the fold's last entry; higher is more recent. Never a clock. */
+  position: number;
+  depth: number;
 }
 
 export interface SurfacingSuggestion extends SurfacingCandidate {
-  score: number;
-}
-
-export interface SuggestionSourceInput {
-  state: ActiveContextState;
-  snapshot: ActiveContextSnapshot;
-  toolName: string;
-}
-
-export interface SuggestionSource {
-  id: string;
-  candidates: (input: SuggestionSourceInput) => SurfacingCandidate[];
+  contentScore: number;
+  briefScore: number;
+  margin: number;
+  /** Slate position, from 0. One suggestion per delivery point, so today it is always 0. */
+  slot: number;
 }
 
 export interface ActiveContextState {

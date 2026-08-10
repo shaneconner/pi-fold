@@ -149,6 +149,10 @@ export type ContextEventKind =
   | "context.lastcall"
   /** One gated round's outcome, attributed to the exposure it answers. */
   | "context.response"
+  /** One surfacing suggestion issued: both channel scores, the divergence, the carrier. */
+  | "context.suggestion"
+  /** One surfacing suggestion graded: the acted/used/ignored join and its transition. */
+  | "context.outcome"
   /** One append-once occupancy threshold notice delivered into the window. */
   | "context.notice"
   /** One commit epoch: the single mutation an epoch pays for. */
