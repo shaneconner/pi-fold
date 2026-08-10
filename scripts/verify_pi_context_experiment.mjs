@@ -2646,7 +2646,7 @@ try {
   // A cheap model at medium effort: the brief is a bounded summary of a bounded span, and
   // the arm's own frontier model is the thing under measurement, not the summarizing.
   assert.deepEqual({ ...EXPERIMENT_BRIEF_GENERATOR },
-    { provider: "openai", model: "gpt-5.6-luna", effort: "medium" });
+    { provider: "openai-codex", model: "gpt-5.6-luna", effort: "medium" });
 
   // Only the arm that registers the runtime writes briefs, so only it may carry a
   // generator: on any other arm the descriptor would be a fact about nothing.
@@ -2721,7 +2721,7 @@ try {
   // Driven against a FAKE host module: verification resolves no model and calls no
   // provider. What is under test is that the harness reaches the PACKAGE's builder, so the
   // arm briefs the way a consumer's deployment briefs.
-  const briefModel = { provider: "openai", id: "gpt-5.6-luna", reasoning: true };
+  const briefModel = { provider: "openai-codex", id: "gpt-5.6-luna", reasoning: true };
   const prompts = [];
   const generate = experimentSummarizeContextSpan(
     { arm: "pifold", briefGenerator: EXPERIMENT_BRIEF_GENERATOR },

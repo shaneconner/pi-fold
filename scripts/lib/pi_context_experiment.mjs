@@ -90,7 +90,7 @@ export const EXPERIMENT_PROVIDER_INPUT_BUDGETS = Object.freeze({
 // A cheap model at medium effort: the brief is a bounded summary of a bounded span, and
 // the frontier model's turn is the thing under measurement, not the summarizing.
 export const EXPERIMENT_BRIEF_GENERATOR = Object.freeze({
-  provider: "openai",
+  provider: "openai-codex",
   model: "gpt-5.6-luna",
   effort: "medium",
 });
