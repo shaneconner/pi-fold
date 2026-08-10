@@ -35,6 +35,7 @@ import type {
   ActiveContextStateWireV2,
   ActiveFold,
   AdvisoryMilestone,
+  BriefOverride,
   BriefProvenance,
   FoldKind,
   FoldPart,
@@ -131,20 +132,41 @@ export function validPendingMark(value: unknown): value is PendingMark {
  * supplied brief obeys, and refused for a fold that is not in the forest, exactly
  * like a pin or a refold mark naming a missing fold.
  */
+/**
+ * A model brief written after the fold committed carries its generator with it, so an
+ * override is either the bare corrected string the agent wrote or that string beside the
+ * attribution. Two shapes, one map: the string form is what every state written before
+ * the upgrade lane existed holds, and it must keep parsing and keep its exact digest.
+ */
+export function briefOverrideText(override: unknown): string | null {
+  if (typeof override === "string") return override;
+  const brief = ownValue(override, "brief");
+  return typeof brief === "string" ? brief : null;
+}
+
 export function parseBriefOverrides(
   value: unknown,
   ids?: ReadonlySet<string>,
-): Record<string, string> {
+): Record<string, BriefOverride> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Invalid active-context brief overrides");
   }
   const entries = Object.entries(value as Record<string, unknown>);
+  const validOverride = (override: unknown): boolean => {
+    const brief = briefOverrideText(override);
+    if (typeof brief !== "string" || !brief.trim() ||
+        brief.length > ACTIVE_CONTEXT_POLICY.maxBriefChars) return false;
+    if (typeof override === "string") return true;
+    return exactRecord(override, ["brief", "provenance"]) &&
+      validProvenance(ownValue(override, "provenance"));
+  };
   if (entries.length > MAX_ACTIVE_FOLD_RECORDS ||
-      entries.some(([id, brief]) => !id || typeof brief !== "string" || !brief.trim() ||
-        brief.length > ACTIVE_CONTEXT_POLICY.maxBriefChars || (ids && !ids.has(id)))) {
+      entries.some(([id, override]) => !id || !validOverride(override) || (ids && !ids.has(id)))) {
     throw new Error("Invalid active-context brief overrides");
   }
-  return Object.fromEntries(entries.sort(([left], [right]) => left.localeCompare(right))) as Record<string, string>;
+  return Object.fromEntries(
+    entries.sort(([left], [right]) => left.localeCompare(right)),
+  ) as Record<string, BriefOverride>;
 }
 
 /** The brief a fold PRESENTS: the agent's correction when it made one, else the record's. */
@@ -152,7 +174,23 @@ export function foldBrief(
   fold: Pick<ActiveFold, "id" | "brief">,
   state: Pick<ActiveContextState, "briefs">,
 ): string {
-  return state.briefs?.[fold.id] ?? fold.brief;
+  return briefOverrideText(state.briefs?.[fold.id]) ?? fold.brief;
+}
+
+/**
+ * The provenance a fold PRESENTS. A fold RECORD is immutable, so a brief written after
+ * the commit lives in the override map and its attribution travels with it; without this
+ * lens a model-written upgrade would report the provenance of the brief it replaced.
+ */
+export function foldProvenance(
+  fold: Pick<ActiveFold, "id" | "provenance">,
+  state: Pick<ActiveContextState, "briefs">,
+): BriefProvenance {
+  const override = state.briefs?.[fold.id];
+  const provenance = typeof override === "object" && override
+    ? ownValue(override, "provenance")
+    : undefined;
+  return normalizeLegacyProvenance(provenance ?? fold.provenance);
 }
 
 export function parsePendingMarks(value: unknown): PendingMark[] {

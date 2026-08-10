@@ -1839,8 +1839,8 @@ async function gateQuietWarming() {
     contextWindow: 100_000,
   });
   let summaryCalls = 0;
-  const summarize = async () => {
-    summaryCalls += 1;
+  const summarize = async (request) => {
+    if (!isBriefUpgradeRequest(request)) summaryCalls += 1;
     return MODEL_BRIEF();
   };
   const warm = makeRuntime(chapterBuilt, { summarizeContextSpan: summarize });
@@ -1900,8 +1900,8 @@ async function gateQuietWarming() {
 
   let fenceCalls = 0;
   const fence = makeRuntime(chapterBuilt, {
-    summarizeContextSpan: async () => {
-      fenceCalls += 1;
+    summarizeContextSpan: async (request) => {
+      if (!isBriefUpgradeRequest(request)) fenceCalls += 1;
       return MODEL_BRIEF();
     },
   });
@@ -2014,15 +2014,16 @@ async function gateNoToolCallRewrite() {
   //
   // The tool rung has no door of its own any more, so it wins every automatic
   // selection ahead of chapter preparation. In a TOOL-BEARING session that means warm
-  // model briefs never start and the commit's chapters carry deterministic briefs.
-  // That is a brief-quality question for the brief-quality iteration, not a scheduling
-  // one, and nothing here works around it.
+  // model briefs never start and the commit's chapters COMMIT deterministic. The brief
+  // quality that costs is bought back after the fact: the upgrade lane briefs those
+  // folds between boundaries and the model brief rides the next commit (gate 107). So
+  // the count here is preparations, which is what the scheduling claim is about.
   let toolBearingWarmCalls = 0;
   const toolBearing = makeRuntime(
     makeFixture({ turns: 8, resultChars: 10_000, contextWindow: 100_000 }),
     {
-      summarizeContextSpan: async () => {
-        toolBearingWarmCalls += 1;
+      summarizeContextSpan: async (request) => {
+        if (!isBriefUpgradeRequest(request)) toolBearingWarmCalls += 1;
         return { brief: "A model brief that a tool-bearing session never asks for." };
       },
     },
@@ -2034,7 +2035,7 @@ async function gateNoToolCallRewrite() {
   assert.equal(toolBearingWarmCalls, 0,
     "A tool-bearing session started a warm preparation the tool rung outranks");
   assert(toolCommitted.folds.length >= 1, "The tool-bearing commit folded nothing");
-  assert(toolCommitted.folds.every((fold) => fold.provenance.kind === "deterministic"),
+  assert(toolCommitted.folds.every((fold) => context.foldProvenance(fold, materialized(toolBearing)).kind === "deterministic"),
     `A tool-bearing commit produced a non-deterministic brief: ${JSON.stringify(
       toolCommitted.folds.map((fold) => fold.provenance.kind))}`);
 
@@ -2322,6 +2323,7 @@ async function gateSummarizerOption() {
   let loaderCalls = 0;
   let createCalls = 0;
   let completionCalls = 0;
+  let preparationCompletions = 0;
   let completionRequest;
   const loadHostModule = async () => {
     loaderCalls += 1;
@@ -2333,6 +2335,8 @@ async function gateSummarizerOption() {
             getModel() { return undefined; },
             async completeSimple(model, request, options) {
               completionCalls += 1;
+              if (completionCalls > 1) return { role: "assistant", content: [{ type: "text", text: "A later lane's brief." }] };
+              preparationCompletions += 1;
               completionRequest = structuredClone({ model, request, options: {
                 maxTokens: options.maxTokens,
                 signalIdentical: options.signal instanceof AbortSignal,
@@ -2384,7 +2388,12 @@ async function gateSummarizerOption() {
   });
   assert.equal(loaderCalls, 1);
   assert.equal(createCalls, 1);
-  assert.equal(completionCalls, 1);
+  // One completion per brief. The host fake cannot see which lane asked, and the upgrade
+  // lane briefs the folds this same commit landed deterministic, so the pin is on the
+  // preparation being FIRST and on the total staying inside the upgrade queue bound.
+  assert.equal(preparationCompletions, 1);
+  assert(completionCalls <= 1 + context.MAX_BRIEF_UPGRADE_QUEUE,
+    `The summarizer was called ${completionCalls} times for one brief`);
   assert.equal(completionRequest.model.provider, sessionModel.provider);
   assert.equal(completionRequest.model.id, sessionModel.id);
   assert.equal(completionRequest.request.messages.length, 1);
@@ -2451,11 +2460,14 @@ async function gateSummarizerOption() {
   failure.ctx.model = sessionModel;
   await startRuntime(failure);
   await measureForModel(failure, fenceTokens, sessionModel);
-  assert.equal(failureCompletionCalls, 1);
-  assert.equal(
-    materialized(failure).folds.find((fold) => fold.kind === "chapter")?.provenance.kind,
-    "deterministic",
-  );
+  // Both lanes meet the same broken generator: the preparation falls back, and the
+  // upgrade lane finds the deterministic fold and fails on it once too. What the gate
+  // pins is that a failure is a fallback rather than a retry loop.
+  assert(failureCompletionCalls >= 1 && failureCompletionCalls <= 1 + context.MAX_BRIEF_UPGRADE_QUEUE,
+    `A failing summarizer was called ${failureCompletionCalls} times`);
+  const failureState = materialized(failure);
+  const failureChapter = failureState.folds.find((fold) => fold.kind === "chapter");
+  assert.equal(context.foldProvenance(failureChapter, failureState).kind, "deterministic");
 
   // `summarizeContextSpan` left the PUBLIC surface. It is the runtime's INTERNAL
   // brief-generator interface, and `summarizer` is the declarative way to choose one, so
@@ -3313,6 +3325,16 @@ async function gateEpochMarkCommit() {
     pendingAfterCommit: 0,
     protectedHeld: refusal.deferredMarks,
   };
+}
+
+/**
+ * Which lane asked for a brief. The preparation lanes name a candidate DIGEST; the
+ * upgrade lane names the fold that already committed, because the candidate is that
+ * fold. Gates that count preparations count them with this, so the upgrade lane adding
+ * a caller does not read as a preparation nobody asked for.
+ */
+function isBriefUpgradeRequest(request) {
+  return typeof request?.candidateId === "string" && request.candidateId.startsWith("fold_");
 }
 
 function bytesOf(value) {
@@ -10085,6 +10107,164 @@ async function gateSurfacingDeliveryRidesTheBoundary() {
   };
 }
 
+/**
+ * THE BRIEF UPGRADE RIDES THE COMMIT BOUNDARY.
+ *
+ * Fold briefs are model-written; the deterministic brief is the failure fallback. The
+ * automatic ladder cannot wait on a provider inside a commit, so it commits deterministic
+ * and the model brief lands as an UPGRADE on the NEXT commit, inside a rewrite the
+ * session already paid for. This pins all four halves of that law: the upgrade happens,
+ * it is visible in the stream, it never happens between boundaries, and it never touches
+ * a brief the agent wrote. The failure leg is the fifth: a generator that throws leaves
+ * the deterministic brief standing and says so on the record.
+ */
+async function gateBriefUpgradesRideTheBoundary() {
+  const shape = { turns: 12, resultChars: 10_000, contextWindow: 100_000, toolName: "bash" };
+  const requests = [];
+  const upgradeText = (candidateId) =>
+    `The folded span records the completed bash inspection under ${candidateId} and its factual result.`;
+  const built = makeFixture(shape);
+  const runtime = makeRuntime(built, {
+    summarizeContextSpan: async (request) => {
+      requests.push(request);
+      return {
+        brief: upgradeText(request.candidateId),
+        provider: "openai-codex",
+        model: "gpt-5.6-luna",
+        effort: "medium",
+        toolCalls: 0,
+        launchContractDigest: "b".repeat(64),
+      };
+    },
+  });
+  await startRuntime(runtime);
+
+  // An agent-written brief on a stale span, so this run carries both provenances into
+  // the same commits.
+  const suppliedBrief = "An early completed task stays exactly recoverable behind this fold.";
+  const suppliedMark = await toolCall(runtime, {
+    action: "fold",
+    ids: [built.turnEntries[1][0], built.turnEntries[1].at(-1)],
+    brief: suppliedBrief,
+  });
+  assert.equal(suppliedMark.details.ok, true);
+
+  // BOUNDARY N.
+  await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  const afterFirst = materialized(runtime);
+  const deterministic = afterFirst.folds.filter((fold) => fold.provenance.kind === "deterministic");
+  assert(deterministic.length, "The ladder committed no deterministic fold to upgrade");
+  const supplied = afterFirst.folds.filter((fold) => fold.provenance.kind === "supplied");
+  assert.equal(supplied.length, 1, "The agent's supplied brief did not commit as one fold");
+  const target = deterministic[0];
+  const deterministicBrief = target.brief;
+
+  // The generator was handed the request contract, over the fold's own source.
+  await settle();
+  assert(requests.length, "No brief was requested for a fold committed deterministic");
+  const request = requests.find((item) => item.candidateId === target.id);
+  assert(request, `No brief request named the committed fold ${target.id}`);
+  for (const field of ["sourceText", "sourceSha256", "beforeText", "beforeSha256",
+    "afterText", "afterSha256", "maxBriefChars", "signal"]) {
+    assert(request[field] !== undefined, `The upgrade request omitted ${field}`);
+  }
+  assert.equal(request.sourceSha256, json.sha256Text(request.sourceText));
+  assert.equal(request.maxBriefChars, context.ACTIVE_CONTEXT_POLICY.maxBriefChars);
+
+  // BETWEEN THE BOUNDARIES: the brief is written and waiting, and not one byte moved.
+  const between = bytesOf((await project(runtime)).messages);
+  await settle();
+  assert.equal(bytesOf((await project(runtime)).messages), between,
+    "A finished brief upgrade rewrote the projection between commits");
+  const midState = materialized(runtime);
+  const midFold = midState.folds.find((fold) => fold.id === target.id);
+  assert.equal(context.foldProvenance(midFold, midState).kind, "deterministic",
+    "The upgrade applied outside a commit boundary");
+  assert.equal(context.foldBrief(midFold, midState), deterministicBrief);
+
+  // BOUNDARY N+1: new turns age in, the epoch commits again, and the upgrade rides it.
+  const aged = makeFixture({ ...shape, turns: 24, sessionId: built.sessionId });
+  for (const entry of aged.entries.slice(built.entries.length)) runtime.branch.push(entry);
+  runtime.messages.length = 0;
+  runtime.messages.push(...aged.messages);
+  const from = runtime.appended.length;
+  await runtimeCommit(runtime, { tokens: 92_000, contextWindow: 100_000, suffix: "second" });
+  const commits = contextEvents(runtime, from).filter((record) =>
+    record.kind === "context.commit" && record.deferred === false);
+  assert(commits.length, "The second boundary never committed");
+  const carrier = commits.find((record) => record.brief_upgrades > 0);
+  assert(carrier, "No commit record reported the upgrade it carried");
+  assert(carrier.brief_upgrades <= context.MAX_BRIEF_UPGRADES_PER_COMMIT,
+    "A single boundary applied more upgrades than the cap allows");
+  assert(carrier.brief_upgrade_ids.split(",").includes(target.id),
+    "The commit record did not name the fold it upgraded");
+  const afterSecond = materialized(runtime);
+  const upgradedFold = afterSecond.folds.find((fold) => fold.id === target.id);
+  // Read through the presentation lens, because a fold RECORD is immutable: the brief
+  // and its generator live in the override map the agent's own rebrief writes to.
+  const upgradedProvenance = context.foldProvenance(upgradedFold, afterSecond);
+  assert.equal(upgradedProvenance.kind, "model", "The deterministic brief was never upgraded");
+  assert.equal(upgradedProvenance.model, "gpt-5.6-luna");
+  assert.equal(upgradedProvenance.provider, "openai-codex");
+  assert.equal(context.foldBrief(upgradedFold, afterSecond), upgradeText(target.id));
+  assert.notEqual(context.foldBrief(upgradedFold, afterSecond), deterministicBrief);
+  // The record itself never moved, which is what keeps the durable ledger append-only.
+  assert.equal(upgradedFold.brief, deterministicBrief);
+  assert.equal(upgradedFold.provenance.kind, "deterministic");
+
+  // Agent judgment outranks automation: a supplied brief is never sent and never moved.
+  const suppliedAfter = afterSecond.folds.find((fold) => fold.id === supplied[0].id);
+  assert.equal(context.foldProvenance(suppliedAfter, afterSecond).kind, "supplied",
+    "An agent-written brief was upgraded");
+  // Its text may have grown by an absorbed sliver, which is the wedge absorber's note
+  // and not a rewrite of what the agent said; it is never the generator's brief.
+  assert(context.foldBrief(suppliedAfter, afterSecond).startsWith(suppliedBrief),
+    "The agent's own words were rewritten");
+  assert.equal(context.foldBrief(suppliedAfter, afterSecond).includes(upgradeText(supplied[0].id)), false);
+  assert.equal(requests.some((item) => item.candidateId === supplied[0].id), false,
+    "A supplied brief was sent to the generator");
+
+  // THE FAILURE LEG. The deterministic brief stands, and the stream says why.
+  let attempts = 0;
+  const failing = makeRuntime(makeFixture(shape), {
+    summarizeContextSpan: async () => {
+      attempts += 1;
+      throw new Error("summarizer unavailable for the upgrade lane");
+    },
+  });
+  const failingBuilt = failing.built;
+  await startRuntime(failing);
+  await runtimeCommit(failing, { tokens: 88_000, contextWindow: 100_000 });
+  await settle();
+  const failingAged = makeFixture({ ...shape, turns: 24, sessionId: failingBuilt.sessionId });
+  for (const entry of failingAged.entries.slice(failingBuilt.entries.length)) failing.branch.push(entry);
+  failing.messages.length = 0;
+  failing.messages.push(...failingAged.messages);
+  const failedFrom = failing.appended.length;
+  await runtimeCommit(failing, { tokens: 92_000, contextWindow: 100_000, suffix: "second" });
+  assert(attempts > 0, "The failing generator was never called");
+  const failedCommits = contextEvents(failing, failedFrom).filter((record) =>
+    record.kind === "context.commit" && record.deferred === false);
+  const loud = failedCommits.find((record) => record.brief_upgrade_failures > 0);
+  assert(loud, "A generator failure left no trace on any commit record");
+  assert.equal(typeof loud.brief_upgrade_error, "string");
+  assert(loud.brief_upgrade_error.includes("summarizer unavailable"),
+    "The failure record did not carry the generator's own words");
+  assert.equal(loud.brief_upgrades, 0);
+  const failedState = materialized(failing);
+  assert(failedState.folds.some((fold) => context.foldProvenance(fold, failedState).kind === "deterministic"),
+    "A failed upgrade did not leave the deterministic brief in place");
+
+  return {
+    upgradedFolds: carrier.brief_upgrades,
+    perBoundaryCap: context.MAX_BRIEF_UPGRADES_PER_COMMIT,
+    queueCap: context.MAX_BRIEF_UPGRADE_QUEUE,
+    projectionStableBetweenBoundaries: true,
+    suppliedUntouched: true,
+    failureIsLoud: loud.brief_upgrade_failures,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -10177,6 +10357,7 @@ const gates = [
   [103, "Guidance is two booleans, default on", gateGuidanceOption],
   [104, "The slate rides the commit boundary", gateSurfacingDeliveryRidesTheBoundary],
   [106, "The band top commits with no turn ever closed", gateOpenTurnCommits],
+  [107, "Model briefs upgrade on the commit boundary", gateBriefUpgradesRideTheBoundary],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

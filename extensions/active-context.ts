@@ -2,9 +2,11 @@ import {
   denseOwnArrayValues,
   evidenceSha256,
   objectRefKey,
+  sha256Text,
   sha256Value,
   stableStringify,
 } from "./json.ts";
+import type { EvidenceRef } from "./json.ts";
 import {
   bytes,
   clone,
@@ -12,10 +14,12 @@ import {
   ownValue,
   sessionEntryMessages,
   uniqueMessageDigestAnchor,
+  usefulBrief,
 } from "./lib/canonical.ts";
 import {
   activeContextStatus,
   automaticPreparationId,
+  boundedOrientation,
   boundStatusPayload,
   commitPreparedFold,
   descendantIds,
@@ -76,6 +80,7 @@ import {
   makeStateDelta,
   MAX_ACTIVE_FOLD_RECORDS,
   materializeStatePersistence,
+  foldProvenance,
   normalizeFoldsForPersistedRecords,
   normalizeLegacyProvenance,
   protectionSha256,
@@ -105,6 +110,8 @@ import {
   servingBudgetTokens,
   ESTIMATED_BYTES_PER_TOKEN,
   entryTypeNamespace,
+  MAX_BRIEF_UPGRADE_QUEUE,
+  MAX_BRIEF_UPGRADES_PER_COMMIT,
   MAX_FOLD_SPAN_CHARS,
   MAX_PINNED_SHARE,
   MAX_WEDGE_ABSORB_TOKENS,
@@ -126,6 +133,7 @@ import type {
   ActiveContextState,
   ActiveContextThresholds,
   ActiveContextToolAction,
+  BriefProvenance,
   FoldCandidate,
   FoldKind,
   FoldRecordEntry,
@@ -444,6 +452,35 @@ export function registerActiveContext(pi: any, options: {
     automaticFailure: null as AutomaticFailureState | null,
     failedPreparations: new Set<string>(),
     actionQueue: Promise.resolve<unknown>(undefined),
+  };
+
+  /**
+   * THE BRIEF UPGRADE LANE.
+   *
+   * A fold brief is model-written from this campaign forward; the deterministic brief is
+   * what a failure leaves behind. The automatic ladder cannot wait for a generator: the
+   * commit path is synchronous with a measured projection and a fold deferred until a
+   * provider answers is a fold that does not happen. So the ladder commits deterministic,
+   * a generator runs between boundaries, and the brief it writes lands as an UPGRADE
+   * riding the next commit: the same law wedge absorption and the surfacing slate follow,
+   * mutations only inside a rewrite the session already paid for.
+   *
+   * Everything here is process-local. An upgrade lost to a reload is a brief that stays
+   * deterministic, which is exactly the failure the fallback exists for, and the state
+   * wire keeps one shape instead of carrying work in progress.
+   */
+  const upgrades = {
+    /** Folds committed deterministic, holding the exact source their brief will cover. */
+    queue: [] as Array<{ foldId: string; sourceSha256: string; request: Record<string, unknown> }>,
+    /** One generator call in flight at a time, cancel-safe on session change or shutdown. */
+    running: null as { foldId: string; controller: AbortController; promise: Promise<void> } | null,
+    /** Written briefs waiting for a boundary. They never apply anywhere else. */
+    ready: [] as Array<{ foldId: string; sourceSha256: string; brief: string; provenance: BriefProvenance }>,
+    /** A generator that failed a fold does not get it back: one attempt, then deterministic stands. */
+    failed: new Set<string>(),
+    /** Failures since the last commit record carried them, so none of this is silent. */
+    failures: 0,
+    lastError: null as string | null,
   };
 
   // Owns provider receipts, anchors, and usage; providerMeasurementQueue serializes receipt writes.
@@ -838,6 +875,7 @@ export function registerActiveContext(pi: any, options: {
     lifecycle.generation += 1;
     lifecycle.shuttingDown = false;
     cancelPreparation();
+    cancelBriefUpgrades();
     lifecycle.latestSnapshot = null;
     lifecycle.latestSnapshotError = null;
     measurements.latestRatio = null;
@@ -2081,15 +2119,200 @@ export function registerActiveContext(pi: any, options: {
     instrumentation.mutationsSinceHandoff = 0;
   };
 
+  /**
+   * Enqueue the folds this commit created with a deterministic brief.
+   *
+   * The request is built HERE, against the snapshot and the pre-commit state, because
+   * this is the last moment the fold's source is still exact active evidence: after the
+   * commit its span is a placeholder and the orientation either side of it is gone.
+   * These are the bytes `prepareFold` already hashed into the fold's identity, so the
+   * generator briefs the span that was folded and nothing else.
+   *
+   * Leaves only. A consolidation's deterministic brief is derived from its children's
+   * briefs, and those children can be upgraded under it, so a consolidation is re-derived
+   * rather than model-written; sending a model the stale child briefs would brief the
+   * summary instead of the source.
+   */
+  const queueBriefUpgrades = (
+    snapshot: ActiveContextSnapshot,
+    stateBeforeCommit: ActiveContextState,
+    foldIds: readonly string[],
+  ): void => {
+    if (!options.summarizeContextSpan || !persistence.state) return;
+    for (const foldId of foldIds) {
+      if (upgrades.queue.length >= MAX_BRIEF_UPGRADE_QUEUE) return;
+      if (upgrades.failed.has(foldId) || upgrades.running?.foldId === foldId ||
+          upgrades.queue.some((entry) => entry.foldId === foldId) ||
+          upgrades.ready.some((entry) => entry.foldId === foldId)) continue;
+      const fold = persistence.state.folds.find((item) => item.id === foldId);
+      // A supplied brief is agent judgment and outranks the generator; a model brief is
+      // already what this lane exists to produce.
+      if (!fold || foldProvenance(fold, persistence.state).kind !== "deterministic") continue;
+      const refs = fold.parts.every((part) => part.kind === "raw")
+        ? fold.parts.map((part) => (part as { kind: "raw"; ref: EvidenceRef }).ref)
+        : null;
+      if (!refs) continue;
+      try {
+        const sourceText = encodedFoldSource(snapshot, stateBeforeCommit, fold.parts, fold.kind);
+        if (bytes(sourceText) > snapshot.policy.maxSourceChars) continue;
+        const orientation = boundedOrientation(snapshot, refs);
+        upgrades.queue.push({
+          foldId,
+          sourceSha256: fold.sourceSha256,
+          request: {
+            candidateId: fold.id,
+            sourceRefs: clone(refs),
+            sourceText,
+            sourceSha256: sha256Text(sourceText),
+            beforeRefs: clone(orientation.beforeRefs),
+            beforeText: orientation.beforeText,
+            beforeSha256: sha256Text(orientation.beforeText),
+            afterRefs: clone(orientation.afterRefs),
+            afterText: orientation.afterText,
+            afterSha256: sha256Text(orientation.afterText),
+            maxBriefChars: snapshot.policy.maxBriefChars,
+          },
+        });
+      } catch (error) {
+        // Evidence drift between the commit and this read leaves the deterministic brief
+        // standing, and the next commit record reports the attempt rather than hiding it.
+        upgrades.failed.add(foldId);
+        upgrades.failures += 1;
+        upgrades.lastError = boundReceiptText(
+          error instanceof Error ? error.message : String(error), 240, "brief upgrade",
+        );
+      }
+    }
+  };
+
+  /**
+   * One generator call, between boundaries, cancel-safe. It writes nothing durable: a
+   * finished brief waits in `ready` for a commit to carry it, and an aborted or failed
+   * call leaves the fold exactly as it committed.
+   */
+  const startBriefUpgrade = (snapshot: ActiveContextSnapshot, ctx: any): void => {
+    const summarize = options.summarizeContextSpan;
+    if (!summarize || lifecycle.shuttingDown || upgrades.running || !upgrades.queue.length) return;
+    const entry = upgrades.queue.shift()!;
+    const controller = new AbortController();
+    const slot = { foldId: entry.foldId, controller, promise: Promise.resolve() };
+    upgrades.running = slot;
+    const capturedSessionId = snapshot.sessionId;
+    const capturedGeneration = lifecycle.generation;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    slot.promise = (async () => {
+      const timed = new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          controller.abort();
+          reject(new Error(`Brief upgrade exceeded ${snapshot.policy.briefTimeoutMs}ms`));
+        }, snapshot.policy.briefTimeoutMs);
+      });
+      const result = await Promise.race([
+        summarize({ ...entry.request, signal: controller.signal }, ctx),
+        timed,
+      ]);
+      const brief = typeof result?.brief === "string" ? result.brief.trim() : "";
+      const digest = result?.launchContractDigest;
+      // The same contract `prepareFold` holds a generated brief to: an upgrade that
+      // skipped it would let attribution the fold path refuses in through a side door.
+      if (!usefulBrief(brief, snapshot.policy.maxBriefChars, snapshot.toolName) ||
+          typeof result?.provider !== "string" || !result.provider ||
+          typeof result?.model !== "string" || !result.model ||
+          typeof result?.effort !== "string" || !result.effort || result.toolCalls !== 0 ||
+          (digest !== undefined && (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)))) {
+        throw new Error("Model context brief attribution, zero-tool, digest, or usefulness contract drift");
+      }
+      if (controller.signal.aborted ||
+          !sessionIdentityStillValid(ctx, capturedSessionId, capturedGeneration)) return;
+      upgrades.ready.push({
+        foldId: entry.foldId,
+        sourceSha256: entry.sourceSha256,
+        brief,
+        provenance: {
+          kind: "model",
+          provider: result.provider,
+          model: result.model,
+          effort: result.effort,
+          ...(typeof digest === "string" ? { launchContractDigest: digest } : {}),
+        },
+      });
+    })().catch((error) => {
+      if (controller.signal.aborted) return;
+      // LOUD, and once. The fold keeps its deterministic brief, the failure is counted
+      // onto the next commit record, and the same fold is never sent again: a generator
+      // that fails on a span fails on it again, and a retry loop would spend the
+      // session's provider calls proving that.
+      upgrades.failed.add(entry.foldId);
+      upgrades.failures += 1;
+      upgrades.lastError = boundReceiptText(
+        error instanceof Error ? error.message : String(error), 240, "brief upgrade",
+      );
+    }).finally(() => {
+      clearTimeout(timeout);
+      if (upgrades.running === slot) upgrades.running = null;
+    });
+  };
+
+  const cancelBriefUpgrades = (): void => {
+    upgrades.running?.controller.abort();
+    upgrades.running = null;
+    upgrades.queue = [];
+    upgrades.ready = [];
+  };
+
+  /**
+   * Apply finished upgrades INSIDE the commit's own mutation.
+   *
+   * Called between `commitPendingMarks` and the byte accounting, so an upgraded brief is
+   * part of what this commit is measured to have done rather than a rewrite nobody
+   * charged for. Nothing else may call this: an upgrade that finishes between boundaries
+   * waits, however long the wait is.
+   *
+   * Identity is revalidated the way `preparedFoldError` revalidates a prepared fold. A
+   * fold that was expanded, reclaimed, re-briefed by the agent, or rebuilt over a
+   * different span is a different object than the one the generator read, and its upgrade
+   * is DROPPED rather than deferred.
+   *
+   * It lands in the brief OVERRIDE map, the same channel the agent's own `rebrief` uses,
+   * and carries its generator beside the text. A fold record is content-addressed and
+   * immutable: rewriting one in place reports a conflicting durable fold at the next
+   * persist and suspends automatic management, which is precisely why the override map
+   * exists.
+   */
+  const applyBriefUpgrades = (): string[] => {
+    if (!upgrades.ready.length || !persistence.state) return [];
+    const applied: string[] = [];
+    const held: typeof upgrades.ready = [];
+    for (const entry of upgrades.ready) {
+      if (applied.length >= MAX_BRIEF_UPGRADES_PER_COMMIT) { held.push(entry); continue; }
+      const state = persistence.state;
+      const fold = state.folds.find((item) => item.id === entry.foldId);
+      if (!fold || fold.sourceSha256 !== entry.sourceSha256 ||
+          foldProvenance(fold, state).kind !== "deterministic" ||
+          state.expanded.includes(fold.id) || state.briefs?.[fold.id] !== undefined) continue;
+      persistence.state = {
+        ...state,
+        briefs: {
+          ...(state.briefs ?? {}),
+          [fold.id]: { brief: entry.brief, provenance: clone(entry.provenance) },
+        },
+      };
+      applied.push(fold.id);
+    }
+    upgrades.ready = held;
+    return applied;
+  };
+
   const commitDeterministicCandidate = async (
     snapshot: ActiveContextSnapshot,
     candidate: FoldCandidate,
     brief: string,
   ): Promise<string> => {
+    const stateBeforeCommit = persistence.state!;
     const preparedFold = await prepareFold({
       candidate,
       snapshot,
-      state: persistence.state!,
+      state: stateBeforeCommit,
       generation: lifecycle.generation,
       brief,
       briefProvenance: "deterministic",
@@ -2097,9 +2320,10 @@ export function registerActiveContext(pi: any, options: {
     persistence.state = commitPreparedFold({
       prepared: preparedFold,
       snapshot,
-      state: persistence.state!,
+      state: stateBeforeCommit,
       generation: lifecycle.generation,
     });
+    queueBriefUpgrades(snapshot, stateBeforeCommit, [preparedFold.id]);
     return preparedFold.id;
   };
 
@@ -2430,7 +2654,15 @@ export function registerActiveContext(pi: any, options: {
       guardWaiver,
     });
     persistence.state = result.state;
-    const bytesAfter = bytes(projectActiveContext(snapshot, result.state));
+    // The upgrade wedge: model briefs written since the last boundary replace their
+    // deterministic ones HERE, inside the mutation this commit already pays for, before
+    // anything measures what the commit did.
+    const upgradedFolds = applyBriefUpgrades();
+    const upgradeFailures = upgrades.failures;
+    const upgradeError = upgrades.lastError;
+    upgrades.failures = 0;
+    upgrades.lastError = null;
+    const bytesAfter = bytes(projectActiveContext(snapshot, persistence.state));
     const freedBytes = Math.max(0, bytesBefore - bytesAfter);
     // The cost of the agent's pins, measured at the moment it matters: mass this
     // commit could not touch because protect holds it.
@@ -2466,6 +2698,14 @@ export function registerActiveContext(pi: any, options: {
       peek_marks: peekAdded,
       topup_marks: topUpAdded,
       absorbed_wedges: wedges.absorbed.length,
+      // The upgrade is a mutation of a fold whose `context.fold` record was written at
+      // creation, so the stream would otherwise show a brief that silently changed. The
+      // count, the ids, and the failures ride the boundary that carried them.
+      brief_upgrades: upgradedFolds.length,
+      brief_upgrade_ids: upgradedFolds.join(","),
+      brief_upgrade_failures: upgradeFailures,
+      brief_upgrade_error: upgradeError,
+      brief_upgrades_waiting: upgrades.ready.length + upgrades.queue.length,
       freed_bytes: freedBytes,
       freed_tokens: estimatedTokens(freedBytes),
       rewrite_tokens: accounting.rewriteTokens,
@@ -2565,9 +2805,12 @@ export function registerActiveContext(pi: any, options: {
         peek_of: peekedSources ? peekedSources.join(",") : null,
         source_chars: fold?.sourceChars ?? 0,
         placeholder_chars: fold?.placeholderChars ?? 0,
-        brief_provenance: fold ? normalizeLegacyProvenance(fold.provenance).kind : null,
+        brief_provenance: fold ? foldProvenance(fold, persistence.state).kind : null,
       });
     }
+    // Queued AFTER the applications above, so no fold can be committed and upgraded on
+    // one boundary: the generator has not run yet, and the wait is the mechanism.
+    queueBriefUpgrades(snapshot, state, result.applied.map((applied) => applied.foldId));
     for (const wedge of wedges.absorbed) {
       emit("context.absorb", {
         commit_seq: commitEvent.seq,
@@ -3295,8 +3538,14 @@ export function registerActiveContext(pi: any, options: {
       waiverRatio?: number;
     } = {},
   ): Promise<Record<string, unknown> | null> => {
-    const operation = ladder.actionQueue.then(() =>
-      runAutomaticRungTransaction(snapshot, ratio, ctx, phase, rungOptions));
+    const operation = ladder.actionQueue.then(async () => {
+      const action = await runAutomaticRungTransaction(snapshot, ratio, ctx, phase, rungOptions);
+      // The one place the generator is started: after the transaction, so the call sits
+      // BETWEEN boundaries. A fold queued by the commit this pass just made is briefed
+      // now and lands on the next commit, which is the whole shape of the lane.
+      startBriefUpgrade(snapshot, ctx);
+      return action;
+    });
     ladder.actionQueue = operation.catch(() => undefined);
     return operation;
   };
@@ -3406,6 +3655,7 @@ export function registerActiveContext(pi: any, options: {
   const attributionChanged = async (_event: unknown, ctx: any): Promise<void> => {
     lifecycle.generation += 1;
     cancelPreparation();
+    cancelBriefUpgrades();
     if (persistence.state?.prepared) persistence.state = clearPrepared(persistence.state);
     measurements.latestRatio = null;
     measurements.lastProviderMeasurement = null;
@@ -4892,6 +5142,7 @@ export function registerActiveContext(pi: any, options: {
     lifecycle.generation += 1;
     lifecycle.shuttingDown = true;
     cancelPreparation();
+    cancelBriefUpgrades();
     persistence.state = null;
     persistence.persisted = null;
     lifecycle.latestSnapshot = null;

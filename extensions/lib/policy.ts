@@ -570,6 +570,23 @@ export const MAX_FOLD_SPAN_CHARS = 16_000;
  * every absorption is receipted, and a wrong grouping is one `reboundary` away.
  */
 export const MAX_WEDGE_ABSORB_TOKENS = 256;
+/**
+ * How many model-written briefs may replace deterministic ones inside ONE commit.
+ *
+ * A brief upgrade rewrites bytes at a fold that is already in the projection, so its
+ * divergence sits EARLIER in the prefix than the spans the same commit is folding: the
+ * cache break the commit already pays for gets deeper, it does not get cheaper. Two per
+ * boundary keeps that deepening bounded and still drains a queue that only fills at one
+ * generator call at a time, and an upgrade over the cap waits for the next boundary
+ * rather than opening a mutation point of its own.
+ */
+export const MAX_BRIEF_UPGRADES_PER_COMMIT = 2;
+/**
+ * How many folds may be waiting on a generator at once. The queue holds each fold's
+ * exact source, so it is a memory bound as much as a work bound, and a fold dropped for
+ * a full queue simply keeps the deterministic brief it committed with.
+ */
+export const MAX_BRIEF_UPGRADE_QUEUE = 4;
 /** What a peek returns without an explicit widening argument. */
 export const PEEK_DEFAULT_MAX_BYTES = 16_000;
 /** Head share of a truncated peek; the remainder is the tail, where conclusions live. */
@@ -656,6 +673,12 @@ export type BriefProvenance =
       effort: string;
       launchContractDigest?: string;
     };
+
+/**
+ * A brief written after its fold committed: the agent's bare correction, or a model
+ * brief carrying the generator that wrote it.
+ */
+export type BriefOverride = string | { brief: string; provenance: BriefProvenance };
 
 export interface ActiveFold {
   id: string;
@@ -752,12 +775,12 @@ export interface ActiveContextState {
   /** Retired with peek reclamation; carried only so pre-cut state still parses. */
   pinnedPeeks?: never;
   /**
-   * Agent-corrected fold briefs, by fold id. A fold RECORD is content-addressed and
+   * Corrected and upgraded fold briefs, by fold id. A fold RECORD is content-addressed and
    * immutable -- rewriting its brief in place would report a conflicting durable fold
    * and suspend automatic management -- so a re-brief is durable state beside the
    * record rather than a mutation of it. Omitted when empty.
    */
-  briefs?: Record<string, string>;
+  briefs?: Record<string, BriefOverride>;
   prepared?: PreparedFold;
   advisory?: {
     highWater: number;
@@ -812,7 +835,7 @@ export interface ActiveContextCheckpointV2 {
   leases?: Record<string, number>;
   surfacing?: SurfacingRecord[];
   pendingMarks?: PendingMark[];
-  briefs?: Record<string, string>;
+  briefs?: Record<string, BriefOverride>;
   advisory?: NonNullable<ActiveContextState["advisory"]>;
   rider?: NonNullable<ActiveContextState["rider"]>;
   lastCall?: NonNullable<ActiveContextState["lastCall"]>;
@@ -836,7 +859,7 @@ export interface ActiveContextDeltaV2 {
   leases?: Record<string, number>;
   surfacing?: SurfacingRecord[];
   pendingMarks?: PendingMark[];
-  briefs?: Record<string, string>;
+  briefs?: Record<string, BriefOverride>;
   advisory?: NonNullable<ActiveContextState["advisory"]>;
   rider?: NonNullable<ActiveContextState["rider"]>;
   lastCall?: NonNullable<ActiveContextState["lastCall"]>;
