@@ -2369,6 +2369,92 @@ export function surfacingLens(events) {
   };
 }
 
+/**
+ * THE ROLLBACK LENS. One row per overflow episode, so recovery frequency and recovery
+ * COST read per arm rather than being reconstructed by hand after the run.
+ *
+ * Two records make one episode and they are joined by sequence, never by order or clock:
+ * `context.rollback` is what left the branch, and `context.recovery` is what the retried
+ * pass folded to make the shorter window fit. An episode with a rollback and no recovery
+ * is not a bookkeeping gap: it is a retried request that never reached the projection
+ * budget, and it is reported as such because that is the shape a lagging-fence abort
+ * leaves behind.
+ */
+export function rollbackLens(events) {
+  const rollbacks = events.filter((event) => event.kind === "context.rollback");
+  const recoveries = events.filter((event) => event.kind === "context.recovery");
+  const recoveryBySeq = new Map();
+  for (const recovery of recoveries) {
+    if (Number.isFinite(recovery.rollback_seq)) recoveryBySeq.set(recovery.rollback_seq, recovery);
+  }
+  const number = (value) => (Number.isFinite(value) ? value : 0);
+  const table = rollbacks.map((rollback) => {
+    const recovery = recoveryBySeq.get(rollback.seq) ?? null;
+    return {
+      seq: rollback.seq,
+      ordinal: Number.isFinite(rollback.ordinal) ? rollback.ordinal : null,
+      trigger: typeof rollback.trigger === "string" ? rollback.trigger : "unknown",
+      armed: rollback.armed === true,
+      disarmReason: typeof rollback.disarm_reason === "string" ? rollback.disarm_reason : null,
+      entriesAbandoned: number(rollback.entries_abandoned),
+      tokensRolledBack: number(rollback.tokens_rolled_back),
+      occupancyTokensBefore: Number.isFinite(rollback.occupancy_tokens_before)
+        ? rollback.occupancy_tokens_before : null,
+      noticeChars: number(rollback.notice_chars),
+      replayed: rollback.replayed === true,
+      replaySkipReason: typeof rollback.replay_skip_reason === "string" ? rollback.replay_skip_reason : null,
+      attemptOrdinal: Number.isFinite(rollback.attempt_ordinal) ? rollback.attempt_ordinal : null,
+      // The fold-side half of the same episode.
+      recoverySeq: recovery ? recovery.seq : null,
+      recoveryAttempts: recovery ? number(recovery.attempts) : null,
+      recoveredTokensBefore: recovery ? number(recovery.tokens_before) : null,
+      recoveredTokensAfter: recovery ? number(recovery.tokens_after) : null,
+      recovered: recovery ? recovery.recovered === true : null,
+    };
+  });
+  const armed = table.filter((row) => row.armed);
+  const replayed = armed.filter((row) => row.replayed);
+  const joined = table.filter((row) => row.recoverySeq !== null);
+  const skipReasons = {};
+  for (const row of table) {
+    if (row.replayed) continue;
+    const reason = row.replaySkipReason ?? (row.armed ? "unstated" : "lane-disarmed");
+    skipReasons[reason] = (skipReasons[reason] ?? 0) + 1;
+  }
+  return {
+    rollbacks: table.length,
+    armed: armed.length,
+    disarmed: table.length - armed.length,
+    replayed: replayed.length,
+    replayedShare: armed.length > 0 ? replayed.length / armed.length : null,
+    replaySkipReasons: skipReasons,
+    entriesAbandoned: table.reduce((total, row) => total + row.entriesAbandoned, 0),
+    tokensRolledBack: table.reduce((total, row) => total + row.tokensRolledBack, 0),
+    noticeChars: replayed.reduce((total, row) => total + row.noticeChars, 0),
+    byTrigger: table.reduce((result, row) => {
+      result[row.trigger] = (result[row.trigger] ?? 0) + 1;
+      return result;
+    }, {}),
+    join: {
+      joinKey: "rollback_seq",
+      recoveryRecords: recoveries.length,
+      joinedEpisodes: joined.length,
+      rollbacksWithoutRecovery: table.length - joined.length,
+      recoveriesWithoutRollback: recoveries.filter((recovery) =>
+        !Number.isFinite(recovery.rollback_seq)).length,
+    },
+    // Recovery COST, which is what the frequency number is only half of.
+    foldedTokensToRecover: joined.reduce((total, row) =>
+      total + Math.max(0, row.recoveredTokensBefore - row.recoveredTokensAfter), 0),
+    unrecovered: joined.filter((row) => row.recovered === false).length,
+    table,
+    definition: "one row per context.rollback, joined to the context.recovery carrying the same " +
+      "rollback_seq; noticeChars counts only replayed episodes because a skipped replay sends " +
+      "its notice to the user rather than into the window, and rollbacksWithoutRecovery counts " +
+      "retried requests that never reached the projection budget",
+  };
+}
+
 export function contextEventMetrics(entries) {
   assertExperiment(Array.isArray(entries), "Context event metrics require session entries");
   const events = entries
@@ -2547,6 +2633,7 @@ export function contextEventMetrics(entries) {
     },
     commits: commits.filter((event) => event.deferred !== true).length,
     commitsDeferred: commits.filter((event) => event.deferred === true).length,
+    rollback: rollbackLens(events),
     folds: byKind["context.fold"] ?? 0,
     toolUsage: {
       attempts: attempts.length,

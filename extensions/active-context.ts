@@ -10,6 +10,7 @@ import {
   clone,
   emptyActiveContextState,
   ownValue,
+  sessionEntryMessages,
   uniqueMessageDigestAnchor,
 } from "./lib/canonical.ts";
 import {
@@ -210,9 +211,16 @@ import type {
 import { buildActiveContextCommands, buildActiveContextTool } from "./lib/tool-surface.ts";
 import {
   currentTurnRefKeys,
-  deepenedFenceSnapshot,
   mapActiveContext,
 } from "./lib/transcript.ts";
+import {
+  findOverflowErrorEntry,
+  overflowEventShape,
+  preStripHolds,
+  probeRollbackSurfaces,
+  rollbackNoticeText,
+  unansweredToolCalls,
+} from "./lib/rollback.ts";
 
 // Test seam only; the package API is registerPiFold because package.json exports block deep imports.
 export * from "./lib/canonical.ts";
@@ -222,6 +230,7 @@ export * from "./lib/instrumentation.ts";
 export * from "./lib/measurement.ts";
 export * from "./lib/persistence.ts";
 export * from "./lib/policy.ts";
+export * from "./lib/rollback.ts";
 export * from "./lib/scheduling.ts";
 export * from "./lib/selection.ts";
 export * from "./lib/surfacing.ts";
@@ -550,6 +559,29 @@ export function registerActiveContext(pi: any, options: {
     pendingRejection: null as { status: number; ordinal: number } | null,
     lastRecovery: null as Record<string, unknown> | null,
     instrumentationQueue: Promise.resolve<void>(undefined),
+  };
+
+  /**
+   * The tree-rollback lane.
+   *
+   * Armed once per session against the pi surfaces it calls, because every one of them
+   * is an internal the extension contract does not promise. Disarmed, the lane is OFF
+   * and says so on the record: an overflow still emits `context.rollback` with
+   * `armed: false` and the reason, the user is notified, and the session behaves
+   * exactly as it did before this build -- the projection-budget fence aborts an
+   * over-budget request rather than half-performing a recovery.
+   */
+  const rollback = {
+    probes: null as ReturnType<typeof probeRollbackSurfaces> | null,
+    armed: false,
+    /** pi's own overflow classifier, resolved from the host; null when unreachable. */
+    classifier: null as ((message: unknown, contextWindow: number) => boolean) | null,
+    classifierSource: null as string | null,
+    /** Ordinals of episodes handled, so the one-shot and the ledger agree. */
+    attempts: 0,
+    last: null as Record<string, unknown> | null,
+    /** An overflow seen at message_end and not yet claimed by the compaction event. */
+    pendingOverflow: null as { at: number; entryId: string | null } | null,
   };
 
   // Owns advisory arming and hard-fence delivery; durable effects use persistenceQueue.
@@ -1654,6 +1686,10 @@ export function registerActiveContext(pi: any, options: {
         budget_tokens: measured.budgetTokens,
         margin_tokens: measured.marginTokens,
         recovered: !measured.over,
+        // The join. `context.rollback` records what left the branch; this records what
+        // the retried pass folded to make the shorter window fit, and the two are one
+        // episode. Null when a rejection was recorded without a tree rollback.
+        rollback_seq: typeof rollback.last?.seq === "number" ? rollback.last.seq : null,
       });
       const overflowBefore = projectedTokenEstimate(projected);
       deliverReceipt(contextReceipt({
@@ -2087,43 +2123,6 @@ export function registerActiveContext(pi: any, options: {
   };
 
   /**
-   * A snapshot whose FRESH tail is narrowed.
-   *
-   * Raising the top-up target does nothing once the eligible mass is exhausted, and at
-   * high occupancy that is exactly the state: measured 2026-08-06 (rep13), the big
-   * stale mass was already folded and what remained was the fresh tail and the newest
-   * payloads, so six commits of two to four folds carried the window from 340k to 370k
-   * and into a provider rejection. Depth therefore means reaching into the fresh tail,
-   * not asking harder for evidence that is not there.
-   *
-   * The newest complete turn stays protected and so does everything the current-turn
-   * guard covers: this narrows freshness, it does not abolish it.
-   *
-   * THE MIDDLE OPENS HERE TOO, and that half is a fence-only rule.
-   *
-   * The stale zone is `staleTail` of the serving BUDGET, and a projection at the fence
-   * is by definition larger than the budget. So the oldest staleTail-of-budget bytes
-   * cover a shrinking fraction of what is actually in the window, and the middle -- the
-   * region automation may never touch -- swallows the remainder and keeps growing.
-   * Measured on the 18,000-token fixture: the projection climbed 132,906 to 200,299
-   * chars over three passes while every fence pass aborted and reclaimed nothing,
-   * because the mass it had to reach sat in a middle it was forbidden to enter.
-   *
-   * The middle is an ECONOMY region: it exists so automation does not fold material the
-   * agent may still be curating, which is a statement about what is worth doing. A
-   * request whose projection exceeds the provider input budget is rejected outright, so
-   * recovery must produce a window that fits, and at the fence economy stops outranking
-   * transmissibility -- the same reasoning that already lets the fence waive the
-   * current-turn guard. So the deepened snapshot extends the stale zone to
-   * everything outside the narrowed fresh tail. Pins are untouched: they are a promise,
-   * not an economy.
-   */
-  const DEEPENED_FRESH_TAIL_SHARE = 0.25;
-
-  const deepenedFreshnessSnapshot = (snapshot: ActiveContextSnapshot): ActiveContextSnapshot =>
-    deepenedFenceSnapshot(snapshot, snapshot.thresholds.freshTail * DEEPENED_FRESH_TAIL_SHARE);
-
-  /**
    * What the gated round did, measured against the arming snapshot. Pins and unpins
    * are read from the stream itself (context.protect records after the exposure); the
    * call and mark deltas are clamped at zero because contextCalls is process-local and
@@ -2175,23 +2174,23 @@ export function registerActiveContext(pi: any, options: {
     let state = persistence.state!;
     let peekAdded = 0;
     let topUpAdded = 0;
-    let deepened = false;
-    let deepenedMarks = 0;
-    let preDeepenShare: number | null = null;
-    // The snapshot the commit adjudicates against: the deepened one narrows freshness
-    // so the marks the deep top-up just made are not refused as fresh.
-    let commitSnapshot = snapshot;
     for (const mark of ephemeralPeekMarks({ snapshot, state, ordinal })) {
       const addition = addPendingMark(state, mark);
       if (addition.added) { state = addition.state; peekAdded += 1; }
     }
     const guarded = currentTurnRefKeys(snapshot);
-    // At the fence everything unpinned is fair game, INCLUDING the top-up's reach: a
-    // session whose only foldable evidence is the open excursion has nothing else to
-    // propose, and excluding it there leaves the commit with nothing to apply at the
-    // exact moment reduction is the only thing keeping the request sendable.
-    const fenceLevel = typeof waiverRatio === "number" && Number.isFinite(waiverRatio) &&
-      waiverRatio >= hardFenceRatio(snapshot);
+    // THE ZONE LAW IS UNCONDITIONAL.
+    //
+    // There was a fence-only snapshot here: at high occupancy it narrowed the fresh
+    // tail to a quarter and extended the stale zone over the middle, so a reduction
+    // that had to make a rejected request sendable had mass to reach. That existed
+    // because the runtime had exactly one answer to a provider rejection, folding
+    // harder, and folding harder inside three zones runs out of legal material. The
+    // rollback lane is the answer now: an overflow rolls the leaf back past the
+    // request that failed and the ordinary commit runs on the shorter window. So the
+    // zones hold in EVERY snapshot at every occupancy -- the fresh tail never folds,
+    // the middle is agent judgment only, pins are exempt -- and there is one set of
+    // rules to reason about instead of two.
     // The thermostat. Firing at the trigger line and folding down to the target line is
     // what makes event SPACING structural rather than hoped for.
     const capacity = servingCapacity(snapshot.contextWindow);
@@ -2250,41 +2249,37 @@ export function registerActiveContext(pi: any, options: {
         snapshot,
         state,
         ordinal,
-        excludeRefKeys: fenceLevel ? new Set<string>() : guarded,
+        excludeRefKeys: guarded,
         eligibleOnly: true,
-        // The fence tops up until there is nothing left to propose: a reduction that
-        // stops at the ordinary target can leave the request still untransmittable.
-        targetShare: fenceLevel ? 1 : freeingTarget,
+        targetShare: freeingTarget,
       })) {
         const addition = addPendingMark(state, mark);
         if (addition.added) { state = addition.state; topUpAdded += 1; }
       }
-      // High-occupancy depth. Near the top of the window a commit that frees less than
-      // one turn of inflow does not reduce anything: it pays a full prefix rewrite,
-      // gives back less than the next stage adds, and the window ratchets UP through
-      // commit after commit. Measured 2026-08-06 (rep13): once the big stale mass was
-      // folded, six commits of two to four folds each carried the window from 340k to
-      // 370k and into a provider rejection, with the backstop firing the whole way.
-      // So a commit at or above the backstop that has not reached one inflow step
-      // reaches further, into everything eligible, instead of billing a rewrite for
-      // crumbs.
-      preDeepenShare = markAccounting(snapshot, state).eligibleFreedBudgetShare;
-      // Deepen whenever the ordinary reach fell short of the thermostat's target too:
-      // an event that does not reach the lower line is an event that re-fires soon.
-      const shallow = preDeepenShare < Math.max(commitDepthFloorShare(snapshot), freeingTarget);
-      if (fenceLevel || (shallow && atOrAboveBackstop(snapshot, waiverRatio))) {
-        deepened = true;
-        commitSnapshot = deepenedFreshnessSnapshot(snapshot);
+      // DEPTH, inside the zones.
+      //
+      // Near the top of the window a commit that frees less than one turn of inflow
+      // does not reduce anything: it pays a full prefix rewrite, gives back less than
+      // the next stage adds, and the window ratchets UP through commit after commit.
+      // Measured 2026-08-06 (rep13): once the big stale mass was folded, six commits of
+      // two to four folds each carried the window from 340k to 370k and into a provider
+      // rejection, with the backstop firing the whole way. So a commit at or above the
+      // backstop that has not reached one inflow step tops up against everything
+      // ELIGIBLE instead of billing a rewrite for crumbs. Eligible is the operative
+      // word: this reaches harder inside the stale zone, and never outside it.
+      const reachedShare = markAccounting(snapshot, state).eligibleFreedBudgetShare;
+      const shallow = reachedShare < Math.max(commitDepthFloorShare(snapshot), freeingTarget);
+      if (shallow && atOrAboveBackstop(snapshot, waiverRatio)) {
         for (const mark of topUpMarks({
-          snapshot: commitSnapshot,
+          snapshot,
           state,
           ordinal,
-          excludeRefKeys: fenceLevel ? new Set<string>() : guarded,
+          excludeRefKeys: guarded,
           eligibleOnly: true,
           targetShare: 1,
         })) {
           const addition = addPendingMark(state, mark);
-          if (addition.added) { state = addition.state; topUpAdded += 1; deepenedMarks += 1; }
+          if (addition.added) { state = addition.state; topUpAdded += 1; }
         }
       }
     }
@@ -2295,7 +2290,7 @@ export function registerActiveContext(pi: any, options: {
       snapshot,
       state,
       charsPerToken: projectionCharsPerToken(),
-      excludeRefKeys: fenceLevel ? new Set<string>() : guarded,
+      excludeRefKeys: guarded,
     });
     state = wedges.state;
     const accounting = markAccounting(snapshot, state);
@@ -2325,27 +2320,23 @@ export function registerActiveContext(pi: any, options: {
     const bytesBefore = bytes(projectActiveContext(snapshot, state));
     // The guard protects an in-flight excursion, never at the cost of the session's
     // ability to send a request at all: above the pressure backstop the oldest guarded
-    // marks are released, and at the fence all of them are.
+    // marks are released. The guard is a protection with a WAIVER, which is why it
+    // survived the fence-snapshot deletion: one protection, one owner, one waiver.
     const guardWaiver = guardWaiverCount({
       snapshot,
       ratio: waiverRatio,
       guardedMarks: pendingMarks(state).filter((mark) =>
         markTouchesCurrentTurn(state, mark, guarded)).length,
-      // Against commitSnapshot, NOT snapshot. The starvation test decides whether the
-      // guard may be waived, so it has to ask the same question the commit will: does
-      // this epoch have work that does not touch the open turn? A DEEPENED epoch tops
-      // up marks that the un-deepened freshness policy still calls protected, so
-      // weighing them under the shallow snapshot reported zero applicable marks while
-      // the commit went on to apply two. The waiver then fired on a false starvation
-      // reading and released eight open-turn marks, six of which folded evidence the
-      // turn was still using. Two snapshots, two answers, and the one that decides the
-      // commit was not the one being asked.
+      // The starvation test asks the same question the commit will, against the same
+      // snapshot the commit adjudicates against: does this epoch have work that does
+      // not touch the open turn? Two snapshots gave two answers, and the one that
+      // decided the commit was not the one being asked. There is one snapshot now.
       otherApplicableMarks: pendingMarks(state).filter((mark) =>
         !markTouchesCurrentTurn(state, mark, guarded) &&
-        markEligibility(commitSnapshot, state, mark) === "eligible").length,
+        markEligibility(snapshot, state, mark) === "eligible").length,
     });
     const result = await commitPendingMarks({
-      snapshot: commitSnapshot,
+      snapshot,
       state,
       generation: lifecycle.generation,
       retainIneligible: true,
@@ -2388,8 +2379,6 @@ export function registerActiveContext(pi: any, options: {
       ladder_marks: accounting.ladderMarks,
       peek_marks: peekAdded,
       topup_marks: topUpAdded,
-      deepened: deepened,
-      deepened_marks: deepenedMarks,
       absorbed_wedges: wedges.absorbed.length,
       freed_bytes: freedBytes,
       freed_tokens: estimatedTokens(freedBytes),
@@ -2516,8 +2505,6 @@ export function registerActiveContext(pi: any, options: {
       ladderMarks: accounting.ladderMarks,
       peekMarks: peekAdded,
       topUpMarks: topUpAdded,
-      deepenedTarget: deepened,
-      deepenedMarks,
       absorbedWedges: wedges.absorbed.length,
       absorbed: wedges.absorbed,
       // What the commit actually folded, the way an agent counts it, so the receipt can
@@ -2525,7 +2512,6 @@ export function registerActiveContext(pi: any, options: {
       foldedSpans,
       foldedToolResults,
       occupancyTokensBefore: usedTokens,
-      preDeepenFreedShare: preDeepenShare,
       depthFloorShare: commitDepthFloorShare(snapshot),
       reclaimFloorShare: COMMIT_RECLAIM_FLOOR_SHARE,
       guardWaived: result.waived.length > 0,
@@ -2658,10 +2644,7 @@ export function registerActiveContext(pi: any, options: {
       absorbedWedges: Number(epoch?.absorbedWedges ?? 0),
       recovered: curation.recoveryAttempts > 0,
       protectedBytes: Number(epoch?.protectedStaleBytes ?? 0),
-      note: epoch && Number(epoch.deepenedMarks ?? 0) > 0
-        ? `The commit reached into the fresh tail for ${epoch.deepenedMarks} further span(s), because a ` +
-          "shallower commit would have freed less than one turn of inflow."
-        : null,
+      note: null,
     }));
   };
 
@@ -3289,6 +3272,7 @@ export function registerActiveContext(pi: any, options: {
   pi.on("session_start", async (_event: unknown, ctx: any) => {
     await safeLifecycleLoad(ctx, "session-start");
     recordResolvedCapacity(ctx);
+    await armRollbackLane(ctx);
   });
   pi.on("session_tree", async (_event: unknown, ctx: any) => { await safeLifecycleLoad(ctx, "session-tree"); });
   pi.on("session_compact", async (event: Record<string, unknown>, ctx: any) => {
@@ -3550,6 +3534,7 @@ export function registerActiveContext(pi: any, options: {
     beginMutationPass();
     try {
       const message = ownValue(event, "message");
+      noteOverflowAtMessageEnd(message, ctx);
       instrumentation.requests += 1;
       const observation = observeCacheUsage(instrumentation.ledger, {
         usage: ownValue(message, "usage"),
@@ -3594,19 +3579,15 @@ export function registerActiveContext(pi: any, options: {
       try { updateStatus(ctx); } catch { /* The provider loop must keep running. */ }
     }
   });
-  /**
-   * A provider rejection is ground truth that the last request did not fit, and it
-   * mutates nothing durable: no assistant message lands, and the projection is rebuilt
-   * from the branch on the next request. So it is recorded, not fatal -- the next
-   * context pass folds at fence pressure and rebuilds the request rather than dying.
-   * A 429 is a rate limit, not an overflow, and is deliberately not recovered from.
+  /*
+   * There was an `after_provider_response` handler here that treated `status >= 400` as
+   * the rejection signal. It could never fire on the case it was written for. Every
+   * provider adapter calls `onResponse` exactly once and only AFTER the request promise
+   * resolves, so a 4xx rejects the promise and control never reaches that call at all
+   * (verified across all seven adapters in pi-ai 0.83.0). `pendingRejection` was
+   * therefore never set in production and the recovery branch of the projection budget
+   * never ran. It is set by the rollback lane now, from an event that does fire.
    */
-  pi.on("after_provider_response", (event: Record<string, unknown>) => {
-    const status = ownValue(event, "status");
-    if (typeof status !== "number" || status < 400 || status === 429) return;
-    if (curation.recoveryAttempts >= OVERFLOW_RECOVERY_MAX_ATTEMPTS) return;
-    curation.pendingRejection = { status, ordinal: currentOrdinal() };
-  });
   pi.on("turn_end", async (_event: unknown, ctx: any) => {
     beginMutationPass();
     if (lifecycle.shuttingDown || !persistence.state || !persistence.persisted) return;
@@ -3638,8 +3619,287 @@ export function registerActiveContext(pi: any, options: {
     return ownValue(preparation, "userWantsSummary") === true ? { cancel: true } : undefined;
   });
 
+  /**
+   * pi's own overflow classifier, borrowed rather than re-implemented.
+   *
+   * `isContextOverflow` owns the provider-message patterns AND the silent cases (usage
+   * past the window with a clean stop, the truncating `length` stop). Re-stating that
+   * pattern set here would drift on the first provider that reworded its 400. The
+   * bare specifier is tried first, for a deployment where pi-ai is hoisted; the second
+   * form reaches pi's own nested copy, which is where a default install puts it.
+   */
+  const resolveOverflowClassifier = async (): Promise<void> => {
+    if (rollback.classifier || rollback.classifierSource === "unresolved") return;
+    const host = "@earendil-works/pi-coding-agent";
+    const marker = `/${host}/`;
+    const specifiers = ["@earendil-works/pi-ai/compat"];
+    try {
+      const entry = import.meta.resolve(host);
+      const at = entry.lastIndexOf(marker);
+      if (at >= 0) {
+        specifiers.push(`${entry.slice(0, at + marker.length)}node_modules/@earendil-works/pi-ai/dist/compat.js`);
+      }
+    } catch { /* An unresolvable host is the same answer as an unresolvable classifier. */ }
+    for (const specifier of specifiers) {
+      try {
+        const module = await import(specifier) as Record<string, unknown>;
+        if (typeof module.isContextOverflow === "function") {
+          rollback.classifier = module.isContextOverflow as (message: unknown, contextWindow: number) => boolean;
+          rollback.classifierSource = specifier;
+          return;
+        }
+      } catch { /* Try the next form; the last failure is the answer. */ }
+    }
+    rollback.classifierSource = "unresolved";
+  };
+
+  const armRollbackLane = async (ctx: any): Promise<void> => {
+    const probes = probeRollbackSurfaces(ctx?.sessionManager);
+    rollback.probes = probes;
+    rollback.armed = probes.armed;
+    await resolveOverflowClassifier();
+    if (!probes.armed) {
+      safeNotify(
+        ctx,
+        `${brandNoun} overflow rollback is DISARMED for this session (${probes.failures.join("; ")}). ` +
+        "An input-overflow rejection will abort the request instead of rolling the session back.",
+        "warning",
+      );
+    }
+  };
+
+  /**
+   * The disarmed answer, and the only one: say so on the record and leave the session
+   * behaving exactly as it did before the lane existed.
+   */
+  const refuseRollback = (reason: string, trigger: string, ctx: any): void => {
+    emit("context.rollback", {
+      trigger,
+      armed: false,
+      disarm_reason: reason,
+      error_entry_id: null,
+      old_leaf_id: null,
+      new_leaf_id: null,
+      entries_abandoned: 0,
+      occupancy_tokens_before: measurements.lastProviderMeasurement?.tokens ?? null,
+      tokens_rolled_back: 0,
+      replayed: false,
+      replay_skip_reason: "lane-disarmed",
+      notice_chars: 0,
+      attempt_ordinal: rollback.attempts,
+      probes_passed: rollback.probes ? rollback.probes.failures.length === 0 : false,
+    });
+    safeNotify(
+      ctx,
+      `${brandNoun} could not roll back after a provider input-overflow rejection: ${reason}. ` +
+      "The request was not retried.",
+      "error",
+    );
+  };
+
+  /**
+   * The fallback trigger, and the honest limit of it.
+   *
+   * `session_before_compact` never fires for a deployment that turned auto-compaction
+   * off, so the primary trigger is deaf there. This is the second detector: pi's own
+   * classifier over the assistant message at `message_end`, which is where the error
+   * message first becomes visible. It records the episode and, if no compaction event
+   * claims it, reports it.
+   *
+   * It does NOT roll back, and the reason is mechanical rather than cautious. The
+   * pre-strip this lane depends on happens INSIDE `_checkCompaction`, which is exactly
+   * the code an auto-compaction-disabled deployment never reaches, so on this path
+   * agent state still carries the oversized window plus the error message. A bare
+   * `branch()` there would leave the tree and agent state disagreeing, which is the
+   * failure mode the whole design exists to avoid. Held, and reported as held.
+   */
+  const noteOverflowAtMessageEnd = (message: unknown, ctx: any): void => {
+    if (!rollback.classifier || !message || typeof message !== "object") return;
+    const window = budgetWindowFor(ctx) ?? DEFAULT_CONTEXT_WINDOW;
+    let overflow = false;
+    try { overflow = rollback.classifier(message, window) === true; }
+    catch { return; }
+    if (!overflow) return;
+    rollback.pendingOverflow = { at: currentOrdinal(), entryId: null };
+  };
+
+  /**
+   * An overflow that no compaction event claimed: the auto-compaction-disabled shape.
+   * Loud, terminal, and never silent.
+   */
+  const reportUnclaimedOverflow = (ctx: any): void => {
+    if (!rollback.pendingOverflow) return;
+    rollback.pendingOverflow = null;
+    rollback.attempts += 1;
+    refuseRollback(
+      "the overflow arrived without a compaction event, so pi never stripped the failed message from agent " +
+      "state and a tree rollback would leave the tree and agent state disagreeing (auto-compaction is off)",
+      "message_end",
+      ctx,
+    );
+  };
+
+  /**
+   * ROLLBACK, COMMIT, REPLAY.
+   *
+   * pi has already stripped the trailing error message from agent state by the time
+   * this fires, so agent state IS the rolled-back window and all that remains is to
+   * move the session leaf to match. The label goes on FIRST, because a label appends at
+   * the current leaf and advances it, so applied after the branch it would mark the
+   * surviving path instead of the abandoned one.
+   *
+   * The commit deliberately does NOT happen here. The retried request runs its own
+   * `context` pass, and that pass folds and commits before the payload is built. A
+   * commit here would adjudicate a snapshot taken outside a projection pass and then be
+   * evaluated again by the retry, which is two mutations for one episode.
+   */
+  const rebuiltMessageCount = (manager: Record<string, any>): number | null => {
+    try {
+      const rebuilt = manager.buildSessionContext?.();
+      return Array.isArray(rebuilt?.messages) ? rebuilt.messages.length : null;
+    } catch { return null; }
+  };
+
+  const recoverFromOverflow = (event: Record<string, unknown>, ctx: any): void => {
+    rollback.attempts += 1;
+    rollback.pendingOverflow = null;
+    if (!rollback.armed) {
+      refuseRollback(
+        rollback.probes?.failures.join("; ") ?? "the rollback probes never ran",
+        "session_before_compact",
+        ctx,
+      );
+      return;
+    }
+    const shape = overflowEventShape(event);
+    if (!shape.ok) {
+      refuseRollback(`the overflow event is missing ${shape.missing.join(", ")}`, "session_before_compact", ctx);
+      return;
+    }
+    const branchEntries = ownValue(event, "branchEntries");
+    // Copied, not aliased. `getBranch()` hands back the live array and the branch call
+    // below truncates it in place, so a handler holding the original reference watches
+    // the entries it is still reasoning about disappear underneath it.
+    const entries = Array.isArray(branchEntries) ? [...branchEntries] : [];
+    const errorEntry = findOverflowErrorEntry(entries);
+    if (!errorEntry) {
+      refuseRollback("the rejected assistant entry is not the branch tail", "session_before_compact", ctx);
+      return;
+    }
+    const manager = ctx.sessionManager as Record<string, any>;
+    const oldLeafId = manager.getLeafId();
+    const sessionMessagesBefore = rebuiltMessageCount(manager);
+    const abandoned = entries.slice(errorEntry.index);
+    const rolledBackBytes = bytes(abandoned.flatMap((entry: any) => sessionEntryMessages(entry) ?? []));
+    // Lineage first. The abandoned path stays in the tree, and it says why it was left.
+    try {
+      manager.appendLabelChange(errorEntry.id, `${entryTypePrefix} overflow rollback`);
+    } catch (error) {
+      refuseRollback(`the lineage label failed (${String(error)})`, "session_before_compact", ctx);
+      return;
+    }
+    try {
+      if (errorEntry.parentId === null) manager.resetLeaf();
+      else manager.branch(errorEntry.parentId);
+    } catch (error) {
+      refuseRollback(`the branch failed (${String(error)})`, "session_before_compact", ctx);
+      return;
+    }
+    // The invariant, measured rather than assumed: the rolled-back window has to be
+    // exactly the failed entry shorter, or the retry sends something nobody built.
+    const errorEntryMessages = (sessionEntryMessages(entries[errorEntry.index]) ?? []).length;
+    const sessionMessagesAfter = rebuiltMessageCount(manager);
+    const holds = sessionMessagesBefore === null || sessionMessagesAfter === null ||
+      preStripHolds({ sessionMessagesBefore, sessionMessagesAfter, errorEntryMessages });
+    const unanswered = unansweredToolCalls(entries.slice(0, errorEntry.index));
+    let replaySkipReason: string | null = null;
+    if (!holds) {
+      replaySkipReason = `the rolled-back window came back ${sessionMessagesAfter} messages against the ` +
+        `${(sessionMessagesBefore ?? 0) - errorEntryMessages} the rollback should have left`;
+    } else if (unanswered.length) {
+      replaySkipReason = `the rolled-back tail leaves ${unanswered.length} tool call(s) unanswered, and a user ` +
+        "turn after an unsatisfied tool call is a malformed transcript for every provider";
+    }
+    const occupancyBefore = measurements.lastProviderMeasurement?.tokens ?? null;
+    const notice = rollbackNoticeText({
+      brandNoun,
+      toolName,
+      tokensRolledBack: estimatedTokens(rolledBackBytes),
+      entriesAbandoned: abandoned.length,
+      replayed: replaySkipReason === null,
+      replaySkipReason,
+    });
+    // Exactly ONE steered message. Steering drains one at a time at the top of the
+    // retried loop, so a second would be silently held to a turn that never comes.
+    let replayed = false;
+    if (replaySkipReason === null) {
+      if (typeof pi.sendMessage !== "function") {
+        replaySkipReason = "this pi build exposes no message verb, so the retry cannot be steered";
+      } else {
+        try {
+          pi.sendMessage(
+            { customType: `${entryTypePrefix}-overflow-recovery`, content: notice },
+            { deliverAs: "steer" },
+          );
+          replayed = true;
+        } catch (error) {
+          replaySkipReason = `the recovery notice could not be queued (${String(error)})`;
+        }
+      }
+    }
+    if (!replayed) safeNotify(ctx, notice, "warning");
+    const record = emit("context.rollback", {
+      trigger: "session_before_compact",
+      armed: true,
+      disarm_reason: null,
+      error_entry_id: errorEntry.id,
+      old_leaf_id: typeof oldLeafId === "string" ? oldLeafId : null,
+      new_leaf_id: errorEntry.parentId,
+      entries_abandoned: abandoned.length,
+      occupancy_tokens_before: occupancyBefore,
+      tokens_rolled_back: estimatedTokens(rolledBackBytes),
+      replayed,
+      replay_skip_reason: replaySkipReason,
+      notice_chars: notice.length,
+      attempt_ordinal: rollback.attempts,
+      probes_passed: true,
+    });
+    rollback.last = {
+      seq: record.seq,
+      errorEntryId: errorEntry.id,
+      newLeafId: errorEntry.parentId,
+      entriesAbandoned: abandoned.length,
+      tokensRolledBack: estimatedTokens(rolledBackBytes),
+      replayed,
+      replaySkipReason,
+      noticeChars: notice.length,
+      attemptOrdinal: rollback.attempts,
+    };
+    // The tree moved, so the mapping is rebuilt from it. THEN the fold is armed for the
+    // retried pass, in that order: a reload clears the recovery flags, and arming before
+    // it would hand the retry a cleared one. The guards are waived in that pass because
+    // a request that already did not fit has nothing left to economize.
+    load(ctx, true);
+    curation.pendingRejection = { status: 400, ordinal: currentOrdinal() };
+  };
+
   pi.on("session_before_compact", (event: Record<string, unknown>, ctx: any) => {
     const reason = ownValue(event, "reason");
+    // The overflow reason is a provider rejection pi is prepared to retry, and it is
+    // the rollback lane's trigger. Threshold and manual compaction are unchanged.
+    if (reason === "overflow" && ownValue(event, "willRetry") === true) {
+      nativeCompaction.lastThresholdDecision = {
+        handled: true,
+        retry: true,
+        reason: `provider input overflow; ${contextBrand(brandNoun)} rolled the session tree back instead`,
+        compactionReason: reason,
+        nativeCompactionCompleted: false,
+      };
+      try { recoverFromOverflow(event, ctx); }
+      catch (error) { suspendAutomatic(error, "overflow-rollback", ctx); }
+      try { updateStatus(ctx); } catch { /* Recovery must survive presentation failure. */ }
+      return { cancel: true };
+    }
     if (reason === "manual") {
       nativeCompaction.lastThresholdDecision = {
         handled: false,
@@ -3660,6 +3920,7 @@ export function registerActiveContext(pi: any, options: {
     return { cancel: true };
   });
   pi.on("agent_settled", async (_event: unknown, ctx: any) => {
+    reportUnclaimedOverflow(ctx);
     if (ladder.pendingManual && persistence.persisted && ladder.boundaryFailure === null) {
       cancelPreparation();
       persistence.state = clone(persistence.persisted);
@@ -3828,6 +4089,13 @@ export function registerActiveContext(pi: any, options: {
             maxAttempts: OVERFLOW_RECOVERY_MAX_ATTEMPTS,
             pendingRejection: curation.pendingRejection ? { ...curation.pendingRejection } : null,
             last: curation.lastRecovery ? clone(curation.lastRecovery) : null,
+            rollback: {
+              armed: rollback.armed,
+              probeFailures: rollback.probes ? [...rollback.probes.failures] : null,
+              classifier: rollback.classifierSource,
+              attempts: rollback.attempts,
+              last: rollback.last ? clone(rollback.last) : null,
+            },
           },
           foldSpanCap: MAX_FOLD_SPAN_CHARS,
           projectionBudgetTokens: currentCapacity(ctx).budgetTokens,

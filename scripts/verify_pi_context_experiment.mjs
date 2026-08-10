@@ -2377,6 +2377,92 @@ try {
   checks.closedBookFloorGradesThroughTheSameVerdicts = true;
 }
 
+// ---------------------------------------------------------------------------
+// GATE 48 - the rollback observability contract: the event kind ships with its
+// adjudicator lens in the same build. Recovery FREQUENCY is one number and recovery
+// COST is another, and neither is readable without joining the two records that make
+// one episode: context.rollback is what left the branch, context.recovery is what the
+// retried pass folded to make the shorter window fit. The join is by rollback_seq,
+// never by order or clock, and an episode missing its fold-side half is reported
+// rather than dropped, because that is what a retried request aborted before the
+// projection budget leaves behind.
+// ---------------------------------------------------------------------------
+{
+  const custom = (data) => ({ type: "custom", customType: "pi-fold-context-event", data });
+  const entries = [
+    // A recovered episode: rolled back, replayed, and folded down inside the budget.
+    custom({ kind: "context.rollback", seq: 10, ordinal: 40, trigger: "session_before_compact",
+      armed: true, disarm_reason: null, error_entry_id: "entry-a", old_leaf_id: "entry-a",
+      new_leaf_id: "entry-parent", entries_abandoned: 1, occupancy_tokens_before: 49_700,
+      tokens_rolled_back: 42, replayed: true, replay_skip_reason: null, notice_chars: 404,
+      attempt_ordinal: 1, probes_passed: true }),
+    custom({ kind: "context.recovery", seq: 11, ordinal: 40, provider_status: 400, attempts: 1,
+      max_attempts: 2, tokens_before: 51_000, tokens_after: 40_000, budget_tokens: 50_400,
+      margin_tokens: 2_520, recovered: true, rollback_seq: 10 }),
+    // An unreplayable tail: the rollback still happened, the retry did not.
+    custom({ kind: "context.rollback", seq: 20, ordinal: 55, trigger: "session_before_compact",
+      armed: true, disarm_reason: null, error_entry_id: "entry-b", old_leaf_id: "entry-b",
+      new_leaf_id: "entry-c", entries_abandoned: 2, occupancy_tokens_before: 52_000,
+      tokens_rolled_back: 90, replayed: false,
+      replay_skip_reason: "the rolled-back tail leaves 1 tool call(s) unanswered",
+      notice_chars: 460, attempt_ordinal: 2, probes_passed: true }),
+    custom({ kind: "context.recovery", seq: 21, ordinal: 55, provider_status: 400, attempts: 2,
+      max_attempts: 2, tokens_before: 52_000, tokens_after: 52_000, budget_tokens: 50_400,
+      margin_tokens: 2_520, recovered: false, rollback_seq: 20 }),
+    // A disarmed lane: nothing silent, and it never counts as a recovery.
+    custom({ kind: "context.rollback", seq: 30, ordinal: 61, trigger: "message_end",
+      armed: false, disarm_reason: "sessionManager.branch is missing", error_entry_id: null,
+      old_leaf_id: null, new_leaf_id: null, entries_abandoned: 0, occupancy_tokens_before: 48_000,
+      tokens_rolled_back: 0, replayed: false, replay_skip_reason: "lane-disarmed",
+      notice_chars: 0, attempt_ordinal: 3, probes_passed: false }),
+  ];
+  const lens = contextEventMetrics(entries).rollback;
+  assert.equal(lens.rollbacks, 3);
+  assert.equal(lens.armed, 2);
+  assert.equal(lens.disarmed, 1);
+  assert.equal(lens.replayed, 1);
+  assert.equal(lens.replayedShare, 0.5, "the replayed rate is measured over ARMED episodes only");
+  assert.equal(lens.entriesAbandoned, 3);
+  assert.equal(lens.tokensRolledBack, 132);
+  assert.equal(lens.noticeChars, 404,
+    "a skipped replay sends its notice to the user, so it is not window overhead");
+  assert.equal(lens.byTrigger.session_before_compact, 2);
+  assert.equal(lens.byTrigger.message_end, 1);
+  assert.equal(lens.replaySkipReasons["lane-disarmed"], 1);
+  assert.equal(Object.keys(lens.replaySkipReasons).length, 2);
+  // The join, and the cost it makes readable.
+  assert.equal(lens.join.joinKey, "rollback_seq");
+  assert.equal(lens.join.recoveryRecords, 2);
+  assert.equal(lens.join.joinedEpisodes, 2);
+  assert.equal(lens.join.rollbacksWithoutRecovery, 1);
+  assert.equal(lens.join.recoveriesWithoutRollback, 0);
+  assert.equal(lens.foldedTokensToRecover, 11_000);
+  assert.equal(lens.unrecovered, 1);
+  const first = lens.table[0];
+  assert.equal(first.seq, 10);
+  assert.equal(first.recoverySeq, 11);
+  assert.equal(first.recovered, true);
+  assert.equal(first.recoveredTokensBefore, 51_000);
+  assert.equal(first.recoveredTokensAfter, 40_000);
+  assert.equal(lens.table[2].recoverySeq, null, "a disarmed episode has no fold-side half");
+  assert.equal(lens.table[2].disarmReason, "sessionManager.branch is missing");
+  // A recovery with no rollback is a rejection recorded without a tree move, and it is
+  // counted rather than silently joined to nothing.
+  const orphan = contextEventMetrics([
+    custom({ kind: "context.recovery", seq: 1, ordinal: 3, attempts: 1, tokens_before: 10,
+      tokens_after: 5, recovered: true, rollback_seq: null }),
+  ]).rollback;
+  assert.equal(orphan.rollbacks, 0);
+  assert.equal(orphan.join.recoveriesWithoutRollback, 1);
+  // The empty run reports the lens, not its absence.
+  assert.equal(contextEventMetrics([]).rollback.rollbacks, 0);
+  assert.equal(contextEventMetrics([]).rollback.replayedShare, null);
+  // The lens rides into every adjudicated report through contextEventMetrics.
+  assert(adjudicator.includes("contextEventMetrics(runEntries)"),
+    "the adjudicator must compute the rollback lens from the event stream");
+  checks.rollbackLensAdjudicated = true;
+}
+
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
 assert.deepEqual([...EXPERIMENT_MODES], ["smoke", "full"]);
 assert(plan, "stage plan fixture did not survive gate 4");

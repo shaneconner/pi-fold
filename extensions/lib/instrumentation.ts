@@ -165,6 +165,8 @@ export type ContextEventKind =
   | "context.split"
   /** One overflow rollback and the recovery that followed it. */
   | "context.recovery"
+  /** One tree rollback: what left the branch, and whether the request replayed. */
+  | "context.rollback"
   /** One projection built, classified against the one before it. */
   | "context.projection"
   /** One provider response, which is where this stream joins provider usage. */

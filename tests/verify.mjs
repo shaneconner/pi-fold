@@ -259,8 +259,12 @@ function makeRuntime(built, {
     branch.push(value);
     return value;
   };
+  const steered = [];
+  const labels = [];
+  const abandoned = [];
   const pi = {
     on(name, handler) { handlers.set(name, handler); },
+    sendMessage(message, options) { steered.push({ message, options }); },
     registerTool(tool) { tools.set(tool.name, tool); },
     registerCommand(name, command) { commands.set(name, command); },
     async appendEntry(customType, data) {
@@ -276,6 +280,7 @@ function makeRuntime(built, {
   };
   const runtime = {
     built, handlers, tools, commands, appended, notifications, statuses, branch, messages,
+    steered, labels, abandoned,
     get usage() { return usage; },
     set usage(value) { usage = value; },
     get aborts() { return aborts; },
@@ -306,8 +311,42 @@ function makeRuntime(built, {
       getBranch: () => branch,
       getEntries: () => branch,
       getLeafId: () => branch.at(-1)?.id ?? null,
+      getEntry: (id) => branch.find((entry) => entry.id === id) ?? null,
       buildContextEntries: () => branch,
-      buildSessionContext: () => ({ messages }),
+      // Rebuilt from the TREE, the way pi rebuilds it, which is what makes the
+      // rollback's pre-strip check a measurement rather than a tautology: agent state is
+      // already one message short here, the tree is not.
+      buildSessionContext: () => ({
+        messages: branch.filter((entry) => entry.type === "message").map((entry) => entry.message),
+      }),
+      // The rollback surfaces, modelled the way pi implements them: a label appends at
+      // the CURRENT leaf and advances it, and a branch moves the leaf without appending.
+      // The abandoned entries stay in the file, which is what makes the tree lineage.
+      appendLabelChange(entryId, label) {
+        const entry = customEntry(
+          "label",
+          { entryId, label },
+          `runtime-label-${String(++sequence).padStart(4, "0")}`,
+          branch.at(-1)?.id ?? null,
+        );
+        labels.push({ entryId, label, id: entry.id });
+        abandoned.push(entry);
+        branch.push(entry);
+        return entry;
+      },
+      branch(targetId) {
+        const at = branch.findIndex((entry) => entry.id === targetId);
+        if (at < 0) throw new Error(`No such entry: ${targetId}`);
+        for (const entry of branch.slice(at + 1)) abandoned.push(entry);
+        branch.length = at + 1;
+        messages.length = branch.filter((entry) => entry.type === "message").length;
+        return targetId;
+      },
+      resetLeaf() {
+        for (const entry of branch) abandoned.push(entry);
+        branch.length = 0;
+        messages.length = 0;
+      },
     },
   };
   const registrationOptions = {
@@ -377,6 +416,37 @@ async function measure(runtime, tokens, contextWindow = runtime.usage.contextWin
   await runtime.handlers.get("message_end")({ message }, runtime.ctx);
   await settle();
   return message;
+}
+
+/**
+ * A provider input-overflow, delivered the way pi delivers one.
+ *
+ * The rejection never resolves a response, so there is no status code to observe. What
+ * the extension sees is an assistant entry whose stop reason is "error", persisted on
+ * the branch, followed by `session_before_compact` with reason "overflow" and willRetry
+ * true -- at which point pi has ALREADY stripped that message from agent state, which is
+ * what the harness models by leaving `messages` one short of the branch.
+ */
+async function overflow(runtime, { willRetry = true, tail } = {}) {
+  const entry = runtime.appendMessage(tail ?? {
+    role: "assistant",
+    stopReason: "error",
+    errorMessage: "prompt is too long: 410000 tokens > 400000 maximum",
+    content: [{ type: "text", text: "" }],
+    timestamp: 9_000,
+  }, "provider-overflow");
+  // pi's pre-strip: the error message leaves agent state before the event fires.
+  runtime.messages.pop();
+  void entry;
+  const result = await runtime.handlers.get("session_before_compact")({
+    reason: "overflow",
+    willRetry,
+    branchEntries: runtime.branch,
+    preparation: {},
+    signal: undefined,
+  }, runtime.ctx);
+  await settle();
+  return result;
 }
 
 async function project(runtime) {
@@ -4839,9 +4909,9 @@ async function gateEpochBatchingUnderFullLevers() {
   // The guard waiver does NOT fire here, and that is the change the zone law made. The
   // waiver exists to keep a request sendable when every applicable mark belongs to the
   // open turn; below the fence there is nothing to keep sendable, so the runtime defers
-  // instead of reaching into the turn. Gate 56 holds the other half: at the fence the
-  // stale zone deepens past the turn clamp, the excursion becomes markable, and the
-  // waiver releases it.
+  // instead of reaching into the turn. Gate 56 holds the other half: at the fence there
+  // is no deeper reach to take, so the session that cannot fold its way out rolls back
+  // instead.
   const accumulated = below.at(-1).marks;
   const foldsAtCrossing = below.at(-1).folds;
   // The first two steps are full request cycles: the crossing exposes the last-call,
@@ -4881,11 +4951,20 @@ async function gateEpochBatchingUnderFullLevers() {
   // waiver is now the only place it lives.
   assert.deepEqual(above.filter((pass) => pass.waivedMarks > 0), []);
 
-  // The turn closes and its evidence ages past the fresh window. Now ONE commit
-  // applies the whole accumulated batch in a single rewrite.
+  // THE TURN CLOSES AND THE SESSION STAYS QUIET.
+  //
+  // This section used to assert a SECOND commit here, and that commit was an artifact.
+  // The crossing epoch had a fence-only deepened top-up that marked spans the fresh
+  // window protects; the guard retained them, and closing the turn released them into a
+  // commit of their own. The deepened snapshot is gone with the rollback build, so the
+  // crossing marks nothing it may not apply, retains nothing, and leaves nothing for a
+  // later epoch to collect. What remains in the window after the batch lands is inside
+  // the protected fresh tail, and the zone law holds there at every occupancy.
   const marksAtCloseIds = new Set((materialized(runtime).pendingMarks ?? []).map((mark) => mark.id));
   const pendingAtClose = marksAtCloseIds.size;
   const foldsAtClose = materialized(runtime).folds.length;
+  assert.equal(pendingAtClose, 0,
+    "The crossing commit retained marks; automation reached material the fresh window protects");
   for (let turn = 0; turn < 3; turn += 1) {
     runtime.appendMessage({
       role: "user", content: [{ type: "text", text: `Next task ${turn}.` }], timestamp: 990 + turn,
@@ -4897,48 +4976,33 @@ async function gateEpochBatchingUnderFullLevers() {
       timestamp: 990 + turn,
     }, "closing");
   }
-  // Full request cycles, and the action captured on the cycle that carried the epoch:
-  // whichever lane lands it (the band-top round on a truthful window, or the margin
-  // lane on this fixture's declared-high parking), the property is the same, ONE
-  // commit applies the accumulated batch, and the stream count below pins exactly
-  // that.
+  // Full request cycles at the same parked occupancy, with the guard now holding
+  // nothing at all: the turn that protected the excursion is closed.
   const closingFrom = runtime.appended.length;
-  let closing = null;
   for (const tokens of [87_000, 87_100, 87_200]) {
     await measure(runtime, tokens, 100_000);
     await project(runtime);
     await settle();
-    const action = (await toolStatus(runtime)).details.automatic.lastAutomaticAction;
-    if (!closing && action?.epoch) closing = action;
   }
-  assert(closing?.epoch, "The closed turn did not open a commit epoch");
+  const closingSnapshot = context.mapActiveContext({
+    sessionId: runtime.built.sessionId,
+    eventMessages: runtime.messages,
+    contextEntries: runtime.branch,
+    contextWindow: 100_000,
+  });
+  assert.equal(context.currentTurnRefKeys(closingSnapshot).size, 0,
+    "The closing turns never closed; the guard is still holding the excursion");
   assert.equal(
     contextEvents(runtime, closingFrom)
       .filter((record) => record.kind === "context.commit" && record.deferred === false).length,
-    1,
-    "The closed turn needed more than one commit to land its batch",
+    0,
+    "A commit fired on a window whose remaining mass the fresh tail protects",
   );
-  assert(closing.epoch.retainedMarks <= 1,
-    `The guard still held ${closing.epoch.retainedMarks} marks after the turn closed`);
-  assert(closing.epoch.appliedMarks >= closing.epoch.pendingMarks - 1,
-    "The closing commit left more than the newest mark behind");
-  assert(closing.epoch.appliedMarks >= 5,
-    `The commit applied ${closing.epoch.appliedMarks} marks; the batch never formed`);
-  const foldsAdded = materialized(runtime).folds.length - foldsAtClose;
-  assert(foldsAdded >= closing.epoch.appliedMarks,
-    `The batched commit added ${foldsAdded} folds; the accumulated marks did not land together`);
-  // The ACCUMULATED batch leaves nothing behind. What may still be pending afterwards is
-  // a mark this same pass created by topping the epoch up, over a span the fresh window
-  // still protects -- refused with a stated reason and retained, never silently dropped.
+  assert.equal(materialized(runtime).folds.length, foldsAtClose,
+    "Bytes moved after the batch landed, with nothing left the zone law admits");
   const stillPending = materialized(runtime).pendingMarks ?? [];
-  assert(stillPending.every((mark) => !marksAtCloseIds.has(mark.id)),
-    `The batched commit left ${stillPending.filter((mark) => marksAtCloseIds.has(mark.id)).length} ` +
-    "accumulated marks pending");
-  assert(stillPending.every((mark) => closing.epoch.refused.some((refusal) =>
-    refusal.id === mark.id && refusal.retained === true && typeof refusal.reason === "string")),
-  "A mark survived the batched commit without a stated retention reason");
-  assert(stillPending.length <= 1,
-    `The batched commit left ${stillPending.length} marks pending; only the newest read may survive it`);
+  assert.equal(stillPending.length, 0,
+    `The quiet window accumulated ${stillPending.length} marks the zone law does not offer`);
 
   return {
     belowThresholdPasses: below.length,
@@ -4952,8 +5016,8 @@ async function gateEpochBatchingUnderFullLevers() {
     marksAtClose: pendingAtClose,
     marksStillPending: stillPending.length,
     committedInOneEpoch: true,
-    appliedInOneCommit: closing.epoch.appliedMarks,
-    foldsAddedByThatCommit: foldsAdded,
+    commitsAfterTheTurnClosed: 0,
+    foldsAfterTheTurnClosed: foldsAtClose,
   };
 }
 
@@ -5067,9 +5131,14 @@ async function gateProjectionBudgetFence() {
   assert(epoch.appliedMarks >= 1, "The fence-level commit applied nothing");
   assert.equal(epoch.retainedMarks, 0, "The fence left marks guarded while the request would not fit");
 
-  // The rep11 shape exactly: the excursion is the ONLY foldable evidence, so the
-  // top-up has nothing unguarded to reach for and the fence waiver is the only thing
-  // standing between the session and an untransmittable request.
+  // THE STARVED SESSION IS THE ROLLBACK'S FIXTURE NOW.
+  //
+  // The rep11 shape exactly: 47 messages, one open excursion, no terminal assistant, so
+  // the whole window is inside the fresh tail and the current turn. This used to be the
+  // deepened snapshot's case, where the fence narrowed the fresh tail, extended the
+  // stale zone over the middle and the waiver released the excursion. The zone law is
+  // unconditional now, so the fold path has nothing legal to reach here at all, and the
+  // answer to a request that does not fit is the rollback, not a deeper fold.
   const guardedOnly = makeRuntime(
     makeFixture({ turns: 8, tools: false, chapterChars: 40, contextWindow: 34_000 }),
     { ...SEALED_SPINE, providerInputBudget: 30_600 },
@@ -5101,14 +5170,58 @@ async function gateProjectionBudgetFence() {
   }
   await measure(guardedOnly, 25_000, 34_000, undefined, "toolUse");
   await project(guardedOnly);
-  const guardedStatus = (await toolStatus(guardedOnly)).details.automatic;
-  const guardedEpoch = guardedStatus.lastAutomaticAction?.epoch;
-  assert(guardedEpoch, "The all-guarded session never opened a commit epoch at the fence");
-  assert.equal(guardedEpoch.guardWaived, true,
-    "The fence did not waive the guard when every mark was current-turn");
-  assert(guardedEpoch.waivedMarks >= 1, "The fence waiver released no mark");
-  assert.equal(guardedEpoch.retainedMarks, 0, "The fence held marks back with the request unsendable");
-  assert(materialized(guardedOnly).folds.length >= 1, "The fence-level waiver folded nothing");
+  await settle();
+  const guardedSnapshot = context.mapActiveContext({
+    sessionId: guardedOnly.built.sessionId,
+    eventMessages: guardedOnly.messages,
+    contextEntries: guardedOnly.branch,
+    contextWindow: 34_000,
+  });
+  assert.equal(guardedSnapshot.staleBoundary, guardedSnapshot.freshBoundary,
+    "The fixture left a middle zone, so the starving case is not being measured");
+  assert(context.currentTurnRefKeys(guardedSnapshot).size >= 12,
+    "The guard does not hold the excursion, so the starving case is not being measured");
+  assert.equal(materialized(guardedOnly).folds.length, 0,
+    "Automation folded material the zone law does not admit at any occupancy");
+  assert.equal((materialized(guardedOnly).pendingMarks ?? []).length, 0,
+    "Automation marked material the zone law does not admit at any occupancy");
+  const guardedAbortsBeforeOverflow = guardedOnly.aborts;
+  assert(guardedAbortsBeforeOverflow >= 1,
+    "A projection the fold path cannot reduce was transmitted instead of aborted");
+
+  // THE ROLLBACK CARRIES IT. The provider rejects, the leaf moves back past the request
+  // that failed, one notice is steered, and the retried pass runs the recovery lane.
+  const guardedFrom = guardedOnly.appended.length;
+  await overflow(guardedOnly);
+  const guardedRollback = contextEvents(guardedOnly, guardedFrom)
+    .find((record) => record.kind === "context.rollback");
+  assert(guardedRollback, "The starved session got no rollback");
+  assert.equal(guardedRollback.armed, true);
+  assert.equal(guardedRollback.replayed, true, "The starved session's request was not reissued");
+  assert.equal(guardedOnly.steered.length, 1, "The recovery queued more than one steered message");
+  assert(!guardedOnly.branch.some((entry) => entry.message?.stopReason === "error"),
+    "The rejected entry is still on the live branch");
+  assert.equal(guardedOnly.labels.length, 1, "The abandoned path carries no lineage label");
+  const guardedRetryFrom = guardedOnly.appended.length;
+  await project(guardedOnly);
+  await settle();
+  const guardedRecovery = contextEvents(guardedOnly, guardedRetryFrom)
+    .find((record) => record.kind === "context.recovery");
+  assert(guardedRecovery, "The retried pass never ran the recovery lane");
+  assert.equal(guardedRecovery.rollback_seq, guardedRollback.seq,
+    "The fold-side record does not join the rollback that caused it");
+
+  // AND THE LOUD FAILURE SURVIVES BOTH. A window that is one open excursion has nothing
+  // the fold path may reach and nothing the rollback can shorten except the request
+  // itself, so it still fails rather than sending something the provider will reject.
+  // That is the impossibility this build never claimed to solve; it only stopped the
+  // runtime from reaching into the fresh tail to pretend otherwise.
+  assert.equal(guardedRecovery.recovered, false,
+    "The starved fixture recovered, so it is no longer measuring the impossible case");
+  assert(guardedOnly.aborts > guardedAbortsBeforeOverflow,
+    "An over-budget projection was transmitted after the rollback");
+  assert.equal(materialized(guardedOnly).folds.length, 0,
+    "The recovery pass folded material the zone law does not admit");
 
   // The invariant, stated once: a projection the fence weighs as over budget is never
   // transmitted. It may still be RETURNED -- an aborted turn hands back the projection,
@@ -5132,8 +5245,10 @@ async function gateProjectionBudgetFence() {
     transmitted: reduction.transmitted === true,
     aborts: runtime.aborts,
     fenceAppliedMarks: epoch.appliedMarks,
-    allGuardedWaivedMarks: guardedEpoch.waivedMarks,
-    allGuardedFolds: materialized(guardedOnly).folds.length,
+    starvedFolds: materialized(guardedOnly).folds.length,
+    starvedRollbackReplayed: guardedRollback.replayed,
+    starvedRecovered: guardedRecovery.recovered,
+    starvedAborts: guardedOnly.aborts,
   };
 }
 
@@ -5341,10 +5456,14 @@ async function gateFenceMarginAndDepth() {
 
   // Climb toward the top of the window in real steps, declaring seven chars per token
   // throughout, which is what this workload actually measured.
+  // Each measurement CLOSES its turn. The climb's subject is the estimator and the
+  // margin, not the guard: an inflow that never closes leaves every byte inside the open
+  // turn, where the zone law admits nothing at any occupancy, and the climb would be
+  // measuring the starving case gate 56 owns instead of the pre-wire margin.
   const climb = [];
   for (let step = 0; step < 12; step += 1) {
     const chars = bytesOf((await project(runtime)).messages);
-    await measure(runtime, sevenChars(chars), window, undefined, "toolUse");
+    await measure(runtime, sevenChars(chars), window);
     const status = (await toolStatus(runtime)).details.automatic;
     climb.push({
       chars,
@@ -5356,7 +5475,12 @@ async function gateFenceMarginAndDepth() {
       reduction: status.overBudgetReduction,
     });
     if (status.overBudgetReduction) break;
-    // One stage of inflow: a payload of the size this workload actually gathers.
+    // One stage of inflow: a payload of the size this workload actually gathers, asked
+    // for by a user turn so the stage CLOSES. An inflow that never closes leaves every
+    // byte inside the open turn, where the zone law admits nothing at any occupancy.
+    runtime.appendMessage({
+      role: "user", content: [{ type: "text", text: `Stage ${step}, please.` }], timestamp: 700 + step,
+    }, "inflow");
     runtime.appendMessage({
       role: "assistant",
       content: [{ type: "toolCall", id: `stage-${step}`, name: "read", arguments: { path: `stage-${step}.txt` } }],
@@ -5373,51 +5497,71 @@ async function gateFenceMarginAndDepth() {
     }, "inflow");
   }
 
-  // The estimator tracks the declared reality closely -- this is not a calibration
-  // failure -- and the fence still acted, because it stopped waiting for the wire.
-  // The first pass has nothing measured yet and necessarily uses the bootstrap
-  // constant; the drift claim is about the CALIBRATED estimator.
+  // THE ESTIMATOR, MEASURED WHERE IT MEANS SOMETHING.
+  //
+  // The first pass has nothing measured yet and necessarily uses the bootstrap constant;
+  // the drift claim is about the CALIBRATED estimator. A pass that ABORTED is excluded
+  // for a different reason: it handed the host no projection, so the estimate it reports
+  // describes the last projection that actually went out. Comparing that against a
+  // declaration made for a projection nobody transmitted measures the abort, not the
+  // estimator.
   const calibrated = climb.filter((entry) =>
     typeof entry.estimate === "number" && entry.charsPerToken !== context.ESTIMATED_BYTES_PER_TOKEN);
   assert(calibrated.length >= 2, "The climb never calibrated");
-  const worstDrift = Math.max(...calibrated.map((entry) =>
+  const transmitted = calibrated.filter((entry, index) =>
+    index === 0 || entry.aborts === calibrated[index - 1].aborts);
+  assert(transmitted.length >= 4, "The climb never transmitted enough calibrated passes to weigh");
+  const worstDrift = Math.max(...transmitted.map((entry) =>
     Math.abs(entry.estimate - entry.declared) / entry.declared));
   assert(worstDrift <= 0.1, `The calibrated estimate drifted ${(worstDrift * 100).toFixed(1)}% from measured`);
-  const fired = climb.find((entry) => entry.reduction);
-  assert(fired, "The fence never fired while the window filled, which is the rep13 death");
-  // Economy waits the round; an over-budget projection is never transmitted, because a
-  // request whose projection exceeds the provider input budget is rejected outright and
-  // recovery must produce a window that fits. On this 18,000-token budget the
-  // margin band is 900 tokens and one round of inflow is larger, so when a last-call
-  // round is open at the crossing the reduction may land at the over line instead of
-  // inside the margin. That is the ruled trade, and it is admissible ONLY when the
-  // reduction's own commit consumed an open exposure; with no round in the gap the
-  // pre-wire margin claim stands at full strength. Either way nothing over the budget
-  // is ever transmitted, which is the rep13 death this gate exists to prevent.
-  const reductionCommits = contextEvents(runtime).filter((record) =>
-    record.kind === "context.commit" && record.deferred === false);
-  const reductionConsumedRound = contextEvents(runtime).some((record) =>
-    record.kind === "context.response" && record.commit_seq === reductionCommits.at(-1)?.seq);
-  assert(fired.reduction.estimatedTokensBefore < budgetTokens || reductionConsumedRound,
-    `The fence waited until ${fired.reduction.estimatedTokensBefore} exceeded the ${budgetTokens} budget ` +
-    "with no last-call round open: that is the wire, not a margin");
-  assert.equal(fired.reduction.transmitted, true,
-    "A reduction that started past the budget line must still land the request under it");
-  assert(fired.reduction.crowded === true, "The reduction did not record why it fired");
-  // The floor is a share of the SERVING BUDGET, which is the one denominator: with the
+  // The margin is a share of the SERVING BUDGET, which is the one denominator: with the
   // budget declared already net there is no window behind it to take a share of.
-  assert(fired.reduction.marginTokens >= 0.05 * budgetTokens,
-    `The margin was ${fired.reduction.marginTokens} tokens, under the floor share of the budget`);
-  assert(fired.reduction.estimatedTokensAfter < fired.reduction.estimatedTokensBefore,
-    "The pre-wire reduction freed nothing");
-  // The bootstrap pass of an already-huge session may still abort: it has nothing
-  // measured yet. Once calibrated, a request inside the budget is REDUCED, never
-  // aborted, which is the difference between surviving the top of the window and dying
-  // at it.
-  assert.equal(fired.reduction.transmitted, true,
-    "The pre-wire reduction aborted a request that was inside the budget");
-  assert.equal(fired.aborts, calibrated[0].aborts,
-    "A calibrated pass inside the budget raised an abort");
+  assert(transmitted.every((entry) => entry.margin >= 0.05 * budgetTokens),
+    `A calibrated pass carried a margin under the floor share of the ${budgetTokens}-token budget`);
+
+  // THE ORDINARY REACH WORKS WHILE THERE IS STALE MASS, AND THEN IT STOPS.
+  //
+  // The climb folds on the way up: the projection drops mid-climb, which is the band-top
+  // commit reducing eligible stale material at ordinary depth. Once that mass is spent
+  // the projection is one open middle and a fresh tail, and the zone law admits nothing
+  // there at any occupancy. This fixture is the one the pass-3 fence rulings were
+  // written from -- 132,906 to 200,299 chars over three passes while every fence pass
+  // reclaimed nothing -- and the answer to it is no longer a deepened snapshot that
+  // reaches into the middle. It is a rollback.
+  const foldedOnTheWayUp = climb.some((entry, index) => index > 0 && entry.chars < climb[index - 1].chars);
+  assert(foldedOnTheWayUp, "The ordinary reach never reduced the window while stale mass remained");
+  assert(climb.at(-1).aborts > climb[0].aborts,
+    "The starved climb transmitted instead of aborting");
+  assert.equal(climb.at(-1).reduction, null,
+    "The starved climb recorded a reduction, so it is no longer measuring the starving case");
+
+  // THE ROLLBACK CARRIES IT, and the loud failure survives when even that is not enough.
+  //
+  // One ordering to know about, and it is why the fold-side record is gate 56's
+  // assertion and not this one: `abortUnsafeHardContext` runs earlier in the context
+  // pass than the projection budget does, so a session whose MEASURED ratio is already
+  // at the hard fence -- which this climb's is -- aborts the retried request before the
+  // recovery lane is reached. The terminal answer is the same either way, an aborted
+  // request rather than one the provider will reject, but the episode goes unrecorded on
+  // the fold side. Gate 56's fixture sits below the fence ratio, so the lane runs there
+  // and the join is asserted against it.
+  const climbFrom = runtime.appended.length;
+  await overflow(runtime);
+  const climbRollback = contextEvents(runtime, climbFrom)
+    .find((record) => record.kind === "context.rollback");
+  assert(climbRollback, "The starved climb got no rollback");
+  assert.equal(climbRollback.armed, true);
+  assert.equal(climbRollback.replayed, true);
+  assert.equal(runtime.steered.length, 1, "The recovery queued more than one steered message");
+  assert(!runtime.branch.some((entry) => entry.message?.stopReason === "error"),
+    "The rejected entry is still on the live branch");
+  const abortsBeforeRetry = runtime.aborts;
+  const retriedProjection = await project(runtime);
+  await settle();
+  assert(runtime.aborts > abortsBeforeRetry,
+    "The retried request was transmitted against a budget it still does not fit");
+  assert(retriedProjection.messages.length >= 1,
+    "An aborted pass handed back nothing at all instead of the projection");
 
   // Calibration recency: the session's ratio drifts from seven chars per token to five.
   // The estimate must follow it, because at this occupancy a stale ratio is the whole
@@ -5512,21 +5656,18 @@ async function gateFenceMarginAndDepth() {
       previousEpochKey = epochKey;
     }
   }
-  assert(epochs.length >= 3, `Only ${epochs.length} commit epochs ran; the ratchet is not being measured`);
-  const shallow = epochs.filter((epoch) =>
-    epoch.preDeepenFreedShare < Math.max(epoch.depthFloorShare, epoch.targetBudgetShare));
-  assert(shallow.length >= 1,
-    "No commit was ever shallow, so the crumb-commit pattern is not being measured");
-  for (const epoch of shallow) {
-    assert.equal(epoch.deepenedTarget, true,
-      `A commit freeing ${epoch.preDeepenFreedShare} of the window did not deepen against a ${epoch.depthFloorShare} floor`);
-  }
-  // Deepening has to REACH something the ordinary top-up could not: that is the whole
-  // difference between reaching into the fresh tail and asking harder for mass that is
-  // not there.
-  const reached = shallow.filter((epoch) => epoch.deepenedMarks >= 1);
-  assert(reached.length >= 1,
-    `Deepening added no marks in ${shallow.length} shallow commits; it reached nothing the top-up had not`);
+  assert(epochs.length >= 2, `Only ${epochs.length} commit epochs ran; the ratchet is not being measured`);
+  // DEPTH IS ORDINARY DEPTH NOW. There were three assertions here about a deepened
+  // target, a pre-deepen freed share and the marks deepening added, and all three
+  // described the fence-only snapshot that reached into the fresh tail. That snapshot is
+  // gone, so a commit reaches as far as the stale zone offers and no further. What has
+  // to survive is the property those assertions were serving: a commit that reaches
+  // eligible mass keeps pace with inflow. It is asserted directly below, on the window
+  // itself, rather than through the machinery that used to produce it.
+  assert(epochs.every((epoch) => epoch.appliedMarks >= 1),
+    "A commit epoch ran without applying a mark");
+  assert(epochs.every((epoch) => epoch.guardWaived !== true),
+    "A commit below the fence waived the current-turn guard");
   // The property the rep13 ratchet violated, measured at like phases of the rhythm:
   // across a run where every cycle added a 24,000-char stage of inflow, the window
   // just after the LAST commit has grown by less than ONE such stage since just after
@@ -5540,16 +5681,12 @@ async function gateFenceMarginAndDepth() {
   return {
     budgetTokens,
     climbSteps: climb.length,
-    firedAtEstimate: fired.reduction.estimatedTokensBefore,
-    firedMarginTokens: fired.reduction.marginTokens,
-    headroomAtFiring: budgetTokens - fired.reduction.estimatedTokensBefore,
-    reducedTo: fired.reduction.estimatedTokensAfter,
+    transmittedCalibratedPasses: transmitted.length,
     worstDriftPercent: Number((worstDrift * 100).toFixed(1)),
     charsPerTokenAfterDrift: afterDrift.at(-1).charsPerToken,
+    starvedClimbRollbackReplayed: climbRollback.replayed,
     commitEpochs: epochs.length,
-    shallowEpochs: shallow.length,
-    deepenedEpochs: epochs.filter((epoch) => epoch.deepenedTarget === true).length,
-    deepeningReachedMarks: reached.reduce((total, epoch) => total + epoch.deepenedMarks, 0),
+    appliedPerEpoch: epochs.map((epoch) => epoch.appliedMarks),
     projectionFirst: projections[0],
     projectionLast: projections.at(-1),
   };
@@ -6189,84 +6326,168 @@ async function gateOverflowRecovery() {
   await startRuntime(runtime);
   const budgetTokens = (await toolStatus(runtime)).details.automatic.projectionBudgetTokens;
   assert.equal(budgetTokens, window - Math.floor(window * 0.1));
+  const armed = (await toolStatus(runtime)).details.automatic.recovery.rollback;
+  assert.equal(armed.armed, true, `The lane refused to arm: ${JSON.stringify(armed.probeFailures)}`);
+  assert.deepEqual(armed.probeFailures, []);
 
   // Calibrate against the fixture's own size, then climb to rep13's position: measured
   // occupancy just under the budget with one ordinary inflow step still to come.
   const baseline = bytesOf((await project(runtime)).messages);
-  const charsPerToken = 4;
-  await measure(runtime, Math.round(baseline / charsPerToken), window);
+  await measure(runtime, Math.round(baseline / 4), window);
   for (const tokens of [41_200, 45_300, 48_800, 49_700]) {
     await measure(runtime, tokens, window);
     await project(runtime);
   }
 
-  // The provider rejects the request the runtime believed was sendable. Nothing
-  // durable was written for it: no assistant message, no state event of its own.
-  const durableBefore = runtime.branch.filter((entry) =>
-    !String(entry.customType ?? "").endsWith("-context-event")).length;
-  await runtime.handlers.get("after_provider_response")({ status: 400 }, runtime.ctx);
-  assert.equal(runtime.branch.filter((entry) =>
-    !String(entry.customType ?? "").endsWith("-context-event")).length, durableBefore,
-  "A rejected exchange wrote durable state");
-  const pending = (await toolStatus(runtime)).details.automatic.recovery.pendingRejection;
-  assert(pending, "The provider rejection was not observed");
-  assert.equal(pending.status, 400);
+  // THE ROLLBACK. The provider rejected the request the runtime believed was sendable.
+  // pi turns that into an error entry, strips it from agent state and asks to compact;
+  // this lane answers by moving the session leaf back past it instead.
+  const leafBefore = runtime.ctx.sessionManager.getLeafId();
+  const beforeRollback = runtime.appended.length;
+  const result = await overflow(runtime);
+  assert.deepEqual(result, { cancel: true }, "Pi's summarizer must never run on the overflow path");
+  const errorEntry = runtime.abandoned.find((entry) => entry.message?.stopReason === "error");
+  assert(errorEntry, "The rejected entry did not leave the branch");
+  // The leaf lands on the rejected entry's parent. This runtime's own event stream
+  // appends after that, advancing the leaf again, so what gets asserted is the position:
+  // the parent is back on the branch and everything past it is telemetry of ours.
+  assert(!runtime.branch.some((entry) => entry.id === errorEntry.id),
+    "The rejected entry is still on the live branch");
+  assert.notEqual(errorEntry.id, leafBefore === null ? "" : leafBefore);
+  const parentAt = runtime.branch.findIndex((entry) => entry.id === errorEntry.parentId);
+  assert(parentAt >= 0, "The rollback target is not on the branch");
+  assert(runtime.branch.slice(parentAt + 1).every((entry) =>
+    entry.customType === "pi-fold-context-event"),
+  "The rollback left conversation entries past the leaf it moved to");
 
-  // The next request is REBUILT rather than dropped, and it is a sealed continuation.
-  const recoveredProjection = await project(runtime);
-  const recovery = (await toolStatus(runtime)).details.automatic.recovery;
-  assert(recovery.last, "The recovery lane never ran");
-  assert.equal(recovery.last.status, 400);
-  assert(recovery.last.attempts >= 1 && recovery.last.attempts <= context.OVERFLOW_RECOVERY_MAX_ATTEMPTS);
-  assert.equal(recovery.pendingRejection, null, "The rejection was not cleared by recovery");
-  const rebuiltTokens = Math.ceil(bytesOf(recoveredProjection.messages) /
-    (await toolStatus(runtime)).details.automatic.projectionCharsPerToken);
+  // LINEAGE. The label is applied BEFORE the branch, so it rides the abandoned path.
+  assert.equal(runtime.labels.length, 1, "The abandoned path carries no lineage label");
+  assert.equal(runtime.labels[0].entryId, errorEntry.id);
+  assert.match(runtime.labels[0].label, /overflow rollback$/);
+  assert(runtime.abandoned.some((entry) => entry.id === runtime.labels[0].id),
+    "The lineage label landed on the surviving branch instead of the abandoned one");
+
+  // THE NOTICE, once. Steering drains one at a time, so a second would never arrive.
+  assert.equal(runtime.steered.length, 1, "The recovery queued more than one steered message");
+  assert.equal(runtime.steered[0].options.deliverAs, "steer");
+  assert.equal(runtime.steered[0].message.customType, "pi-fold-active-context-overflow-recovery");
+  assert.match(String(runtime.steered[0].message.content), /rolled the session back/);
+  assert.match(String(runtime.steered[0].message.content), /reissued now/);
+
+  const rollbackRecord = contextEvents(runtime, beforeRollback)
+    .find((record) => record.kind === "context.rollback");
+  assert(rollbackRecord, "The rollback was not recorded on the stream");
+  assert.equal(rollbackRecord.trigger, "session_before_compact");
+  assert.equal(rollbackRecord.armed, true);
+  assert.equal(rollbackRecord.replayed, true);
+  assert.equal(rollbackRecord.replay_skip_reason, null);
+  assert.equal(rollbackRecord.error_entry_id, errorEntry.id);
+  assert.equal(rollbackRecord.new_leaf_id, errorEntry.parentId);
+  assert(rollbackRecord.entries_abandoned >= 1);
+  assert(rollbackRecord.notice_chars > 0);
+  assert.equal(rollbackRecord.probes_passed, true);
+
+  // THE COMMIT, in the RETRIED pass and strictly before transmission. It is not run
+  // synchronously inside the recovery: that would adjudicate a snapshot taken outside a
+  // projection pass and then be evaluated again by the retry, which is two mutations.
+  assert.equal(contextEvents(runtime, beforeRollback)
+    .filter((record) => record.kind === "context.commit").length, 0,
+  "The recovery committed synchronously instead of leaving it to the retried pass");
+  const beforeRetry = runtime.appended.length;
+  const retried = await project(runtime);
+  await settle();
+  const recoveryRecord = contextEvents(runtime, beforeRetry)
+    .find((record) => record.kind === "context.recovery");
+  assert(recoveryRecord, "The retried pass never ran the recovery lane");
+  assert.equal(recoveryRecord.rollback_seq, rollbackRecord.seq,
+    "The fold-side record does not join the rollback that caused it");
+  const status = (await toolStatus(runtime)).details.automatic;
+  assert.equal(status.recovery.pendingRejection, null, "The rejection was not cleared by recovery");
+  assert.equal(status.recovery.last.recovered, true, "The rebuilt request still does not fit");
+  assert.equal(status.recovery.rollback.last.replayed, true);
+  const rebuiltTokens = Math.ceil(bytesOf(retried.messages) / status.projectionCharsPerToken);
   assert(rebuiltTokens <= budgetTokens || runtime.aborts >= 1,
     `A ${rebuiltTokens}-token request was rebuilt over a ${budgetTokens}-token budget`);
-  assert.equal(recovery.last.recovered, true, "The rebuilt request still does not fit");
+  const receipts = status.curation.receipts;
+  const receipt = receipts.find((item) => item.kind === "overflow-recovery");
+  assert(receipt, "The rollback was not receipted");
+  assert.match(String(receipt.note), /rollback was required/);
 
-  // The agent is told, through the receipt mechanism, what was folded to make room.
-  const receipts = (await toolStatus(runtime)).details.automatic.curation.receipts;
-  const rollback = receipts.find((receipt) => receipt.kind === "overflow-recovery");
-  assert(rollback, "The rollback was not receipted");
-  assert.equal(rollback.recovered, true);
-  assert.match(String(rollback.note), /rollback was required/);
-  assert.match(String(rollback.trigger), /^provider-rejection:400$/);
-  const block = recoveredProjection.messages.find((message) =>
-    message.customType === "pi-fold-active-context-receipts");
-  assert(block, "The rollback receipt never reached the window");
-
-  // The cap terminates PROVABLY: an accepted request resets it, and further rejections
-  // beyond the cap are not recovered from, so the loop cannot run forever.
-  const capped = makeRuntime(
+  // THE UNREPLAYABLE TAIL. A rolled-back tail with unanswered tool calls rolls back and
+  // stops there: a user turn after an unsatisfied tool call is malformed for every
+  // provider, so the notice goes to the human and nothing is steered.
+  const orphan = makeRuntime(
     makeFixture({ turns: 8, tools: false, contextWindow: window }),
     { ...SEALED_SPINE, providerInputBudget: servingBudget(window) },
   );
-  await startRuntime(capped);
-  await measure(capped, 28_000, window);
-  await project(capped);
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    await capped.handlers.get("after_provider_response")({ status: 400 }, capped.ctx);
-    await project(capped);
-  }
-  const cappedRecovery = (await toolStatus(capped)).details.automatic.recovery;
-  assert(cappedRecovery.attempts <= context.OVERFLOW_RECOVERY_MAX_ATTEMPTS,
-    `Recovery spent ${cappedRecovery.attempts} attempts against a cap of ` +
-    `${context.OVERFLOW_RECOVERY_MAX_ATTEMPTS}`);
-  assert.equal(cappedRecovery.pendingRejection, null,
-    "A rejection past the cap was queued for another recovery");
+  await startRuntime(orphan);
+  await measure(orphan, 28_000, window);
+  orphan.appendMessage({
+    role: "assistant",
+    content: [{ type: "toolCall", id: "orphaned-call", name: "read", arguments: { path: "big.txt" } }],
+    stopReason: "toolUse",
+    timestamp: 8_500,
+  }, "orphan");
+  const orphanBefore = orphan.appended.length;
+  await overflow(orphan);
+  assert.equal(orphan.steered.length, 0, "An unreplayable tail still queued a retry");
+  const orphanRecord = contextEvents(orphan, orphanBefore)
+    .find((record) => record.kind === "context.rollback");
+  assert(orphanRecord, "The unreplayable rollback was not recorded");
+  assert.equal(orphanRecord.armed, true, "The rollback itself must still happen");
+  assert.equal(orphanRecord.replayed, false);
+  assert.match(String(orphanRecord.replay_skip_reason), /unanswered/);
+  assert(orphan.labels.length === 1 && orphan.abandoned.some((entry) =>
+    entry.message?.stopReason === "error"),
+  "The rollback did not happen on the unreplayable path");
+  assert.match(String(orphan.notifications.at(-1)?.message), /NOT reissued/);
 
-  // A 429 is a rate limit, not an overflow, and is deliberately not recovered from.
-  await capped.handlers.get("after_provider_response")({ status: 429 }, capped.ctx);
-  assert.equal((await toolStatus(capped)).details.automatic.recovery.pendingRejection, null);
+  // REFUSE TO ARM. A pi whose session surface moved gets no rollback at all: the lane is
+  // off, it says so on the stream and to the user, and the session behaves exactly as it
+  // did before this build. Nothing silent, nothing half-performed.
+  const mutilated = makeRuntime(
+    makeFixture({ turns: 8, tools: false, contextWindow: window }),
+    { ...SEALED_SPINE, providerInputBudget: servingBudget(window) },
+  );
+  delete mutilated.ctx.sessionManager.branch;
+  mutilated.ctx.sessionManager.appendLabelChange = (only) => only;
+  await startRuntime(mutilated);
+  const disarmed = (await toolStatus(mutilated)).details.automatic.recovery.rollback;
+  assert.equal(disarmed.armed, false, "A mutilated surface still armed the lane");
+  assert.equal(disarmed.probeFailures.length, 2, JSON.stringify(disarmed.probeFailures));
+  assert(disarmed.probeFailures.some((failure) => /branch is missing/.test(failure)));
+  assert(disarmed.probeFailures.some((failure) => /appendLabelChange takes 1/.test(failure)));
+  assert.match(String(mutilated.notifications.at(-1)?.message), /DISARMED/);
+  await measure(mutilated, 28_000, window);
+  const mutilatedBefore = mutilated.appended.length;
+  await overflow(mutilated);
+  const refusal = contextEvents(mutilated, mutilatedBefore)
+    .find((record) => record.kind === "context.rollback");
+  assert(refusal, "A disarmed lane failed silently");
+  assert.equal(refusal.armed, false);
+  assert.equal(refusal.replay_skip_reason, "lane-disarmed");
+  assert.equal(refusal.probes_passed, false);
+  assert.equal(mutilated.steered.length, 0);
+  assert(mutilated.branch.some((entry) => entry.message?.stopReason === "error"),
+    "A disarmed lane moved the leaf anyway");
+  assert.match(String(mutilated.notifications.at(-1)?.message), /could not roll back/);
+
+  // The probes are the version pin, and they are exact about what they demand.
+  const probed = context.probeRollbackSurfaces({});
+  assert.equal(probed.armed, false);
+  assert.equal(probed.probes.length, 7);
+  assert(probed.probes.every((probe) => probe.required));
 
   return {
     budgetTokens,
     maxAttempts: context.OVERFLOW_RECOVERY_MAX_ATTEMPTS,
-    recoveryAttempts: recovery.last.attempts,
-    recovered: recovery.last.recovered,
+    entriesAbandoned: rollbackRecord.entries_abandoned,
+    tokensRolledBack: rollbackRecord.tokens_rolled_back,
+    noticeChars: rollbackRecord.notice_chars,
+    steeredMessages: runtime.steered.length,
     rebuiltTokens,
-    cappedAttempts: cappedRecovery.attempts,
+    replaySkipped: String(orphanRecord.replay_skip_reason).slice(0, 40),
+    disarmedFailures: disarmed.probeFailures.length,
   };
 }
 
@@ -8343,7 +8564,7 @@ async function gateLastCallRidesTheCommitBoundary() {
   await measure(recovery, 80_000, 100_000);
   const recoveryExposure = materialized(recovery).lastCall;
   assert(recoveryExposure, "The recovery fixture must first arm an exposure");
-  recovery.handlers.get("after_provider_response")({ status: 400 }, recovery.ctx);
+  await overflow(recovery);
   await project(recovery);
   await settle();
   assert(contextEvents(recovery).some((record) =>
@@ -8820,11 +9041,12 @@ async function gateThreeZones() {
 }
 
 /**
- * THE FENCE OPENS THE MIDDLE, AND IT IS NOT LATCHED.
+ * THE ZONE LAW IS UNCONDITIONAL, AND THE LATCH QUESTION DISSOLVED.
  *
- * Three separate behaviors, each pinned by name, because each one was a defect this
- * build introduced and fixed, and a silent return of any of them costs the fence its
- * ability to reduce at all.
+ * Three behaviors, each pinned by name: the zones hold at every occupancy and the
+ * machinery that used to bend them at the fence is gone; the reopen latch still holds a
+ * parked window; and a window at the fence with nothing the zone law admits is aborted
+ * and then recovered by a rollback, not by a deeper fold.
  */
 async function gateFenceOpensTheMiddle() {
   const thresholds = Object.freeze({
@@ -8836,89 +9058,57 @@ async function gateFenceOpensTheMiddle() {
   const snapshot = built.snapshot;
   const state = context.emptyActiveContextState(built.sessionId);
 
-  // (a) At the fence the stale zone extends to everything outside the NARROWED fresh
-  // tail, so the middle stops being off limits and the reduction has mass to reach.
-  const deepened = context.deepenedFenceSnapshot(snapshot, thresholds.freshTail * 0.25);
-  assert(deepened.staleBoundary > snapshot.staleBoundary,
-    `The fence did not open the middle: ${snapshot.staleBoundary} to ${deepened.staleBoundary}`);
-  assert(deepened.staleBoundary >= snapshot.freshBoundary,
-    "The fence stale zone stopped short of the ordinary fresh boundary");
-  assert(deepened.staleBoundary < snapshot.messages.length,
-    "The fence stale zone swallowed the whole window; the narrowed tail protects nothing");
-  const ordinaryClaims = new Set();
-  let ordinarySpans = 0;
-  for (let round = 0; round < 40; round += 1) {
-    const candidate = context.selectAutomaticSpan(snapshot, state, ordinaryClaims);
-    if (!candidate) break;
-    for (const ref of candidate.sourceRefs) ordinaryClaims.add(json.objectRefKey(ref));
-    ordinarySpans += 1;
-  }
-  const fenceClaims = new Set();
-  let fenceSpans = 0;
-  for (let round = 0; round < 40; round += 1) {
-    const candidate = context.selectAutomaticSpan(deepened, state, fenceClaims);
-    if (!candidate) break;
-    for (const ref of candidate.sourceRefs) fenceClaims.add(json.objectRefKey(ref));
-    fenceSpans += 1;
-  }
-  assert(fenceSpans > ordinarySpans,
-    `The fence reached ${fenceSpans} spans against the ordinary ${ordinarySpans}; the middle stayed shut`);
+  // (a) THE ZONE LAW IS UNCONDITIONAL, AND THE MACHINERY THAT BENT IT IS GONE.
+  //
+  // There was a fence-only snapshot here: at high occupancy it narrowed the fresh tail
+  // to a quarter and extended the stale zone across the middle, so a reduction that had
+  // to make a rejected request sendable had mass to reach. It existed because folding
+  // harder was the runtime's only answer to a provider rejection. The rollback lane is
+  // the answer now, so the zones hold at every occupancy and there is one set of rules.
+  assert.equal(typeof context.deepenedFenceSnapshot, "undefined",
+    "The fence-only snapshot survived the rollback build");
+  const source = await readFile(join(projectRoot, "extensions", "lib", "transcript.ts"), "utf8");
+  assert(!/deepenedFenceSnapshot/.test(source), "deepenedFenceSnapshot is still reachable in the transcript module");
+  const runtimeSource = await readFile(join(projectRoot, "extensions", "active-context.ts"), "utf8");
+  assert(!/deepenedFreshnessSnapshot|DEEPENED_FRESH_TAIL_SHARE/.test(runtimeSource),
+    "The fence-only reach rules survived in the runtime");
+  assert(!/fenceLevel \? new Set/.test(runtimeSource),
+    "A fence-only zone waiver survived in the commit epoch");
 
-  // (c) THE CLAMP REGRESSION, pinned. The deepened stale boundary is the BYTE tail's
-  // complement, never freshBoundary's, because freshBoundary also clamps to the
-  // unfinished turn. A session with an open excursion and no terminal assistant has its
-  // ordinary fresh boundary at the top of that turn, and deriving the fence zone from it
-  // would leave the excursion unmarkable, the waiver with nothing to release and the
-  // fence with nothing to reduce.
-  const openMessages = built.messages.slice(0, 20);
-  openMessages.push({
-    role: "user", content: [{ type: "text", text: "Start the long excursion." }], timestamp: 900,
-  });
-  for (let step = 0; step < 8; step += 1) {
-    openMessages.push({
-      role: "assistant",
-      content: [{ type: "toolCall", id: `open-${step}`, name: "read", arguments: { path: `open-${step}.txt` } }],
-      stopReason: "toolUse",
-      timestamp: 901 + step,
-    });
-    openMessages.push({
-      role: "toolResult",
-      toolCallId: `open-${step}`,
-      toolName: "read",
-      content: [{ type: "text", text: `Open ${step}: ${"x".repeat(9_000)}` }],
-      isError: false,
-      timestamp: 901 + step,
-    });
+  // The zones themselves, asserted directly: automation proposes inside the stale zone
+  // and nowhere else, whatever the pressure. Every span the selector can reach lives
+  // below the stale boundary, so the middle and the fresh tail are unreachable BY
+  // CONSTRUCTION rather than by a pressure test that happened not to reach them.
+  const claims = new Set();
+  const proposed = [];
+  for (let round = 0; round < 40; round += 1) {
+    const candidate = context.selectAutomaticSpan(snapshot, state, claims);
+    if (!candidate) break;
+    for (const ref of candidate.sourceRefs) claims.add(json.objectRefKey(ref));
+    proposed.push(candidate);
   }
-  const openSnapshot = context.mapActiveContext({
-    sessionId: built.sessionId,
-    eventMessages: openMessages,
-    contextEntries: built.entries,
-    contextWindow: 100_000,
-    thresholds,
-  });
-  // The excursion is still running: the last user message never became a complete turn,
-  // so the ORDINARY fresh boundary clamps to it and everything after it is structurally
-  // protected. That clamp is correct, and it is exactly what the fence zone must not
-  // inherit.
-  const excursionStart = openMessages.findIndex((message) =>
-    message.role === "user" && message.content?.[0]?.text === "Start the long excursion.");
-  assert(excursionStart > 0);
-  assert.equal(openSnapshot.freshBoundary, excursionStart,
-    `The ordinary fresh boundary is ${openSnapshot.freshBoundary}, not the open turn at ${excursionStart}`);
-  const openDeepened = context.deepenedFenceSnapshot(openSnapshot, thresholds.freshTail * 0.25);
-  assert(openDeepened.staleBoundary > openSnapshot.freshBoundary,
-    `The fence zone clamped to the unfinished turn at ${openDeepened.staleBoundary}; ` +
-    "the excursion is unmarkable and the waiver has nothing to release");
-  assert(openDeepened.staleBoundary >= openMessages.length - 6,
-    "The fence zone stopped well short of the byte tail's complement");
+  assert(proposed.length >= 1, "The stale zone proposed nothing at all");
+  const reachedIndices = proposed.flatMap((candidate) => candidate.sourceRefs
+    .map((ref) => snapshot.mapped.findIndex((item) => item.ref && json.objectRefKey(item.ref) === json.objectRefKey(ref)))
+    .filter((index) => index >= 0));
+  assert(reachedIndices.every((index) => index < snapshot.staleBoundary),
+    `Automation proposed at index ${Math.max(...reachedIndices)} against a stale boundary of ${snapshot.staleBoundary}`);
+  assert(snapshot.staleBoundary < snapshot.freshBoundary,
+    "The middle vanished; the three zones are two");
 
-  // (b) THE FENCE IS NOT LATCHED. The reopen latch is an economy rule: it keeps a window
-  // parked on the band top from buying a prefix rewrite per pass. A request that does
-  // not fit is not economy, and waiting for new eligible mass there spends the session's
-  // transmissibility to save a rewrite.
+  // (b) THE LATCH QUESTION DISSOLVES.
+  //
+  // The reopen latch is an economy rule: it keeps a window parked on the band top from
+  // buying a prefix rewrite per pass. It used to be asserted here that the fence
+  // BYPASSES it, because a request that does not fit is not economy. That bypass was the
+  // fence racing the latch for a DEEPER commit, and there is no deeper commit any more:
+  // the band-top commit already folds everything the stale zone offers, so a window that
+  // reaches the fence has a latch holding back a commit with nothing to apply. Recovery
+  // is a rollback now, not a trigger racing a latch. What remains is the pair this pins:
+  // the latch holds a parked window, and a window at the fence with nothing the zone law
+  // admits is ABORTED rather than transmitted.
   const runtime = makeRuntime(
-    makeFixture({ turns: 20, resultChars: 9_000, contextWindow: 34_000, thresholds }),
+    makeFixture({ turns: 40, resultChars: 3_000, contextWindow: 34_000, thresholds }),
     { ...SEALED_SPINE, providerInputBudget: 30_600, thresholds },
   );
   await startRuntime(runtime);
@@ -8933,9 +9123,16 @@ async function gateFenceOpensTheMiddle() {
     .filter((record) => record.kind === "context.commit" && record.deferred === false);
   assert.equal(latched.length, 0,
     "A window parked on the band top committed again with no new eligible mass");
-  // The fence: same window, and now it does not fit. The latch does not hold it.
+  // The fence: the same window, now past the serving budget, with its stale zone already
+  // spent. The inflow arrives as CLOSED turns, so this is not the open-excursion case
+  // gate 56 owns; automation still reaches nothing, because reaching further would mean
+  // the middle or the fresh tail, and the zone law admits neither at any occupancy.
   const beforeFence = runtime.appended.length;
-  for (let step = 0; step < 8; step += 1) {
+  const abortsBeforeFence = runtime.aborts;
+  for (let step = 0; step < 3; step += 1) {
+    runtime.appendMessage({
+      role: "user", content: [{ type: "text", text: `Fence stage ${step}.` }], timestamp: 960 + step,
+    }, "fence-inflow");
     runtime.appendMessage({
       role: "assistant",
       content: [{ type: "toolCall", id: `fence-${step}`, name: "read", arguments: { path: `fence-${step}.txt` } }],
@@ -8946,29 +9143,50 @@ async function gateFenceOpensTheMiddle() {
       role: "toolResult",
       toolCallId: `fence-${step}`,
       toolName: "read",
-      content: [{ type: "text", text: `Fence ${step}: ${"f".repeat(24_000)}` }],
+      content: [{ type: "text", text: `Fence ${step}: ${"f".repeat(5_000)}` }],
       isError: false,
       timestamp: 960 + step,
     }, "fence-inflow");
+    runtime.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: `Fence stage ${step} done.` }],
+      stopReason: "stop",
+      timestamp: 960 + step,
+    }, "fence-inflow");
   }
-  await measure(runtime, 30_000, 34_000, undefined, "toolUse");
+  await measure(runtime, 31_500, 34_000);
   await project(runtime);
   await settle();
   const fenceCommits = contextEvents(runtime, beforeFence)
     .filter((record) => record.kind === "context.commit" && record.deferred === false);
-  assert(fenceCommits.length >= 1,
-    "The reopen latch held the fence back; the request stayed untransmittable");
-  assert(fenceCommits.some((record) => record.applied_marks >= 1),
-    "The unlatched fence commit applied nothing");
+  assert.equal(fenceCommits.length, 0,
+    "A commit applied marks the zone law does not offer at the fence");
+  assert(runtime.aborts > abortsBeforeFence,
+    "An untransmittable request went out instead of being aborted");
+
+  // (c) AND THE ROLLBACK IS THE RECOVERY. The one thing left that can shorten this
+  // window is taking the request that failed off the branch.
+  const fenceRollbackFrom = runtime.appended.length;
+  await overflow(runtime);
+  const fenceRollback = contextEvents(runtime, fenceRollbackFrom)
+    .find((record) => record.kind === "context.rollback");
+  assert(fenceRollback, "The fence-level session got no rollback");
+  assert.equal(fenceRollback.armed, true);
+  assert.equal(fenceRollback.replayed, true);
+  assert.equal(runtime.steered.length, 1, "The recovery queued more than one steered message");
+  assert(!runtime.branch.some((entry) => entry.message?.stopReason === "error"),
+    "The rejected entry is still on the live branch");
+
   return {
-    ordinaryStaleBoundary: snapshot.staleBoundary,
-    fenceStaleBoundary: deepened.staleBoundary,
-    ordinarySpans,
-    fenceSpans,
-    openTurnFreshBoundary: openSnapshot.freshBoundary,
-    openTurnFenceBoundary: openDeepened.staleBoundary,
+    staleBoundary: snapshot.staleBoundary,
+    freshBoundary: snapshot.freshBoundary,
+    proposedSpans: proposed.length,
+    deepestProposedIndex: Math.max(...reachedIndices),
+    fenceSnapshotDeleted: true,
     latchedCommits: latched.length,
-    unlatchedFenceCommits: fenceCommits.length,
+    fenceCommits: fenceCommits.length,
+    fenceAborts: runtime.aborts,
+    fenceRollbackReplayed: fenceRollback.replayed,
   };
 }
 
@@ -9314,7 +9532,7 @@ const gates = [
   [95, "Agent spans nest; pins refuse", gateAgentSpansNest],
   [96, "Thresholds are validated at construction", gateThresholdConstruction],
   [97, "The three zones", gateThreeZones],
-  [98, "The fence opens the middle, unlatched", gateFenceOpensTheMiddle],
+  [98, "The zone law is unconditional", gateFenceOpensTheMiddle],
   [99, "The last-call rides the commit boundary", gateLastCallRidesTheCommitBoundary],
   [100, "Threshold notices append once and re-arm", gateThresholdNoticesAppendOnce],
   [101, "Peek copies reclaim with identity", gatePeekReclaimWithIdentity],

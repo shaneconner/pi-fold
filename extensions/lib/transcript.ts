@@ -407,43 +407,6 @@ export function toolFreshIndices(
  * anything there. That is the 2026-08-06 ruling that agent context is not sequential,
  * written as a region instead of as a preference.
  */
-/**
- * The snapshot a commit adjudicates against AT THE FENCE.
- *
- * Two narrowings, one reason. The protected byte tail shrinks to a quarter of its
- * share, because depth at high occupancy means reaching into the fresh tail rather than
- * asking harder for evidence that is not there. And the stale zone extends to the
- * complement of that narrowed tail, because `staleTail` is a share of the serving
- * BUDGET and a projection at the fence is larger than the budget, so the middle -- the
- * region automation may never touch -- swallows a growing remainder that the reduction
- * has to reach.
- *
- * The stale boundary here is the BYTE tail's complement and deliberately not
- * `freshBoundary`'s: that one also clamps to the unfinished turn. The open turn is
- * protected by the current-turn GUARD at commit time, and the guard is the protection
- * that has a waiver; duplicating it as a zone would make the waiver unreachable, so a
- * session whose only foldable evidence is its open excursion could never mark it and
- * the fence would have nothing to reduce.
- */
-export function deepenedFenceSnapshot(
-  snapshot: ActiveContextSnapshot,
-  freshTailShare: number,
-): ActiveContextSnapshot {
-  const deepenedFreshBytes = zoneBytes(freshTailShare, snapshot.budgetTokens);
-  const toolProtectedIndices = toolFreshIndices(
-    snapshot.messages,
-    snapshot.completeTurns,
-    deepenedFreshBytes,
-  );
-  const staleBoundary = toolProtectedIndices.size
-    ? Math.min(...toolProtectedIndices)
-    : snapshot.messages.length;
-  // Unmapped messages are protected in every snapshot: nothing can fold what the
-  // durable branch cannot name.
-  for (const item of snapshot.mapped) if (!item.ref) toolProtectedIndices.add(item.index);
-  return { ...snapshot, toolProtectedIndices, staleBoundary };
-}
-
 export function staleBoundary(messages: unknown[], staleBytes: number): number {
   if (staleBytes <= 0) return 0;
   let total = 0;
