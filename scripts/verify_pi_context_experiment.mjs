@@ -1495,6 +1495,70 @@ try {
 }
 
 // ---------------------------------------------------------------------------
+// GATE 46 - the B1 observability contract: every guidance carrier ships with its
+// adjudicator lens in the same build. The last-call exposure-to-response attribution
+// is a TABLE the adjudicator can read (one row per exposure, joined by exposure_seq,
+// with the round's attempts counted between the two seqs), the threshold-notice log
+// travels with its shares, and per-carrier byte overhead is summed from each carrier
+// event's own chars field.
+// ---------------------------------------------------------------------------
+{
+  const custom = (data) => ({ type: "custom", customType: "pi-fold-context-event", data });
+  const entries = [
+    custom({ kind: "context.notice", seq: 1, ordinal: 2, share: 0.25, occupancy: 0.26,
+      occupancy_tokens: 23_400, budget_tokens: 90_000, max_target: 0.8, chars: 300 }),
+    custom({ kind: "context.lastcall", seq: 2, ordinal: 6, occupancy: 0.89, max_target: 0.8,
+      occupancy_tokens: 80_100, budget_tokens: 90_000, unmarked_stale_spans: 4,
+      unmarked_stale_tokens: 30_000, pending_marks: 2, pending_agent_marks: 0, chars: 900 }),
+    custom({ kind: "context.attempt", seq: 3, ordinal: 7, action: "fold", ok: true,
+      tool_call_id: "call_9", marks_requested: 2, corrections_applied: 0, error: null }),
+    custom({ kind: "context.attempt", seq: 4, ordinal: 7, action: "protect", ok: true,
+      tool_call_id: "call_10", marks_requested: 0, corrections_applied: 0, error: null }),
+    custom({ kind: "context.response", seq: 5, ordinal: 8, exposure_seq: 2, commit_seq: 6,
+      trigger: "band-top", outcome: "responded", responded: true, context_calls: 2,
+      marks_added: 2, protects: 1, unprotects: 0 }),
+    custom({ kind: "context.commit", seq: 6, ordinal: 8, deferred: false, trigger: "band-top" }),
+    custom({ kind: "context.rider", seq: 7, ordinal: 8, epoch: 6, chars: 800 }),
+    // A second exposure nothing ever answered stays visible as an open row.
+    custom({ kind: "context.lastcall", seq: 8, ordinal: 12, occupancy: 0.85, max_target: 0.8,
+      occupancy_tokens: 76_500, budget_tokens: 90_000, unmarked_stale_spans: 1,
+      unmarked_stale_tokens: 5_000, pending_marks: 0, pending_agent_marks: 0, chars: 880 }),
+  ];
+  const carriers = contextEventMetrics(entries).guidanceCarriers;
+  assert.equal(carriers.lastCall.exposures, 2);
+  assert.equal(carriers.lastCall.responses, 1);
+  assert.equal(carriers.lastCall.responded, 1);
+  assert.equal(carriers.lastCall.open, 1);
+  assert.equal(carriers.lastCall.responseRate, 0.5);
+  const row = carriers.lastCall.table[0];
+  assert.equal(row.exposureSeq, 2);
+  assert.equal(row.outcome, "responded");
+  assert.equal(row.commitSeq, 6);
+  assert.equal(row.contextCalls, 2);
+  assert.equal(row.marksAdded, 2);
+  assert.equal(row.protects, 1);
+  assert.equal(row.attemptsInRound, 2);
+  assert.equal(row.attemptActionsInRound.fold, 1);
+  assert.equal(row.attemptActionsInRound.protect, 1);
+  assert.equal(row.unmarkedStaleTokens, 30_000);
+  assert.equal(carriers.lastCall.table[1].outcome, "open");
+  assert.equal(carriers.notices.delivered, 1);
+  assert.equal(carriers.notices.byShare["0.25"], 1);
+  assert.equal(carriers.notices.chars, 300);
+  assert.equal(carriers.carrierBytes.riderChars, 800);
+  assert.equal(carriers.carrierBytes.lastCallChars, 1_780);
+  assert.equal(carriers.carrierBytes.noticeChars, 300);
+  assert.equal(carriers.carrierBytes.totalChars, 2_880);
+  // The empty run reports the lens, not its absence.
+  assert.equal(contextEventMetrics([]).guidanceCarriers.lastCall.exposures, 0);
+  assert.equal(contextEventMetrics([]).guidanceCarriers.lastCall.responseRate, null);
+  // The lens rides into every adjudicated report through contextEventMetrics.
+  assert(adjudicator.includes("contextEventMetrics(runEntries)"),
+    "the adjudicator must compute the guidance-carrier lenses from the event stream");
+  checks.guidanceCarrierLensesAdjudicated = true;
+}
+
+// ---------------------------------------------------------------------------
 // GATE 29 - the observability capture is threaded end to end: the extension logs
 // bounded arguments on every tool call and logs FAILED context calls as rows rather
 // than anonymous errors, the runtime's attempt records carry the tool_call_id join

@@ -97,8 +97,12 @@ import {
   DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   COMMIT_RECLAIM_FLOOR_SHARE,
+  CONTEXT_ACTION_RESPONSES_ENABLED,
   CONTEXT_RECEIPT_BLOCK_BYTES,
   DEFAULT_CONTEXT_WINDOW,
+  MAX_THRESHOLD_NOTICES,
+  THRESHOLD_NOTICE_SHARES,
+  THRESHOLD_NOTICES_ENABLED,
   assertThresholdsServable,
   resolveThresholds,
   servingBudgetTokens,
@@ -131,8 +135,10 @@ import {
 import {
   contextReceipt,
   curationSignals,
+  lastCallText,
   markAwarenessText,
   receiptBlockText,
+  thresholdNoticeText,
   withReceipt,
 } from "./lib/curation.ts";
 import type {
@@ -337,6 +343,8 @@ export function registerActiveContext(pi: any, options: {
   const surfacingProjectionType = `${entryTypePrefix}-surfacing`;
   const receiptProjectionType = `${entryTypePrefix}-receipts`;
   const riderProjectionType = `${entryTypePrefix}-rider`;
+  const lastCallProjectionType = `${entryTypePrefix}-lastcall`;
+  const noticeProjectionType = `${entryTypePrefix}-notice`;
   const curationProjectionType = `${entryTypePrefix}-curation`;
   const entryNamespace = entryTypeNamespace(entryTypePrefix);
   const providerMeasurementEntryType = `${entryNamespace}-provider-context-measurement`;
@@ -494,6 +502,13 @@ export function registerActiveContext(pi: any, options: {
      * runtime rewrites the projection, which is the whole cost model.
      */
     reopenBaselineShare: null as number | null,
+    /**
+     * Where the armed last-call actually LANDED: the exposure it rendered and the
+     * ordinal of the pass that rendered it. In-memory on purpose: after a reload the
+     * carrier re-renders on the first projection, this re-arms, and the commit waits
+     * one more round rather than firing on a prompt nobody saw.
+     */
+    lastCallDelivery: null as { exposure: number; ordinal: number } | null,
     /** Recovery attempts spent on the CURRENT inflow; reset by any accepted request. */
     recoveryAttempts: 0,
     /** A provider rejection observed but not yet recovered from. */
@@ -1536,6 +1551,22 @@ export function registerActiveContext(pi: any, options: {
     // is the one built after this one. A provider rejection outranks our own estimate:
     // it is ground truth that the last request did not fit, whatever we measured.
     if (!measured.crowded && !rejected) return { projected, aborted: false };
+    // Crowded is a MARGIN PREDICTION, not an overflow. While a last-call round is
+    // genuinely OPEN, exposure rendered this pass or the agent's response still
+    // outstanding, the prediction waits for it: this request still fits and the
+    // round ends on the very next context pass. Once the round has elapsed the
+    // margin lane acts freely, because a stale exposure parked behind the reopen
+    // latch must never muzzle the one reducer that can still act (the 20k-window
+    // probe climbed from crowded to the wire in exactly that state). Genuine
+    // untransmissibility, an over-budget projection or a provider rejection, never
+    // waits; safety outranks ceremony, and economy does not outrank the one round.
+    const lastCall = persistence.state?.lastCall;
+    const delivery = curation.lastCallDelivery;
+    const roundOpen = Boolean(lastCall) && (!delivery || delivery.exposure !== lastCall.exposure ||
+      markOrdinal(snapshot) <= delivery.ordinal);
+    if (!measured.over && !rejected && roundOpen) {
+      return { projected, aborted: false };
+    }
     // Why this fired, recorded from the measurement that TRIGGERED it rather than the
     // one taken afterwards, which by then describes a projection that fits.
     const trigger = measured;
@@ -1748,6 +1779,69 @@ export function registerActiveContext(pi: any, options: {
   };
 
   /**
+   * Threshold notices are APPEND-ONCE: each delivered notice is its own carrier with
+   * its own key, so a notice that fires mid-freeze lands at the tail as a pure append,
+   * the freeze closes over it, and it then persists in the window the way a tool
+   * result does. A freeze break re-renders every retained notice from its persisted
+   * literal bytes inside the rewrite that broke the freeze.
+   */
+  const appendNotices = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
+    const notices = persistence.state?.notices;
+    if (!notices?.ring.length) return projected;
+    for (const notice of notices.ring) {
+      if (!carrierAdmitted(`notice-${notice.share}-${notice.ordinal}`)) continue;
+      projected.push({
+        role: "custom",
+        customType: noticeProjectionType,
+        content: notice.text,
+        display: false,
+        details: {
+          source: activeContextSource(entryTypePrefix),
+          ephemeral: true,
+          share: notice.share,
+          noticeOrdinal: notice.ordinal,
+        },
+        timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
+          ? ownValue(snapshot.messages.at(-1), "timestamp")
+          : 0,
+      });
+    }
+    return projected;
+  };
+
+  /**
+   * The pre-commit last-call rides the commit BOUNDARY: it is armed when the band-top
+   * trigger fires, appended at the tail (a pure append) for exactly one gated round,
+   * and the commit that consumes it clears the state, so the carrier's disappearance
+   * rides the rewrite that commit already pays for. Rendering records the delivery,
+   * which is what the one-round clock is measured from.
+   */
+  const appendLastCall = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
+    const lastCall = persistence.state?.lastCall;
+    if (!lastCall) return projected;
+    if (carrierAdmitted(`lastcall-${lastCall.exposure}`)) {
+      projected.push({
+        role: "custom",
+        customType: lastCallProjectionType,
+        content: lastCall.text,
+        display: false,
+        details: {
+          source: activeContextSource(entryTypePrefix),
+          ephemeral: true,
+          exposure: lastCall.exposure,
+        },
+        timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
+          ? ownValue(snapshot.messages.at(-1), "timestamp")
+          : 0,
+      });
+    }
+    if (curation.lastCallDelivery?.exposure !== lastCall.exposure) {
+      curation.lastCallDelivery = { exposure: lastCall.exposure, ordinal: markOrdinal(snapshot) };
+    }
+    return projected;
+  };
+
+  /**
    * Whatever this pass ended up sending becomes the frozen surface for the next one, in
    * full. Nothing rides after the frozen region.
    *
@@ -1781,7 +1875,8 @@ export function registerActiveContext(pi: any, options: {
       const customType = ownValue(message, "customType");
       return customType !== milestoneProjectionType && customType !== advisoryProjectionType &&
         customType !== surfacingProjectionType && customType !== receiptProjectionType &&
-        customType !== riderProjectionType && customType !== curationProjectionType;
+        customType !== riderProjectionType && customType !== curationProjectionType &&
+        customType !== lastCallProjectionType && customType !== noticeProjectionType;
     });
     // The freeze test, stated as bytes rather than as intent: if the rebuilt body still
     // OPENS with the frozen body verbatim, nothing structural moved and the previous
@@ -1808,6 +1903,8 @@ export function registerActiveContext(pi: any, options: {
     // specifically to invite curation produced 0, 1 and 0 voluntary folds.
     appendReceipts(projected, snapshot);
     appendRider(projected, snapshot);
+    appendNotices(projected, snapshot);
+    appendLastCall(projected, snapshot);
     return holdFrozen(projected);
   };
   /**
@@ -1995,6 +2092,37 @@ export function registerActiveContext(pi: any, options: {
 
   const deepenedFreshnessSnapshot = (snapshot: ActiveContextSnapshot): ActiveContextSnapshot =>
     deepenedFenceSnapshot(snapshot, snapshot.thresholds.freshTail * DEEPENED_FRESH_TAIL_SHARE);
+
+  /**
+   * What the gated round did, measured against the arming snapshot. Pins and unpins
+   * are read from the stream itself (context.protect records after the exposure); the
+   * call and mark deltas are clamped at zero because contextCalls is process-local and
+   * a reload inside a round must not report a negative response.
+   */
+  const lastCallAttribution = (
+    lastCall: NonNullable<ActiveContextState["lastCall"]>,
+    agentMarksNow: number,
+  ): { responded: boolean; context_calls: number; marks_added: number; protects: number; unprotects: number } => {
+    const contextCalls = Math.max(0, curation.contextCalls - lastCall.contextCalls);
+    const protectRecords = instrumentation.ledger.events.filter((record) =>
+      record.seq > lastCall.exposure && record.kind === "context.protect");
+    const protects = protectRecords.filter((record) => record.protect === true).length;
+    return {
+      responded: contextCalls > 0,
+      context_calls: contextCalls,
+      marks_added: Math.max(0, agentMarksNow - lastCall.agentMarks),
+      protects,
+      unprotects: protectRecords.length - protects,
+    };
+  };
+
+  const clearLastCall = (): void => {
+    if (!persistence.state?.lastCall) return;
+    const next = { ...persistence.state };
+    delete next.lastCall;
+    persistence.state = next;
+    curation.lastCallDelivery = null;
+  };
 
   const runCommitEpoch = async (
     snapshot: ActiveContextSnapshot,
@@ -2242,6 +2370,33 @@ export function registerActiveContext(pi: any, options: {
     instrumentation.mutationsSinceHandoff += 1;
     instrumentation.lastMutationRequest = instrumentation.requests;
     instrumentation.lastMutationTokens = usedTokens;
+    // THE RESPONSE ATTRIBUTION. Whatever the gated round did, or that it did nothing,
+    // is linked to the exposure it answered, and the exposure is consumed by the
+    // commit whatever its trigger: a fence or user commit landing mid-round is still
+    // the commit boundary the last-call announced. The carrier's disappearance rides
+    // this commit's own rewrite.
+    if (persistence.state.lastCall) {
+      const lastCall = persistence.state.lastCall;
+      const attribution = lastCallAttribution(lastCall, accounting.agentMarks);
+      emit("context.response", {
+        exposure_seq: lastCall.exposure,
+        commit_seq: commitEvent.seq,
+        trigger,
+        outcome: attribution.responded ? "responded" : "silent",
+        ...attribution,
+      });
+      clearLastCall();
+    }
+    // A commit that drops occupancy back under a waypoint re-arms its notice: the next
+    // upward crossing is a new event and earns a new one. The estimate is the same one
+    // the receipt reports: measured occupancy before, less what this commit freed.
+    if (persistence.state.notices && usedTokens !== null && budgetTokens > 0) {
+      const postOccupancy = Math.max(0, usedTokens - estimatedTokens(freedBytes)) / budgetTokens;
+      const fired = persistence.state.notices.fired.filter((share) => postOccupancy >= share);
+      if (fired.length !== persistence.state.notices.fired.length) {
+        persistence.state = { ...persistence.state, notices: { ...persistence.state.notices, fired } };
+      }
+    }
     // The rider: at most ONE action prompt per fold epoch, composed from post-commit
     // numbers, persisted as literal bytes, delivered beside the receipt inside the
     // rewrite this commit already paid for. The epoch key is the commit event's own
@@ -2467,6 +2622,115 @@ export function registerActiveContext(pi: any, options: {
     }));
   };
 
+  /**
+   * Threshold notices, evaluated on every pass the ladder runs on. One waypoint fires
+   * once per upward crossing of the measured occupancy; delivery is an append-once
+   * carrier plus its stream record, and re-arming belongs to the commit that drops
+   * occupancy back under the line. Default on; the switch is a constant until Build D
+   * makes the option surface public.
+   */
+  const deliverThresholdNotices = (snapshot: ActiveContextSnapshot): boolean => {
+    if (!THRESHOLD_NOTICES_ENABLED || !persistence.state) return false;
+    const capacity = servingCapacity(snapshot.contextWindow);
+    if (capacity.usedTokens === null || capacity.budgetTokens <= 0) return false;
+    const occupancy = capacity.usedTokens / capacity.budgetTokens;
+    const current = persistence.state.notices ?? { fired: [], ring: [] };
+    let fired = current.fired;
+    let ring = current.ring;
+    let changed = false;
+    for (const share of THRESHOLD_NOTICE_SHARES) {
+      if (occupancy < share || fired.includes(share)) continue;
+      const text = thresholdNoticeText({
+        share,
+        occupancyTokens: capacity.usedTokens,
+        budgetTokens: capacity.budgetTokens,
+        maxTarget: thresholds.maxTarget,
+        toolName,
+        brandNoun,
+      });
+      fired = [...fired, share];
+      ring = [...ring, { share, ordinal: markOrdinal(snapshot), text }];
+      if (ring.length > MAX_THRESHOLD_NOTICES) ring = ring.slice(ring.length - MAX_THRESHOLD_NOTICES);
+      changed = true;
+      emit("context.notice", {
+        share,
+        occupancy,
+        occupancy_tokens: capacity.usedTokens,
+        budget_tokens: capacity.budgetTokens,
+        max_target: thresholds.maxTarget,
+        chars: text.length,
+      });
+    }
+    if (changed) persistence.state = { ...persistence.state, notices: { fired, ring } };
+    return changed;
+  };
+
+  /**
+   * THE PRE-COMMIT LAST-CALL GATE. When the band-top trigger fires, the commit defers
+   * exactly one gated round behind one exposure of the ruled prompt; then it proceeds
+   * with whatever marks exist. Safety outranks ceremony: fence pressure, the recovery
+   * lane, or an occupancy already past the serving budget commit NOW, and the user
+   * command never reaches this gate because explicit intent is its own answer. The
+   * round is measured from DELIVERY: the commit proceeds only on a context pass whose
+   * ordinal is past the pass that rendered the exposure, which is exactly one agent
+   * response between prompt and rewrite.
+   */
+  const lastCallVerdict = (
+    snapshot: ActiveContextSnapshot,
+    pressure: number | null,
+    phase: string,
+  ): "expose" | "hold" | "proceed" => {
+    const state = persistence.state!;
+    const capacity = servingCapacity(snapshot.contextWindow);
+    const fenceLevel = typeof pressure === "number" && Number.isFinite(pressure) &&
+      pressure >= hardFenceRatio(snapshot);
+    const overBudget = capacity.usedTokens !== null && capacity.budgetTokens > 0 &&
+      capacity.usedTokens > capacity.budgetTokens;
+    if (fenceLevel || overBudget || curation.recoveryAttempts > 0 || curation.pendingRejection) {
+      return "proceed";
+    }
+    if (!state.lastCall) return "expose";
+    if (phase !== "context") return "hold";
+    const delivery = curation.lastCallDelivery;
+    if (!delivery || delivery.exposure !== state.lastCall.exposure) return "hold";
+    return markOrdinal(snapshot) > delivery.ordinal ? "proceed" : "hold";
+  };
+
+  const exposeLastCall = (snapshot: ActiveContextSnapshot): void => {
+    if (!persistence.state) return;
+    const signals = measuredCurationSignals(snapshot);
+    const remainder = unmarkedRemainder(snapshot, persistence.state, projectionCharsPerToken());
+    const accounting = markAccounting(snapshot, persistence.state);
+    const text = lastCallText({
+      signals,
+      unmarked: { spans: remainder.spans, tokens: remainder.tokens },
+      pendingMarks: accounting.pending,
+      toolName,
+      brandNoun,
+    });
+    const record = emit("context.lastcall", {
+      occupancy: signals.occupancy,
+      max_target: thresholds.maxTarget,
+      occupancy_tokens: signals.occupancyTokens,
+      budget_tokens: signals.budgetTokens,
+      unmarked_stale_spans: remainder.spans,
+      unmarked_stale_tokens: remainder.tokens,
+      pending_marks: accounting.pending,
+      pending_agent_marks: accounting.agentMarks,
+      chars: text.length,
+    });
+    persistence.state = {
+      ...persistence.state,
+      lastCall: {
+        exposure: record.seq,
+        ordinal: markOrdinal(snapshot),
+        contextCalls: curation.contextCalls,
+        agentMarks: accounting.agentMarks,
+        text,
+      },
+    };
+  };
+
   const applyAutomaticRung = async (
     snapshot: ActiveContextSnapshot,
     ratio: number,
@@ -2474,6 +2738,7 @@ export function registerActiveContext(pi: any, options: {
       toolOnly?: boolean;
       waiverRatio?: number;
     } = {},
+    phase = "context",
   ): Promise<Record<string, unknown> | null> => {
     if (!persistence.state || ladder.automaticFailure || ladder.preparing) return null;
     const rungSelectionOptions = {
@@ -2540,20 +2805,52 @@ export function registerActiveContext(pi: any, options: {
     // always sat. Crossing the band top is a property of occupancy, not of which
     // lifecycle hook happened to notice it, and a trigger that waits for the next
     // projection pass is a window that keeps climbing while it waits.
+    const noticesChanged = deliverThresholdNotices(snapshot);
+    let lastCallChanged = false;
     const commitDue = commitTriggerDue(snapshot, ratio);
     if (commitDue) {
-      epoch = await runCommitEpoch(
-        snapshot,
-        "band-top",
-        true,
-        rungOptions.waiverRatio ?? ratio,
-      );
-      // Latch the eligible share this commit left behind, so the next crossing waits
-      // for genuinely new foldable mass rather than for the same window to still be
-      // full. The band top is a LINE, and a window parked on it is one event.
-      if (persistence.state) {
-        curation.reopenBaselineShare =
-          markAccounting(snapshot, persistence.state).eligibleFreedBudgetShare;
+      const verdict = lastCallVerdict(snapshot, rungOptions.waiverRatio ?? ratio, phase);
+      if (verdict === "expose") {
+        exposeLastCall(snapshot);
+        lastCallChanged = true;
+      } else if (verdict === "proceed") {
+        epoch = await runCommitEpoch(
+          snapshot,
+          "band-top",
+          true,
+          rungOptions.waiverRatio ?? ratio,
+        );
+        // Latch the eligible share this commit left behind, so the next crossing waits
+        // for genuinely new foldable mass rather than for the same window to still be
+        // full. The band top is a LINE, and a window parked on it is one event.
+        if (persistence.state) {
+          curation.reopenBaselineShare =
+            markAccounting(snapshot, persistence.state).eligibleFreedBudgetShare;
+        }
+      }
+      // "hold": the exposure is out and the round is still the agent's. Marks keep
+      // accumulating below; nothing commits and nothing re-exposes.
+    } else if (persistence.state.lastCall) {
+      // The crossing died without its commit (a user rescue or expiry dropped
+      // occupancy back under the trigger), so the exposure lapses: attributed,
+      // cleared, and the next crossing is a fresh event with a fresh exposure.
+      const capacity = servingCapacity(snapshot.contextWindow);
+      if (capacity.usedTokens !== null && capacity.budgetTokens > 0 &&
+          capacity.usedTokens / capacity.budgetTokens < thresholds.maxTarget) {
+        const lastCall = persistence.state.lastCall;
+        const attribution = lastCallAttribution(
+          lastCall,
+          markAccounting(snapshot, persistence.state).agentMarks,
+        );
+        emit("context.response", {
+          exposure_seq: lastCall.exposure,
+          commit_seq: null,
+          trigger: null,
+          outcome: "lapsed",
+          ...attribution,
+        });
+        clearLastCall();
+        lastCallChanged = true;
       }
     }
     // An inline rung is free only INSIDE a rewrite the epoch already paid for. Below
@@ -2569,6 +2866,13 @@ export function registerActiveContext(pi: any, options: {
       const marked = markLadderSelection();
       if (marked) {
         if (epoch) ladder.lastAutomaticAction = { ...marked, epoch };
+        return ladder.lastAutomaticAction;
+      }
+      // A carrier change is durable state even when no mark and no epoch moved: the
+      // exposure and the notices must survive a reload, so the pass returns an action
+      // for the transaction to persist. Never a receipt: a carrier reports itself.
+      if (!epoch && (lastCallChanged || noticesChanged)) {
+        ladder.lastAutomaticAction = { kind: "carrier", foldIds: [], sourceIds: [], sourceBytesSaved: 0 };
         return ladder.lastAutomaticAction;
       }
     }
@@ -2733,7 +3037,7 @@ export function registerActiveContext(pi: any, options: {
     const transientAtEntry = captureTransient();
     let action: Record<string, unknown> | null = null;
     try {
-      action = await applyAutomaticRung(snapshot, ratio, rungOptions);
+      action = await applyAutomaticRung(snapshot, ratio, rungOptions, phase);
       if (action) await persist(ctx);
       if (action) ladder.boundaryFailure = null;
       return action;
@@ -3900,13 +4204,18 @@ export function registerActiveContext(pi: any, options: {
         unmarkedTokens: remainder.tokens,
         unmarkedShare: remainder.share,
         unmarkedCandidates: remainder.candidates,
-        awareness: markAwarenessText({ held, remainder, toolName, brandNoun }),
-        activation: "accepted as pending marks; no context bytes moved, and nothing else in your " +
-          "context changed either. They apply together at the next commit epoch, which the runtime " +
-          "opens at the fold event. " +
-          "A mark over a still-fresh span is held, not refused: it is scheduled, and it folds at the " +
-          "first commit after that span ages out of the fresh window. " +
-          "Mark several spans in one call: this whole picture comes back with each one.",
+        // The acknowledgement rides the tool result, so it PERSISTS in context the way
+        // every tool result does. Default on; the switch is a constant until Build D
+        // makes the option surface public.
+        ...(CONTEXT_ACTION_RESPONSES_ENABLED ? {
+          awareness: markAwarenessText({ held, remainder, toolName, brandNoun }),
+          activation: "accepted as pending marks; no context bytes moved, and nothing else in your " +
+            "context changed either. They apply together at the next commit epoch, which the runtime " +
+            "opens at the fold event. " +
+            "A mark over a still-fresh span is held, not refused: it is scheduled, and it folds at the " +
+            "first commit after that span ages out of the fresh window. " +
+            "Mark several spans in one call: this whole picture comes back with each one.",
+        } : {}),
       });
     }
     throw new Error(`Unknown ${toolName} action '${action}'`);

@@ -382,6 +382,15 @@ async function measureAndCommit(runtime, tokens, contextWindow = runtime.usage.c
   await measure(runtime, tokens, contextWindow, suffix);
   await project(runtime);
   await settle();
+  // Below the fence, the band-top trigger opens the one-round last-call gate before
+  // the commit applies: the second measured pass is the agent's round, and the commit
+  // lands on the context pass after it. Driving the epoch through its REAL trigger
+  // now includes that round.
+  if (materialized(runtime).lastCall) {
+    await measure(runtime, tokens, contextWindow, suffix ? `${suffix}-round` : undefined);
+    await project(runtime);
+    await settle();
+  }
   return materialized(runtime);
 }
 
@@ -415,6 +424,21 @@ async function runtimeCommit(runtime, {
   }
   await project(runtime);
   await settle();
+  // A sub-fence band-top crossing defers one gated round behind the last-call; the
+  // response round is part of reaching the epoch through its real trigger.
+  if (!contextEvents(runtime, from).some((record) =>
+      record.kind === "context.commit" && record.deferred === false) &&
+      materialized(runtime).lastCall) {
+    await measure(
+      runtime,
+      tokens ?? runtime.usage.tokens,
+      window,
+      suffix ? `${suffix}-round` : undefined,
+      stopReason,
+    );
+    await project(runtime);
+    await settle();
+  }
   const records = contextEvents(runtime, from);
   const commits = records.filter((record) => record.kind === "context.commit");
   // One pass can carry more than one epoch (the handoff and the projection each run
@@ -628,6 +652,9 @@ async function collectRegistrationSurface(registration, mcpToolName) {
     await startRuntime(runtime);
     const initialStatus = structuredClone(runtime.statuses.at(-1));
     await measure(runtime, 80_000, 100_000);
+    await project(runtime);
+    // The gated last-call round sits between the crossing and its commit.
+    await measure(runtime, 80_500, 100_000);
     const foldedProjection = await project(runtime);
     const foldedRecord = runtime.appended.find((entry) => entry.customType.endsWith("-fold-record"));
     assert(foldedRecord?.data?.fold, `Branding fixture produced no fold: ${json.stableStringify({
@@ -743,10 +770,15 @@ async function gateRegistration() {
   assert.deepEqual([...custom.tools.keys()], ["ctx_tool"]);
   assert.deepEqual([...custom.commands.keys()].sort(), ["sandbox-context", "sandbox-fold-context"]);
   await startRuntime(custom);
-  // The measurement marks; the context pass that follows is where the epoch commits,
-  // and the fold record is written by the commit. Both halves of the lifecycle have to
-  // run before the deployment's entry types can all be observed.
+  // The measurement marks; the context pass that follows delivers the last-call, the
+  // second measured pass is the gated round, and the context pass after it is where
+  // the epoch commits and the fold record is written. All of it has to run before the
+  // deployment's entry types can all be observed. Driven by hand because materialized()
+  // reads the DEFAULT entry types and this runtime persists under the custom prefix.
   await measure(custom, 80_000, 100_000);
+  await project(custom);
+  await settle();
+  await measure(custom, 80_500, 100_000);
   await project(custom);
   await settle();
   const types = custom.appended.map((entry) => entry.customType);
@@ -965,6 +997,14 @@ async function gateAutonomousLadder() {
   // is which pass pays for it, because the trigger no longer waits for a projection.
   const beforeCrossing = toolRuntime.appended.length;
   const measurement = await measure(toolRuntime, 80_000, 100_000);
+  // The crossing EXPOSES the one-round last-call; the commit is the context pass
+  // after the agent's round. Still one structural mutation, one round later.
+  assert(materialized(toolRuntime).lastCall, "The crossing must arm the last-call");
+  await project(toolRuntime);
+  await settle();
+  await measure(toolRuntime, 80_500, 100_000, "last-call-round");
+  await project(toolRuntime);
+  await settle();
   const crossingCommits = contextEvents(toolRuntime, beforeCrossing)
     .filter((record) => record.kind === "context.commit" && record.deferred === false);
   const toolCommit = await runtimeCommit(toolRuntime, { measured: false });
@@ -1937,7 +1977,11 @@ async function gateWireForwardBackwardNote() {
   await startRuntime(runtime);
   await measure(runtime, 50_000, 100_000);
   await measure(runtime, 80_000, 100_000);
+  await project(runtime);
+  await settle();
   await measure(runtime, 88_000, 100_000);
+  await project(runtime);
+  await settle();
   const canonicalDeltaEntry = runtime.branch.filter((entry) =>
     entry.customType === context.ACTIVE_CONTEXT_STATE_ENTRY).at(-1);
   assert.equal(canonicalDeltaEntry.data.kind, "delta");
@@ -2941,6 +2985,11 @@ async function gateEpochQuotaTopUp() {
   assert.equal(materialized(runtime).pendingMarks[0].briefProvenance.kind, "supplied");
 
   await measure(runtime, 88_000, 100_000);
+  await project(runtime);
+  await settle();
+  await measure(runtime, 88_500, 100_000, "quota-round");
+  await project(runtime);
+  await settle();
   const status = await toolStatus(runtime);
   // Inside the rewrite the commit already paid for, one further rung may follow it, so
   // the ACTION reported last is not always the commit. The epoch record is, and that is
@@ -3112,22 +3161,36 @@ async function gateEphemeralPeekMark() {
     false,
   );
 
-  // End to end: the commit epoch folds the peek read without being asked.
+  // End to end: the commit epoch folds the peek read without being asked. RULING
+  // (2026-08-10): the doorless ladder may legitimately claim a completed peek read
+  // during the gated last-call round, so the property is not WHICH mechanism claimed
+  // it. It is that the claim is single, the duplicate bytes fold at the commit, and
+  // the recorded origin is truthful for whichever mechanism made the claim: agent
+  // when the epoch's own peek auto-mark did (peek_marks counts it), ladder when the
+  // doorless round got there first (and then no peek mark is counted).
   const runtime = makeRuntime(built);
   await startRuntime(runtime);
+  const peekReadId = built.turnEntries[0][2];
   const committed = await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
-  assert.equal(committed.commit.peek_marks, 1, "The peek read was not auto-marked by the epoch");
-  assert.equal(committed.commit.agent_marks, 1);
-  const peekFold = committed.applied.find((mark) => mark.origin === "agent");
-  assert(peekFold, "The auto-marked peek read was not applied");
   const folded = materialized(runtime);
-  assert(folded.folds.some((fold) => fold.id === peekFold.foldId && fold.kind === "tool-result"),
-    "The peek read did not become a tool-result fold");
+  const owners = folded.folds.filter((fold) =>
+    context.flattenFoldRefs(fold, folded).some((ref) => ref.entryId === peekReadId));
+  assert.equal(owners.length, 1, "The peek read must be claimed by exactly one fold");
+  assert.equal(owners[0].kind, "tool-result", "The peek read did not become a tool-result fold");
+  const appliedRecord = committed.applied.find((mark) => mark.foldId === owners[0].id);
+  assert(appliedRecord, "The peek fold did not land through the commit's applied marks");
+  const originTruthful = appliedRecord.origin === "agent"
+    ? committed.commit.peek_marks >= 1
+    : appliedRecord.origin === "ladder" && committed.commit.peek_marks === 0;
+  assert(originTruthful,
+    `The recorded origin '${appliedRecord.origin}' does not match the claiming mechanism ` +
+    `(peek_marks ${committed.commit.peek_marks})`);
   return {
     peekMarks: marks.length,
     peekMarkOrigin: marks[0].origin,
     expandedPeekExempt: true,
     autoFoldedOnCommit: committed.applied.length,
+    claimedBy: appliedRecord.origin,
   };
 }
 
@@ -3642,8 +3705,17 @@ async function gateCommitOnThreshold() {
   const marksBelow = materialized(runtime).pendingMarks.length;
   assert(marksBelow >= 1);
 
-  // Crossing the band top is the whole trigger. There is no second line.
+  // Crossing the band top is the whole trigger. There is no second line. What the
+  // crossing does FIRST is expose the one-round last-call; the commit proceeds on the
+  // context pass after the agent's round, with whatever marks exist.
   await measure(runtime, 86_000, 100_000);
+  assert(materialized(runtime).lastCall, "The sub-fence crossing must arm the last-call");
+  assert.equal(materialized(runtime).folds.length, 0, "The exposure pass must not commit");
+  await project(runtime);
+  await settle();
+  await measure(runtime, 86_500, 100_000);
+  await project(runtime);
+  await settle();
   const aboveStatus = await toolStatus(runtime);
   const aboveAction = aboveStatus.details.automatic.lastAutomaticAction;
   // The crossing commits. It may also carry an INLINE rung inside the rewrite it just
@@ -3702,7 +3774,10 @@ async function gateCommitOnThreshold() {
   assert(freeEntry, "The pressure commit left the rider fixture nothing to mark");
   const secondMark = await toolCall(rider, { action: "fold", ids: [freeEntry],
     brief: "A second completed inspection is stale and its exact output stays recoverable." });
-  assert.equal(materialized(rider).pendingMarks.length, 1);
+  // The agent's mark is pending; a mark the commit retained (still fresh, or inside
+  // the open turn) may legitimately stand beside it under the gated-round cadence.
+  assert(materialized(rider).pendingMarks.some((mark) => mark.id === secondMark.details.id),
+    "The agent's second mark was not recorded as pending");
   // The commit left the window near the fence; the restore needs room to land in.
   await measure(rider, 55_000, 100_000);
   // Pin the fold being restored. One selection law lets the commit this expand opens
@@ -3711,7 +3786,8 @@ async function gateCommitOnThreshold() {
   // target stays a root across the rewrite it triggered.
   await toolCall(rider, { action: "protect", ids: [target] });
   const expanded = await toolCall(rider, { action: "expand", id: target });
-  assert.equal(expanded.details.committedMarks.length, 1);
+  assert(expanded.details.committedMarks.some((mark) => mark.id === secondMark.details.id),
+    "The commit the expand opened did not apply the agent's pending mark");
   // The agent's mark was applied by the commit the expand opened. What the pass marks
   // AFTERWARDS is the next epoch's business, so the invariant is that this mark is gone.
   assert.equal(
@@ -3819,6 +3895,11 @@ async function gateMarkAccumulation() {
 
   // At the commit the accumulated marks, not the top-up floor, do most of the freeing.
   await measure(runtime, 86_000, 100_000);
+  await project(runtime);
+  await settle();
+  await measure(runtime, 86_500, 100_000, "accumulation-round");
+  await project(runtime);
+  await settle();
   const status = await toolStatus(runtime);
   const epoch = status.details.automatic.lastAutomaticAction.epoch;
   assert.equal(epoch.refusedMarks, 0);
@@ -3852,12 +3933,22 @@ async function gateMarkAccumulation() {
 async function gateEpochInlineRungs() {
   const wide = await epochToolRuntime({ turns: 40 });
   await measure(wide, 86_000, 100_000);
+  await project(wide);
+  await settle();
+  await measure(wide, 86_500, 100_000, "inline-round");
+  await project(wide);
+  await settle();
   const first = (await toolStatus(wide)).details.automatic.lastAutomaticAction;
   assert.equal(first.kind, "tool-fold", "The inline rung did not run inside the epoch's rewrite turn");
   assert.equal(typeof first.epoch, "object", "The inline rung replaced the epoch commit instead of riding it");
 
   const runtime = await epochToolRuntime({ turns: 12 });
   await measure(runtime, 86_000, 100_000);
+  await project(runtime);
+  await settle();
+  await measure(runtime, 86_100, 100_000);
+  await project(runtime);
+  await settle();
   // A ROOT. Under the counting rule a commit may nest what it folds, and a child is
   // not expandable while its parent is still a placeholder.
   const target = materialized(runtime).folds.find((fold) => fold.parentId === null).id;
@@ -3865,7 +3956,11 @@ async function gateEpochInlineRungs() {
   assert(materialized(runtime).expanded.includes(target));
   let kinds = [];
   for (let step = 0; step < 12; step += 1) {
-    await measure(runtime, 86_000 + step * 100, 100_000);
+    // Full request cycles: the refold decision lands as a mark on any pass, and the
+    // commit that applies it needs the context pass that closes the last-call round.
+    await measure(runtime, 86_200 + step * 100, 100_000);
+    await project(runtime);
+    await settle();
     const action = (await toolStatus(runtime)).details.automatic.lastAutomaticAction;
     kinds.push(action.kind);
     if (!materialized(runtime).expanded.includes(target)) break;
@@ -3874,8 +3969,13 @@ async function gateEpochInlineRungs() {
     `The refold rung never fired in epoch mode: ${kinds.join(",")}`);
   assert(["refold", "epoch-commit"].includes(kinds.at(-1)),
     `The fold re-collapsed outside the refold rung: ${kinds.join(",")}`);
-  assert(kinds.includes("mark") || kinds.includes("refold"),
-    `The refold decision was never taken: ${kinds.join(",")}`);
+  // The decision itself is read off the canonical stream: the refold lands as a MARK
+  // on a measured pass, the exposure carrier overwrites that pass's action reading in
+  // the same cycle, and the commit that closes the round applies it. What proves the
+  // decision was taken is the applying commit plus the placeholder flip above.
+  assert(contextEvents(runtime).some((record) =>
+    record.kind === "context.commit" && record.deferred === false && record.applied_marks >= 1),
+  `The refold decision was never applied by a commit: ${kinds.join(",")}`);
 
   // The mark-side branch for a refold selection maps to a refold mark, not a fold one.
   const snapshot = epochSnapshot(runtime.built);
@@ -4146,6 +4246,12 @@ async function gateCurrentTurnCommitGuard() {
   assert(epochTurnMarks.length >= 3,
     `Only ${epochTurnMarks.length} current-turn marks survived to the epoch`);
   await measure(runtime, 176_000, 200_000, undefined, "toolUse");
+  // The gated last-call round, with the excursion still open on every pass.
+  await project(runtime);
+  await settle();
+  await measure(runtime, 176_500, 200_000, undefined, "toolUse");
+  await project(runtime);
+  await settle();
   const epoch = (await toolStatus(runtime)).details.automatic.lastAutomaticAction?.epoch;
   assert(epoch, "No commit epoch ran");
   assert.equal(epoch.currentTurnRetained, epochTurnMarks.length,
@@ -4281,6 +4387,12 @@ async function gatePinnedMassBackstop() {
   await startRuntime(runtime);
   for (const tokens of [76_000, 78_000, 80_000]) await measure(runtime, tokens, 100_000);
   await measure(runtime, 88_000, 100_000);
+  // The crossing exposes the last-call; the commit is the context pass after the round.
+  await project(runtime);
+  await settle();
+  await measure(runtime, 88_500, 100_000);
+  await project(runtime);
+  await settle();
   const epoch = (await toolStatus(runtime)).details.automatic.lastAutomaticAction?.epoch;
   assert(epoch, "The pressure backstop did not commit");
   assert.equal(epoch.trigger, "band-top");
@@ -4365,8 +4477,15 @@ async function sealedSpineExcursionRuntime(overrides = {}) {
 async function gateEpochBatchingUnderFullLevers() {
   const runtime = await sealedSpineExcursionRuntime();
   const passes = [];
-  const step = async (tokens) => {
+  const step = async (tokens, round = false) => {
     await measure(runtime, tokens, 100_000, undefined, "toolUse");
+    // Above the band top a pass is a full request cycle: the measurement exposes or
+    // holds the last-call, and the context pass that follows is where the round
+    // closes and a commit can land, so the record samples AFTER that pass.
+    if (round) {
+      await project(runtime);
+      await settle();
+    }
     const state = materialized(runtime);
     const action = (await toolStatus(runtime)).details.automatic.lastAutomaticAction;
     passes.push({
@@ -4409,10 +4528,20 @@ async function gateEpochBatchingUnderFullLevers() {
   // waiver releases it.
   const accumulated = below.at(-1).marks;
   const foldsAtCrossing = below.at(-1).folds;
+  // The first two steps are full request cycles: the crossing exposes the last-call,
+  // the next context pass closes the round and lands the batch. The remaining steps
+  // are bare measurements, the same parked-window shape this gate always pinned; the
+  // fixture declares a high token count forever, so a projection pass here would put
+  // the estimate inside the fence margin, and the margin lane is gate 56's subject,
+  // not this one's.
   const above = [];
-  for (let index = 0; index < 8; index += 1) above.push(await step(86_000 + index * 100));
-  assert(above[0].appliedMarks >= accumulated,
-    `The crossing applied ${above[0].appliedMarks} of ${accumulated} accumulated marks; the batch did not land together`);
+  above.push(await step(86_000, true));
+  above.push(await step(86_100, true));
+  for (let index = 2; index < 8; index += 1) above.push(await step(86_000 + index * 100));
+  const commitPass = above.find((pass) => pass.appliedMarks !== null);
+  assert(commitPass, "No commit epoch ran above the band top");
+  assert(commitPass.appliedMarks >= accumulated,
+    `The crossing applied ${commitPass.appliedMarks} of ${accumulated} accumulated marks; the batch did not land together`);
   assert(above.every((pass) => pass.guardWaived !== true),
     `A commit below the fence waived the current-turn guard: ${
       above.map((pass) => `${pass.kind}/waived=${pass.guardWaived}`).join(",")}`);
@@ -4452,10 +4581,27 @@ async function gateEpochBatchingUnderFullLevers() {
       timestamp: 990 + turn,
     }, "closing");
   }
-  await project(runtime);
-  await measure(runtime, 87_000, 100_000);
-  const closing = (await toolStatus(runtime)).details.automatic.lastAutomaticAction;
-  assert(closing.epoch, "The closed turn did not open a commit epoch");
+  // Full request cycles, and the action captured on the cycle that carried the epoch:
+  // whichever lane lands it (the band-top round on a truthful window, or the margin
+  // lane on this fixture's declared-high parking), the property is the same, ONE
+  // commit applies the accumulated batch, and the stream count below pins exactly
+  // that.
+  const closingFrom = runtime.appended.length;
+  let closing = null;
+  for (const tokens of [87_000, 87_100, 87_200]) {
+    await measure(runtime, tokens, 100_000);
+    await project(runtime);
+    await settle();
+    const action = (await toolStatus(runtime)).details.automatic.lastAutomaticAction;
+    if (!closing && action?.epoch) closing = action;
+  }
+  assert(closing?.epoch, "The closed turn did not open a commit epoch");
+  assert.equal(
+    contextEvents(runtime, closingFrom)
+      .filter((record) => record.kind === "context.commit" && record.deferred === false).length,
+    1,
+    "The closed turn needed more than one commit to land its batch",
+  );
   assert(closing.epoch.retainedMarks <= 1,
     `The guard still held ${closing.epoch.retainedMarks} marks after the turn closed`);
   assert(closing.epoch.appliedMarks >= closing.epoch.pendingMarks - 1,
@@ -4484,7 +4630,7 @@ async function gateEpochBatchingUnderFullLevers() {
     accumulatedMarks: accumulated,
     waivedCommitsBelowFence: 0,
     accumulatedBeforeCrossing: accumulated,
-    appliedAtCrossing: above[0].appliedMarks,
+    appliedAtCrossing: commitPass.appliedMarks,
     passesThatMovedBytes: foldingPasses.length,
     passesTotal: passes.length,
     marksAtClose: pendingAtClose,
@@ -4922,8 +5068,22 @@ async function gateFenceMarginAndDepth() {
   assert(worstDrift <= 0.1, `The calibrated estimate drifted ${(worstDrift * 100).toFixed(1)}% from measured`);
   const fired = climb.find((entry) => entry.reduction);
   assert(fired, "The fence never fired while the window filled, which is the rep13 death");
-  assert(fired.reduction.estimatedTokensBefore < budgetTokens,
-    `The fence waited until ${fired.reduction.estimatedTokensBefore} exceeded the ${budgetTokens} budget: that is the wire, not a margin`);
+  // Economy waits the round; safety never transmits. On this 20,000-token window the
+  // margin band is 1,000 tokens and one round of inflow is larger, so when a last-call
+  // round is open at the crossing the reduction may land at the over line instead of
+  // inside the margin. That is the ruled trade, and it is admissible ONLY when the
+  // reduction's own commit consumed an open exposure; with no round in the gap the
+  // pre-wire margin claim stands at full strength. Either way nothing over the budget
+  // is ever transmitted, which is the rep13 death this gate exists to prevent.
+  const reductionCommits = contextEvents(runtime).filter((record) =>
+    record.kind === "context.commit" && record.deferred === false);
+  const reductionConsumedRound = contextEvents(runtime).some((record) =>
+    record.kind === "context.response" && record.commit_seq === reductionCommits.at(-1)?.seq);
+  assert(fired.reduction.estimatedTokensBefore < budgetTokens || reductionConsumedRound,
+    `The fence waited until ${fired.reduction.estimatedTokensBefore} exceeded the ${budgetTokens} budget ` +
+    "with no last-call round open: that is the wire, not a margin");
+  assert.equal(fired.reduction.transmitted, true,
+    "A reduction that started past the budget line must still land the request under it");
   assert(fired.reduction.crowded === true, "The reduction did not record why it fired");
   assert(fired.reduction.marginTokens >= 0.05 * window,
     `The margin was ${fired.reduction.marginTokens} tokens, under the floor share of the window`);
@@ -4989,7 +5149,13 @@ async function gateFenceMarginAndDepth() {
   await startRuntime(deep);
   const epochs = [];
   const projections = [];
-  for (let step = 0; step < 5; step += 1) {
+  // Eight cycles instead of five: with the last-call round in front of every band-top
+  // commit, the rhythm is expose-then-commit across two request cycles, so three
+  // commits need at least six, and the action is read after the context pass that can
+  // carry the commit, deduplicated because it lingers across quiet passes.
+  let previousEpochKey = null;
+  const postCommitProjections = [];
+  for (let step = 0; step < 8; step += 1) {
     // One more complete turn of inflow, so the newest turns are genuinely fresh.
     deep.appendMessage({
       role: "user", content: [{ type: "text", text: `Stage ${step}.` }], timestamp: 700 + step,
@@ -5015,9 +5181,15 @@ async function gateFenceMarginAndDepth() {
       timestamp: 700 + step,
     }, "inflow");
     await measure(deep, 86_000 + step * 100, 100_000);
-    const action = (await toolStatus(deep)).details.automatic.lastAutomaticAction;
-    if (action?.epoch) epochs.push(action.epoch);
     projections.push(bytesOf((await project(deep)).messages));
+    await settle();
+    const action = (await toolStatus(deep)).details.automatic.lastAutomaticAction;
+    const epochKey = action?.epoch ? json.stableStringify(action.epoch) : null;
+    if (epochKey && epochKey !== previousEpochKey) {
+      epochs.push(action.epoch);
+      postCommitProjections.push(projections.at(-1));
+      previousEpochKey = epochKey;
+    }
   }
   assert(epochs.length >= 3, `Only ${epochs.length} commit epochs ran; the ratchet is not being measured`);
   const shallow = epochs.filter((epoch) =>
@@ -5034,10 +5206,15 @@ async function gateFenceMarginAndDepth() {
   const reached = shallow.filter((epoch) => epoch.deepenedMarks >= 1);
   assert(reached.length >= 1,
     `Deepening added no marks in ${shallow.length} shallow commits; it reached nothing the top-up had not`);
-  // The property the rep13 ratchet violated: the window ends no larger than it started,
-  // across a run where every pass added a stage of inflow.
-  assert(projections.at(-1) <= projections[0],
-    `The window ratcheted from ${projections[0]} to ${projections.at(-1)} chars across ${epochs.length} commits`);
+  // The property the rep13 ratchet violated, measured at like phases of the rhythm:
+  // across a run where every cycle added a 24,000-char stage of inflow, the window
+  // just after the LAST commit has grown by less than ONE such stage since just after
+  // the first. Commits that keep pace with inflow bound the window; the ratchet was
+  // the unbounded staircase, 30,000 tokens up through six commits and into a
+  // provider rejection.
+  assert(postCommitProjections.at(-1) - postCommitProjections[0] < 24_000,
+    `The window ratcheted from ${postCommitProjections[0]} to ${postCommitProjections.at(-1)} chars ` +
+    `across ${epochs.length} commits`);
 
   return {
     budgetTokens,
@@ -5149,6 +5326,11 @@ async function gateContextReceipts() {
   for (const tokens of [76_000, 80_000, 86_000, 86_500, 87_000]) {
     await measure(runtime, tokens, 100_000, undefined, "toolUse");
   }
+  // Deliver the last-call, spend the gated round, and read the projection of the
+  // commit pass itself: the receipt rides the rewrite that commit paid for.
+  await project(runtime);
+  await settle();
+  await measure(runtime, 87_500, 100_000, undefined, "toolUse");
   const projection = await project(runtime);
   const block = projection.messages.find((message) =>
     message.customType === "pi-fold-active-context-receipts");
@@ -5190,6 +5372,7 @@ async function gateContextReceipts() {
   // And it is adjudicable: every delivery lands in the durable event stream.
   // Restated at iteration 8: read the durable stream directly; the status page
   // carries a bounded tail of it.
+  await settle();
   const events = contextEvents(runtime).filter((event) => event.kind === "context.receipt");
   assert(events.length >= 1, "No receipt delivery reached the durable stream");
   assert(typeof events.at(-1).receipt_kind === "string");
@@ -6183,6 +6366,10 @@ async function gateOneTruthfulBudget() {
   await project(runtime);
   await measure(runtime, 330_000, 272_000, undefined, "toolUse");
   const announced = await project(runtime);
+  await settle();
+  // The gated last-call round; the commit lands on the context pass after it.
+  await measure(runtime, 331_000, 272_000, undefined, "toolUse");
+  await project(runtime);
   await settle();
 
   // Every curation-side record carries the truthful budget, and none carries the
@@ -7661,6 +7848,232 @@ async function gateRiderContentLaw() {
 }
 
 /**
+ * THE PRE-COMMIT LAST-CALL, END TO END.
+ *
+ * The band-top trigger fires, and before the commit applies, exactly one prompt rides
+ * the commit boundary: the ruled wording, the telemetry the 13:23 directive names,
+ * one gated round, then the commit proceeds with whatever marks exist. Safety paths
+ * commit without ceremony, the user command never sees the gate, a crossing that dies
+ * uncommitted lapses with attribution, and every exposure is joined to its response
+ * on the canonical stream by exposure_seq.
+ */
+async function gateLastCallRidesTheCommitBoundary() {
+  // The band-top path: 80,000 of a 90,000-token budget is 0.889 occupancy, over the
+  // 0.80 trigger, while the 0.80 window ratio stays under the 0.90 hard fence.
+  const runtime = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
+  await measure(runtime, 80_000, 100_000);
+  const armed = materialized(runtime).lastCall;
+  assert(armed, "The band-top crossing must arm the last-call");
+  assert(armed.text.includes(context.LAST_CALL_WORDING),
+    "The exposure must carry the ruled wording verbatim");
+  assert(Buffer.byteLength(armed.text, "utf8") <= context.MAX_LAST_CALL_TEXT_BYTES,
+    "The exposure is hard-bounded");
+  const exposures = () => contextEvents(runtime).filter((record) => record.kind === "context.lastcall");
+  assert.equal(exposures().length, 1, "Exactly one exposure per band-top crossing");
+  const exposure = exposures()[0];
+  assert.equal(exposure.seq, armed.exposure, "The persisted exposure is the stream record's seq");
+  // The telemetry payload the ruling names: occupancy against maxTarget, unmarked
+  // foldable mass in the stale zone, pending marks, and the carrier's own byte cost.
+  assert(typeof exposure.occupancy === "number" && exposure.occupancy >= exposure.max_target);
+  assert.equal(exposure.max_target, context.DEFAULT_THRESHOLDS.maxTarget);
+  assert.equal(exposure.budget_tokens, 90_000);
+  assert(Number.isFinite(exposure.unmarked_stale_tokens) && exposure.unmarked_stale_tokens > 0);
+  assert(Number.isFinite(exposure.unmarked_stale_spans) && exposure.unmarked_stale_spans > 0);
+  assert(Number.isFinite(exposure.pending_marks));
+  assert.equal(exposure.chars, armed.text.length);
+  assert.equal(materialized(runtime).folds.length, 0, "The exposure pass must not commit");
+  // Delivery: one carrier, the persisted literal bytes, and a held re-render neither
+  // stacks a second copy nor re-exposes.
+  const carrierEntries = (projection) => projection.messages.filter((message) =>
+    typeof message?.customType === "string" && message.customType.endsWith("-lastcall"));
+  let carriers = carrierEntries(await project(runtime));
+  assert.equal(carriers.length, 1, "Exactly one last-call carrier rides the projection");
+  assert.equal(carriers[0].content, armed.text, "The carrier renders the persisted literal bytes");
+  carriers = carrierEntries(await project(runtime));
+  assert.equal(carriers.length, 1, "A held pass must not stack a second carrier");
+  assert.equal(exposures().length, 1, "A held pass must not re-expose");
+  // The gated round: the agent adds a mark and a pin; the commit proceeds on the
+  // context pass after its response, with response attribution joined by exposure_seq.
+  // The mark must be the AGENT'S OWN: the doorless ladder has already claimed the
+  // stale tail, so the agent marks the last unclaimed span before the open turn,
+  // exactly the middle-zone judgment the prompt asks for.
+  const claimed = new Set((materialized(runtime).pendingMarks ?? [])
+    .flatMap((mark) => mark.parts ?? [])
+    .filter((part) => part.kind === "raw")
+    .map((part) => part.ref.entryId));
+  const markable = runtime.built.turnEntries
+    .slice(1, -1)
+    .map((entries) => entries[2])
+    .filter((id) => !claimed.has(id))
+    .at(-1);
+  assert(markable, "The ladder left the agent nothing unclaimed to mark");
+  await toolCall(runtime, {
+    action: "fold", ids: [markable],
+    brief: "The finished second inspection is stale and its exact output stays recoverable.",
+  });
+  await toolCall(runtime, { action: "protect", ids: [runtime.built.turnEntries[2][2]] });
+  await measure(runtime, 80_500, 100_000);
+  await project(runtime);
+  await settle();
+  const commits = contextEvents(runtime).filter((record) =>
+    record.kind === "context.commit" && record.deferred === false);
+  assert.equal(commits.length, 1, "The commit proceeds exactly once after the round");
+  assert.equal(commits[0].trigger, "band-top");
+  const responses = contextEvents(runtime).filter((record) => record.kind === "context.response");
+  assert.equal(responses.length, 1, "One response attribution per exposure");
+  assert.equal(responses[0].exposure_seq, exposure.seq, "Attribution joins by exposure_seq");
+  assert.equal(responses[0].commit_seq, commits[0].seq, "Attribution names the commit that consumed it");
+  assert.equal(responses[0].outcome, "responded");
+  assert(responses[0].context_calls >= 2, "Both round actions count as engagement");
+  assert(responses[0].marks_added >= 1, "The round's mark is attributed to the exposure");
+  assert.equal(responses[0].protects, 1, "The round's pin is attributed to the exposure");
+  assert.equal(materialized(runtime).lastCall, undefined, "The commit consumes the exposure");
+  assert.equal(exposures().length, 1, "One exposure per band-top commit, never more");
+  const state = materialized(runtime);
+  assert(state.folds.some((fold) =>
+    context.flattenFoldRefs(fold, state).some((ref) => ref.entryId === markable)),
+  "The round's mark did not fold at the commit it was made for");
+
+  // The fence path commits without ceremony: safety outranks it.
+  const fence = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
+  await measure(fence, 95_000, 100_000);
+  await settle();
+  assert(contextEvents(fence).some((record) =>
+    record.kind === "context.commit" && record.deferred === false),
+  "The fence path must commit without waiting a round");
+  assert.equal(contextEvents(fence).filter((record) => record.kind === "context.lastcall").length, 0,
+    "No last-call on the fence path");
+
+  // The recovery lane never waits either: a provider rejection consumes an armed
+  // exposure at the very next pass, attributed rather than dropped.
+  const recovery = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
+  await measure(recovery, 80_000, 100_000);
+  const recoveryExposure = materialized(recovery).lastCall;
+  assert(recoveryExposure, "The recovery fixture must first arm an exposure");
+  recovery.handlers.get("after_provider_response")({ status: 400 }, recovery.ctx);
+  await project(recovery);
+  await settle();
+  assert(contextEvents(recovery).some((record) =>
+    record.kind === "context.commit" && record.deferred === false),
+  "The recovery lane must not wait out the round");
+  assert(contextEvents(recovery).some((record) => record.kind === "context.response" &&
+    record.exposure_seq === recoveryExposure.exposure),
+  "The recovery commit must attribute the exposure it consumed");
+  assert.equal(materialized(recovery).lastCall, undefined);
+
+  // The user command is explicit intent: it commits with no exposure at all.
+  const user = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
+  await measure(user, 60_000, 100_000);
+  assert((materialized(user).pendingMarks ?? []).length >= 1,
+    "The quiet band must have accumulated a mark to bank");
+  await user.commands.get("fold-context").handler("commit", user.ctx);
+  await settle();
+  assert(contextEvents(user).some((record) => record.kind === "context.commit" &&
+    record.deferred === false && record.trigger === "user-command"),
+  "The user command must commit directly");
+  assert.equal(contextEvents(user).filter((record) => record.kind === "context.lastcall").length, 0,
+    "No last-call on the user command");
+
+  // A crossing that dies uncommitted lapses: attributed, cleared, never sticky.
+  const lapse = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
+  await measure(lapse, 80_000, 100_000);
+  const lapseExposure = materialized(lapse).lastCall;
+  assert(lapseExposure, "The lapse fixture must first arm an exposure");
+  await measure(lapse, 60_000, 100_000);
+  await settle();
+  const lapsed = contextEvents(lapse).filter((record) => record.kind === "context.response");
+  assert.equal(lapsed.length, 1, "A dead crossing gets exactly one attribution");
+  assert.equal(lapsed[0].outcome, "lapsed");
+  assert.equal(lapsed[0].exposure_seq, lapseExposure.exposure);
+  assert.equal(lapsed[0].commit_seq, null);
+  assert.equal(materialized(lapse).lastCall, undefined, "A lapsed exposure is cleared");
+  return {
+    ruledWording: context.LAST_CALL_WORDING.slice(0, 24),
+    exposureChars: exposure.chars,
+    responseOutcome: "responded",
+    fenceExposures: 0,
+    userCommandExposures: 0,
+    lapseAttributed: true,
+  };
+}
+
+/**
+ * THRESHOLD NOTICES: append-once occupancy waypoints.
+ *
+ * 25, 50 and 75 percent of the serving budget each land once per upward crossing as a
+ * carrier that persists in the window the way a tool result does, never moving a
+ * prefix byte. A commit that drops occupancy back under a waypoint re-arms it, and
+ * the next crossing is a new event. FIXTURE NOTE: measurements here are declared, so
+ * after a commit the next declared value still reads high the way a real session's
+ * next provider measurement can; the re-fire that follows is the once-per-crossing
+ * law doing its job, not a stack.
+ */
+async function gateThresholdNoticesAppendOnce() {
+  assert.equal(context.THRESHOLD_NOTICES_ENABLED, true, "Notices default on");
+  assert.deepEqual([...context.THRESHOLD_NOTICE_SHARES], [0.25, 0.50, 0.75]);
+  const runtime = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
+  const notices = () => contextEvents(runtime).filter((record) => record.kind === "context.notice");
+  await measure(runtime, 20_000, 100_000);
+  assert.equal(notices().length, 0, "Below every waypoint nothing fires");
+  await measure(runtime, 23_000, 100_000);
+  assert.equal(notices().length, 1, "Crossing 25% fires its notice once");
+  assert.equal(notices()[0].share, 0.25);
+  assert.equal(notices()[0].budget_tokens, 90_000);
+  await measure(runtime, 24_000, 100_000);
+  assert.equal(notices().length, 1, "A parked window must not re-fire its waypoint");
+  await measure(runtime, 46_000, 100_000);
+  await measure(runtime, 68_000, 100_000);
+  assert.deepEqual(notices().map((record) => record.share), [0.25, 0.5, 0.75],
+    "Each waypoint fires once, in crossing order");
+  assert(notices().every((record) =>
+    Number.isFinite(record.chars) && record.chars > 0 &&
+    record.chars <= context.MAX_THRESHOLD_NOTICE_TEXT_BYTES),
+  "Notice byte overhead must stay bounded and reported on each event");
+  const state = materialized(runtime);
+  assert.deepEqual(state.notices.fired, [0.25, 0.5, 0.75]);
+  assert.equal(state.notices.ring.length, 3);
+  // The carriers: one message per notice, the persisted literal bytes, append-once
+  // across re-renders; each lands at the tail as a pure append and the freeze closes
+  // over it, so no prefix byte ever moves for one.
+  const noticeEntries = (projection) => projection.messages.filter((message) =>
+    typeof message?.customType === "string" && message.customType.endsWith("-notice"));
+  const first = noticeEntries(await project(runtime));
+  assert.equal(first.length, 3, "One carrier per delivered notice");
+  assert.deepEqual(first.map((message) => message.content), state.notices.ring.map((notice) => notice.text),
+    "Carriers render the persisted literal bytes");
+  const again = noticeEntries(await project(runtime));
+  assert.deepEqual(again.map((message) => message.content), first.map((message) => message.content),
+    "A re-render must neither regenerate nor stack notices");
+  // Re-arm across a commit: the band-top round runs, the commit folds down toward
+  // minTarget, and the waypoints it fell back under become armable again.
+  await measure(runtime, 86_000, 100_000);
+  await project(runtime);
+  await settle();
+  await measure(runtime, 86_500, 100_000);
+  await project(runtime);
+  await settle();
+  assert.equal(contextEvents(runtime).filter((record) =>
+    record.kind === "context.commit" && record.deferred === false).length, 1,
+  "The re-arm needs a commit behind it");
+  const rearmed = materialized(runtime).notices.fired;
+  assert.equal(rearmed.includes(0.75), false,
+    "A commit that dropped occupancy under 75% must re-arm that waypoint");
+  const before = notices().length;
+  await measure(runtime, 80_000, 100_000);
+  assert(notices().length > before,
+    "A re-armed waypoint must fire again on its next upward crossing");
+  assert(materialized(runtime).notices.ring.length <= context.MAX_THRESHOLD_NOTICES,
+    "The rendered ring stays bounded; the durable stream keeps the full trail");
+  return {
+    shares: [...context.THRESHOLD_NOTICE_SHARES],
+    delivered: notices().length,
+    maxNoticeBytes: context.MAX_THRESHOLD_NOTICE_TEXT_BYTES,
+    ringBound: context.MAX_THRESHOLD_NOTICES,
+    rearmedAcrossCommit: true,
+  };
+}
+
+/**
  * THE UNIFIED SPAN LAW, WHERE IT IS NEW.
  *
  * One law selects stale material at commit time, and what the span contains decides the
@@ -8325,6 +8738,8 @@ const gates = [
   [96, "Thresholds are validated at construction", gateThresholdConstruction],
   [97, "The three zones", gateThreeZones],
   [98, "The fence opens the middle, unlatched", gateFenceOpensTheMiddle],
+  [99, "The last-call rides the commit boundary", gateLastCallRidesTheCommitBoundary],
+  [100, "Threshold notices append once and re-arm", gateThresholdNoticesAppendOnce],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

@@ -2364,6 +2364,81 @@ export function contextEventMetrics(entries) {
     bucket.counterfactualCacheShare = bucket.projectedTokens > 0
       ? bucket.idealCachedTokens / bucket.projectedTokens : null;
   }
+
+  // The B1 guidance-carrier lenses. Every carrier ships its event kind and its
+  // adjudicator lens in the same build: the last-call exposure-to-response table,
+  // the threshold-notice log, and the per-carrier byte overhead the 21.9% slate tax
+  // is measured against.
+  const lastCalls = events.filter((event) => event.kind === "context.lastcall");
+  const responses = events.filter((event) => event.kind === "context.response");
+  const notices = events.filter((event) => event.kind === "context.notice");
+  const riders = events.filter((event) => event.kind === "context.rider");
+  const responseByExposure = new Map(responses
+    .filter((response) => Number.isFinite(response.exposure_seq))
+    .map((response) => [response.exposure_seq, response]));
+  const lastCallTable = lastCalls.map((exposure) => {
+    const response = responseByExposure.get(exposure.seq) ?? null;
+    const attemptsInRound = attempts.filter((attempt) =>
+      attempt.seq > exposure.seq && (!response || attempt.seq < response.seq));
+    return {
+      exposureSeq: exposure.seq,
+      ordinal: Number.isFinite(exposure.ordinal) ? exposure.ordinal : null,
+      occupancy: Number.isFinite(exposure.occupancy) ? exposure.occupancy : null,
+      maxTarget: Number.isFinite(exposure.max_target) ? exposure.max_target : null,
+      pendingMarks: Number.isFinite(exposure.pending_marks) ? exposure.pending_marks : null,
+      unmarkedStaleTokens: Number.isFinite(exposure.unmarked_stale_tokens)
+        ? exposure.unmarked_stale_tokens : null,
+      chars: Number.isFinite(exposure.chars) ? exposure.chars : null,
+      outcome: response ? response.outcome ?? null : "open",
+      commitSeq: response && Number.isFinite(response.commit_seq) ? response.commit_seq : null,
+      contextCalls: response && Number.isFinite(response.context_calls) ? response.context_calls : null,
+      marksAdded: response && Number.isFinite(response.marks_added) ? response.marks_added : null,
+      protects: response && Number.isFinite(response.protects) ? response.protects : null,
+      unprotects: response && Number.isFinite(response.unprotects) ? response.unprotects : null,
+      attemptsInRound: attemptsInRound.length,
+      attemptActionsInRound: attemptsInRound.reduce((result, attempt) => {
+        const action = typeof attempt.action === "string" && attempt.action ? attempt.action : "unknown";
+        result[action] = (result[action] ?? 0) + 1;
+        return result;
+      }, {}),
+    };
+  });
+  const respondedExposures = lastCallTable.filter((row) => row.outcome === "responded").length;
+  const carrierChars = (records) => records.reduce((sum, record) =>
+    sum + (Number.isFinite(record.chars) ? record.chars : 0), 0);
+  const guidanceCarriers = {
+    lastCall: {
+      exposures: lastCalls.length,
+      responses: responses.length,
+      responded: respondedExposures,
+      silent: lastCallTable.filter((row) => row.outcome === "silent").length,
+      lapsed: lastCallTable.filter((row) => row.outcome === "lapsed").length,
+      open: lastCallTable.filter((row) => row.outcome === "open").length,
+      responseRate: lastCalls.length > 0 ? respondedExposures / lastCalls.length : null,
+      table: lastCallTable,
+      definition: "one row per context.lastcall exposure, joined to its context.response by " +
+        "exposure_seq; attemptsInRound counts context.attempt records between exposure and response",
+    },
+    notices: {
+      delivered: notices.length,
+      byShare: notices.reduce((result, notice) => {
+        const share = Number.isFinite(notice.share) ? String(notice.share) : "unknown";
+        result[share] = (result[share] ?? 0) + 1;
+        return result;
+      }, {}),
+      chars: carrierChars(notices),
+      definition: "context.notice records; a share appearing twice means a commit re-armed it " +
+        "and the window crossed it again",
+    },
+    carrierBytes: {
+      riderChars: carrierChars(riders),
+      lastCallChars: carrierChars(lastCalls),
+      noticeChars: carrierChars(notices),
+      totalChars: carrierChars(riders) + carrierChars(lastCalls) + carrierChars(notices),
+      definition: "per-carrier byte overhead from each carrier event's own chars field; " +
+        "the economics guardrail the 21.9% ephemeral-slate tax is measured against",
+    },
+  };
   return {
     events: events.length,
     byKind,
@@ -2413,6 +2488,7 @@ export function contextEventMetrics(entries) {
       pooledCacheShare: projectedTokens > 0 ? idealCachedTokens / projectedTokens : null,
       byRequestClass,
     },
+    guidanceCarriers,
   };
 }
 

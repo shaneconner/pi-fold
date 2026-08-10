@@ -416,6 +416,31 @@ export const CURATION_REMINDER_SHARES: readonly number[] = Object.freeze([0.45, 
  */
 export const CURATION_GATE_MAX_ROUNDS = 2;
 
+/**
+ * The three occupancy waypoints, as shares of the truthful serving budget.
+ *
+ * Each one lands exactly once per upward crossing as an append-once notice that then
+ * persists in the window the way a tool result does: appended at the tail, closed over
+ * by the freeze, never re-rendered mid-cycle, so it can never move a prefix byte. A
+ * commit that drops occupancy back under a waypoint re-arms it; the next crossing is a
+ * new event and gets a new notice.
+ */
+export const THRESHOLD_NOTICE_SHARES: readonly number[] = Object.freeze([0.25, 0.50, 0.75]);
+/** Delivered notices kept rendered in the window; the oldest leaves the carrier, never the stream. */
+export const MAX_THRESHOLD_NOTICES = 9;
+/**
+ * Internal switches for the two guidance surfaces this build ships, both default ON.
+ * Shane wants them user-optional eventually; the PUBLIC option surface is Build D's
+ * mechanism, so until then these are constants, not constructor knobs.
+ */
+export const THRESHOLD_NOTICES_ENABLED = true;
+/** Context-management actions answer with persistent acknowledgements by default. */
+export const CONTEXT_ACTION_RESPONSES_ENABLED = true;
+/** The last-call is LITERAL persisted bytes; the bound is on the stored text itself. */
+export const MAX_LAST_CALL_TEXT_BYTES = 2_048;
+/** One notice is one waypoint line; a waypoint that becomes a paragraph is bloat. */
+export const MAX_THRESHOLD_NOTICE_TEXT_BYTES = 512;
+
 /** How many automatic-action receipts stay in the window; the oldest ages out. */
 export const MAX_CONTEXT_RECEIPTS = 3;
 /** Hard byte cap on the rendered receipt block, so a receipt can never itself bloat. */
@@ -672,6 +697,20 @@ export interface ActiveContextState {
    * the next epoch's rider. Omitted when absent so pre-rider state digests never move.
    */
   rider?: { epoch: number; text: string };
+  /**
+   * The armed pre-commit last-call: one exposure per band-top crossing, persisted as
+   * LITERAL bytes like the rider. `exposure` is the context.lastcall event's stream
+   * seq; `contextCalls` and `agentMarks` are the arming snapshot the response
+   * attribution is measured against. Cleared by the commit that consumes it. Omitted
+   * when absent so pre-last-call state digests never move.
+   */
+  lastCall?: { exposure: number; ordinal: number; contextCalls: number; agentMarks: number; text: string };
+  /**
+   * Threshold notices: `fired` is the waypoint shares spent this occupancy cycle
+   * (re-armed by a commit that drops back under them), `ring` the delivered notices
+   * still rendered in the window, literal bytes, oldest evicted. Omitted when absent.
+   */
+  notices?: { fired: number[]; ring: Array<{ share: number; ordinal: number; text: string }> };
 }
 
 export interface FoldRecordRef {
@@ -703,6 +742,8 @@ export interface ActiveContextCheckpointV2 {
   briefs?: Record<string, string>;
   advisory?: NonNullable<ActiveContextState["advisory"]>;
   rider?: NonNullable<ActiveContextState["rider"]>;
+  lastCall?: NonNullable<ActiveContextState["lastCall"]>;
+  notices?: NonNullable<ActiveContextState["notices"]>;
   stateSha256: string;
 }
 
@@ -725,6 +766,8 @@ export interface ActiveContextDeltaV2 {
   briefs?: Record<string, string>;
   advisory?: NonNullable<ActiveContextState["advisory"]>;
   rider?: NonNullable<ActiveContextState["rider"]>;
+  lastCall?: NonNullable<ActiveContextState["lastCall"]>;
+  notices?: NonNullable<ActiveContextState["notices"]>;
   stateSha256: string;
 }
 

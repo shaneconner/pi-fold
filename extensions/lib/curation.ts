@@ -12,6 +12,8 @@ import {
   CURATION_REMINDER_SHARES,
   DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
   MAX_CONTEXT_RECEIPTS,
+  MAX_LAST_CALL_TEXT_BYTES,
+  MAX_THRESHOLD_NOTICE_TEXT_BYTES,
 } from "./policy.ts";
 import type {
   ActiveContextSnapshot,
@@ -314,6 +316,71 @@ export function curationNoticeText(input: {
     "Continuing the task is the default: this commit proceeds on the next pass unless the next thing you do " +
       `is a ${input.toolName} call, and it proceeds regardless after ${remaining} more curation round(s).`,
   ].join("\n"), 2_048, `[${brand} curation] A commit epoch is due; details are unavailable this pass.`);
+}
+
+/** The ruled last-call sentence (Shane, 2026-08-09 13:23), verbatim. */
+export const LAST_CALL_WORDING =
+  "Fold commit triggered, please add or edit marks, pin or unpin context based on foreseeable relevance.";
+
+/**
+ * The pre-commit last-call.
+ *
+ * It rides the commit boundary: the band-top trigger has fired, the rewrite is one
+ * round away, so this is the single moment telemetry is both accurate and free. It
+ * carries the ruled wording, the three numbers the ruling names (occupancy against the
+ * commit line, unmarked foldable mass in the stale zone, pending marks), the verbs,
+ * and the one-round law. Never a question: continuing the task is the stated default,
+ * and the commit proceeds regardless.
+ */
+export function lastCallText(input: {
+  signals: CurationSignals;
+  unmarked: { spans: number; tokens: number };
+  pendingMarks: number;
+  toolName: string;
+  brandNoun?: string;
+}): string {
+  const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
+  const { signals } = input;
+  const occupancy = signals.occupancy === null ? "unmeasured" : `${Math.round(signals.occupancy * 100)}%`;
+  return boundReceiptText([
+    `[${brand} last call] ${LAST_CALL_WORDING}`,
+    `Occupancy is ${occupancy} of the ${signals.budgetTokens}-token serving budget, at or past the ` +
+      `${Math.round(signals.maxTarget * 100)}% commit line. Unmarked foldable mass in the stale zone: ` +
+      `${input.unmarked.spans} span(s), about ${input.unmarked.tokens} tokens. ` +
+      `Pending marks: ${input.pendingMarks}.`,
+    `Marks: ${input.toolName} ` +
+      "{\"action\":\"fold\",\"marks\":[{\"ids\":[\"<start>\",\"<end>\"],\"brief\":\"<factual brief>\"}]} " +
+      "adds or widens several in one call. Pins: {\"action\":\"protect\",\"ids\":[\"<entry-id>\"]} holds " +
+      "entries raw through every fold, and {\"action\":\"unprotect\"} releases them.",
+    "This is one round: the commit proceeds on the pass after your next response with whatever marks " +
+      "exist. Continuing the task is the default; nothing here needs a reply.",
+  ].join("\n"), MAX_LAST_CALL_TEXT_BYTES,
+  `[${brand} last call] ${LAST_CALL_WORDING}`);
+}
+
+/**
+ * One occupancy waypoint, stated once. Informatory and quiet: below the commit line
+ * nothing folds automatically, so the only useful sentence is where the window stands
+ * and that marks and pins made now shape the eventual commit.
+ */
+export function thresholdNoticeText(input: {
+  share: number;
+  occupancyTokens: number;
+  budgetTokens: number;
+  maxTarget: number;
+  toolName: string;
+  brandNoun?: string;
+}): string {
+  const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
+  return boundReceiptText(
+    `[${brand} notice] Context occupancy crossed ${Math.round(input.share * 100)}% of the ` +
+      `${input.budgetTokens}-token serving budget (${input.occupancyTokens} tokens). Nothing folds before ` +
+      `the fold commit at ${Math.round(input.maxTarget * 100)}%; marks and pins made now shape it: ` +
+      `${input.toolName} {"action":"fold","marks":[{"ids":["<start>","<end>"],"brief":"<factual brief>"}]} ` +
+      'or {"action":"protect","ids":["<entry-id>"]}.',
+    MAX_THRESHOLD_NOTICE_TEXT_BYTES,
+    `[${brand} notice] Context occupancy crossed ${Math.round(input.share * 100)}% of the serving budget.`,
+  );
 }
 
 /** One automatic context action, reported back as status rather than as advice. */

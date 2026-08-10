@@ -149,6 +149,12 @@ export type ContextEventKind =
   | "context.receipt"
   /** One post-commit rider composed and persisted: at most one per fold epoch. */
   | "context.rider"
+  /** One pre-commit last-call exposure: the band-top prompt, with its telemetry. */
+  | "context.lastcall"
+  /** One gated round's outcome, attributed to the exposure it answers. */
+  | "context.response"
+  /** One append-once occupancy threshold notice delivered into the window. */
+  | "context.notice"
   /** One commit epoch: the single mutation an epoch pays for. */
   | "context.commit"
   /** One fold created, by the ladder or by the agent. */
