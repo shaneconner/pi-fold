@@ -183,19 +183,6 @@ The package entry calls `registerPiFold(pi)` with the defaults below, and that i
 | `evidenceIngestion` | `true` | Set to `false` to register no evidence-ingestion hook and write no evidence artifacts. The tradeoff is stated below. |
 | `guidance` | `{ thresholdNotices: true, actionResponses: true }` | The two guidance surfaces, set together. `thresholdNotices` is the append-once occupancy waypoint at 25, 50 and 75 percent of the serving budget; `actionResponses` is the persistent acknowledgement a context action returns. Booleans only, and off means the carrier is absent rather than empty. |
 
-### The names that left
-
-Everything below was a documented option through 1.0.2 and is now refused by name. Passing one throws at registration rather than being ignored, because an ignored option hands a deployment the opposite of what it asked for.
-
-| Removed | What to do instead |
-| --- | --- |
-| `toolName`, `toolLabel`, `brandNoun`, `entryTypePrefix`, `commandPrefix`, `commandNames` | Nothing. The deployment identity is hardwired: the tool is `pi_fold_context` and the commands are `/pi-fold-context` and `/fold-context`. pi-fold is a branded package with one deployment, not a framework a host rebrands, and a moved `entryTypePrefix` stranded a consumer's own durable folds under a namespace nothing would read back. |
-| `isMcpTool` | Nothing. MCP tools are recognized by the `mcp__server__tool` naming convention every MCP host follows. The predicate's default returned false for everything, so a conventionally named MCP tool was never classified unless a host wrote one. A name outside the convention is deliberately not classified as MCP. |
-| `readOnlyTools` | `autoFoldableTools`, same set. The name now says what the set controls, which is whose results may fold without a mark, rather than what the tools are. |
-| `providerTotalWindow` | `providerInputBudget`, already net. The old option took a gross window and subtracted a fixed 16,384-token reserve capped at a tenth of it, while this page claimed it subtracted the reservation actually in force. A deployment that declared 400,000 declares 383,616 now. |
-| `summarizeContextSpan` | `summarizer`, which is the declarative way to choose the same thing. |
-| `foldScheduling`, `foldPeekResults`, `toolActions`, `blockingTools` | Nothing. Epoch is the only scheduler, peek results are foldable, the action surface is whole, and no tool call causes a rewrite of its own. |
-
 ### Projection candidate records
 
 `registerPiFold` returns `{ projectionCandidates }`, a provider a host may call with a Pi context. It emits one record per visible collapsed fold. The fields and current values are:
