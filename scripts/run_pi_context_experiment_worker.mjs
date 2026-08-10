@@ -407,6 +407,9 @@ try {
     // The deployment fact travels config -> manifest -> registration, so the sealed
     // manifest states which serving budget the run's thresholds were measured against.
     ...(config.providerInputBudget === undefined ? {} : { providerInputBudget: config.providerInputBudget }),
+    // The brief generator travels the same road, so the sealed manifest states which
+    // model wrote the run's fold briefs. An arm that registers no runtime records none.
+    ...(config.briefGenerator === undefined ? {} : { briefGenerator: config.briefGenerator }),
     ...(config.transport === undefined ? {} : { transport: config.transport }),
     ordinal: config.ordinal,
     repetition: config.repetition,

@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import {
   EXPERIMENT_ARMS,
   EXPERIMENT_BEHAVIORAL_MODE,
+  EXPERIMENT_BRIEF_GENERATOR,
   EXPERIMENT_CLOSED_BOOK_LABEL,
   EXPERIMENT_SESSION_TYPES,
   EXPERIMENT_DEPENDENCY_KEYS,
@@ -354,7 +355,14 @@ async function run() {
     mode: plan.mode,
     ...(closedBook
       ? { sessionType }
-      : { ...(providerInputBudget === null ? {} : { providerInputBudget }) }),
+      : {
+        ...(providerInputBudget === null ? {} : { providerInputBudget }),
+        // Fold briefs are model-written wherever they are measured. Only the arm that
+        // registers the runtime writes any, so only it carries the generator.
+        ...(armRuntimeConfiguration(arm).activeContextEnabled
+          ? { briefGenerator: EXPERIMENT_BRIEF_GENERATOR }
+          : {}),
+      }),
     transport: EXPERIMENT_TRANSPORT,
     repetition,
     ordinal,

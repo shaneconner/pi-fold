@@ -26,6 +26,45 @@ function normalizeSummarizer(summarizer) {
   };
 }
 
+/**
+ * The runtime hands the generator two BOUNDED orientation slices beside the span: up to
+ * two messages and 12,000 characters either side, hashed into the fold identity. They are
+ * labelled distinctly here rather than pasted in, because a model that cannot tell the
+ * span from its surroundings briefs the surroundings. An absent slice arrives as the
+ * empty-orientation literal, and a label with "[]" under it reads as content.
+ */
+const EMPTY_ORIENTATION = "[]";
+
+function orientationBlock(label, text) {
+  return typeof text === "string" && text && text !== EMPTY_ORIENTATION
+    ? `${label}:\n${text}`
+    : `${label}: none.`;
+}
+
+/**
+ * A brief does two jobs at once, so the request says both: it summarizes the span, and it
+ * tells the agent what expanding or peeking that fold would return, which is the whole
+ * basis on which the agent decides to dig back in. Naming the concrete contents is what
+ * makes the second job possible: an abstract description of a span is not a statement of
+ * what is recoverable from it.
+ */
+function briefRequestPrompt(request) {
+  return [
+    `Write a factual brief of at most ${request.maxBriefChars} characters covering the ` +
+    "SPAN TO BRIEF below, and nothing else. The brief does two jobs at once: it " +
+    "summarizes what the span contains, and it tells an agent what it would get back by " +
+    "expanding or peeking this fold later, so the agent can decide whether to dig back " +
+    "in. Once the span is folded the brief is its only visible trace, so name the " +
+    "concrete things inside it: files, identifiers, decisions, results, errors. Do not " +
+    "describe the span abstractly. The BEFORE and AFTER sections are orientation only: " +
+    "they say where the span sits in the larger conversation, and their content is not " +
+    "part of what you are briefing. Use no preamble and no Markdown headers.",
+    orientationBlock("BEFORE THE SPAN (orientation only, do not brief)", request.beforeText),
+    `SPAN TO BRIEF:\n${request.sourceText}`,
+    orientationBlock("AFTER THE SPAN (orientation only, do not brief)", request.afterText),
+  ].join("\n\n");
+}
+
 export function createSummarizeContextSpan(summarizer = "session", loadHostModule = loadPiHost) {
   const configured = normalizeSummarizer(summarizer);
   if (typeof loadHostModule !== "function") {
@@ -70,8 +109,7 @@ export function createSummarizeContextSpan(summarizer = "session", loadHostModul
       : typeof ctx?.thinkingLevel === "string" && ctx.thinkingLevel
         ? ctx.thinkingLevel
         : "none";
-    const prompt = `Write a factual brief of at most ${request.maxBriefChars} characters. ` +
-      `Use no preamble and no Markdown headers.\n\n${request.sourceText}`;
+    const prompt = briefRequestPrompt(request);
     const completionOptions = { maxTokens: 512, signal: request.signal };
     if (model.reasoning && effort !== "none" && effort !== "off") {
       completionOptions.reasoning = effort;

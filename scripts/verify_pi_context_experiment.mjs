@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   EXPERIMENT_ARMS,
+  EXPERIMENT_BRIEF_GENERATOR,
   EXPERIMENT_DEFAULT_GUIDED_CURATION,
   EXPERIMENT_PROVIDER_INPUT_BUDGETS,
   EXPERIMENT_TRANSPORT,
@@ -765,6 +766,14 @@ assert(extension.includes("const pifold = config.arm === \"pifold\"") &&
   extension.includes("registerActiveContext(pi, {") &&
   extension.includes("if (pifold) {"),
 "the extension must register the active-context runtime only for the pifold arm");
+// The registration is the arm, and a brief generator is part of it: the package writes
+// fold briefs with a model and keeps the deterministic brief as the failure fallback, so
+// an arm registered without a generator measures the fallback and calls it the mechanism.
+assert(extension.includes("createSummarizeContextSpan(config.briefGenerator, loadHostModule)") &&
+  extension.includes("{ summarizeContextSpan }"),
+"the extension must build the run's brief generator from the config descriptor and register it");
+assert(!extension.includes("no summarizer is configured"),
+  "the extension still says it wires no summarizer");
 // The guidance profile is RETIRED. It shaped the milestone and live-advisory copy, and
 // both carriers are deleted, so a run that recorded a profile would be attesting to a
 // condition that changed nothing. The key stays readable for reps 15-21; no producer
@@ -1464,6 +1473,13 @@ try {
   assert(!Object.hasOwn(identity.PI_FOLD_ACTIVE_CONTEXT_REGISTRATION, "blacklistAutoFoldTools") &&
     !Object.hasOwn(identity.PI_FOLD_ACTIVE_CONTEXT_REGISTRATION, "autoFoldableTools"),
   "the harness identity must carry no auto-fold policy: the arm runs the shipped default");
+  // Nor any brief-generator policy. Which model writes a run's briefs is a RUN fact that
+  // travels the run config and gets sealed into that run's manifest; parked here it would
+  // be invisible to the manifest and identical across every rep by construction.
+  assert(!Object.hasOwn(identity.PI_FOLD_ACTIVE_CONTEXT_REGISTRATION, "summarizeContextSpan") &&
+    !Object.hasOwn(identity.PI_FOLD_ACTIVE_CONTEXT_REGISTRATION, "summarizer") &&
+    !Object.hasOwn(identity.PI_FOLD_ACTIVE_CONTEXT_REGISTRATION, "briefGenerator"),
+  "the harness identity must carry no brief-generator policy: that fact belongs to the run");
   checks.harnessIdentityMatchesRuntimeNamespace = true;
 }
 
@@ -2615,6 +2631,134 @@ try {
   assert(adjudicator.includes("nativeCompactionDisposition(config.arm).latchOnCompletion"),
     "the adjudicator must derive its native-compaction invariant from the shared disposition");
   checks.nativeCompactionIsJudgedByOutcome = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 50 - fold briefs are MODEL-WRITTEN on the arm that folds, and the run says which
+// model wrote them. The package writes briefs with a model and keeps the deterministic
+// brief as the automatic failure fallback; the pifold arm registered the runtime with no
+// generator wired, so every sealed run briefed deterministically and no artifact said so.
+// The descriptor now travels config -> manifest -> registration exactly as the serving
+// budget does, the adjudicator echoes it, and the per-fold provenance counts beside it say
+// what the run actually got, so a rep that quietly fell back to the fallback is visible.
+// ---------------------------------------------------------------------------
+{
+  // A cheap model at medium effort: the brief is a bounded summary of a bounded span, and
+  // the arm's own frontier model is the thing under measurement, not the summarizing.
+  assert.deepEqual({ ...EXPERIMENT_BRIEF_GENERATOR },
+    { provider: "openai", model: "gpt-5.6-luna", effort: "medium" });
+
+  // Only the arm that registers the runtime writes briefs, so only it may carry a
+  // generator: on any other arm the descriptor would be a fact about nothing.
+  validateExperimentRunConfig({ ...runConfig, arm: "pifold", briefGenerator: EXPERIMENT_BRIEF_GENERATOR });
+  validateExperimentRunConfig(runConfig); // runs sealed before the descriptor existed
+  for (const arm of ["native", "unmanaged"]) {
+    assert.throws(() => validateExperimentRunConfig({
+      ...runConfig, arm, briefGenerator: EXPERIMENT_BRIEF_GENERATOR,
+    }), /carries a brief generator but registers no runtime/);
+  }
+  assert.throws(() => validateExperimentRunConfig({
+    ...runConfig, arm: "closed-book", sessionType: "closed-book",
+    briefGenerator: EXPERIMENT_BRIEF_GENERATOR,
+  }), /arm-condition keys with no referent/);
+  for (const malformed of [
+    "session",
+    { provider: "openai", model: "gpt-5.6-luna" },
+    { provider: "openai", model: "gpt-5.6-luna", effort: "" },
+    { provider: "openai", model: "gpt-5.6-luna", effort: "medium", temperature: 0 },
+  ]) {
+    assert.throws(() => validateExperimentRunConfig({
+      ...runConfig, arm: "pifold", briefGenerator: malformed,
+    }), /brief generator is not a provider\/model\/effort descriptor/, JSON.stringify(malformed));
+  }
+  validateExperimentManifest({ ...manifest, briefGenerator: EXPERIMENT_BRIEF_GENERATOR });
+  validateExperimentManifest(manifest);
+  assert.throws(() => validateExperimentManifest({
+    ...manifest,
+    arm: "native",
+    runtime: {
+      ...manifest.runtime,
+      activeContextEnabled: armRuntimeConfiguration("native").activeContextEnabled,
+      nativeCompactionEnabled: armRuntimeConfiguration("native").nativeCompactionEnabled,
+    },
+    briefGenerator: EXPERIMENT_BRIEF_GENERATOR,
+  }), /claims a brief generator but registers no runtime/);
+  assert.throws(() => validateExperimentManifest({
+    ...manifest, briefGenerator: { provider: "openai" },
+  }), /brief generator is not a provider\/model\/effort descriptor/);
+
+  assert(supervisor.includes("briefGenerator: EXPERIMENT_BRIEF_GENERATOR") &&
+    supervisor.includes("armRuntimeConfiguration(arm).activeContextEnabled"),
+  "the supervisor must pin the campaign's brief generator onto the arm that folds");
+  assert(worker.includes("{ briefGenerator: config.briefGenerator }"),
+    "the worker must seal the run's brief generator into the manifest");
+  assert(extension.includes("{ summarizeContextSpan }"),
+    "the extension must pass the generator into the active-context registration");
+  assert(adjudicator.includes("briefGenerator: config.briefGenerator ?? null"),
+    "the adjudicator must echo the run's brief generator into the evidence");
+  // The intended regime and the observed one are different facts, and the evidence
+  // carries both: a generator that failed every call leaves a full deterministic count.
+  assert(adjudicator.includes("record.data?.fold?.provenance?.kind ?? \"unknown\"") &&
+    adjudicator.includes("{ model: 0, deterministic: 0 }"),
+  "the adjudicator must count brief provenance per fold, with both regimes always present");
+
+  const jitiPath = join(PROJECT, "node_modules", "jiti", "lib", "jiti.mjs");
+  assert(existsSync(jitiPath), "could not resolve package-local jiti to build the brief generator");
+  const typeboxPath = join(PI_INSTALL_ROOT, "node_modules", "typebox", "build", "index.mjs");
+  assert(existsSync(typeboxPath), `the pi install does not carry typebox at ${typeboxPath}`);
+  const { createJiti } = await import(pathToFileURL(jitiPath));
+  const jiti = createJiti(import.meta.url, { alias: { typebox: typeboxPath } });
+  // The counts the adjudicator reads come off the sealed fold record, so the record has
+  // to carry the provenance in the first place.
+  const persistence = await jiti.import(join(PROJECT, "extensions", "lib", "persistence.ts"));
+  assert([...persistence.ACTIVE_FOLD_KEYS].includes("provenance"),
+    "the sealed fold record no longer carries its brief provenance");
+
+  const { experimentSummarizeContextSpan } = await jiti.import(
+    join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"));
+  assert.equal(experimentSummarizeContextSpan({ arm: "pifold" }), undefined,
+    "a run config with no descriptor must register no generator and fall back deterministically");
+  // Driven against a FAKE host module: verification resolves no model and calls no
+  // provider. What is under test is that the harness reaches the PACKAGE's builder, so the
+  // arm briefs the way a consumer's deployment briefs.
+  const briefModel = { provider: "openai", id: "gpt-5.6-luna", reasoning: true };
+  const prompts = [];
+  const generate = experimentSummarizeContextSpan(
+    { arm: "pifold", briefGenerator: EXPERIMENT_BRIEF_GENERATOR },
+    async () => ({
+      ModelRuntime: {
+        async create() {
+          return {
+            getModel(provider, model) {
+              return provider === briefModel.provider && model === briefModel.id ? briefModel : undefined;
+            },
+            async completeSimple(_model, completion) {
+              prompts.push(completion.messages[0].content);
+              return { content: [{ type: "text", text: "Stage 12 released the nonce." }] };
+            },
+          };
+        },
+      },
+    }),
+  );
+  assert.equal(typeof generate, "function");
+  assert.deepEqual(await generate({
+    sourceText: "STAGE BODY: the stage tool returned NEXT_KEY and four files.",
+    beforeText: "[]",
+    afterText: "[]",
+    maxBriefChars: 1_200,
+    signal: new AbortController().signal,
+  }, {}), {
+    brief: "Stage 12 released the nonce.",
+    provider: briefModel.provider,
+    model: briefModel.id,
+    effort: EXPERIMENT_BRIEF_GENERATOR.effort,
+    toolCalls: 0,
+  });
+  assert(prompts.length === 1 && prompts[0].includes("SPAN TO BRIEF:") &&
+    prompts[0].includes("expanding or peeking this fold later"),
+  "the arm must brief through the package's own request contract, not a harness copy");
+  checks.briefGeneratorThreadedFromCampaignPinToRegistration = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

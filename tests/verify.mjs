@@ -2389,9 +2389,22 @@ async function gateSummarizerOption() {
   assert.equal(completionRequest.model.id, sessionModel.id);
   assert.equal(completionRequest.request.messages.length, 1);
   assert.equal(completionRequest.request.messages[0].role, "user");
-  assert(completionRequest.request.messages[0].content.startsWith(
-    "Write a factual brief of at most 1200 characters. Use no preamble and no Markdown headers.\n\n",
-  ));
+  // The prompt the RUNTIME drives carries the same contract the direct call pins below:
+  // the labelled span, both orientation labels, and the two purposes. The runtime supplies
+  // the orientation slices from its own bounded computation, so whether a slice is present
+  // or empty is the runtime's business; the labels are always there to be filled.
+  const runtimeBriefPrompt = completionRequest.request.messages[0].content;
+  for (const clause of [
+    "Write a factual brief of at most 1200 characters covering the SPAN TO BRIEF below",
+    "expanding or peeking this fold later",
+    "BEFORE THE SPAN (orientation only, do not brief)",
+    "SPAN TO BRIEF:",
+    "AFTER THE SPAN (orientation only, do not brief)",
+    "Use no preamble and no Markdown headers.",
+  ]) {
+    assert(runtimeBriefPrompt.includes(clause),
+      `the runtime-driven brief request lost "${clause}"`);
+  }
   assert.equal(completionRequest.options.maxTokens, 512);
   assert.equal(completionRequest.options.signalIdentical, true);
   assert.equal(completionRequest.options.reasoning, "max");
@@ -2477,6 +2490,7 @@ async function gateSummarizerOption() {
   let registryLoaderCalls = 0;
   let registryCreateCalls = 0;
   const registryCompletionOptions = [];
+  const registryPrompts = [];
   const registryModel = { provider: "fake-registry", id: "explicit-model", reasoning: true };
   const explicit = summarizerFactory.createSummarizeContextSpan({
     provider: registryModel.provider,
@@ -2494,8 +2508,9 @@ async function gateSummarizerOption() {
                 ? registryModel
                 : undefined;
             },
-            async completeSimple(_model, _request, options) {
+            async completeSimple(_model, completion, options) {
               registryCompletionOptions.push(options);
+              registryPrompts.push(completion.messages[0].content);
               return { content: [{ type: "text", text: "Explicit registry brief." }] };
             },
           };
@@ -2525,6 +2540,57 @@ async function gateSummarizerOption() {
   assert(registryCompletionOptions.every((options) => options.maxTokens === 512));
   assert(registryCompletionOptions.every((options) => options.reasoning === "low"));
 
+  // The request IS the contract, so it is pinned as one. A brief does two jobs at once:
+  // it summarizes the span, and it states what expanding or peeking that fold would give
+  // back, which is the only basis the agent has for deciding to dig in again. The
+  // orientation slices the runtime computes and hashes into the fold identity are labelled
+  // distinctly, because a model that cannot tell the span from its surroundings briefs the
+  // surroundings. Every clause below would be missing from a thin "summarize this" prompt.
+  await explicit({
+    sourceText: "SPAN BODY: rewrote createSummarizeContextSpan and reran the gate suite.",
+    beforeText: "BEFORE BODY: the operator asked for a model-written brief.",
+    afterText: "AFTER BODY: the suite reported ninety green gates.",
+    maxBriefChars: 1_200,
+    signal: new AbortController().signal,
+  }, { thinkingLevel: "max" });
+  const oriented = registryPrompts.at(-1);
+  assert(oriented.startsWith("Write a factual brief of at most 1200 characters covering the " +
+    "SPAN TO BRIEF below, and nothing else."), oriented);
+  for (const clause of [
+    "it summarizes what the span contains, and it tells an agent what it would get back " +
+    "by expanding or peeking this fold later",
+    "the brief is its only visible trace",
+    "name the concrete things inside it: files, identifiers, decisions, results, errors",
+    "Do not describe the span abstractly.",
+    "their content is not part of what you are briefing",
+    "Use no preamble and no Markdown headers.",
+  ]) {
+    assert(oriented.includes(clause), `the brief request lost "${clause}"`);
+  }
+  const beforeSection = oriented.indexOf(
+    "BEFORE THE SPAN (orientation only, do not brief):\nBEFORE BODY: the operator asked");
+  const spanSection = oriented.indexOf(
+    "SPAN TO BRIEF:\nSPAN BODY: rewrote createSummarizeContextSpan");
+  const afterSection = oriented.indexOf(
+    "AFTER THE SPAN (orientation only, do not brief):\nAFTER BODY: the suite reported");
+  assert(beforeSection > 0 && spanSection > beforeSection && afterSection > spanSection,
+    `the three sections must be distinctly labelled and in conversation order: ${oriented}`);
+
+  // Empty orientation is the runtime's own literal for "no slice on this side". Pasted in
+  // raw it reads as content, so it becomes a stated absence instead.
+  await explicit({
+    sourceText: "SPAN BODY: a span with nothing either side of it.",
+    beforeText: "[]",
+    afterText: "[]",
+    maxBriefChars: 1_200,
+    signal: new AbortController().signal,
+  }, { thinkingLevel: "max" });
+  const unoriented = registryPrompts.at(-1);
+  assert(unoriented.includes("BEFORE THE SPAN (orientation only, do not brief): none.") &&
+    unoriented.includes("AFTER THE SPAN (orientation only, do not brief): none.") &&
+    !unoriented.includes("[]"),
+  `empty orientation must read as an absence, never as content: ${unoriented}`);
+
   return {
     default: modelFold.provenance,
     toolCalls: 0,
@@ -2537,6 +2603,9 @@ async function gateSummarizerOption() {
     malformedObjects: "rejected",
     customCallback: "internal-seam",
     explicitRegistryRuntimeCreates: registryCreateCalls,
+    briefRequestSections: ["instruction", "before", "span", "after"],
+    briefRequestPurposes: ["summary", "what-expand-or-peek-returns"],
+    emptyOrientation: "stated-absence",
   };
 }
 

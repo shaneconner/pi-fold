@@ -268,6 +268,15 @@ function curation({ entries, foldRecords, contextToolName, workerEvents = [], wo
       result[kind] = (result[kind] ?? 0) + 1;
       return result;
     }, {}),
+    // Which generator wrote each brief, counted off the sealed fold records. Seeded with
+    // both regimes at zero so a run that produced no model brief SAYS so rather than
+    // omitting the key: the deterministic brief is the failure fallback, and a rep whose
+    // folds all carry it measured the fallback, not the mechanism.
+    briefProvenance: foldRecords.reduce((result, record) => {
+      const kind = record.data?.fold?.provenance?.kind ?? "unknown";
+      result[kind] = (result[kind] ?? 0) + 1;
+      return result;
+    }, { model: 0, deterministic: 0 }),
   };
 }
 
@@ -453,7 +462,8 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     : { contextToolCalls: 0, byAction: {}, totalFolds: 0, totalFoldsCounts: "fold-records",
       headlineMutationMetric: "usage.mutations", voluntaryFolds: 0, automaticFolds: 0,
       voluntaryFoldShare: null, expandCalls: 0, protectCalls: 0, unprotectCalls: 0,
-      refoldCalls: 0, peekCalls: 0, foldKinds: {} };
+      refoldCalls: 0, peekCalls: 0, foldKinds: {},
+      briefProvenance: { model: 0, deterministic: 0 } };
   // The runtime's own canonical stream: exact mutation accounting and the
   // mechanism-limited counterfactual. Arms without the extension emit no stream, and the
   // wire series above remains their only mutation lens.
@@ -594,6 +604,11 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     foldScheduling: config.foldScheduling ?? "epoch",
     foldPeekResults: config.foldPeekResults ?? true,
     providerInputBudget: config.providerInputBudget ?? null,
+    // Which model this run ASKED to write its fold briefs, or null for a run that wired
+    // none. What the run actually got is `curation.briefProvenance`: a configured
+    // generator that failed every call reads as a full deterministic count there, so the
+    // two fields together separate the intended regime from the observed one.
+    briefGenerator: config.briefGenerator ?? null,
     transport: config.transport ?? "auto",
     repetition: config.repetition,
     mode: config.mode,

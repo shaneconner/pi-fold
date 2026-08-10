@@ -81,6 +81,31 @@ export const EXPERIMENT_PROVIDER_INPUT_BUDGETS = Object.freeze({
   "openai-codex/gpt-5.6-luna": 383_616,
   "openai-codex/gpt-5.6-sol": 383_616,
 });
+// The campaign's brief generator. Fold briefs are MODEL-WRITTEN in the shipped package,
+// and the deterministic brief exists only as the automatic fallback when a generator
+// fails, so an arm that registered the runtime with no generator wired measured the
+// fallback in every fold and called it the mechanism. This descriptor is what the pifold
+// arm registers, and it travels config -> manifest -> registration -> evidence so the
+// brief regime of a sealed run is a readable fact rather than an inference from silence.
+// A cheap model at medium effort: the brief is a bounded summary of a bounded span, and
+// the frontier model's turn is the thing under measurement, not the summarizing.
+export const EXPERIMENT_BRIEF_GENERATOR = Object.freeze({
+  provider: "openai",
+  model: "gpt-5.6-luna",
+  effort: "medium",
+});
+
+// The package's own summarizer contract, revalidated on this side of the wire: the
+// runtime accepts "session" or a provider/model/effort descriptor, and the harness only
+// ever pins a descriptor, because "session" would brief with the arm's own frontier model
+// and bill the comparison for it.
+export function validBriefGenerator(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value) &&
+    exactKeys(value, ["provider", "model", "effort"]) &&
+    [value.provider, value.model, value.effort].every((part) =>
+      typeof part === "string" && part.length > 0);
+}
+
 // Pi's default "auto" transport rides a WebSocket whose follow-ups are DELTA requests
 // against connection-scoped server state; every drop re-sends the full context, usually
 // onto a cold backend. Rep 17 measured the bill: raw pooled cache share 0.390 against a
@@ -1340,7 +1365,7 @@ export function validateExperimentManifest(manifest) {
   assertExperiment(keysWithin(manifest, [
     "version", "runId", "campaignId", "arm", "mode", "ordinal", "repetition",
     "seed", "model", "runtime", "target", "plan", "pacing", "createdWallMs",
-  ], ["sessionType", "guidance", "foldScheduling", "foldPeekResults", "guidedCuration", "providerTotalWindow", "providerInputBudget", "transport", "reliabilityLevers"]),
+  ], ["sessionType", "guidance", "foldScheduling", "foldPeekResults", "guidedCuration", "providerTotalWindow", "providerInputBudget", "briefGenerator", "transport", "reliabilityLevers"]),
   "Invalid experiment manifest shape");
   assertExperiment(manifest.sessionType === undefined || manifest.sessionType === "arm",
     "Arm manifest carries a foreign session type");
@@ -1359,6 +1384,12 @@ export function validateExperimentManifest(manifest) {
   assertExperiment(manifest.providerInputBudget === undefined ||
     (Number.isSafeInteger(manifest.providerInputBudget) && manifest.providerInputBudget > 0),
   "Manifest provider input budget is invalid");
+  // Only an arm that REGISTERS the runtime writes briefs, so only that arm may claim a
+  // generator. A native or unmanaged manifest carrying one would be attesting to a brief
+  // regime it never ran. Runs sealed before the descriptor existed carry no key and stay
+  // readable: their briefs were the deterministic fallback throughout.
+  assertExperiment(manifest.briefGenerator === undefined || validBriefGenerator(manifest.briefGenerator),
+    "Manifest brief generator is not a provider/model/effort descriptor");
   assertExperiment(manifest.transport === undefined || EXPERIMENT_TRANSPORTS.includes(manifest.transport),
     "Manifest transport is not a known Pi transport");
   assertExperiment(manifest.version === EXPERIMENT_PROTOCOL_VERSION, "Manifest protocol version drifted");
@@ -1394,6 +1425,12 @@ export function validateExperimentManifest(manifest) {
   assertExperiment(manifest.runtime.activeContextEnabled === expected.activeContextEnabled &&
     manifest.runtime.nativeCompactionEnabled === expected.nativeCompactionEnabled,
   `Manifest runtime configuration contradicts arm ${manifest.arm}`);
+  // Only an arm that REGISTERS the runtime writes briefs, so only that arm may claim a
+  // generator: a native or unmanaged manifest carrying one would attest to a brief regime
+  // it never ran. Runs sealed before the descriptor existed carry no key and stay
+  // readable, and their briefs were the deterministic fallback throughout.
+  assertExperiment(manifest.briefGenerator === undefined || expected.activeContextEnabled,
+    `Manifest arm ${manifest.arm} claims a brief generator but registers no runtime`);
   assertExperiment(exactKeys(manifest.target, ["repoKey", "url", "commit", "treeSha256", "checkoutSha256"]) &&
     Object.hasOwn(EXPERIMENT_REPOS, manifest.target.repoKey) &&
     manifest.target.commit === EXPERIMENT_REPOS[manifest.target.repoKey].commit &&
@@ -1431,7 +1468,7 @@ export const EXPERIMENT_RUN_CONFIG_KEYS = Object.freeze([
 // carries `providerInputBudget` instead of the gross window.
 export const EXPERIMENT_RUN_CONFIG_OPTIONAL_KEYS = Object.freeze([
   "sessionType", "guidance", "foldScheduling", "foldPeekResults", "guidedCuration",
-  "providerTotalWindow", "providerInputBudget", "transport", "reliabilityLevers",
+  "providerTotalWindow", "providerInputBudget", "briefGenerator", "transport", "reliabilityLevers",
 ]);
 
 export function validateExperimentRunConfig(value) {
@@ -1450,6 +1487,8 @@ export function validateExperimentRunConfig(value) {
   assertExperiment(value.providerInputBudget === undefined ||
     (Number.isSafeInteger(value.providerInputBudget) && value.providerInputBudget > 0),
   "Run config provider input budget is invalid");
+  assertExperiment(value.briefGenerator === undefined || validBriefGenerator(value.briefGenerator),
+    "Run config brief generator is not a provider/model/effort descriptor");
   assertExperiment(value.transport === undefined || EXPERIMENT_TRANSPORTS.includes(value.transport),
     "Run config transport is not a known Pi transport");
   assertExperiment(value.version === EXPERIMENT_PROTOCOL_VERSION, "Run config protocol version drifted");
@@ -1464,8 +1503,15 @@ export function validateExperimentRunConfig(value) {
   "Run config arm is invalid");
   assertExperiment(value.sessionType !== EXPERIMENT_CLOSED_BOOK_LABEL ||
     (value.foldScheduling === undefined && value.foldPeekResults === undefined &&
-      value.guidance === undefined && value.guidedCuration === undefined),
+      value.guidance === undefined && value.guidedCuration === undefined &&
+      value.briefGenerator === undefined),
   "Closed-book run config carries arm-condition keys with no referent");
+  // A generator belongs to the arm that registers the runtime and writes briefs; on any
+  // other arm the descriptor would be a fact about nothing.
+  assertExperiment(value.briefGenerator === undefined ||
+    (value.sessionType !== EXPERIMENT_CLOSED_BOOK_LABEL &&
+      armRuntimeConfiguration(value.arm).activeContextEnabled),
+  `Run config arm ${value.arm} carries a brief generator but registers no runtime`);
   assertExperiment(EXPERIMENT_MODES.includes(value.mode), "Run config mode is invalid");
   assertExperiment(value.guidance === undefined ||
     EXPERIMENT_GUIDANCE_PROFILES.includes(value.guidance),
