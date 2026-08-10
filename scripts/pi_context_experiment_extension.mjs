@@ -8,8 +8,11 @@
 //     guidance profile, so the arm IS the runtime configuration;
 //   - context-tool actions are NOT policy-restricted: expand/protect/refold usage is a
 //     first-class metric here, and the soak's status/fold allowlist would suppress it;
-//   - a native compaction is RECORDED, not latched as a failure: for the native arm it is
-//     the event under measurement;
+//   - a native compaction is RECORDED, not latched as a failure, and it is judged by its
+//     OUTCOME: the pifold arm runs with compaction enabled so the runtime's overflow lane
+//     can arm off the hook, so a pass there is expected traffic and only a COMPLETED
+//     compaction is a defect; for the native arm the completion is the event under
+//     measurement;
 //   - every tool result is hashed into a ledger so the reread tax is measurable.
 
 import { existsSync, readFileSync, watch } from "node:fs";
@@ -33,6 +36,7 @@ import {
   assertExperiment,
   estimateTokens,
   isWindowOverflow,
+  nativeCompactionDisposition,
   stageCallDisposition,
   toolResultContentSha256,
   toolResultText,
@@ -109,6 +113,7 @@ function readMarkerIndex(ctx) {
 
 export function createPiContextExperimentExtension(config) {
   const pifold = config.arm === "pifold";
+  const compactionDisposition = nativeCompactionDisposition(config.arm);
   const allowedTools = new Set([
     ...EXPERIMENT_ALLOWED_TOOLS,
     ...(pifold ? EXPERIMENT_PIFOLD_EXTRA_TOOLS : []),
@@ -209,12 +214,37 @@ export function createPiContextExperimentExtension(config) {
   return {
     name: "pi-fold-context-experiment",
     factory(pi) {
-      // Native compaction is an EVENT here, not a latch: the native arm is supposed to
-      // produce them. It is only a defect when the arm forbids it.
+      // Native compaction is an EVENT here, not a latch, and the event that counts is the
+      // OUTCOME. The pifold arm runs with compaction enabled, so its hook fires are expected
+      // traffic: the runtime cancels a threshold pass and converts an overflow pass into a
+      // rollback, and neither reaches a summary. This handler returns nothing, which is what
+      // lets the runtime's own handler, registered after it on the same event, return the
+      // cancel that stops the pass.
       pi.on("session_before_compact", (event) => {
-        openStopTheWorld("native-compaction", event.reason ?? "unknown");
-        appendEvent("native-compaction", { reason: event.reason ?? null, stage: expectedStage });
-        if (config.arm !== "native") {
+        const reason = event.reason ?? null;
+        appendEvent("native-compaction-pass", {
+          reason, willRetry: event.willRetry === true, stage: expectedStage,
+        });
+        if (compactionDisposition.stopsTheWorld) openStopTheWorld("native-compaction", reason ?? "unknown");
+        // Only where compaction is switched off: there the hook cannot fire legitimately.
+        if (compactionDisposition.latchOnPass) {
+          appendFailure(config, "unexpected-native-compaction", reason ?? "unknown");
+        }
+      });
+
+      // `session_compact` fires only after a summary has been appended and the transcript
+      // replaced, so it is the honest completion witness: a cancelled or converted pass
+      // never reaches it. The session's own compaction entry is the second witness, checked
+      // on the branch by the context handler below.
+      pi.on("session_compact", (event) => {
+        appendEvent("native-compaction", {
+          reason: event.reason ?? null,
+          willRetry: event.willRetry === true,
+          fromExtension: event.fromExtension === true,
+          compactionEntryId: event.compactionEntry?.id ?? null,
+          stage: expectedStage,
+        });
+        if (compactionDisposition.latchOnCompletion) {
           appendFailure(config, "unexpected-native-compaction", event.reason ?? "unknown");
         }
       });
@@ -442,7 +472,10 @@ export function createPiContextExperimentExtension(config) {
             PI_FOLD_NATIVE_COMPACTION_DECISION_ENTRY,
             PI_FOLD_NATIVE_COMPACTION_RECEIPT_ENTRY,
           ].includes(entry.customType)));
-        if (native && config.arm !== "native") {
+        // Second witness on the same outcome: the runtime writes its decision and receipt
+        // entries from its own `session_compact` handler, so all three entry types appear on
+        // the branch only once a compaction has actually completed.
+        if (native && compactionDisposition.latchOnCompletion) {
           appendFailure(config, "unexpected-native-entry", native.customType ?? native.type);
         }
       });

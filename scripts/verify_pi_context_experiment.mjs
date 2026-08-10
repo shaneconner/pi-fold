@@ -46,6 +46,7 @@ import {
   extractDefinitions,
   fileFacts,
   isWindowOverflow,
+  nativeCompactionDisposition,
   probeAnswerPattern,
   probeTranscripts,
   seededShuffle,
@@ -91,7 +92,13 @@ import {
   closedBookSystemPrompt,
   closedBookTranscript,
 } from "./lib/pi_context_experiment.mjs";
-import { directoryTreeSha256, sha256Json, sha256Text, verifySourceHashes } from "./lib/pi_context_soak_attestation.mjs";
+import {
+  PI_INSTALL_ROOT,
+  directoryTreeSha256,
+  sha256Json,
+  sha256Text,
+  verifySourceHashes,
+} from "./lib/pi_context_soak_attestation.mjs";
 
 const PROJECT = dirname(dirname(fileURLToPath(import.meta.url)));
 const source = (relative) => readFileSync(join(PROJECT, relative), "utf8");
@@ -101,8 +108,11 @@ const checks = {};
 // GATE 1 - arm contract
 // ---------------------------------------------------------------------------
 assert.deepEqual([...EXPERIMENT_ARMS], ["pifold", "native", "unmanaged"]);
+// The pifold arm runs compaction ON: the runtime's overflow recovery lane arms off
+// `session_before_compact`, so an arm with compaction off would be measuring a deployment
+// nobody is asked to run.
 assert.deepEqual(armRuntimeConfiguration("pifold"),
-  { activeContextEnabled: true, nativeCompactionEnabled: false, toleratesOverflow: false });
+  { activeContextEnabled: true, nativeCompactionEnabled: true, toleratesOverflow: false });
 assert.deepEqual(armRuntimeConfiguration("native"),
   { activeContextEnabled: false, nativeCompactionEnabled: true, toleratesOverflow: false });
 assert.deepEqual(armRuntimeConfiguration("unmanaged"),
@@ -541,7 +551,7 @@ const manifest = {
     sourceHashes: { "scripts/lib/pi_context_experiment.mjs": "d".repeat(64) },
     dependencyHashes: { piPackageJson: "e".repeat(64) },
     activeContextEnabled: true,
-    nativeCompactionEnabled: false,
+    nativeCompactionEnabled: true,
   },
   target: {
     repoKey: repo.key, url: repo.url, commit: repo.commit,
@@ -562,7 +572,7 @@ const manifest = {
 };
 validateExperimentManifest(manifest);
 assert.throws(() => validateExperimentManifest({
-  ...manifest, runtime: { ...manifest.runtime, nativeCompactionEnabled: true },
+  ...manifest, runtime: { ...manifest.runtime, nativeCompactionEnabled: false },
 }), /contradicts arm pifold/);
 assert.throws(() => validateExperimentManifest({
   ...manifest, arm: "native",
@@ -764,9 +774,11 @@ for (const [name, text] of [["extension", extension], ["worker", worker], ["supe
     `${name} still carries the retired guidance profile condition`);
 }
 assert(extension.includes('pi.on("session_before_compact"') &&
+  extension.includes('pi.on("session_compact"') &&
   extension.includes("openStopTheWorld(\"native-compaction\"") &&
-  extension.includes("if (config.arm !== \"native\")"),
-"native compaction must be recorded as an event and only latched when the arm forbids it");
+  extension.includes("nativeCompactionDisposition(config.arm)") &&
+  extension.includes("compactionDisposition.latchOnCompletion"),
+"native compaction must be recorded by outcome: every pass an event, the latch on completion");
 assert(extension.includes("appendToolResult({") && extension.includes("toolResultContentSha256(content)"),
   "every tool result must be hashed into the reread-tax ledger");
 assert(worker.includes("compaction: { enabled: armRuntime.nativeCompactionEnabled") &&
@@ -2461,6 +2473,144 @@ try {
   assert(adjudicator.includes("contextEventMetrics(runEntries)"),
     "the adjudicator must compute the rollback lens from the event stream");
   checks.rollbackLensAdjudicated = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 49 - a native compaction is recorded by OUTCOME, not by the hook firing. The
+// pifold arm runs with pi's compaction ENABLED, because the runtime's overflow recovery
+// lane arms off `session_before_compact`; there a fire is expected traffic, since the
+// runtime cancels a threshold pass and converts an overflow pass into a tree rollback.
+// What no arm but the native one may produce is a COMPLETED compaction, a summary that
+// replaced the transcript. So: every pass is an event everywhere; a pass opens a
+// stop-the-world record only where it runs to a summary; a pass latches on its own only
+// where compaction is switched off and the hook therefore cannot fire legitimately; a
+// completion latches everywhere except the arm whose datum it is. Driven through the real
+// extension, on a real run directory, so the ledgers are the ones a run would seal.
+// ---------------------------------------------------------------------------
+{
+  assert.deepEqual(nativeCompactionDisposition("pifold"),
+    { latchOnPass: false, stopsTheWorld: false, latchOnCompletion: true });
+  assert.deepEqual(nativeCompactionDisposition("native"),
+    { latchOnPass: false, stopsTheWorld: true, latchOnCompletion: false });
+  assert.deepEqual(nativeCompactionDisposition("unmanaged"),
+    { latchOnPass: true, stopsTheWorld: false, latchOnCompletion: true });
+  assert.throws(() => nativeCompactionDisposition("hybrid"), /Unknown arm/);
+
+  const jitiPath = join(PROJECT, "node_modules", "jiti", "lib", "jiti.mjs");
+  assert(existsSync(jitiPath), "could not resolve package-local jiti to drive the experiment extension");
+  // The stage tool's parameter schema comes from typebox, which the harness gets from the
+  // pi install the same way the worker resolves it. Resolving it here and not by luck means
+  // a pi that moved the module fails this gate instead of a launched campaign.
+  const typeboxPath = join(PI_INSTALL_ROOT, "node_modules", "typebox", "build", "index.mjs");
+  assert(existsSync(typeboxPath), `the pi install does not carry typebox at ${typeboxPath}`);
+  const { createJiti } = await import(pathToFileURL(jitiPath));
+  const { createPiContextExperimentExtension } = await createJiti(import.meta.url, {
+    alias: { typebox: typeboxPath },
+  }).import(join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"));
+
+  const readLedger = (runDir, name) => {
+    const path = join(runDir, name);
+    if (!existsSync(path)) return [];
+    return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  };
+  // One pass, then optionally the completion, then shutdown so a stop-the-world record that
+  // never saw another productive request is still flushed. Only the extension's own handler
+  // is called: the runtime registers its own on the same events, and its cancel is what a
+  // live pifold session would return, which is exactly the outcome being modelled here.
+  const drive = (arm, { complete = false, branch = [] } = {}) => {
+    const runDir = mkdtempSync(join(tmpdir(), `pi-fold-compaction-${arm}-`));
+    const handlers = new Map();
+    const pi = {
+      on(name, handler) {
+        if (!handlers.has(name)) handlers.set(name, []);
+        handlers.get(name).push(handler);
+      },
+      registerTool() {},
+      registerCommand() {},
+      sendMessage() {},
+      async appendEntry() {},
+    };
+    createPiContextExperimentExtension({
+      version: EXPERIMENT_PROTOCOL_VERSION,
+      runId: `compaction-${arm}`,
+      runDir,
+      campaignId: "gate-49",
+      arm,
+      mode: "smoke",
+      firstChallenge: "a".repeat(64),
+      stageCount: EXPERIMENT_MODE_PLANS.smoke.stageCount,
+      watchdogMs: EXPERIMENT_MODE_PLANS.smoke.watchdogMs,
+    }).factory(pi);
+    // The extension registers both compaction handlers at the TOP of its factory, before it
+    // registers the runtime, and its own context projection handler after it. So the
+    // experiment's compaction handler is first on its event and its context handler is last
+    // on that one. The counts are pinned: a reordering that would send these events to the
+    // runtime's handler instead fails here rather than silently measuring nothing.
+    const registered = (name, expected) => {
+      const list = handlers.get(name) ?? [];
+      assert.equal(list.length, expected,
+        `the ${name} registration shape changed; this gate would drive the wrong handler`);
+      return list;
+    };
+    const runtimeShares = arm === "pifold" ? 2 : 1;
+    registered("session_before_compact", runtimeShares)[0]({ reason: "threshold", willRetry: false });
+    if (complete) {
+      registered("session_compact", runtimeShares)[0]({
+        reason: "threshold", willRetry: false, fromExtension: false,
+        compactionEntry: { id: "compaction-entry-1" },
+      });
+    }
+    if (branch.length > 0) {
+      registered("context", runtimeShares).at(-1)({ messages: [] }, {
+        signal: { aborted: false },
+        sessionManager: { getBranch: () => branch, getLeafId: () => "leaf-1" },
+      });
+    }
+    registered("session_shutdown", runtimeShares).at(-1)({ reason: "quit" });
+    const result = {
+      events: readLedger(runDir, "worker-events.jsonl"),
+      failures: readLedger(runDir, "failure-latch.jsonl"),
+      stops: readLedger(runDir, "stop-the-world.jsonl"),
+    };
+    rmSync(runDir, { recursive: true, force: true });
+    return result;
+  };
+
+  // pifold: the fire is recorded and nothing else happens. No latch, no pause.
+  const pifoldPass = drive("pifold");
+  assert.deepEqual(pifoldPass.events.filter((event) => event.kind === "native-compaction-pass")
+    .map((event) => event.details.reason), ["threshold"]);
+  assert.equal(pifoldPass.failures.length, 0, "a cancelled pass is not a defect in the pifold arm");
+  assert.equal(pifoldPass.stops.length, 0, "a cancelled pass stops no world");
+  // pifold: a compaction that COMPLETED is the defect, and it says so by that name.
+  const pifoldCompletion = drive("pifold", { complete: true });
+  assert.deepEqual(pifoldCompletion.events.map((event) => event.kind).filter((kind) =>
+    kind.startsWith("native-compaction")), ["native-compaction-pass", "native-compaction"]);
+  assert.deepEqual(pifoldCompletion.failures.map((failure) => failure.phase),
+    ["unexpected-native-compaction"]);
+  assert.equal(pifoldCompletion.stops.length, 0);
+  // native: the pass runs to a summary, so it pauses the run and latches nothing.
+  const nativeCompletion = drive("native", { complete: true });
+  assert.equal(nativeCompletion.failures.length, 0, "the native arm's compaction is its datum");
+  assert.deepEqual(nativeCompletion.stops.map((record) => record.kind), ["native-compaction"]);
+  assert.equal(nativeCompletion.stops[0].timeToFirstProductiveRequestMs, null,
+    "an event that never saw another productive request records a null duration, not a made-up one");
+  // unmanaged: compaction is switched off, so the fire alone is the defect.
+  const unmanagedPass = drive("unmanaged");
+  assert.deepEqual(unmanagedPass.failures.map((failure) => failure.phase),
+    ["unexpected-native-compaction"]);
+  assert.equal(unmanagedPass.stops.length, 0);
+  // The branch is the second witness, and it carries the same outcome rule: the runtime
+  // writes its decision and receipt entries from its own completion handler, so any of the
+  // three entry types on the branch means a compaction finished.
+  const compactionEntry = [{ type: "compaction", id: "compaction-entry-1" }];
+  assert.deepEqual(drive("pifold", { branch: compactionEntry }).failures.map((failure) => failure.phase),
+    ["unexpected-native-entry"]);
+  assert.equal(drive("native", { branch: compactionEntry }).failures.length, 0);
+  // The adjudicator judges the sealed run by the same rule, from the same helper.
+  assert(adjudicator.includes("nativeCompactionDisposition(config.arm).latchOnCompletion"),
+    "the adjudicator must derive its native-compaction invariant from the shared disposition");
+  checks.nativeCompactionIsJudgedByOutcome = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

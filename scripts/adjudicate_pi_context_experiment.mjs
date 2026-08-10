@@ -34,6 +34,7 @@ import {
   echoVerdicts,
   estimateTokens,
   isWindowOverflow,
+  nativeCompactionDisposition,
   probeClassOf,
   probeMechanicalVerdicts,
   probeProvenance,
@@ -460,10 +461,14 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     ? contextEventMetrics(runEntries)
     : null;
 
-  // Arm invariants: an arm that did the other arm's thing is not evidence.
-  if (!armRuntime.nativeCompactionEnabled) {
+  // Arm invariants: an arm that did the other arm's thing is not evidence. Compaction is
+  // judged by OUTCOME, so the invariant is about COMPLETED compactions: the pifold arm runs
+  // with compaction enabled and is expected to see passes, but a summary that replaced its
+  // transcript would mean the runtime failed to intercept. Both witnesses count completions
+  // only, since a cancelled pass opens no stop-the-world record and writes no branch entry.
+  if (nativeCompactionDisposition(config.arm).latchOnCompletion) {
     assertExperiment(stw.nativeCompactions === 0 && stw.nativeCompactionSessionEntries === 0,
-      `Arm ${config.arm} recorded a native compaction`);
+      `Arm ${config.arm} recorded a completed native compaction`);
   }
   if (!armRuntime.activeContextEnabled) {
     assertExperiment(foldRecords.length === 0, `Arm ${config.arm} recorded a fold`);

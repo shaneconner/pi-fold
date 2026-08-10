@@ -1388,11 +1388,9 @@ export function validateExperimentManifest(manifest) {
     typeof manifest.runtime.nativeCompactionEnabled === "boolean",
   "Manifest runtime pin is incomplete");
   // The arm IS the runtime configuration; a manifest that disagrees with its arm is a lie.
-  const expected = {
-    pifold: { activeContextEnabled: true, nativeCompactionEnabled: false },
-    native: { activeContextEnabled: false, nativeCompactionEnabled: true },
-    unmanaged: { activeContextEnabled: false, nativeCompactionEnabled: false },
-  }[manifest.arm];
+  // Derived from the one arm table rather than copied beside it: a second copy is a thing
+  // that drifts, and the copy is what a sealed manifest would be validated against.
+  const expected = armRuntimeConfiguration(manifest.arm);
   assertExperiment(manifest.runtime.activeContextEnabled === expected.activeContextEnabled &&
     manifest.runtime.nativeCompactionEnabled === expected.nativeCompactionEnabled,
   `Manifest runtime configuration contradicts arm ${manifest.arm}`);
@@ -1504,13 +1502,39 @@ export function validateExperimentRunConfig(value) {
   return structuredClone(value);
 }
 
+// The pifold arm runs with Pi's native compaction ENABLED, because that is the recommended
+// deployment: the runtime intercepts every `session_before_compact`, cancels a threshold
+// pass, and converts an overflow pass that will retry into a tree rollback and replay. The
+// overflow recovery lane arms off that hook, so switching compaction off would switch the
+// lane off with it and measure a deployment nobody is asked to run.
 export function armRuntimeConfiguration(arm) {
   assertExperiment(EXPERIMENT_ARMS.includes(arm), `Unknown arm ${arm}`);
   return {
-    pifold: { activeContextEnabled: true, nativeCompactionEnabled: false, toleratesOverflow: false },
+    pifold: { activeContextEnabled: true, nativeCompactionEnabled: true, toleratesOverflow: false },
     native: { activeContextEnabled: false, nativeCompactionEnabled: true, toleratesOverflow: false },
     unmanaged: { activeContextEnabled: false, nativeCompactionEnabled: false, toleratesOverflow: true },
   }[arm];
+}
+
+// A compaction PASS is not a compaction. Two of the three arms can now see the hook fire,
+// and what separates them is the OUTCOME, so the experiment judges the outcome:
+//
+//   - every pass is recorded as an event on every arm, always;
+//   - a pass stops the world only where it runs to a summary, which means compaction on and
+//     no fold runtime in front of it: the pifold arm's passes are cancelled or converted, so
+//     they pause nothing and open no stop-the-world record;
+//   - a pass latches on the fire alone only where compaction is switched OFF, because there
+//     the hook cannot fire for any legitimate reason;
+//   - a COMPLETED compaction, meaning a summary that replaced the transcript, latches
+//     everywhere except the arm whose datum it is.
+export function nativeCompactionDisposition(arm) {
+  const runtime = armRuntimeConfiguration(arm);
+  const runsToCompletion = runtime.nativeCompactionEnabled && !runtime.activeContextEnabled;
+  return {
+    latchOnPass: !runtime.nativeCompactionEnabled,
+    stopsTheWorld: runsToCompletion,
+    latchOnCompletion: !runsToCompletion,
+  };
 }
 
 const WINDOW_OVERFLOW = /context (?:length|window)|maximum context|too many tokens|token limit|exceeds? the (?:model|context)|prompt is too long|input length/i;
