@@ -1,49 +1,32 @@
 # pi-fold: next steps
 
-Queued work, recorded 2026-08-08. Ordering is not priority.
+Queued work, recorded 2026-08-10. Ordering is not priority. Entries from earlier
+revisions of this file that shipped (the durable pin, the pre-commit last call, the
+exposed thresholds, the user-triggered fold event, tool-usage instrumentation, and
+the surfacing slate) left the list with their builds; git history holds them.
+
+## Overflow recovery
+
+- **The fold-side record at the hard fence.** A session already parked at the
+  provider-window fence aborts the retried pass before the projection budget runs,
+  so an armed rollback there leaves no fold-side recovery record, and the
+  adjudication lens counts the episode as a rollback without recovery. The terminal
+  behavior is right either way; what is missing is the record. The fix is one
+  ordering decision, letting the rejection-armed pass reach the projection budget
+  before the lagging abort, with a gate asserting a fold-side record for every
+  armed rollback.
+- **The giant message.** After a rollback and a full commit, the triggering message
+  alone can still exceed the budget. Candidate shape: ingest the oversized message
+  as evidence and fold it on arrival, so the window carries its brief and the exact
+  bytes stay one peek away.
+- **An attempt cap.** Pi retries a rejected request once. Decide what the lane does
+  when the retry overflows again, rather than inheriting the one-shot by accident.
 
 ## Agent control surface
 
-- **Pin and unpin expanded folds.** An agent that expands a fold has made a decision, and the
-  ladder can currently refold it out from under that decision. Pinning makes the decision durable
-  until the agent releases it.
 - **Simplify the argument surface.** The action arguments were designed when a fold applied at the
   moment of the tool call. Folding is now an automated batch event, so several arguments describe
   a control the agent no longer exercises per call. Reduce them to what still means something.
-- **A hook before the fold event.** Give the agent a last chance to mark spans before a commit
-  fires, so the batch reflects its judgment rather than only the ladder's top-up.
-
-## Thresholds, and who sets them
-
-Expose a small set of window thresholds that either the user or the agent can set:
-
-- **Max context window size.** The upper target: the occupancy that triggers a fold event.
-- **Protected fresh tail.** A marked fold does not apply while its span is still inside this
-  range, so recent work is never folded out from under the turn that is using it.
-- **Stale tail.** Tool results and unpinned folds inside this range are eligible to fold.
-- **Max post-fold window size.** The lower target: how small the window must be after a fold event.
-  This is what decides how much folds automatically when the agent's own marks do not free enough.
-
-## User control
-
-- **User triggered fold events**, with the thresholds above settable at the same time.
-
-## Observability
-
-- **Instrument tool call usage** so errors, low usage, and problematic outcomes are visible.
-  The rep-23 finding that the agent never called the context tool at all was discovered by hand,
-  after the run. That should have been a reported number.
-
-## Surfacing
-
-- **Surface potentially relevant folds to the agent.** This was built and it worked, but the
-  delivery mechanism was an ephemeral tail message, and in the Codex implementation those mutated
-  the context window on every pass despite sitting at the tail. A slate shown once and withdrawn
-  next pass is a show-then-retract: the bytes occupy prefix positions in one request and different
-  bytes occupy them in the next, so the cached prefix dies. It was removed for that reason, not
-  because the idea was wrong. Any future version has to deliver a suggestion without the window
-  changing underneath it, which likely means the marks live outside the window and land at a fold
-  event.
 
 ## Fold interiors
 
@@ -69,3 +52,7 @@ Expose a small set of window thresholds that either the user or the agent can se
   first: the file line count is reported as `split("\n").length`, one more than `wc -l`, and one
   symbol-file probe has a defensible wrong answer. Both change the plan hash, so they force a new
   baseline.
+- **Grade the slate in the field.** The surfacing slate ships fully instrumented: every
+  suggestion is graded acted, used, or ignored, and the harness reads first-hop peek precision
+  per arm. The memex fold-lane accept rate of 2.2 percent is the floor the mechanism exists to
+  beat, and the next campaign carries that comparison.
