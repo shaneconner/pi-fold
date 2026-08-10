@@ -25,7 +25,6 @@ import {
   descendantIds,
   encodedFoldSource,
   foldCandidatesDetail,
-  foldProjectionSpans,
   foldTreeDetail,
   peekFoldSource,
   prepareFold,
@@ -801,15 +800,6 @@ export function registerActiveContext(pi: any, options: {
   const currentCapacity = (ctx: any): ReturnType<typeof capacityAccounting> =>
     servingCapacity(budgetWindowFor(ctx));
 
-  /**
-   * The automatic reach measured against the window the provider receives: the mapper
-   * charges a folded prefix its placeholder, and this is where it learns what those
-   * placeholders cost. Read the state at call time, because the mapper runs on paths
-   * that just installed one.
-   */
-  const foldProjection = (base: ActiveContextSnapshot) =>
-    persistence.state ? foldProjectionSpans(base, persistence.state) : [];
-
   const snapshotForEvent = (ctx: any, messages: unknown[]): ActiveContextSnapshot => mapActiveContext({
     sessionId: ctx.sessionManager.getSessionId(),
     eventMessages: messages,
@@ -822,7 +812,6 @@ export function registerActiveContext(pi: any, options: {
     contextWindow: budgetWindowFor(ctx) ?? undefined,
     netBudget: providerInputBudget !== null,
     thresholds,
-    foldProjection,
   });
 
   const authoritativeSnapshotFor = (ctx: any): ActiveContextSnapshot => {
@@ -843,7 +832,6 @@ export function registerActiveContext(pi: any, options: {
       contextWindow: budgetWindowFor(ctx) ?? undefined,
       netBudget: providerInputBudget !== null,
       thresholds,
-      foldProjection,
     });
   };
 
@@ -1352,7 +1340,6 @@ export function registerActiveContext(pi: any, options: {
         maxTarget: snapshot.thresholds.maxTarget,
         minTarget: snapshot.thresholds.minTarget,
         freshTail: snapshot.thresholds.freshTail,
-        staleTail: snapshot.thresholds.staleTail,
         hardFenceRatio: hardFenceRatio(snapshot),
       } : null,
     });
@@ -2477,18 +2464,18 @@ export function registerActiveContext(pi: any, options: {
     //
     // Wedge absorption keeps the exclusion (below): it grows a mark backward over a
     // gap without any waiver of its own, so the guard there has no second chance.
-    // THE ZONE LAW IS UNCONDITIONAL.
+    // THE CLASS LAW IS UNCONDITIONAL.
     //
     // There was a fence-only snapshot here: at high occupancy it narrowed the fresh
-    // tail to a quarter and extended the stale zone over the middle, so a reduction
+    // tail to a quarter and extended the automatic reach over the middle, so a reduction
     // that had to make a rejected request sendable had mass to reach. That existed
     // because the runtime had exactly one answer to a provider rejection, folding
-    // harder, and folding harder inside three zones runs out of legal material. The
-    // rollback lane is the answer now: an overflow rolls the leaf back past the
+    // harder, and folding harder inside a positional region runs out of legal material.
+    // The rollback lane is the answer now: an overflow rolls the leaf back past the
     // request that failed and the ordinary commit runs on the shorter window. So the
-    // zones hold in EVERY snapshot at every occupancy -- the fresh tail never folds,
-    // the middle is agent judgment only, pins are exempt -- and there is one set of
-    // rules to reason about instead of two.
+    // law holds in EVERY snapshot at every occupancy -- membership decides what folds,
+    // the fresh tail never folds, pins are exempt -- and there is one set of rules to
+    // reason about instead of two.
     // The thermostat. Firing at the trigger line and folding down to the target line is
     // what makes event SPACING structural rather than hoped for.
     const capacity = servingCapacity(snapshot.contextWindow);
@@ -2563,7 +2550,7 @@ export function registerActiveContext(pi: any, options: {
       // rejection, with the backstop firing the whole way. So a commit at or above the
       // backstop that has not reached one inflow step tops up against everything
       // ELIGIBLE instead of billing a rewrite for crumbs. Eligible is the operative
-      // word: this reaches harder inside the stale zone, and never outside it.
+      // word: this reaches harder inside what the class law admits, never outside it.
       const reachedShare = markAccounting(snapshot, state).eligibleFreedBudgetShare;
       const shallow = reachedShare < Math.max(commitDepthFloorShare(snapshot), freeingTarget);
       if (shallow && atOrAboveBackstop(snapshot, waiverRatio)) {
@@ -2612,7 +2599,6 @@ export function registerActiveContext(pi: any, options: {
         pending_marks: 0,
         unmarked_stale_spans: remainder.spans,
         unmarked_stale_tokens: remainder.tokens,
-        stale_boundary: snapshot.staleBoundary,
         window_tokens: snapshot.contextWindow,
       });
       return null;
@@ -4394,7 +4380,6 @@ export function registerActiveContext(pi: any, options: {
           // The declared policy, reported. No action reads it back as a setting.
           thresholds: { ...snapshot.thresholds },
           zones: {
-            staleBoundary: snapshot.staleBoundary,
             freshBoundary: snapshot.freshBoundary,
             budgetTokens: snapshot.budgetTokens,
           },

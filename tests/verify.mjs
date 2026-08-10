@@ -94,7 +94,7 @@ const servingBudget = (window) => window - Math.min(16_384, Math.floor(window * 
 const NO_FRESH_TAIL = Object.freeze({ ...context.DEFAULT_THRESHOLDS, freshTail: 1e-9 });
 
 /** A fresh tail wide enough that the newest turns are unfoldable at fixture scale. */
-const WIDE_FRESH_TAIL = Object.freeze({ ...context.DEFAULT_THRESHOLDS, freshTail: 0.10, staleTail: 0.70 });
+const WIDE_FRESH_TAIL = Object.freeze({ ...context.DEFAULT_THRESHOLDS, freshTail: 0.10 });
 
 const MODEL_BRIEF = async () => ({
   brief: "The exact stale evidence records the completed inspection and its factual result.",
@@ -1924,7 +1924,8 @@ async function gateQuietWarming() {
 
 async function gateFoldCandidatesDetail() {
   // Wide enough that the commit which spends the measurement still leaves foldable
-  // material behind: the property is that ONLY staleness blocks the selection.
+  // material behind: the property is that ONLY the stale measurement blocks the
+  // selection, never a shortage of members.
   const built = makeFixture({ turns: 40, resultChars: 10_000, contextWindow: 100_000 });
   const runtime = makeRuntime(built);
   await startRuntime(runtime);
@@ -1933,16 +1934,14 @@ async function gateFoldCandidatesDetail() {
   // happens on the context pass, so the epoch is driven all the way through it.
   await measureAndCommit(runtime, 80_000, 100_000);
   const state = materialized(runtime);
-  // Mapped the way the runtime maps: the automatic reach is a share of the PROJECTED
-  // window, so a snapshot built without the fold footprints answers a different
-  // question than the one the tool answered, and this gate exists to compare the two
-  // selectors, not the two bases.
+  // Mapped the way the runtime maps. There is one basis now: foldability is membership,
+  // so a snapshot is a function of the branch and the thresholds alone and this gate
+  // compares the two selectors rather than two readings of the window.
   const snapshot = context.mapActiveContext({
     sessionId: built.sessionId,
     eventMessages: runtime.messages,
     contextEntries: runtime.branch,
     contextWindow: 100_000,
-    foldProjection: (base) => context.foldProjectionSpans(base, state),
   });
   const expected = context.foldCandidatesDetail(snapshot, state, 0.80, {
     summarizerAvailable: false,
@@ -5061,15 +5060,15 @@ async function gateEpochBatchingUnderFullLevers() {
   // The accumulated batch lands in ONE commit rather than dribbling out as an inline
   // fold per pass, and then the session goes quiet IN BYTES while the turn stays open.
   //
-  // RE-DERIVED 2026-08-10 (the open-turn commit fix). This section used to assert that
-  // the open excursion is never even MARKED, on the reasoning that the stale zone ends
-  // at the last closed turn and so offers automation nothing there. That reasoning was
-  // the defect: the stale boundary was clamped to the fresh boundary, so a session that
-  // never closes a turn had a stale zone of width zero and starved outright
-  // (luna-20260810 pifold rep 2: 274,173 tokens of unmarked stale spans, zero commits of
-  // any kind, two provider rejections). The stale zone is a byte prefix now, so the older
-  // excursion batches ARE proposable, and the open turn is protected where it was always
-  // meant to be: at the commit, by the guard that has a waiver.
+  // RE-DERIVED 2026-08-10 (the open-turn commit fix, then the class-law ruling). This
+  // section used to assert that the open excursion is never even MARKED, on the reasoning
+  // that the automatic reach ends at the last closed turn and so offers automation
+  // nothing there. That reasoning was the defect: the reach was a byte prefix clamped to
+  // the fresh boundary, so a session that never closes a turn had a zero-width reach and
+  // starved outright (luna-20260810 pifold rep 2: 274,173 tokens of unmarked stale spans,
+  // zero commits of any kind, two provider rejections). Foldability is membership now, so
+  // the older excursion batches ARE proposable, and the open turn is protected where it
+  // was always meant to be: at the commit, by the guard that has a waiver.
   //
   // What the gate measures instead is the property that actually matters economically,
   // and it is stronger than the old one: marks are free, folds are not. Automation marks
@@ -5375,11 +5374,13 @@ async function gateProjectionBudgetFence() {
   });
   assert(context.currentTurnBoundary(guardedSnapshot) < guardedSnapshot.messages.length - 28,
     "A turn closed inside the excursion, so the starving case is not being measured");
-  assert(guardedSnapshot.staleBoundary > guardedSnapshot.freshBoundary,
-    `The automatic reach stopped at the last closed turn: stale ${guardedSnapshot.staleBoundary}, ` +
-      `fresh ${guardedSnapshot.freshBoundary}`);
-  assert(guardedSnapshot.staleBoundary < guardedSnapshot.messages.length,
-    "The stale zone swallowed the whole window, so its byte width bounds nothing");
+  const guardedMembers = context.automaticToolBatches(
+    guardedSnapshot, context.emptyActiveContextState(guardedOnly.built.sessionId));
+  assert(guardedMembers.length > 0,
+    "The automatic law found no member inside the open excursion, so the reach is clamped again");
+  assert(!guardedMembers.some((batch) =>
+    batch.indices.includes(guardedSnapshot.messages.length - 1)),
+  "The newest result is a member, so the fresh tail bounds nothing");
   assert(context.currentTurnRefKeys(guardedSnapshot).size >= 12,
     "The guard does not hold the excursion, so the starving case is not being measured");
   // The new truth, positively: the fold path found legal material inside the open
@@ -5452,7 +5453,7 @@ async function gateProjectionBudgetFence() {
     transmitted: reduction.transmitted === true,
     aborts: runtime.aborts,
     fenceAppliedMarks: epoch.appliedMarks,
-    starvedStaleBoundary: guardedSnapshot.staleBoundary,
+    starvedMemberBatches: guardedMembers.length,
     starvedFreshBoundary: guardedSnapshot.freshBoundary,
     starvedFolds: starvedFolds,
     starvedFoldsAfterRecovery: materialized(guardedOnly).folds.length,
@@ -5660,16 +5661,15 @@ async function gateFenceMarginAndDepth() {
   // STARVATION IS MASS THE LADDER MAY NOT TAKE, NOT MASS IT HAS NOT REACHED.
   //
   // This climb used to starve on inflow that was merely unfolded, which worked only
-  // because the stale walk charged the folded head its raw bytes and froze the reach.
-  // Measured on the corrected basis 2026-08-10: the same fixture folds each stage as it
-  // arrives and sawtooths between 84k and 123k chars forever, which measures the ladder
-  // keeping up rather than the fence. Untakeable now means declared untakeable, by two
-  // standing refusals that hold at any occupancy: the deployment named this producer
+  // because a byte walk charged the folded head its raw bytes and froze the reach. That
+  // walk is deleted: foldability is membership, so the same fixture folds each stage as
+  // it arrives and sawtooths between 84k and 123k chars forever, which measures the
+  // ladder keeping up rather than the fence. Untakeable now means declared untakeable, by
+  // two standing refusals that hold at any occupancy: the deployment named this producer
   // unfoldable, so no tool batch forms, and the agent pinned the call inside each batch,
   // so no chapter span may contain it. The pin is the assistant message, not the result,
-  // which costs a couple of hundred bytes against the 25% pinned-share ceiling: a pin
-  // ceiling below the stale zone's width is deliberate, and a fixture that needed to pin
-  // its way past it would be measuring the ceiling instead of the fence.
+  // which costs a couple of hundred bytes against the 25% pinned-share ceiling, so the
+  // fixture measures the fence rather than the ceiling.
   const runtime = makeRuntime(
     makeFixture({ turns: 8, resultChars: 10_000, contextWindow: window, thresholds: WIDE_FRESH_TAIL }),
     {
@@ -5688,12 +5688,13 @@ async function gateFenceMarginAndDepth() {
   // Each measurement CLOSES its turn. The climb's subject is the estimator and the
   // margin, not the guard.
   //
-  // RESTATED 2026-08-10 (the open-turn commit fix). The reason used to be that an inflow
-  // which never closes leaves every byte inside the open turn "where the zone law admits
-  // nothing at any occupancy". That was the regression talking: the stale boundary was
-  // clamped to the fresh boundary, so an unclosed session had a zero-width stale zone and
-  // starved. Automation reaches an open excursion now, and the guard adjudicates it at
-  // the commit. Closing every turn still matters here for a simpler reason: it keeps the
+  // RESTATED 2026-08-10 (the open-turn commit fix, then the class-law ruling). The reason
+  // used to be that an inflow which never closes leaves every byte inside the open turn
+  // "where the zone law admits nothing at any occupancy". That was the regression
+  // talking: the automatic reach was a byte prefix clamped to the fresh boundary, so an
+  // unclosed session had zero width and starved. Automation reaches an open excursion
+  // now, and the guard adjudicates it at the commit. Closing every turn still matters
+  // here for a simpler reason: it keeps the
   // guard out of the picture entirely, so what the climb measures is the estimator and
   // the margin rather than the guard-and-waiver case gate 56 owns.
   const climb = [];
@@ -9187,7 +9188,7 @@ async function gateThresholdConstruction() {
 
   // Every proportion is a proportion, and the count is a count.
   const named = [];
-  for (const field of ["maxTarget", "minTarget", "freshTail", "staleTail"]) {
+  for (const field of ["maxTarget", "minTarget", "freshTail"]) {
     named.push(refuses(withField({ [field]: 0 }), field));
     named.push(refuses(withField({ [field]: 1 }), field));
     named.push(refuses(withField({ [field]: -0.1 }), field));
@@ -9203,18 +9204,16 @@ async function gateThresholdConstruction() {
     // L < M: the thermostat needs a gap to fold down into.
     refuses(withField({ minTarget: 0.80, maxTarget: 0.80 }), "minTarget<maxTarget"),
     // F < M: a fresh tail wider than the trigger triggers on protection alone.
-    refuses(withField({ maxTarget: 0.40, minTarget: 0.30, freshTail: 0.40, staleTail: 0.05 }),
+    refuses(withField({ maxTarget: 0.40, minTarget: 0.30, freshTail: 0.40 }),
       "freshTail<maxTarget"),
-    // S <= M - F: the zones may not overlap at the trigger.
-    refuses(withField({ staleTail: 0.79 }), "staleTail<=maxTarget-freshTail"),
     // G >= F: one refill of the protected tail must not re-arm the trigger by itself.
-    refuses(withField({ maxTarget: 0.60, minTarget: 0.58, freshTail: 0.10, staleTail: 0.30 }),
+    refuses(withField({ maxTarget: 0.60, minTarget: 0.58, freshTail: 0.10 }),
       "gap>=freshTail"),
     // P + F < M: the pin ceiling plus the structurally fresh tail is the floor a commit
     // can never get under, and a trigger at or below it announces nothing reclaimable.
-    // Ordered so only the pin sum fails: 0.20 <= 0.30 - 0.06 and 0.20 >= 0.06 both hold,
-    // while 0.25 + 0.06 does not stay under 0.30.
-    refuses(withField({ maxTarget: 0.30, minTarget: 0.10, freshTail: 0.06, staleTail: 0.20 }),
+    // Ordered so only the pin sum fails: 0.20 >= 0.06 holds, while 0.25 + 0.06 does not
+    // stay under 0.30.
+    refuses(withField({ maxTarget: 0.30, minTarget: 0.10, freshTail: 0.06 }),
       "pinnedPlusFreshTail<maxTarget"),
   ];
   assert.equal(new Set(orderings).size, orderings.length,
@@ -9235,11 +9234,26 @@ async function gateThresholdConstruction() {
   }
   context.assertThresholdsServable(context.DEFAULT_THRESHOLDS, 25_000);
 
+  // THE POSITIONAL REACH IS NOT A SETTING ANY MORE. `staleTail` declared how far back
+  // automation could reach as a byte prefix, and Shane's 2026-08-10 ruling deleted the
+  // idea: foldability is a class a span belongs to, not a position it occupies. A
+  // deployment that still passes the old field is refused by name rather than having it
+  // quietly ignored, which is the only way a governing number may leave a public surface.
+  assert.deepEqual(Object.keys(context.DEFAULT_THRESHOLDS).sort(),
+    ["consolidateAfter", "freshTail", "maxTarget", "minTarget"],
+    "The thermostat is not the four numbers it declares");
+  refuses({ ...context.DEFAULT_THRESHOLDS, staleTail: 0.78 }, "shape");
+
   // And the same refusal reaches a real registration, by name, never clamped.
   assert.throws(
     () => makeRuntime(makeFixture({ turns: 3, tools: false, contextWindow: 100_000 }),
-      { thresholds: withField({ staleTail: 0.79 }) }),
-    /staleTail must not overlap the fresh tail/,
+      { thresholds: { ...context.DEFAULT_THRESHOLDS, staleTail: 0.78 } }),
+    /thresholds has no staleTail field/,
+  );
+  assert.throws(
+    () => makeRuntime(makeFixture({ turns: 3, tools: false, contextWindow: 100_000 }),
+      { thresholds: withField({ maxTarget: 0.40, minTarget: 0.30, freshTail: 0.40 }) }),
+    /thresholds\.freshTail must sit below thresholds\.maxTarget/,
   );
   const clamped = makeRuntime(makeFixture({ turns: 3, tools: false, contextWindow: 100_000 }));
   await startRuntime(clamped);
@@ -9256,56 +9270,93 @@ async function gateThresholdConstruction() {
 }
 
 /**
- * THE THREE ZONES.
+ * THE CLASS LAW.
  *
- * fresh tail: nothing folds, marked or not.
- * middle:     agent judgment only. No automatic path proposes anything there.
- * stale tail: the one span law operates, and folds every foldable it finds.
- * Pins are exempt in all three.
+ * Automatic foldability is MEMBERSHIP, not position (Shane 2026-08-10). A span is
+ * automatically foldable when it is a completed tool batch the deployment did not
+ * blacklist, or older material a chapter or a consolidation can compose over. Four
+ * things and only four things hold it back, and this gate names each of them:
+ *
+ *   pinned          the agent protected it, anywhere in the window;
+ *   fresh tail      the guaranteed-raw newest bytes, marked or not;
+ *   blacklisted     the deployment named the tool, so no batch forms over it;
+ *   guarded         the open turn's own evidence, adjudicated once at the commit,
+ *                   where it has a high-occupancy waiver.
+ *
+ * There is no fifth thing, and in particular there is no MIDDLE. The positional stale
+ * prefix that used to be the automatic law's whole reach is deleted: it starved rep 2 by
+ * collapsing to zero width and rep 3 by charging a folded head its raw bytes, and both
+ * times the set-based protections above went on working exactly as written. What sits
+ * between the fresh tail and the oldest material is whatever the ladder has not needed
+ * yet plus whatever the agent pinned.
  */
 async function gateThreeZones() {
-  // A budget whose zones cut the fixture into three visible regions: freshTail 0.05 and
-  // staleTail 0.35 of a 90,000-token budget is 18,000 protected bytes at the new end,
-  // 126,000 automation-eligible bytes at the old end, and a real middle between them.
   const thresholds = Object.freeze({
-    maxTarget: 0.80, minTarget: 0.35, freshTail: 0.05, staleTail: 0.35, consolidateAfter: 10,
+    maxTarget: 0.80, minTarget: 0.35, freshTail: 0.05, consolidateAfter: 10,
   });
   const built = makeFixture({
     turns: 30, resultChars: 8_000, contextWindow: 100_000, thresholds,
   });
   const snapshot = built.snapshot;
   const state = context.emptyActiveContextState(built.sessionId);
-  assert(snapshot.staleBoundary > 0, "The fixture has no stale zone");
-  assert(snapshot.staleBoundary < snapshot.freshBoundary,
-    `The fixture has no middle: stale ${snapshot.staleBoundary}, fresh ${snapshot.freshBoundary}`);
   assert(snapshot.freshBoundary < snapshot.messages.length, "The fixture has no fresh tail");
-  const zoneOf = (index) => index < snapshot.staleBoundary
-    ? "stale"
-    : index < snapshot.freshBoundary ? "middle" : "fresh";
+  // THE DELETED VARIABLE IS GONE FROM THE DATA, not merely unread.
+  assert(!("staleBoundary" in snapshot), "The snapshot still carries a positional reach");
+  assert(!("staleTail" in snapshot.thresholds), "The thermostat still carries a positional reach");
 
-  // STALE: the law proposes, repeatedly, and everything it proposes is stale.
+  // (a) THE LAW PROPOSES, AND NOTHING IT PROPOSES IS PINNED OR FRESH.
   const claimed = new Set();
   const proposed = [];
-  for (let round = 0; round < 24; round += 1) {
+  const reached = [];
+  for (let round = 0; round < 40; round += 1) {
     const candidate = context.selectAutomaticSpan(snapshot, state, claimed);
     if (!candidate) break;
     for (const ref of candidate.sourceRefs) {
       const item = snapshot.mapped.find((entry) => entry.ref &&
         json.objectRefKey(entry.ref) === json.objectRefKey(ref));
       assert(item, "An automatic span named evidence the snapshot does not hold");
-      assert.equal(zoneOf(item.index), "stale",
-        `Automation proposed index ${item.index} from the ${zoneOf(item.index)} zone`);
+      const tail = candidate.kind === "tool-result"
+        ? snapshot.toolProtectedIndices
+        : snapshot.protectedIndices;
+      assert(!tail.has(item.index),
+        `Automation proposed index ${item.index} out of the guaranteed-raw fresh tail`);
       claimed.add(json.objectRefKey(ref));
+      reached.push(item.index);
     }
     proposed.push(candidate.kind);
   }
-  assert(proposed.length >= 2, "The stale zone offered automation almost nothing");
+  assert(proposed.length >= 2, "The class law offered automation almost nothing");
 
-  // MIDDLE and FRESH: once the stale zone is claimed, automation has nothing left. It
-  // does not walk forward into the middle, however full the window is.
+  // (b) THE MIDDLE IS NOT A WALL. Under the positional law this fixture had a real middle
+  // and the ladder stopped dead at its edge; the class law reaches every member the fresh
+  // tail does not cover, so exhaustion means EXHAUSTED rather than blocked.
+  const foldableIndices = snapshot.mapped
+    .filter((item) => item.ref && item.message?.role === "toolResult" &&
+      !snapshot.toolProtectedIndices.has(item.index))
+    .map((item) => item.index);
+  assert(foldableIndices.length > 0, "The fixture holds no foldable tool results at all");
+  const unreached = foldableIndices.filter((index) => !reached.includes(index));
+  assert.deepEqual(unreached, [],
+    `The ladder left ${unreached.length} unpinned member results untouched: ${unreached.join(", ")}`);
+  assert(Math.max(...reached) > snapshot.freshBoundary - 1 || snapshot.freshBoundary === 0 ||
+    Math.max(...reached) >= Math.max(...foldableIndices),
+    "The deepest proposal stopped short of the newest foldable member");
   assert.equal(context.selectAutomaticSpan(snapshot, state, claimed), null,
-    "Automation walked out of the stale zone once it was exhausted");
+    "Automation kept proposing after every member was claimed");
   assert.deepEqual(context.selectAutomaticToolBatch(snapshot, state, claimed), []);
+
+  // (c) BLACKLISTED IS NOT A MEMBER. The same window, with the fixture's only tool named
+  // by the deployment: no batch forms over it, at any position.
+  const blacklisted = context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: built.messages,
+    contextEntries: built.entries,
+    contextWindow: 100_000,
+    thresholds,
+    blacklistAutoFoldTools: new Set(["read"]),
+  });
+  assert.deepEqual(context.selectAutomaticToolBatch(blacklisted, state), [],
+    "A blacklisted tool's completed batch was still proposed as a tool fold");
 
   // FRESH TAIL: a mark inside it does not commit, and the SAME span outside it does.
   const freshEntry = built.turnEntries.at(-1)[2];
@@ -9327,8 +9378,10 @@ async function gateThreeZones() {
   };
   const freshMark = markFor(freshEntry);
   const staleMark = markFor(staleEntry);
-  assert.equal(zoneOf(freshMark.index), "fresh");
-  assert.equal(zoneOf(staleMark.index), "stale");
+  assert(snapshot.toolProtectedIndices.has(freshMark.index),
+    "The newest entry is not inside the fresh tail, so the tail is not being measured");
+  assert(!snapshot.toolProtectedIndices.has(staleMark.index),
+    "The older entry is inside the fresh tail, so the contrast is not being measured");
   // The fresh tail refuses by the same label protection uses, which is the point: from
   // the commit's side a fresh span and a pinned span are both simply unavailable.
   assert.notEqual(context.markEligibility(snapshot, state, freshMark), "eligible",
@@ -9346,28 +9399,41 @@ async function gateThreeZones() {
   assert.equal(context.markEligibility(narrowTail, state, freshMark), "eligible",
     "The same mark stayed unfoldable once it was outside the tail");
 
-  // PINS ARE EXEMPT EVERYWHERE. Protect the stale span and the law steps over it.
+  // PINS ARE EXEMPT EVERYWHERE. Protect the older span and the law steps over it, at
+  // whatever position it holds. This is the protection the positional prefix was
+  // supposedly reinforcing, and it is the one that never failed.
   const pinnedRef = snapshot.mapped.find((entry) => entry.ref?.entryId === staleEntry).ref;
   const pinned = { ...state, protected: [structuredClone(pinnedRef)] };
   assert.equal(context.markEligibility(snapshot, pinned, staleMark), "protected",
-    "A pinned stale span was still eligible");
+    "A pinned span was still eligible");
   const pinnedKey = json.objectRefKey(pinnedRef);
   const pinnedClaims = new Set();
-  for (let round = 0; round < 24; round += 1) {
+  for (let round = 0; round < 40; round += 1) {
     const candidate = context.selectAutomaticSpan(snapshot, pinned, pinnedClaims);
     if (!candidate) break;
     for (const ref of candidate.sourceRefs) {
       assert.notEqual(json.objectRefKey(ref), pinnedKey,
-        "An automatic span in the stale zone swallowed a pinned entry");
+        "An automatic span swallowed a pinned entry");
       pinnedClaims.add(json.objectRefKey(ref));
     }
   }
+
+  // GUARDED IS THE FOURTH, and it is adjudicated at the COMMIT rather than here: the open
+  // turn's evidence stays proposable, because a session that never closes a turn would
+  // otherwise have nothing to offer, and the commit refuses it unless the high-occupancy
+  // waiver releases it. Gate 52 pins the guard and gate 106 pins the waiver end to end;
+  // this fixture closes every turn, so it has no open turn to speak for.
+  assert.equal(context.currentTurnRefKeys(snapshot).size, 0,
+    "The fixture left a turn open, so the guard belongs in this gate after all");
+
   return {
-    staleBoundary: snapshot.staleBoundary,
     freshBoundary: snapshot.freshBoundary,
     messages: snapshot.messages.length,
-    staleSpansProposed: proposed.length,
-    middleProposals: 0,
+    spansProposed: proposed.length,
+    memberResults: foldableIndices.length,
+    memberResultsReached: foldableIndices.length,
+    deepestProposedIndex: Math.max(...reached),
+    blacklistedProposals: 0,
     freshMarkEligibility: context.markEligibility(snapshot, state, freshMark),
     staleMarkEligibility: "eligible",
     pinnedMarkEligibility: "protected",
@@ -9375,16 +9441,16 @@ async function gateThreeZones() {
 }
 
 /**
- * THE ZONE LAW IS UNCONDITIONAL, AND THE LATCH QUESTION DISSOLVED.
+ * THE CLASS LAW IS UNCONDITIONAL, AND THE LATCH QUESTION DISSOLVED.
  *
- * Three behaviors, each pinned by name: the zones hold at every occupancy and the
- * machinery that used to bend them at the fence is gone; the reopen latch still holds a
- * parked window; and a window at the fence with nothing the zone law admits is aborted
- * and then recovered by a rollback, not by a deeper fold.
+ * Three behaviors, each pinned by name: membership decides what folds at every
+ * occupancy and the machinery that used to bend the rules at the fence is gone; the
+ * reopen latch still holds a parked window; and a window at the fence with nothing the
+ * law admits is aborted and then recovered by a rollback, not by a deeper fold.
  */
 async function gateFenceOpensTheMiddle() {
   const thresholds = Object.freeze({
-    maxTarget: 0.80, minTarget: 0.35, freshTail: 0.05, staleTail: 0.35, consolidateAfter: 10,
+    maxTarget: 0.80, minTarget: 0.35, freshTail: 0.05, consolidateAfter: 10,
   });
   const built = makeFixture({
     turns: 30, resultChars: 8_000, contextWindow: 100_000, thresholds,
@@ -9392,27 +9458,28 @@ async function gateFenceOpensTheMiddle() {
   const snapshot = built.snapshot;
   const state = context.emptyActiveContextState(built.sessionId);
 
-  // (a) THE ZONE LAW IS UNCONDITIONAL, AND THE MACHINERY THAT BENT IT IS GONE.
+  // (a) THE LAW IS UNCONDITIONAL, AND THE MACHINERY THAT BENT IT IS GONE.
   //
   // There was a fence-only snapshot here: at high occupancy it narrowed the fresh tail
-  // to a quarter and extended the stale zone across the middle, so a reduction that had
-  // to make a rejected request sendable had mass to reach. It existed because folding
+  // to a quarter and extended the automatic reach across the middle, so a reduction that
+  // had to make a rejected request sendable had mass to reach. It existed because folding
   // harder was the runtime's only answer to a provider rejection. The rollback lane is
-  // the answer now, so the zones hold at every occupancy and there is one set of rules.
+  // the answer now, so the rules hold at every occupancy and there is one set of them.
   assert.equal(typeof context.deepenedFenceSnapshot, "undefined",
     "The fence-only snapshot survived the rollback build");
   const source = await readFile(join(projectRoot, "extensions", "lib", "transcript.ts"), "utf8");
   assert(!/deepenedFenceSnapshot/.test(source), "deepenedFenceSnapshot is still reachable in the transcript module");
+  assert(!/staleBoundary|staleTail/.test(source),
+    "The positional reach survived in the transcript module");
   const runtimeSource = await readFile(join(projectRoot, "extensions", "active-context.ts"), "utf8");
   assert(!/deepenedFreshnessSnapshot|DEEPENED_FRESH_TAIL_SHARE/.test(runtimeSource),
     "The fence-only reach rules survived in the runtime");
   assert(!/fenceLevel \? new Set/.test(runtimeSource),
     "A fence-only zone waiver survived in the commit epoch");
 
-  // The zones themselves, asserted directly: automation proposes inside the stale zone
-  // and nowhere else, whatever the pressure. Every span the selector can reach lives
-  // below the stale boundary, so the middle and the fresh tail are unreachable BY
-  // CONSTRUCTION rather than by a pressure test that happened not to reach them.
+  // The law itself, asserted directly: automation proposes members and nothing else,
+  // whatever the pressure. Nothing the fresh tail covers is reachable BY CONSTRUCTION
+  // rather than by a pressure test that happened not to reach it.
   const claims = new Set();
   const proposed = [];
   for (let round = 0; round < 40; round += 1) {
@@ -9421,14 +9488,12 @@ async function gateFenceOpensTheMiddle() {
     for (const ref of candidate.sourceRefs) claims.add(json.objectRefKey(ref));
     proposed.push(candidate);
   }
-  assert(proposed.length >= 1, "The stale zone proposed nothing at all");
+  assert(proposed.length >= 1, "The class law proposed nothing at all");
   const reachedIndices = proposed.flatMap((candidate) => candidate.sourceRefs
     .map((ref) => snapshot.mapped.findIndex((item) => item.ref && json.objectRefKey(item.ref) === json.objectRefKey(ref)))
     .filter((index) => index >= 0));
-  assert(reachedIndices.every((index) => index < snapshot.staleBoundary),
-    `Automation proposed at index ${Math.max(...reachedIndices)} against a stale boundary of ${snapshot.staleBoundary}`);
-  assert(snapshot.staleBoundary < snapshot.freshBoundary,
-    "The middle vanished; the three zones are two");
+  assert(reachedIndices.every((index) => !snapshot.protectedIndices.has(index)),
+    `Automation proposed protected index ${reachedIndices.find((index) => snapshot.protectedIndices.has(index))}`);
 
   // (b) THE LATCH QUESTION DISSOLVES.
   //
@@ -9473,11 +9538,11 @@ async function gateFenceOpensTheMiddle() {
   // is shaped, including with a blacklisted producer whose every call is pinned.
   //
   // The protective purpose is untouched and is what this pins instead: the fence never
-  // opens the MIDDLE or the FRESH TAIL. Every fold a fence-pressure pass lands covers
-  // indices strictly below the stale boundary as it stood when that pass ran, takes
-  // nothing the agent pinned and nothing the deployment blacklisted, and stays out of
-  // the tail its own kind protects. The ladder takes what the zone law offers, and the
-  // request that still does not fit is aborted rather than transmitted.
+  // opens the FRESH TAIL and never takes what the agent pinned or the deployment
+  // blacklisted. Every fold a fence-pressure pass lands is a member span, audited fold
+  // by fold against the state as it stood when that pass ran. The ladder takes what the
+  // class law offers, and the request that still does not fit is aborted rather than
+  // transmitted.
   const zoneState = () => {
     const value = materialized(runtime);
     return {
@@ -9489,7 +9554,6 @@ async function gateFenceOpensTheMiddle() {
         contextWindow: 30_600,
         netBudget: true,
         thresholds,
-        foldProjection: (base) => context.foldProjectionSpans(base, value),
       }),
     };
   };
@@ -9550,7 +9614,7 @@ async function gateFenceOpensTheMiddle() {
       `The fence-${step} pin did not hold: ${JSON.stringify(pinned.details).slice(0, 200)}`);
     untakeable.add(callIndex);
     landedAtFence.push(...foldsLandedBetween(beforePin, zoneState())
-      .map((fold) => ({ ...fold, boundary: beforePin.snapshot.staleBoundary, pre: beforePin })));
+      .map((fold) => ({ ...fold, pre: beforePin })));
     const beforeResult = zoneState();
     runtime.appendMessage({
       role: "toolResult",
@@ -9570,19 +9634,17 @@ async function gateFenceOpensTheMiddle() {
     await project(runtime);
     await settle();
     landedAtFence.push(...foldsLandedBetween(beforeResult, zoneState())
-      .map((fold) => ({ ...fold, boundary: beforeResult.snapshot.staleBoundary, pre: beforeResult })));
+      .map((fold) => ({ ...fold, pre: beforeResult })));
   }
   const beforeFenceMeasurement = zoneState();
   await measure(runtime, 31_500, 34_000);
   await project(runtime);
   await settle();
   landedAtFence.push(...foldsLandedBetween(beforeFenceMeasurement, zoneState())
-    .map((fold) => ({ ...fold, boundary: beforeFenceMeasurement.snapshot.staleBoundary, pre: beforeFenceMeasurement })));
+    .map((fold) => ({ ...fold, pre: beforeFenceMeasurement })));
   for (const fold of landedAtFence) {
     assert(fold.indices.length > 0 && fold.indices.every((index) => index >= 0),
       `Fold ${fold.id} landed on evidence outside the window`);
-    assert(Math.max(...fold.indices) < fold.boundary,
-      `Fold ${fold.id} reached index ${Math.max(...fold.indices)} past a stale boundary of ${fold.boundary}`);
     assert(fold.indices.every((index) => !untakeable.has(index)),
       `Fold ${fold.id} took pinned or blacklisted evidence at the fence`);
     // Each kind against the tail its own renderer protects: a tool-result fold answers
@@ -9606,12 +9668,11 @@ async function gateFenceOpensTheMiddle() {
   // stages: the last call announced 274,173 tokens of unmarked stale spans and the pass
   // that answered it left no record that a commit had even been attempted. It names
   // itself now, and it carries the remainder beside the emptiness so the two facts sit
-  // on one record. The remainder here is legitimately nonzero and it is scoped to the
-  // stale zone, which is the same region the selectors read: what it announces is what a
-  // commit could take, so mass it names and marks it cannot make are the same
-  // contradiction rather than two different questions. This record is a report, not an
-  // alarm; what makes it useful is that a starved window and a merely exhausted one are
-  // told apart by the stale boundary printed alongside.
+  // on one record. The remainder counts MEMBER spans, which is the same enumeration the
+  // selectors propose out of, so mass it names and marks it cannot make are the same
+  // contradiction rather than two different questions. A starved window and a merely
+  // exhausted one are told apart by the remainder alone: nonzero means the members are
+  // held by a pin, a blacklist or the guard, and zero means there is nothing to hold.
   const nothingProposable = contextEvents(runtime, beforeFence).filter((record) =>
     record.kind === "context.commit" && record.reason === "nothing-proposable");
   assert(nothingProposable.length >= 1,
@@ -9620,10 +9681,10 @@ async function gateFenceOpensTheMiddle() {
     assert.equal(record.deferred, true);
     assert.equal(record.applied_marks, 0);
     assert.equal(record.pending_marks, 0);
-    assert(record.unmarked_stale_tokens > 0,
+    assert.equal(typeof record.unmarked_stale_spans, "number",
       "The deferral reported no remainder, so it says nothing the silence did not");
-    assert(record.stale_boundary > 0,
-      "The deferral reported no stale boundary, so a starved zone reads like an exhausted one");
+    assert.equal(record.stale_boundary, undefined,
+      "The deferral still carries a positional boundary");
   }
 
   // (c) AND THE ROLLBACK IS THE RECOVERY. The one thing left that can shorten this
@@ -9640,7 +9701,6 @@ async function gateFenceOpensTheMiddle() {
     "The rejected entry is still on the live branch");
 
   return {
-    staleBoundary: snapshot.staleBoundary,
     freshBoundary: snapshot.freshBoundary,
     proposedSpans: proposed.length,
     deepestProposedIndex: Math.max(...reachedIndices),
@@ -9649,7 +9709,6 @@ async function gateFenceOpensTheMiddle() {
     drainRounds: drained,
     fenceFolds: landedAtFence.length,
     fenceFoldDeepestIndex: landedAtFence.length ? Math.max(...landedAtFence.flatMap((fold) => fold.indices)) : -1,
-    fenceBoundaries: [...new Set(landedAtFence.map((fold) => fold.boundary))],
     untakeableIndices: untakeable.size,
     nothingProposableRecords: nothingProposable.length,
     fenceAborts: runtime.aborts,
@@ -9668,15 +9727,20 @@ async function gateFenceOpensTheMiddle() {
  * estimated tokens and the provider rejected it twice.
  *
  * Two independent defects each emptied the automatic selector on that shape, and either
- * alone was enough to starve it. The stale boundary was clamped to the fresh boundary,
- * which is 0 when no turn has closed, so every automatic rung read a zero-width stale
- * zone. And the commit pass handed `currentTurnRefKeys` to the top-up as an exclusion,
+ * alone was enough to starve it. The automatic reach was a position, and it was pinned
+ * to the last CLOSED turn, which on this shape does not exist: every rung read an empty
+ * region. And the commit pass handed `currentTurnRefKeys` to the top-up as an exclusion,
  * which on this shape is the entire window, so nothing was ever proposed and the guard
  * waiver written for exactly this starvation never had a guarded mark to count.
  *
- * Counterfactual on the sealed state at ordinal 45: either fix alone yields 0 marks,
- * both together yield 13 marks, 11 applied under a guard waiver of 11, about 167,321
- * tokens freed.
+ * The reach is not a position any more, so the first defect has no expression left to
+ * come back in: what the selectors read is membership, and a completed tool batch is a
+ * member whether or not its turn ever closed. What this gate holds unchanged is the
+ * second half, which is the half that still has a moving part: the open turn is excluded
+ * at the COMMIT, where the waiver can release it, and never at the proposal, where it
+ * cannot. Counterfactual on the sealed state at ordinal 45: either fix alone yields 0
+ * marks, both together yield 13 marks, 11 applied under a guard waiver of 11, about
+ * 167,321 tokens freed.
  */
 async function gateOpenTurnCommits() {
   // THE FIXTURE IS THE SHAPE. One user message, then nothing but tool-calling assistants
@@ -9752,14 +9816,17 @@ async function gateOpenTurnCommits() {
   assert(snapshot.policy.minToolChars <= resultChars,
     "The fixture's results are under the minimum a tool batch may fold");
 
-  // (b) THE DIRECT REGRESSION ASSERTION. The stale zone is a byte prefix, so it has width
-  // even though no turn has ever closed. Clamping it to the fresh boundary made it zero.
+  // (b) THE DIRECT REGRESSION ASSERTION. Foldability is membership, so a session that
+  // never closed a turn still holds members. The old law made the automatic reach a byte
+  // prefix clamped to the fresh boundary, which is 0 here, so every rung saw nothing.
   assert.equal(snapshot.freshBoundary, 0,
     "The fresh boundary is not zero, so the clamp is not being measured");
-  assert(snapshot.staleBoundary > 0,
-    "The stale zone is empty in a session that never closed a turn: the clamp is back");
-  assert(snapshot.staleBoundary < snapshot.messages.length,
-    "The stale zone swallowed the newest batch, so its byte width bounds nothing");
+  const members = context.automaticToolBatches(snapshot, context.emptyActiveContextState(sessionId));
+  assert(members.length > 0,
+    "No completed batch is a member in a session that never closed a turn: the clamp is back");
+  const newestIndex = snapshot.messages.length - 1;
+  assert(!members.some((batch) => batch.indices.includes(newestIndex)),
+    "The newest batch is a member, so the fresh tail bounds nothing");
 
   // (c) DRIVE PAST THE BAND TOP WITH ZERO AGENT MARKS. Every measurement stops on
   // toolUse, so the turn stays open through the whole climb.
@@ -9855,7 +9922,7 @@ async function gateOpenTurnCommits() {
     completeTurns: snapshot.completeTurns.length,
     currentTurnBoundary: context.currentTurnBoundary(snapshot),
     freshBoundary: snapshot.freshBoundary,
-    staleBoundary: snapshot.staleBoundary,
+    memberBatches: members.length,
     messages: snapshot.messages.length,
     lastCallOccupancy: lastCall.occupancy,
     lastCallUnmarkedTokens: lastCall.unmarked_stale_tokens,
@@ -10096,13 +10163,14 @@ async function gateEveryToolBatchFoldsUnmarked() {
   assert.deepEqual(context.selectAutomaticToolBatch(blacklisted, state), [],
     "A blacklisted tool's completed batch was still selected unmarked");
 
-  // The zones did not move. Foldability grants eligibility, never reach: every ref the
-  // rung took sits inside the stale zone, and the freshest batch is untouched.
-  const staleIndices = candidate.sourceRefs.map((ref) =>
+  // The protections did not move. Foldability grants membership, never a waiver: every
+  // ref the rung took sits outside the guaranteed-raw fresh tail, and it took the
+  // stalest batch rather than the freshest.
+  const takenIndices = candidate.sourceRefs.map((ref) =>
     built.snapshot.mapped.findIndex((item) => item.ref?.entryId === ref.entryId));
-  assert(staleIndices.length && staleIndices.every((index) =>
-    index >= 0 && index < built.snapshot.staleBoundary),
-  "The ladder reached outside the stale zone once the tool became foldable");
+  assert(takenIndices.length && takenIndices.every((index) =>
+    index >= 0 && !built.snapshot.toolProtectedIndices.has(index)),
+  "The ladder reached into the fresh tail once the tool became foldable");
   assert(!candidate.sourceRefs.some((ref) => ref.entryId === bashResultIds.at(-1)),
     "The rung took the freshest batch");
 
@@ -10134,7 +10202,7 @@ async function gateEveryToolBatchFoldsUnmarked() {
     defaultBlacklist: [...context.AUTO_FOLD_BLACKLIST_DEFAULT],
     unlistedToolSelected: candidate.sourceRefs.length,
     blacklistedToolSelected: 0,
-    selectionConfinedToStaleZone: true,
+    selectionOutsideTheFreshTail: true,
     ladderToolFolds: toolFolds.length,
     contextToolMutatingActionsFoldable: false,
   };
@@ -10406,23 +10474,29 @@ async function gateBriefUpgradesRideTheBoundary() {
 }
 
 /**
- * THE STALE ALLOWANCE IS SPENT ON PROJECTED BYTES, NOT RAW ONES.
+ * A FOLDED HEAD NEVER LIMITS REACH.
  *
- * The rep-3 shape at fixture scale: a head of tool results the ladder has ALREADY
- * folded, whose raw bytes alone exceed the whole stale allowance. On the raw basis the
- * walk charges that head its original mass, the reach halts inside the placeholders,
- * and every rung starves on a window that is mostly foldable. Measured on the sealed
- * rep-3 state 2026-08-10: 17 folded head results cost 1,002,801 raw bytes against a
- * 1,072,081-byte allowance, the reach froze at index 36 of 133, three passes had
- * nothing proposable, and the run died against the fence at 0.972 occupancy.
+ * The rep-3 shape at fixture scale: a head of tool results the ladder has ALREADY folded,
+ * whose raw bytes alone exceed the whole window this fixture is measured against. Under
+ * the positional law that head was charged its original mass against a byte allowance, so
+ * the reach halted inside its own placeholders and every rung starved on a window that was
+ * mostly foldable. Measured on the sealed rep-3 state 2026-08-10: 17 folded head results
+ * cost 1,002,801 raw bytes against a 1,072,081-byte allowance, the reach froze at index 36
+ * of 133, three passes had nothing proposable, and the run died against the fence at 0.972
+ * occupancy with 25 takeable batches above the line.
+ *
+ * Spending PROJECTED bytes on the same walk was the first fix, and it worked; Shane's
+ * ruling deleted the walk instead. The arithmetic here is membership arithmetic now: what
+ * the head costs, raw or projected, decides nothing, because a batch is a member of the
+ * foldable class or it is not and no accumulated prefix can spend that away.
  *
  * The property, in one line: folding must never shrink what folding can reach next.
  */
 async function gateProjectedStaleBasis() {
   const budget = 60_000;
   const built = makeFixture({ turns: 40, resultChars: 12_000, contextWindow: budget });
-  // Fold the head against a window wide enough that all of it is stale, which is how
-  // the real prefix got there: earlier commits, at earlier occupancies.
+  // Fold the head against a wide window, which is how the real prefix got there: earlier
+  // commits, at earlier occupancies.
   const wide = context.mapActiveContext({
     sessionId: built.sessionId,
     eventMessages: built.messages,
@@ -10437,49 +10511,33 @@ async function gateProjectedStaleBasis() {
     assert(candidate, `The head ran out of foldable batches after ${batch}`);
     state = (await commitCandidate(state, wide, candidate, { now: batch + 1 })).state;
   }
-  const map = (extra = {}) => context.mapActiveContext({
+  const snapshot = context.mapActiveContext({
     sessionId: built.sessionId,
     eventMessages: built.messages,
     contextEntries: built.entries,
     contextWindow: budget,
     netBudget: true,
-    ...extra,
   });
-  const raw = map();
-  const projected = map({ foldProjection: (base) => context.foldProjectionSpans(base, state) });
-  const spans = context.foldProjectionSpans(raw, state);
-  assert.equal(spans.length, head, `The head folded ${spans.length} roots, not ${head}`);
-  const prefixEnd = Math.max(...spans.map((span) => span.end));
-  const allowance = context.zoneBytes(context.DEFAULT_THRESHOLDS.staleTail, projected.budgetTokens);
+
+  // (a) THE FIXTURE REALLY IS THE SHAPE: the folded head alone outweighs the budget the
+  // rest of the window has to fit inside, which is what made the byte walk starve.
+  const foldedIndices = new Set(context.orderedRoots(state, snapshot)
+    .flatMap((root) => Array.from({ length: root.end - root.start + 1 }, (_, step) => root.start + step)));
+  assert.equal(context.orderedRoots(state, snapshot).length, head,
+    "The head did not fold the roots it declares");
   let coveredRaw = 0;
-  for (const span of spans) {
-    for (let index = span.start; index <= span.end; index += 1) coveredRaw += bytesOf(built.messages[index]);
-  }
-  const coveredProjected = spans.reduce((total, span) => total + span.bytes, 0);
+  for (const index of foldedIndices) coveredRaw += bytesOf(built.messages[index]);
+  assert(coveredRaw > snapshot.budgetTokens,
+    `The folded head costs ${coveredRaw} raw bytes against a ${snapshot.budgetTokens}-token budget, so it does not starve a byte walk`);
+  const prefixEnd = Math.max(...foldedIndices);
 
-  // (a) THE FIXTURE REALLY IS THE SHAPE: the folded head alone would eat the allowance.
-  assert(coveredRaw > allowance,
-    `The folded head costs ${coveredRaw} raw bytes against a ${allowance}-byte allowance, so it does not starve the raw walk`);
-  assert(coveredProjected * 10 < allowance,
-    `The head's placeholders cost ${coveredProjected} bytes, too close to the allowance to show the difference`);
-
-  // (b) THE RAW BASIS STARVES INSIDE THE PLACEHOLDERS; THE PROJECTED BASIS DOES NOT.
-  assert(raw.staleBoundary <= prefixEnd,
-    `The raw-basis reach passed the folded head at ${raw.staleBoundary}, so the defect is not being measured`);
-  assert(projected.staleBoundary > prefixEnd,
-    `The projected reach stopped at ${projected.staleBoundary}, inside a folded head that ends at ${prefixEnd}`);
-
-  // (c) THE TOOL RUNG TAKES THE FIRST POST-PREFIX BATCH. On the raw basis every
-  // proposal, if any, is confined to evidence already folded; on the projected basis
-  // the rung reaches new mass.
-  const indexOf = new Map(projected.mapped.flatMap((item) =>
+  // (b) AND THE LADDER REACHES STRAIGHT PAST IT. Every unfolded batch outside the fresh
+  // tail is a member, whatever the head cost, and the rung takes the stalest of them.
+  const indexOf = new Map(snapshot.mapped.flatMap((item) =>
     item.ref ? [[json.objectRefKey(item.ref), item.index]] : []));
   const indices = (candidate) => candidate.sourceRefs.map((ref) => indexOf.get(json.objectRefKey(ref)) ?? -1);
-  const starved = context.selectAutomaticSpan(raw, state);
-  assert(!starved || Math.max(...indices(starved)) <= prefixEnd,
-    "The raw basis reached past the folded head, so this fixture no longer starves");
-  const reached = context.selectAutomaticSpan(projected, state);
-  assert(reached, "The projected basis proposed nothing on a window full of unfolded batches");
+  const reached = context.selectAutomaticSpan(snapshot, state);
+  assert(reached, "The class law proposed nothing on a window full of unfolded batches");
   assert.equal(reached.kind, "tool-result", `The rung took a ${reached.kind}, not the tool batch`);
   const firstReached = Math.min(...indices(reached));
   assert(firstReached > prefixEnd,
@@ -10489,54 +10547,66 @@ async function gateProjectedStaleBasis() {
   assert.equal(firstReached, nextUnfolded,
     `The rung skipped past the stalest unfolded batch at ${nextUnfolded}`);
 
-  // (d) AND THE COMMIT CLEARS THE FENCE LINE. Rep 3's window could not be transmitted
-  // at all; the reconstruction on the fixed basis frees enough to fit.
-  const before = bytesOf(context.projectActiveContext(projected, state));
+  // AND THE HEAD IS NOT WHAT DECIDES IT. The same window with no folds at all offers the
+  // same members past the prefix, so reach is independent of what folding already took.
+  const unfoldedState = context.emptyActiveContextState(built.sessionId);
+  const memberIndices = (value) => new Set(context.automaticToolBatches(snapshot, value)
+    .flatMap((batch) => batch.indices));
+  const withHead = memberIndices(state);
+  const withoutHead = memberIndices(unfoldedState);
+  const pastPrefix = (set) => [...set].filter((index) => index > prefixEnd).sort((a, b) => a - b);
+  assert.deepEqual(pastPrefix(withHead), pastPrefix(withoutHead),
+    "The folded head changed which spans past it are members, so folding still shrinks reach");
+  assert(pastPrefix(withHead).length > 0, "There is nothing past the prefix to measure");
+
+  // (c) AND THE COMMIT CLEARS THE FENCE LINE. Rep 3's window could not be transmitted at
+  // all; the reconstruction under the class law frees enough to fit.
+  const before = bytesOf(context.projectActiveContext(snapshot, state));
   assert(before / 4 > budget,
     `The fixture projects ${Math.round(before / 4)} tokens, already inside a ${budget}-token budget`);
   let marked = state;
   const marks = context.topUpMarks({
-    snapshot: projected, state: marked, ordinal: 1, targetShare: 1, eligibleOnly: true,
+    snapshot, state: marked, ordinal: 1, targetShare: 1, eligibleOnly: true,
   });
   for (const mark of marks) {
     const addition = context.addPendingMark(marked, mark);
     if (addition.added) marked = addition.state;
   }
   const committed = await context.commitPendingMarks({
-    snapshot: projected, state: marked, generation: 1, retainIneligible: true, guardCurrentTurn: true,
+    snapshot, state: marked, generation: 1, retainIneligible: true, guardCurrentTurn: true,
   });
-  const after = bytesOf(context.projectActiveContext(projected, committed.state));
+  const after = bytesOf(context.projectActiveContext(snapshot, committed.state));
   assert(committed.applied.length > 0, "The commit applied nothing");
   assert(after / 4 < budget,
     `The commit left ${Math.round(after / 4)} tokens against a ${budget}-token budget, still over the fence`);
 
-  // (e) ONE DEFINITION OF STALE. What the last call announces is what the ladder can
-  // take: the remainder is scoped to the same boundary the selectors read.
-  const remainder = context.unmarkedRemainder(projected, state, 4);
-  const announced = projected.mapped.filter((item) =>
-    item.message?.role === "toolResult" && item.index < projected.staleBoundary &&
-    !projected.toolProtectedIndices.has(item.index));
+  // (d) ONE DEFINITION OF STALE. What the last call announces is what the ladder can
+  // take: the remainder counts member results and nothing else, which is the same
+  // enumeration the selector picks its proposal out of.
+  const remainder = context.unmarkedRemainder(snapshot, state, 4);
+  const claimed = context.claimedRefKeys(state);
+  const announced = snapshot.mapped.filter((item) => item.ref && withHead.has(item.index) &&
+    !claimed.has(json.objectRefKey(item.ref)));
   assert(remainder.spans > 0, "The remainder announced nothing on a window full of unfolded batches");
-  assert(remainder.spans <= announced.length,
-    `The remainder announced ${remainder.spans} spans against ${announced.length} inside the stale zone`);
-  const middle = context.unmarkedRemainder(
-    { ...projected, staleBoundary: projected.messages.length }, state, 4,
-  );
-  assert(middle.tokens > remainder.tokens,
-    "The fixture has no middle, so the scoping is not being measured");
+  assert.equal(remainder.spans, announced.length,
+    `The remainder announced ${remainder.spans} spans against ${announced.length} members`);
+  const wholeWindow = snapshot.mapped.filter((item) =>
+    item.ref && item.message?.role === "toolResult" && !claimed.has(json.objectRefKey(item.ref)));
+  assert(wholeWindow.length > announced.length,
+    "Every unclaimed tool result is a member, so the scoping is not being measured");
 
   return {
     foldedHeadRoots: head,
     headRawBytes: coveredRaw,
-    headProjectedBytes: coveredProjected,
-    staleAllowanceBytes: allowance,
-    rawBasisBoundary: raw.staleBoundary,
-    projectedBasisBoundary: projected.staleBoundary,
+    budgetTokens: snapshot.budgetTokens,
+    prefixEnd,
     rungIndex: firstReached,
+    membersPastPrefix: pastPrefix(withHead).length,
+    membersPastPrefixUnfolded: pastPrefix(withoutHead).length,
     appliedMarks: committed.applied.length,
     projectionTokens: [Math.round(before / 4), Math.round(after / 4)],
-    announcedStaleTokens: remainder.tokens,
-    wholeWindowUnmarkedTokens: middle.tokens,
+    announcedMemberSpans: remainder.spans,
+    wholeWindowToolResults: wholeWindow.length,
   };
 }
 
@@ -10622,8 +10692,8 @@ const gates = [
   [94, "One span law: raw, nested, pinned", gateUnifiedSpanLaw],
   [95, "Agent spans nest; pins refuse", gateAgentSpansNest],
   [96, "Thresholds are validated at construction", gateThresholdConstruction],
-  [97, "The three zones", gateThreeZones],
-  [98, "The zone law is unconditional", gateFenceOpensTheMiddle],
+  [97, "The class law: membership, not position", gateThreeZones],
+  [98, "The class law is unconditional", gateFenceOpensTheMiddle],
   [99, "The last-call rides the commit boundary", gateLastCallRidesTheCommitBoundary],
   [100, "Threshold notices append once and re-arm", gateThresholdNoticesAppendOnce],
   [101, "Peek copies reclaim with identity", gatePeekReclaimWithIdentity],
@@ -10633,7 +10703,7 @@ const gates = [
   [104, "The slate rides the commit boundary", gateSurfacingDeliveryRidesTheBoundary],
   [106, "The band top commits with no turn ever closed", gateOpenTurnCommits],
   [107, "Model briefs upgrade on the commit boundary", gateBriefUpgradesRideTheBoundary],
-  [108, "The automatic reach is measured in projected bytes", gateProjectedStaleBasis],
+  [108, "A folded head never limits reach", gateProjectedStaleBasis],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

@@ -158,7 +158,7 @@ export const COMMIT_RECLAIM_FLOOR_SHARE = 0.02;
 export const MAX_PINNED_SHARE = 0.25;
 
 // ---------------------------------------------------------------------------
-// THE THERMOSTAT. One declared object, one denominator, five numbers.
+// THE THERMOSTAT. One declared object, one denominator, four numbers.
 //
 // Occupancy used to be a cluster: a trigger share of the budget, a post-commit target
 // share of the budget, a freeing floor stated as a share of the WINDOW, a fresh tail
@@ -169,13 +169,17 @@ export const MAX_PINNED_SHARE = 0.25;
 // `capacityAccounting.budgetTokens` -- the truthful serving budget, the same value the
 // fence, the estimator and the trigger already read.
 //
-// User-set, never agent-set (Sol 2026-08-09): an agent that can widen freshTail, shrink
-// staleTail or move maxTarget to the fence neutralizes the governor without ever
-// calling a verb it is not entitled to. Agent authority stays where it already is --
-// mark, unmark, protect, unprotect -- and status may REPORT these values.
+// There was a fifth, `staleTail`, that declared how far back automation could reach as a
+// byte prefix of the window. It is deleted (Shane 2026-08-10): automatic foldability is a
+// CLASS a span belongs to, not a position it occupies, so there is no width to declare.
+//
+// User-set, never agent-set (Sol 2026-08-09): an agent that can widen freshTail or move
+// maxTarget to the fence neutralizes the governor without ever calling a verb it is not
+// entitled to. Agent authority stays where it already is -- mark, unmark, protect,
+// unprotect -- and status may REPORT these values.
 // ---------------------------------------------------------------------------
 
-/** The five numbers that decide when a commit fires, how deep it cuts, and what it may reach. */
+/** The four numbers that decide when a commit fires, how deep it cuts, and what stays raw. */
 export interface ActiveContextThresholds {
   /** Occupancy of the serving budget that fires an automatic commit. */
   maxTarget: number;
@@ -183,9 +187,7 @@ export interface ActiveContextThresholds {
   minTarget: number;
   /** Newest share of the serving budget where nothing folds, marked or not. */
   freshTail: number;
-  /** Oldest share of the serving budget where automation may fold every unpinned foldable. */
-  staleTail: number;
-  /** Unpinned folds in the stale zone at or above which placeholders become span material. */
+  /** Unpinned member folds at or above which placeholders become span material. */
   consolidateAfter: number;
 }
 
@@ -209,12 +211,6 @@ export interface ActiveContextThresholds {
  * the 16,384-token response reserve) that is 1.564%, rounded UP to 0.02 so the
  * re-denomination never narrows protection at the reference deployment.
  *
- * staleTail 0.78: today's automation reach, re-denominated. Before this build every
- * byte outside the fresh tail was automation-eligible, so at the trigger the reach was
- * exactly maxTarget - freshTail. That is also the largest value the non-overlap
- * invariant admits, so the default reproduces the proven behavior and the middle zone
- * is what a user opens by lowering it.
- *
  * consolidateAfter 10: the proven count (the retired width rung counted the same roots
  * against the same line). Placeholder briefs are about 300 tokens, so ten siblings cost
  * under 1% of budget, and ten keeps an overnight session within two hops of any
@@ -226,7 +222,6 @@ export const DEFAULT_THRESHOLDS: Readonly<ActiveContextThresholds> = Object.free
   maxTarget: 0.80,
   minTarget: 0.35,
   freshTail: 0.02,
-  staleTail: 0.78,
   consolidateAfter: 10,
 });
 
@@ -268,18 +263,18 @@ function thresholdProportion(value: unknown, field: string): number {
 /**
  * The whole object, validated atomically, or an error naming the invariant that failed.
  *
- * Atomic because these are five halves of one decision: validating them one at a time is
- * how a trigger moved from 0.50 to 0.80 while its target stayed at 0.35 and the
+ * Atomic because these are four quarters of one decision: validating them one at a time
+ * is how a trigger moved from 0.50 to 0.80 while its target stayed at 0.35 and the
  * docstring kept arguing a 15-point gap that had become 45. Never clamped: a policy that
  * cannot be served is a registration error, not a value to quietly rewrite (Sol).
  */
 export function resolveThresholds(value: unknown): ActiveContextThresholds {
   if (value === undefined) return { ...DEFAULT_THRESHOLDS };
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new ThresholdPolicyError("shape", "thresholds must be an object with all five fields");
+    throw new ThresholdPolicyError("shape", "thresholds must be an object with all four fields");
   }
   const supplied = value as Record<string, unknown>;
-  const fields = ["maxTarget", "minTarget", "freshTail", "staleTail", "consolidateAfter"] as const;
+  const fields = ["maxTarget", "minTarget", "freshTail", "consolidateAfter"] as const;
   for (const key of Object.keys(supplied)) {
     if (!(fields as readonly string[]).includes(key)) {
       throw new ThresholdPolicyError("shape", `thresholds has no ${key} field`);
@@ -293,7 +288,6 @@ export function resolveThresholds(value: unknown): ActiveContextThresholds {
   const maxTarget = thresholdProportion(supplied.maxTarget, "maxTarget");
   const minTarget = thresholdProportion(supplied.minTarget, "minTarget");
   const freshTail = thresholdProportion(supplied.freshTail, "freshTail");
-  const staleTail = thresholdProportion(supplied.staleTail, "staleTail");
   const consolidateAfter = supplied.consolidateAfter;
   if (typeof consolidateAfter !== "number" || !Number.isInteger(consolidateAfter) || consolidateAfter < 1) {
     throw new ThresholdPolicyError("consolidateAfter", "thresholds.consolidateAfter must be a positive integer count");
@@ -307,11 +301,6 @@ export function resolveThresholds(value: unknown): ActiveContextThresholds {
   if (!(freshTail < maxTarget)) {
     throw new ThresholdPolicyError("freshTail<maxTarget",
       "thresholds.freshTail must sit below thresholds.maxTarget, or the trigger fires on protected mass alone");
-  }
-  // S <= M - F: the zones may not overlap at the trigger.
-  if (!(staleTail <= maxTarget - freshTail)) {
-    throw new ThresholdPolicyError("staleTail<=maxTarget-freshTail",
-      "thresholds.staleTail must not overlap the fresh tail at the trigger (staleTail <= maxTarget - freshTail)");
   }
   // G >= F: one refill of the protected tail must not re-arm the trigger by itself.
   if (!(maxTarget - minTarget >= freshTail)) {
@@ -329,7 +318,7 @@ export function resolveThresholds(value: unknown): ActiveContextThresholds {
       `the pin ceiling (${MAX_PINNED_SHARE}) plus thresholds.freshTail must stay below ` +
       `thresholds.maxTarget at the ${MINIMUM_SUPPORTED_BUDGET_TOKENS}-token minimum supported budget`);
   }
-  return { maxTarget, minTarget, freshTail, staleTail, consolidateAfter };
+  return { maxTarget, minTarget, freshTail, consolidateAfter };
 }
 
 /**
@@ -363,7 +352,7 @@ export function assertThresholdsServable(thresholds: ActiveContextThresholds, bu
  *
  * The thresholds are proportions of one denominator and a transcript position is a byte
  * count, so exactly one conversion stands between them: the estimator's bytes per token.
- * It is stated here, once, so the fresh tail and the stale tail are cut by one ruler.
+ * It is stated here, once, so every share of the budget is cut by one ruler.
  */
 export function zoneBytes(share: number, budgetTokens: number): number {
   if (!Number.isFinite(share) || share <= 0 || !Number.isFinite(budgetTokens) || budgetTokens <= 0) return 0;
@@ -886,20 +875,6 @@ export interface CompleteTurn {
   end: number;
 }
 
-/**
- * One fold root's footprint in the TRANSMITTED projection: the source span it covers
- * and what those source indices cost once the placeholder stands in for them.
- *
- * The automatic reach is a share of the window the provider actually receives, so the
- * walk that measures it has to spend projected bytes, not raw ones. A folded prefix
- * costs its placeholder here and nothing more.
- */
-export interface ProjectedSpan {
-  start: number;
-  end: number;
-  bytes: number;
-}
-
 export interface ActiveContextSnapshot {
   sessionId: string;
   messages: unknown[];
@@ -907,13 +882,7 @@ export interface ActiveContextSnapshot {
   branchObjects: BranchObject[];
   completeTurns: CompleteTurn[];
   freshBoundary: number;
-  /**
-   * Exclusive end of the STALE zone: indices below it are the oldest `staleTail` share
-   * of the serving budget, and automation may reach nothing else. Between it and the
-   * fresh boundary is the middle, which is agent judgment only.
-   */
-  staleBoundary: number;
-  /** The five thermostat numbers in force for this session. */
+  /** The four thermostat numbers in force for this session. */
   thresholds: ActiveContextThresholds;
   /** The serving budget the thresholds are proportions of. One denominator. */
   budgetTokens: number;
@@ -942,8 +911,8 @@ export interface FoldCandidate {
  * raw. The list ran the other way until the 2026-08-10 surface, as an allow-list seeded
  * with pi's four built-in readers, which meant a deployment's own tools were unfoldable
  * until someone remembered to name them and the ladder starved on exactly the results
- * that filled the window. Foldability was never the protection: pins, the three zones and
- * the fresh tail are, and they apply to a blacklisted tool and an ordinary one alike.
+ * that filled the window. Foldability was never the protection: pins, the fresh tail and
+ * the commit guard are, and they apply to a blacklisted tool and an ordinary one alike.
  */
 export const AUTO_FOLD_BLACKLIST_DEFAULT: ReadonlySet<string> = new Set();
 

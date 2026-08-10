@@ -238,7 +238,7 @@ export const LAST_CALL_WORDING =
  * It rides the commit boundary: the band-top trigger has fired, the rewrite is one
  * round away, so this is the single moment telemetry is both accurate and free. It
  * carries the ruled wording, the three numbers the ruling names (occupancy against the
- * commit line, unmarked foldable mass in the stale zone, pending marks), the verbs,
+ * commit line, unmarked foldable mass the ladder can reach, pending marks), the verbs,
  * and the one-round law. Never a question: continuing the task is the stated default,
  * and the commit proceeds regardless.
  */
@@ -260,7 +260,7 @@ export function lastCallText(input: {
   return joinSurfacing(boundReceiptText([
     `[${brand} last call] ${LAST_CALL_WORDING}`,
     `Occupancy is ${occupancy} of the ${signals.budgetTokens}-token serving budget, at or past the ` +
-      `${Math.round(signals.maxTarget * 100)}% commit line. Unmarked foldable mass in the stale zone: ` +
+      `${Math.round(signals.maxTarget * 100)}% commit line. Unmarked foldable mass: ` +
       `${input.unmarked.spans} span(s), about ${input.unmarked.tokens} tokens. ` +
       `Pending marks: ${input.pendingMarks}.`,
     // Stated only when there is one to veto: a standing sentence about zero peek copies

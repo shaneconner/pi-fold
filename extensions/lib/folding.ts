@@ -66,7 +66,6 @@ import type {
   FoldPart,
   MappedMessage,
   PreparedFold,
-  ProjectedSpan,
 } from "./policy.ts";
 import {
   automaticToolBrief,
@@ -88,9 +87,11 @@ export function selectAutomaticChapter(
   maximumSourceRefs: number = snapshot.policy.maxFoldSourceRefs,
   claimed: ReadonlySet<string> = new Set<string>(),
 ): FoldCandidate | null {
-  // The stale zone is the automatic law's whole reach. A unit that ends past it sits in
-  // the middle, and the middle is agent judgment only.
-  const units = chapterUnits(snapshot).filter((unit) => unit.end <= snapshot.staleBoundary);
+  // Every structurally closed unit is a candidate. What keeps a chapter off the newest
+  // material is `refsProtected` below -- the fresh byte tail and the agent's pins -- and
+  // what keeps it off the running excursion's own evidence is the guard adjudicated at
+  // the commit. There is no position filter here: a unit is composable or it is not.
+  const units = chapterUnits(snapshot);
   // The counting rule, applied to the span the automation composes: below the line a
   // span is raw material only and steps over every placeholder; at or above it the
   // placeholders are ordinary material and the span swallows them, so folds nest.
@@ -138,7 +139,7 @@ export function selectAutomaticChapter(
  *
  * There is no chapter rung and no consolidation rung any more, each with its own
  * trigger: automation proposes the stalest eligible SPAN, and what the span contains
- * decides the fold's kind. Raw narrative folds as a chapter. Once the stale region
+ * decides the fold's kind. Raw narrative folds as a chapter. Once the window
  * carries `thresholds.consolidateAfter` unpinned folds, placeholders are span material,
  * so a span of whole folds folds as a consolidation and a mixed span nests its
  * tool-result children inside a chapter. Nothing here is pressure-scaled: the epoch's
@@ -291,10 +292,9 @@ export function foldCandidatesDetail(
     } : null,
     wouldFireNow,
     blockedBy,
-    // The three zones, reported as the positions they actually cut at, plus the
-    // counting rule read as the number it counts.
+    // The one position that still cuts anything, plus the counting rule read as the
+    // number it counts.
     zones: {
-      staleBoundary: snapshot.staleBoundary,
       freshBoundary: snapshot.freshBoundary,
       budgetTokens: snapshot.budgetTokens,
     },
@@ -929,31 +929,6 @@ export function pinnedPeekMass(
     results += 1;
   }
   return { bytes: total, results };
-}
-
-/**
- * What the fold roots cost in the projection, per covered source span.
- *
- * The same replacement map `projectActiveContext` builds, measured instead of emitted,
- * so the automatic reach and the transmitted window agree by construction rather than
- * by two walks that have to be kept in step. A root the renderer reveals (expanded, or
- * protected evidence it must show raw) still yields its span, priced at what the
- * revealed parts cost; a root whose evidence is no longer contiguous in the window
- * yields nothing, exactly as the projection leaves those positions alone.
- */
-export function foldProjectionSpans(
-  snapshot: ActiveContextSnapshot,
-  state: ActiveContextState,
-): ProjectedSpan[] {
-  const spans: ProjectedSpan[] = [];
-  for (const root of orderedRoots(state, snapshot)) {
-    const rendered = renderFold(root.fold, state, snapshot);
-    if (!rendered) continue;
-    let size = 0;
-    for (const message of rendered) size += bytes(message);
-    spans.push({ start: root.start, end: root.end, bytes: size });
-  }
-  return spans;
 }
 
 export function projectActiveContext(

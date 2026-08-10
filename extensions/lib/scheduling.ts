@@ -48,6 +48,7 @@ import type {
   PendingMark,
 } from "./policy.ts";
 import {
+  automaticToolBatches,
   automaticToolBrief,
   candidateSourceRefs,
   chapterRangeIsUnitAligned,
@@ -351,7 +352,7 @@ export function markAccounting(
  * BELOW maxTarget, which is the quiet-runtime law it was sitting underneath. The
  * pressure arm read a window ratio against the refold rung, which after
  * re-denomination is simply a second line above this one. Both are gone. Marking is
- * doorless in the stale zone and costs nothing, so what a pass accumulates is never a
+ * doorless below the commit line and costs nothing, so what a pass accumulates is never a
  * reason to commit; crossing the band top is.
  */
 export function epochCommitDue(snapshot: ActiveContextSnapshot, ratio: number | null): boolean {
@@ -534,10 +535,10 @@ export function claimedRefKeys(state: ActiveContextState): Set<string> {
 
 /** What is still on the table after the marks in hand: the steering number and its parts. */
 export interface UnmarkedRemainder {
-  /** Tool results IN THE STALE ZONE that no fold and no pending mark owns. */
+  /** Tool results in a MEMBER batch that no fold and no pending mark owns. */
   spans: number;
   tokens: number;
-  /** Unmarked stale tokens as a share of the stale zone's tool mass. The steering number. */
+  /** Unmarked member tokens as a share of the member tool mass. The steering number. */
   share: number;
   /** The largest few, by reclaim value, so the next batch is one read away. */
   candidates: Array<{ id: string; tokens: number }>;
@@ -550,13 +551,16 @@ export interface UnmarkedRemainder {
  * this build removed from the projection. What an agent needs to decide the NEXT batch
  * is one percentage and the few largest names; everything else is a total.
  *
- * ONE DEFINITION OF STALE. The scope is the stale zone, the same region the selectors
- * propose from, so the last call and the deferred-commit record announce mass a commit
- * can actually take. Filtering on the fresh tail alone counted the MIDDLE too, and the
- * middle is agent judgment only: rep 3 announced 280k tokens of it as stale while every
- * automatic rung had nothing to propose, which reads as a runtime refusing to do work
- * it had just described. Whole-window curation mass is a different question with a
- * different name; this number answers what the ladder can reach.
+ * ONE DEFINITION OF STALE, AND IT IS THE SELECTOR'S OWN. The scope is class membership:
+ * every result inside a batch `automaticToolBatches` admits, which is the same
+ * enumeration `selectAutomaticToolBatch` picks its proposal out of. So the last call and
+ * the deferred-commit record announce mass a commit can actually take, by construction
+ * rather than by two filters kept in step. Counting whole-window tool results instead
+ * announced material no rung could ever propose: rep 3 named 280k tokens while every
+ * selector had nothing, which reads as a runtime refusing work it had just described.
+ *
+ * Membership is not ownership: the denominator is every member result, taken or not, so
+ * the share reads as the fraction of reachable tool mass still unspoken for.
  */
 export function unmarkedRemainder(
   snapshot: ActiveContextSnapshot,
@@ -566,15 +570,17 @@ export function unmarkedRemainder(
 ): UnmarkedRemainder {
   const perToken = Number.isFinite(charsPerToken) && charsPerToken > 0 ? charsPerToken : ESTIMATED_BYTES_PER_TOKEN;
   const claimed = claimedRefKeys(state);
+  const members = new Set<number>();
+  for (const batch of automaticToolBatches(snapshot, state)) {
+    for (const index of batch.indices) members.add(index);
+  }
   const candidates: Array<{ id: string; tokens: number }> = [];
   let unmarkedBytes = 0;
-  let staleBytes = 0;
+  let memberBytes = 0;
   for (const item of snapshot.mapped) {
-    if (!item.ref || messageRole(item.message) !== "toolResult") continue;
-    if (item.index >= snapshot.staleBoundary) continue;
-    if (snapshot.toolProtectedIndices.has(item.index)) continue;
+    if (!item.ref || !members.has(item.index)) continue;
     const size = bytes(item.message);
-    staleBytes += size;
+    memberBytes += size;
     if (claimed.has(objectRefKey(item.ref))) continue;
     unmarkedBytes += size;
     candidates.push({ id: item.ref.entryId, tokens: Math.ceil(size / perToken) });
@@ -583,7 +589,7 @@ export function unmarkedRemainder(
   return {
     spans: candidates.length,
     tokens: Math.ceil(unmarkedBytes / perToken),
-    share: staleBytes > 0 ? unmarkedBytes / staleBytes : 0,
+    share: memberBytes > 0 ? unmarkedBytes / memberBytes : 0,
     candidates: candidates.slice(0, Math.max(0, limit)),
   };
 }
@@ -599,7 +605,7 @@ export function markedFoldIds(state: ActiveContextState): Set<string> {
  * Agent judgment leads; automation guarantees the floor. If the marks the agent made
  * would free less than the target share of the window, automation adds the stalest
  * unprotected eligible SPANS until they do: completed tool batches, raw narrative
- * chapters, and, once the stale region carries enough unpinned folds, the placeholders
+ * chapters, and, once the window carries enough unpinned folds, the placeholders
  * themselves. One law proposes all three, which is what makes chapters and nested folds
  * reachable from the commit path at all.
  */

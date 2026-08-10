@@ -436,18 +436,17 @@ export function chapterUnits(snapshot: ActiveContextSnapshot): ChapterUnit[] {
 /**
  * Folds the automatic law may treat as span material.
  *
- * The counting rule reads the stale region only, and pins are the exemption: a fold the
- * agent protected is never auto-included, and an EXPANDED fold is not a placeholder at
- * all. One predicate answers both halves, because "stale" and "unpinned" are the same
- * question `refsProtected` already asks of a span's evidence.
+ * Membership, not position: every visible collapsed root counts unless the agent pinned
+ * it or the fresh tail covers it, and an EXPANDED fold is not a placeholder at all. One
+ * predicate answers all of it, because that is the same question `refsProtected` already
+ * asks of a span's evidence.
  */
 export function unpinnedStaleFolds(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
 ): Array<{ fold: ActiveFold; start: number; end: number }> {
   return visibleCollapsedRoots(state, snapshot)
-    .filter(({ fold, end }) => end < snapshot.staleBoundary &&
-      !refsProtected(flattenFoldRefs(fold, state), state, snapshot));
+    .filter(({ fold }) => !refsProtected(flattenFoldRefs(fold, state), state, snapshot));
 }
 
 /** Whether fold placeholders currently count as ordinary material for an automatic span. */
@@ -508,18 +507,34 @@ export function selectAutomaticFoldRun(
   return candidateFor(run);
 }
 
+/** One completed batch the automatic law may take, with the indices it covers. */
+export interface AutomaticToolBatch {
+  refs: EvidenceRef[];
+  indices: number[];
+  bytes: number;
+}
+
 /**
- * The stalest eligible completed read-only batch. `claimed` lets a caller exclude
- * evidence already spoken for by something that is not yet a fold (a pending mark),
- * so repeated calls walk forward instead of returning the same batch.
+ * MEMBERSHIP, WRITTEN ONCE: every completed tool batch the automatic law may take,
+ * stalest first, whether or not anything has claimed it yet.
+ *
+ * A batch is a member when it is complete and validated, its tool is not blacklisted
+ * (`resultCall` runs the batch scan with the deployment's list), its evidence carries
+ * exact refs in branch order, it is inside the record's reference bound, it is large
+ * enough to be worth a placeholder, and neither an agent pin nor the fresh byte tail
+ * covers any part of it. There is no position in that list. A prefix of the window is
+ * not more foldable than the middle of it, and the middle is not a wall: it is whatever
+ * the ladder has not needed yet plus whatever the agent pinned (Shane 2026-08-10).
+ *
+ * Ownership is deliberately NOT membership. A batch some fold or pending mark already
+ * speaks for is still a member of the class; it is simply taken. The selector filters on
+ * ownership because it must propose something new, and the announcement counts the class
+ * because that is the mass a commit can reach. One definition, two readings of it.
  */
-export function selectAutomaticToolBatch(
+export function automaticToolBatches(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
-  claimed: ReadonlySet<string> = new Set<string>(),
-): FoldCandidate[] {
-  const owned = new Set([...claimed, ...state.folds.flatMap((fold) => fold.parts.flatMap((part) =>
-    part.kind === "raw" ? [objectRefKey(part.ref)] : []))]);
+): AutomaticToolBatch[] {
   const groups = new Map<number, Array<{ item: MappedMessage; call: NonNullable<ReturnType<typeof resultCall>> }>>();
   for (const item of snapshot.mapped) {
     if (messageRole(item.message) !== "toolResult") continue;
@@ -529,6 +544,7 @@ export function selectAutomaticToolBatch(
     group.push({ item, call });
     groups.set(call.assistantIndex, group);
   }
+  const batches: AutomaticToolBatch[] = [];
   for (const group of groups.values()) {
     const expected = group[0].call.batch;
     const ids = new Set(group.map(({ call }) => call.id));
@@ -536,26 +552,45 @@ export function selectAutomaticToolBatch(
     if (ids.size !== expected.length || expected.some((id) => !ids.has(id)) ||
         refs.some((ref) => !ref || ref.role !== "toolResult")) continue;
     const exactRefs = refs as EvidenceRef[];
+    const size = group.reduce((total, { item }) => total + bytes(item.message), 0);
     if (exactRefs.length > snapshot.policy.maxFoldSourceRefs ||
-        group.some(({ item }) => item.index >= snapshot.staleBoundary) ||
-        exactRefs.some((ref) => owned.has(objectRefKey(ref))) ||
         toolRefsProtected(exactRefs, state, snapshot) || refsInOrder(snapshot, exactRefs) === null ||
-        group.reduce((total, { item }) => total + bytes(item.message), 0) < snapshot.policy.minToolChars) continue;
+        size < snapshot.policy.minToolChars) continue;
+    batches.push({ refs: exactRefs, indices: group.map(({ item }) => item.index), bytes: size });
+  }
+  return batches;
+}
+
+/**
+ * The stalest member batch nothing has claimed. `claimed` lets a caller exclude evidence
+ * already spoken for by something that is not yet a fold (a pending mark), so repeated
+ * calls walk forward instead of returning the same batch.
+ */
+export function selectAutomaticToolBatch(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+  claimed: ReadonlySet<string> = new Set<string>(),
+): FoldCandidate[] {
+  const owned = new Set([...claimed, ...state.folds.flatMap((fold) => fold.parts.flatMap((part) =>
+    part.kind === "raw" ? [objectRefKey(part.ref)] : []))]);
+  for (const batch of automaticToolBatches(snapshot, state)) {
+    if (batch.refs.some((ref) => owned.has(objectRefKey(ref)))) continue;
     return [{
       kind: "tool-result",
-      parts: exactRefs.map((ref) => ({ kind: "raw", ref })),
-      sourceRefs: exactRefs,
+      parts: batch.refs.map((ref) => ({ kind: "raw", ref })),
+      sourceRefs: batch.refs,
     }];
   }
   return [];
 }
 
 /**
- * The re-fold path, re-pointed at the stale zone.
+ * The re-fold path.
  *
- * An expansion is a deliberate act, so it PERSISTS in the middle: no pressure reading
- * undoes it there. Once the span it covers has aged into the stale tail, automation may
- * return it to its placeholder like any other stale foldable, pins excepted.
+ * An expansion is a deliberate act, and the way to make it permanent is a pin: a pinned
+ * fold is never re-folded, and a leased one is held for the term of its lease. Anything
+ * else the agent opened is an ordinary member of the foldable class again, so automation
+ * may return it to its placeholder, stalest and narrowest first.
  */
 export function selectAutomaticRefold(
   snapshot: ActiveContextSnapshot,
@@ -569,7 +604,7 @@ export function selectAutomaticRefold(
     const protectedSource = fold && (fold.kind === "tool-result"
       ? toolRefsProtected(flattenFoldRefs(fold, state), state, snapshot)
       : refsProtected(flattenFoldRefs(fold, state), state, snapshot));
-    return fold && interval && interval.end < snapshot.staleBoundary && !protectedSource && !state.leases[id]
+    return fold && interval && !protectedSource && !state.leases[id]
       ? [{ id, ...interval }]
       : [];
   }).sort((left, right) => left.end - right.end || (left.end - left.start) - (right.end - right.start));

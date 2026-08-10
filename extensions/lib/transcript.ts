@@ -32,7 +32,6 @@ import type {
   BranchObject,
   CompleteTurn,
   MappedMessage,
-  ProjectedSpan,
 } from "./policy.ts";
 
 export function terminalAssistant(message: unknown): boolean {
@@ -409,64 +408,6 @@ export function toolFreshIndices(
   return protectedIndices;
 }
 
-/**
- * The oldest end of the window, where automation may reach.
- *
- * Exclusive: indices below the returned value are stale. Everything between it and the
- * fresh boundary is the MIDDLE, and the middle is agent judgment only -- marks commit
- * there, expansions persist there, raw stays raw there, and no automatic path proposes
- * anything there. That is the 2026-08-06 ruling that agent context is not sequential,
- * written as a region instead of as a preference.
- *
- * The middle can be EMPTY, and on a session that never closes a turn it always is: the
- * fresh boundary walks back turn by turn and has nowhere to stop, so it sits at 0 while
- * this prefix carries real width. The fresh tail is still protected there, by the byte
- * tail in `protectedIndices` rather than by an ordering between the two numbers, and the
- * threshold invariant `staleTail <= maxTarget - freshTail` is what keeps the zones from
- * overlapping at the trigger.
- *
- * THE WALK SPENDS PROJECTED BYTES, NOT RAW ONES.
- *
- * `projectedSpans` carries each fold root's footprint in the transmitted window: at a
- * span's start the walk charges the placeholder and steps to `end + 1`, and everywhere
- * else it charges the raw message. Passing none is the unfolded case, where the two
- * bases are the same number.
- *
- * Measured 2026-08-10 (luna-20260810 pifold rep 3): 17 already-folded head tool results
- * cost 1,002,801 raw bytes and 87,017 projected ones, so a raw walk spent 94 percent of
- * the 1,072,081-byte allowance on mass the provider never received. The reach froze at
- * index 36 of 133, three consecutive passes had nothing proposable, and the run ended
- * against the fence at 0.972 occupancy with 25 applicable batches sitting above the
- * line. On the same state the projected walk reaches index 107, which is where the
- * doctrine always said it was: the oldest `staleTail` share of the SERVED window.
- *
- * The rule is all-or-nothing per root. A span whose placeholder does not fit leaves the
- * whole covered range above the line rather than splitting a fold across the zones.
- */
-export function staleBoundary(
-  messages: unknown[],
-  staleBytes: number,
-  projectedSpans: readonly ProjectedSpan[] = [],
-): number {
-  if (staleBytes <= 0) return 0;
-  const spans = new Map<number, ProjectedSpan>();
-  for (const span of projectedSpans) {
-    if (!Number.isInteger(span.start) || span.start < 0 || span.end < span.start) continue;
-    const widest = spans.get(span.start);
-    if (!widest || span.end > widest.end) spans.set(span.start, span);
-  }
-  let total = 0;
-  let index = 0;
-  while (index < messages.length) {
-    const span = spans.get(index);
-    const size = span ? span.bytes : bytes(messages[index]);
-    if (total + size > staleBytes) break;
-    total += size;
-    index = span ? Math.min(span.end + 1, messages.length) : index + 1;
-  }
-  return index;
-}
-
 export function mapActiveContext(input: {
   sessionId: string;
   eventMessages: unknown[];
@@ -482,17 +423,6 @@ export function mapActiveContext(input: {
   /** True when `contextWindow` is a declared serving budget rather than a raw window. */
   netBudget?: boolean;
   thresholds?: ActiveContextThresholds;
-  /**
-   * The fold roots' footprints in the transmitted projection, as a callback because the
-   * renderer that produces them is a layer above this one and needs the mapping this
-   * function builds. It receives the snapshot as it stands on the raw basis and returns
-   * one span per root; the returned snapshot carries the projected-basis reach.
-   *
-   * Omitting it leaves the raw basis, which is the same number on a session with no
-   * folds. Every runtime path passes it: a snapshot built without it under-reaches by
-   * exactly the mass the folds already reclaimed.
-   */
-  foldProjection?: (snapshot: ActiveContextSnapshot) => readonly ProjectedSpan[];
 }): ActiveContextSnapshot {
   const policy = Object.freeze({ ...ACTIVE_CONTEXT_POLICY, ...(input.policy ?? {}) }) as typeof ACTIVE_CONTEXT_POLICY;
   const projectEntry = input.projectEntry ?? sessionEntryMessages;
@@ -562,31 +492,26 @@ export function mapActiveContext(input: {
   const freshBytes = zoneBytes(thresholds.freshTail, budgetTokens);
   const turns = completeTurns(input.eventMessages);
   const boundary = freshBoundary(input.eventMessages, turns, freshBytes);
-  // THE STALE ZONE IS A BYTE PREFIX, AND NOTHING ELSE CLIPS IT.
+  // THERE IS NO POSITIONAL REACH HERE ANY MORE.
   //
-  // This used to read `Math.min(boundary, ...)`, which made the automatic reach a
-  // function of the last CLOSED turn. A marathon session that never closes one has a
-  // fresh boundary of 0, so the clamp put the stale boundary at 0 too and every
-  // automatic rung -- chapters, tool batches, refolds, fold runs -- saw an empty zone.
-  // Measured 2026-08-10 (luna-20260810 pifold rep 2): one user message and 24 assistant
-  // messages, all stopReason "toolUse", so the last call announced 19 unmarked stale
-  // spans worth 274,173 tokens while the selector could propose nothing, no commit of
-  // any kind ever fired, and the window climbed to 375,830 estimated tokens and was
-  // rejected twice.
+  // This function used to compute a second boundary, a byte prefix of the window called
+  // the stale zone, and the selectors would take nothing above it. Two reps died of it.
+  // Rep 2 clamped it to the last CLOSED turn, so a marathon session that never closed
+  // one had a zero-width zone: the last call announced 19 unmarked spans worth 274,173
+  // tokens while the selector could propose nothing, no commit ever fired, and the
+  // window was rejected twice at 375,830 estimated tokens. Rep 3 unclamped it and walked
+  // raw bytes, so a folded prefix was charged for evidence it had already replaced: 17
+  // folded results cost 1,002,801 raw bytes of a 1,072,081-byte allowance, the reach
+  // froze at index 36 of 133, and the run died against the fence at 0.972 occupancy with
+  // 25 takeable batches sitting above the line.
   //
-  // The clamp was a SECOND copy of the open-turn protection, written as a zone. The
-  // first copy is the at-commit current-turn guard, and that one has a waiver for
-  // exactly this starvation; a zone has none, so the duplicate silently outranked the
-  // waiver and made it unreachable. The protections that remain are the ones that can
-  // be reasoned about: the fresh tail (a byte tail, set-shaped, in `protectedIndices`),
-  // the stale zone's own byte width, and the guard-with-waiver at commit time.
-  //
-  // The allowance is spent on PROJECTED bytes: see `staleBoundary`. On the raw basis a
-  // prefix of placeholders was charged for the evidence it had already replaced, so the
-  // more the ladder folded the less it could reach next, which is the opposite of what
-  // folding is for.
-  const staleAllowance = zoneBytes(thresholds.staleTail, budgetTokens);
-  const stale = staleBoundary(input.eventMessages, staleAllowance);
+  // Shane's ruling (2026-08-10): stale is a CLASS, not a position. A span is
+  // automatically foldable because of what it IS -- a completed tool batch the deployment
+  // did not blacklist, or older material a chapter or consolidation can compose -- and
+  // never because of where it sits. What this function still produces is the protection
+  // that is genuinely positional: the fresh byte tail, set-shaped, in `protectedIndices`
+  // and `toolProtectedIndices`. The rest of the law is membership plus the agent's pins
+  // plus the guard-with-waiver adjudicated once at commit.
   const protectedIndices = unsafeChapterIndices(input.eventMessages);
   const toolProtectedIndices = toolFreshIndices(input.eventMessages, turns, freshBytes);
   // Chapter protection is set-shaped: preserve the newest complete turns and
@@ -605,7 +530,6 @@ export function mapActiveContext(input: {
     branchObjects,
     completeTurns: turns,
     freshBoundary: boundary,
-    staleBoundary: stale,
     thresholds,
     budgetTokens,
     protectedIndices,
@@ -619,11 +543,7 @@ export function mapActiveContext(input: {
     contextWindow: reportedContextWindow ?? DEFAULT_CONTEXT_WINDOW,
     windowSource: reportedContextWindow === null ? "fallback" : "reported",
   };
-  if (!input.foldProjection) return snapshot;
-  return {
-    ...snapshot,
-    staleBoundary: staleBoundary(input.eventMessages, staleAllowance, input.foldProjection(snapshot)),
-  };
+  return snapshot;
 }
 
 /**
