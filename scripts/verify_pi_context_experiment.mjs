@@ -1304,8 +1304,12 @@ try {
 {
   // Keyed by provider AND model: capacity is a fact about a deployment, and the same
   // model id behind another provider is another wire. Stated already net, which is the
-  // shape the runtime now takes, and equal to the 383,616 every sealed run measured.
-  assert.equal(EXPERIMENT_PROVIDER_INPUT_BUDGETS["openai-codex/gpt-5.6-luna"], 383_616);
+  // shape the runtime now takes. The two entries differ because they are two separate
+  // deployment facts: rep 2 of luna-20260810 proved luna's wire refuses below 383,616
+  // (largest served 361,882, refused at approximately 377,800), so luna pins the
+  // corrected 343,616 while sol keeps the 383,616 its own sealed lane measured against
+  // without ever recording a refusal.
+  assert.equal(EXPERIMENT_PROVIDER_INPUT_BUDGETS["openai-codex/gpt-5.6-luna"], 343_616);
   assert.equal(EXPERIMENT_PROVIDER_INPUT_BUDGETS["openai-codex/gpt-5.6-sol"], 383_616);
   assert.equal(EXPERIMENT_PROVIDER_INPUT_BUDGETS["gpt-5.6-sol"], undefined);
   validateExperimentRunConfig({ ...runConfig, providerInputBudget: 383_616 });

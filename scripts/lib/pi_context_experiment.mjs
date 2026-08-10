@@ -72,13 +72,24 @@ export const EXPERIMENT_DEFAULT_GUIDED_CURATION = false;
 // Stated as the SERVING BUDGET, already net of the deployment's output reservation,
 // because that is the shape the runtime now takes: `providerInputBudget` passes straight
 // through as the one denominator instead of being netted down by a guessed reservation.
-// 383,616 is the same number every sealed run measured against (400,000 total less the
-// 16,384 the runtime used to withhold), so the arms stay comparable across the rename.
+// 383,616 (400,000 total less the 16,384 the runtime used to withhold) is the number
+// every run through luna-20260810 rep 2 measured against. Rep 2 then falsified it for
+// the luna deployment on its own wire: the sealed ledger's largest served request is
+// 361,882 tokens and the provider refused at approximately 377,800 real (375,830
+// estimated, estimator bias 1.0056), so luna's serving ceiling lies in (361,882,
+// 377,800] and a 383,616 budget builds requests the wire will not take. Luna's entry
+// is now 343,616, a 360,000 total less the same 16,384 reservation, the largest round
+// claim the evidence does not contradict; runs sealed against 383,616 stay readable
+// because validation requires only a positive budget, and cross-lane token numbers
+// carry the differing denominators as a stated caveat. Sol keeps 383,616: the
+// counterevidence is luna's alone and no sealed sol run recorded a wire refusal,
+// though the sol lane has never probed its top; correct it the day sol's wire says
+// otherwise.
 // Keyed by PROVIDER and model together: capacity is a fact about a deployment, and the
 // same model id behind a different provider is a different deployment with a different
 // wire, so a bare model key would hand it this fact incorrectly.
 export const EXPERIMENT_PROVIDER_INPUT_BUDGETS = Object.freeze({
-  "openai-codex/gpt-5.6-luna": 383_616,
+  "openai-codex/gpt-5.6-luna": 343_616,
   "openai-codex/gpt-5.6-sol": 383_616,
 });
 // The campaign's brief generator. Fold briefs are MODEL-WRITTEN in the shipped package,
