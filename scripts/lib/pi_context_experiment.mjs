@@ -2479,6 +2479,17 @@ export function rollbackLens(events) {
       recoveryAttempts: recovery ? number(recovery.attempts) : null,
       recoveredTokensBefore: recovery ? number(recovery.tokens_before) : null,
       recoveredTokensAfter: recovery ? number(recovery.tokens_after) : null,
+      // What the episode actually took off the request the provider REFUSED, which is
+      // the only baseline the recovered verdict is derived from. `tokens_before` is the
+      // projection the recovery loop itself started from, and by then the ordinary
+      // commit of the same pass has usually already run, so the loop-local delta reads
+      // zero on episodes that genuinely rebuilt a smaller request.
+      recoveredFreedTokens: recovery && Number.isFinite(recovery.freed_tokens)
+        ? recovery.freed_tokens
+        : null,
+      rejectedTokens: recovery && Number.isFinite(recovery.rejected_tokens)
+        ? recovery.rejected_tokens
+        : null,
       recovered: recovery ? recovery.recovered === true : null,
     };
   });
@@ -2513,9 +2524,13 @@ export function rollbackLens(events) {
       recoveriesWithoutRollback: recoveries.filter((recovery) =>
         !Number.isFinite(recovery.rollback_seq)).length,
     },
-    // Recovery COST, which is what the frequency number is only half of.
+    // Recovery COST, which is what the frequency number is only half of. Read from the
+    // episode's own freed count where the record carries one; older streams have only
+    // the loop-local delta, which understates any episode the ordinary commit rescued.
     foldedTokensToRecover: joined.reduce((total, row) =>
-      total + Math.max(0, row.recoveredTokensBefore - row.recoveredTokensAfter), 0),
+      total + (row.recoveredFreedTokens === null
+        ? Math.max(0, row.recoveredTokensBefore - row.recoveredTokensAfter)
+        : Math.max(0, row.recoveredFreedTokens)), 0),
     unrecovered: joined.filter((row) => row.recovered === false).length,
     table,
     definition: "one row per context.rollback, joined to the context.recovery carrying the same " +

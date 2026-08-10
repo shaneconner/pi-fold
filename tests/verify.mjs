@@ -5032,16 +5032,27 @@ async function gateEpochBatchingUnderFullLevers() {
   // ABOVE THE BAND TOP, BELOW THE FENCE, WITH THE TURN STILL OPEN.
   //
   // The accumulated batch lands in ONE commit rather than dribbling out as an inline
-  // fold per pass, and then the session goes quiet: the open excursion is inside the
-  // unfinished turn, the zone law does not offer automation anything there, and no
-  // further commit fires on a window with nothing left it may reach.
+  // fold per pass, and then the session goes quiet IN BYTES while the turn stays open.
   //
-  // The guard waiver does NOT fire here, and that is the change the zone law made. The
-  // waiver exists to keep a request sendable when every applicable mark belongs to the
-  // open turn; below the fence there is nothing to keep sendable, so the runtime defers
-  // instead of reaching into the turn. Gate 56 holds the other half: at the fence there
-  // is no deeper reach to take, so the session that cannot fold its way out rolls back
-  // instead.
+  // RE-DERIVED 2026-08-10 (the open-turn commit fix). This section used to assert that
+  // the open excursion is never even MARKED, on the reasoning that the stale zone ends
+  // at the last closed turn and so offers automation nothing there. That reasoning was
+  // the defect: the stale boundary was clamped to the fresh boundary, so a session that
+  // never closes a turn had a stale zone of width zero and starved outright
+  // (luna-20260810 pifold rep 2: 274,173 tokens of unmarked stale spans, zero commits of
+  // any kind, two provider rejections). The stale zone is a byte prefix now, so the older
+  // excursion batches ARE proposable, and the open turn is protected where it was always
+  // meant to be: at the commit, by the guard that has a waiver.
+  //
+  // What the gate measures instead is the property that actually matters economically,
+  // and it is stronger than the old one: marks are free, folds are not. Automation marks
+  // the excursion every pass and MOVES NO BYTE while the turn is open, because the guard
+  // retains every one of those marks; the whole retained batch then lands in exactly one
+  // commit at the moment the turn closes.
+  //
+  // The guard waiver still does NOT fire here. Below the fence the waiver only releases
+  // a commit that would otherwise be starved, and this one has spine marks it can apply,
+  // so the guard holds in full. Gate 56 holds the other half at fence level.
   const accumulated = below.at(-1).marks;
   const foldsAtCrossing = below.at(-1).folds;
   // The first two steps are full request cycles: the crossing exposes the last-call,
@@ -5061,10 +5072,21 @@ async function gateEpochBatchingUnderFullLevers() {
   assert(above.every((pass) => pass.guardWaived !== true),
     `A commit below the fence waived the current-turn guard: ${
       above.map((pass) => `${pass.kind}/waived=${pass.guardWaived}`).join(",")}`);
-  assert.equal(above.at(-1).marks, 0,
-    "The open excursion was marked by automation the zone law does not admit there");
   assert(above.at(-1).folds > foldsAtCrossing,
     "The crossing folded nothing at all");
+  // The guard, doing its own job at the commit rather than borrowing a zone's. The
+  // crossing epoch RETAINED the open excursion's marks instead of refusing them, which
+  // is the difference between "held until the turn closes" and "lost".
+  assert(commitPass.retainedMarks > 0,
+    "The crossing epoch retained nothing, so the current-turn guard held nothing back");
+  // Marks are free; folds are not. Automation keeps proposing into the open excursion
+  // and not one byte moves for it while the turn stays open.
+  const openPasses = above.slice(above.indexOf(commitPass) + 1);
+  assert(openPasses.length >= 3, "The fixture never sat on the open turn long enough to measure it");
+  assert(openPasses.at(-1).marks > commitPass.appliedMarks,
+    `Automation stopped proposing on the open turn at ${openPasses.at(-1).marks} marks`);
+  assert(openPasses.every((pass) => pass.folds === commitPass.folds),
+    `Bytes moved on the open turn: ${openPasses.map((pass) => pass.folds).join(",")}`);
 
   // The rep10 property still holds everywhere: no pass folds unless a commit epoch
   // applied at least one mark, so folds never dribble out one rewrite at a time.
@@ -5081,20 +5103,19 @@ async function gateEpochBatchingUnderFullLevers() {
   // waiver is now the only place it lives.
   assert.deepEqual(above.filter((pass) => pass.waivedMarks > 0), []);
 
-  // THE TURN CLOSES AND THE SESSION STAYS QUIET.
+  // THE TURN CLOSES AND THE HELD BATCH LANDS, ONCE.
   //
-  // This section used to assert a SECOND commit here, and that commit was an artifact.
-  // The crossing epoch had a fence-only deepened top-up that marked spans the fresh
-  // window protects; the guard retained them, and closing the turn released them into a
-  // commit of their own. The deepened snapshot is gone with the rollback build, so the
-  // crossing marks nothing it may not apply, retains nothing, and leaves nothing for a
-  // later epoch to collect. What remains in the window after the batch lands is inside
-  // the protected fresh tail, and the zone law holds there at every occupancy.
+  // RE-DERIVED 2026-08-10 with the section above. The claim here used to be that nothing
+  // is left to collect when the turn closes, because nothing had been marked. Now the
+  // excursion IS marked and the guard is holding all of it, so closing the turn releases
+  // a batch, and the property under test is that it lands in ONE commit rather than one
+  // fold per pass over three request cycles. That is the same economic law the rest of
+  // this gate measures, applied at the only moment on this fixture where the hold ends.
   const marksAtCloseIds = new Set((materialized(runtime).pendingMarks ?? []).map((mark) => mark.id));
   const pendingAtClose = marksAtCloseIds.size;
   const foldsAtClose = materialized(runtime).folds.length;
-  assert.equal(pendingAtClose, 0,
-    "The crossing commit retained marks; automation reached material the fresh window protects");
+  assert(pendingAtClose >= 12,
+    `The guard held only ${pendingAtClose} marks, so the released batch is not worth measuring`);
   for (let turn = 0; turn < 3; turn += 1) {
     runtime.appendMessage({
       role: "user", content: [{ type: "text", text: `Next task ${turn}.` }], timestamp: 990 + turn,
@@ -5122,17 +5143,21 @@ async function gateEpochBatchingUnderFullLevers() {
   });
   assert.equal(context.currentTurnRefKeys(closingSnapshot).size, 0,
     "The closing turns never closed; the guard is still holding the excursion");
-  assert.equal(
-    contextEvents(runtime, closingFrom)
-      .filter((record) => record.kind === "context.commit" && record.deferred === false).length,
-    0,
-    "A commit fired on a window whose remaining mass the fresh tail protects",
-  );
-  assert.equal(materialized(runtime).folds.length, foldsAtClose,
-    "Bytes moved after the batch landed, with nothing left the zone law admits");
+  const closingCommits = contextEvents(runtime, closingFrom)
+    .filter((record) => record.kind === "context.commit" && record.deferred === false);
+  assert.equal(closingCommits.length, 1,
+    `The released batch took ${closingCommits.length} commits over three request cycles`);
+  assert.equal(closingCommits[0].applied_marks, pendingAtClose,
+    `The commit applied ${closingCommits[0].applied_marks} of the ${pendingAtClose} marks the guard released`);
+  assert.equal(closingCommits[0].refused_marks, 0, "A released mark was refused rather than applied");
+  assert(closingCommits[0].freed_tokens > 0, "The released batch freed nothing");
+  assert(materialized(runtime).folds.length > foldsAtClose,
+    "The guard released its batch and no fold landed for it");
+  // What accumulates after is the NEXT batch, proposed against a window the commit just
+  // shortened. It is bounded by what one pass can propose, and it has moved no bytes.
   const stillPending = materialized(runtime).pendingMarks ?? [];
-  assert.equal(stillPending.length, 0,
-    `The quiet window accumulated ${stillPending.length} marks the zone law does not offer`);
+  assert(stillPending.length <= 2,
+    `The quiet window accumulated ${stillPending.length} marks after the batch landed`);
 
   return {
     belowThresholdPasses: below.length,
@@ -5141,13 +5166,17 @@ async function gateEpochBatchingUnderFullLevers() {
     waivedCommitsBelowFence: 0,
     accumulatedBeforeCrossing: accumulated,
     appliedAtCrossing: commitPass.appliedMarks,
+    retainedAtCrossing: commitPass.retainedMarks,
+    markedOnTheOpenTurn: openPasses.at(-1).marks,
+    bytesMovedOnTheOpenTurn: 0,
     passesThatMovedBytes: foldingPasses.length,
     passesTotal: passes.length,
-    marksAtClose: pendingAtClose,
+    marksHeldByTheGuard: pendingAtClose,
     marksStillPending: stillPending.length,
     committedInOneEpoch: true,
-    commitsAfterTheTurnClosed: 0,
-    foldsAfterTheTurnClosed: foldsAtClose,
+    commitsAfterTheTurnClosed: closingCommits.length,
+    appliedAfterTheTurnClosed: closingCommits[0].applied_marks,
+    foldsAfterTheTurnClosed: materialized(runtime).folds.length,
   };
 }
 
@@ -5261,14 +5290,24 @@ async function gateProjectionBudgetFence() {
   assert(epoch.appliedMarks >= 1, "The fence-level commit applied nothing");
   assert.equal(epoch.retainedMarks, 0, "The fence left marks guarded while the request would not fit");
 
-  // THE STARVED SESSION IS THE ROLLBACK'S FIXTURE NOW.
+  // THE STARVED SESSION: THE FOLD PATH REACHES, AND THE ROLLBACK STILL CARRIES IT.
   //
-  // The rep11 shape exactly: 47 messages, one open excursion, no terminal assistant, so
-  // the whole window is inside the fresh tail and the current turn. This used to be the
-  // deepened snapshot's case, where the fence narrowed the fresh tail, extended the
-  // stale zone over the middle and the waiver released the excursion. The zone law is
-  // unconditional now, so the fold path has nothing legal to reach here at all, and the
-  // answer to a request that does not fit is the rollback, not a deeper fold.
+  // The rep11 shape exactly: 47 messages, one open excursion, no terminal assistant.
+  //
+  // RE-DERIVED 2026-08-10 (the open-turn commit fix). This section used to assert that
+  // the stale boundary EQUALS the fresh boundary here and that automation therefore
+  // folds and marks nothing at all -- "a window that is one open excursion cannot be
+  // saved by either mechanism". The equality was the bug, not the law: the stale
+  // boundary was clamped to the fresh boundary, and on a session that never closes a
+  // turn that clamp is zero-width, which is how luna-20260810 pifold rep 2 reached
+  // 375,830 tokens with 274,173 of them unmarked and never committed once.
+  //
+  // The stale zone is a byte prefix now, so it runs PAST the last closed turn into the
+  // excursion and the fold path does reach real mass here. What this fixture still
+  // proves is that reaching is not the same as saving: 420,000 chars of excursion
+  // against a 30,600-token serving budget is a genuine impossibility, so the reduction
+  // cannot close the gap, the abort holds, the rollback lane runs, and the recovery
+  // record says recovered FALSE rather than dressing an unchanged request as a rescue.
   const guardedOnly = makeRuntime(
     makeFixture({ turns: 8, tools: false, chapterChars: 40, contextWindow: 34_000 }),
     { ...SEALED_SPINE, providerInputBudget: 30_600 },
@@ -5307,17 +5346,23 @@ async function gateProjectionBudgetFence() {
     contextEntries: guardedOnly.branch,
     contextWindow: 34_000,
   });
-  assert.equal(guardedSnapshot.staleBoundary, guardedSnapshot.freshBoundary,
-    "The fixture left a middle zone, so the starving case is not being measured");
+  assert(context.currentTurnBoundary(guardedSnapshot) < guardedSnapshot.messages.length - 28,
+    "A turn closed inside the excursion, so the starving case is not being measured");
+  assert(guardedSnapshot.staleBoundary > guardedSnapshot.freshBoundary,
+    `The automatic reach stopped at the last closed turn: stale ${guardedSnapshot.staleBoundary}, ` +
+      `fresh ${guardedSnapshot.freshBoundary}`);
+  assert(guardedSnapshot.staleBoundary < guardedSnapshot.messages.length,
+    "The stale zone swallowed the whole window, so its byte width bounds nothing");
   assert(context.currentTurnRefKeys(guardedSnapshot).size >= 12,
     "The guard does not hold the excursion, so the starving case is not being measured");
-  assert.equal(materialized(guardedOnly).folds.length, 0,
-    "Automation folded material the zone law does not admit at any occupancy");
-  assert.equal((materialized(guardedOnly).pendingMarks ?? []).length, 0,
-    "Automation marked material the zone law does not admit at any occupancy");
+  // The new truth, positively: the fold path found legal material inside the open
+  // excursion and folded it. What it could not do is fold enough.
+  const starvedFolds = materialized(guardedOnly).folds.length;
+  assert(starvedFolds >= 1,
+    "The fold path reached nothing on the open excursion, so the starvation is back");
   const guardedAbortsBeforeOverflow = guardedOnly.aborts;
   assert(guardedAbortsBeforeOverflow >= 1,
-    "A projection the fold path cannot reduce was transmitted instead of aborted");
+    "A projection the fold path cannot reduce far enough was transmitted instead of aborted");
 
   // THE ROLLBACK CARRIES IT. The provider rejects, the leaf moves back past the request
   // that failed, one notice is steered, and the retried pass runs the recovery lane.
@@ -5341,17 +5386,22 @@ async function gateProjectionBudgetFence() {
   assert.equal(guardedRecovery.rollback_seq, guardedRollback.seq,
     "The fold-side record does not join the rollback that caused it");
 
-  // AND THE LOUD FAILURE SURVIVES BOTH. A window that is one open excursion has nothing
-  // the fold path may reach and nothing the rollback can shorten except the request
-  // itself, so it still fails rather than sending something the provider will reject.
-  // That is the impossibility this build never claimed to solve; it only stopped the
-  // runtime from reaching into the fresh tail to pretend otherwise.
+  // AND THE LOUD FAILURE SURVIVES BOTH. This window is 420,000 chars of excursion
+  // against a 30,600-token budget: the fold path reaches what the stale zone admits and
+  // it is nowhere near enough, and the rollback can shorten nothing except the request
+  // itself. So it still fails rather than sending something the provider will reject.
+  // That is the impossibility this build never claimed to solve.
   assert.equal(guardedRecovery.recovered, false,
     "The starved fixture recovered, so it is no longer measuring the impossible case");
+  // AND THE CLAIM IS BACKED, not asserted from our own estimate. The recovery pass
+  // folded nothing, so the retried request is byte-identical to the one the provider
+  // rejected, and the record says so in the two fields the verdict is derived from.
+  assert.equal(guardedRecovery.loop_reduced, false, "The recovery loop reduced but reported nothing reduced");
+  assert.equal(guardedRecovery.freed_tokens, 0, "The recovery pass freed tokens it did not report");
+  assert.equal(guardedRecovery.rejected_tokens, guardedRecovery.tokens_after,
+    "The rebuilt request differs in size from the one the provider rejected");
   assert(guardedOnly.aborts > guardedAbortsBeforeOverflow,
     "An over-budget projection was transmitted after the rollback");
-  assert.equal(materialized(guardedOnly).folds.length, 0,
-    "The recovery pass folded material the zone law does not admit");
 
   // The invariant, stated once: a projection the fence weighs as over budget is never
   // transmitted. It may still be RETURNED -- an aborted turn hands back the projection,
@@ -5375,9 +5425,13 @@ async function gateProjectionBudgetFence() {
     transmitted: reduction.transmitted === true,
     aborts: runtime.aborts,
     fenceAppliedMarks: epoch.appliedMarks,
-    starvedFolds: materialized(guardedOnly).folds.length,
+    starvedStaleBoundary: guardedSnapshot.staleBoundary,
+    starvedFreshBoundary: guardedSnapshot.freshBoundary,
+    starvedFolds: starvedFolds,
+    starvedFoldsAfterRecovery: materialized(guardedOnly).folds.length,
     starvedRollbackReplayed: guardedRollback.replayed,
     starvedRecovered: guardedRecovery.recovered,
+    starvedRecoveryLoopReduced: guardedRecovery.loop_reduced,
     starvedAborts: guardedOnly.aborts,
   };
 }
@@ -5587,9 +5641,16 @@ async function gateFenceMarginAndDepth() {
   // Climb toward the top of the window in real steps, declaring seven chars per token
   // throughout, which is what this workload actually measured.
   // Each measurement CLOSES its turn. The climb's subject is the estimator and the
-  // margin, not the guard: an inflow that never closes leaves every byte inside the open
-  // turn, where the zone law admits nothing at any occupancy, and the climb would be
-  // measuring the starving case gate 56 owns instead of the pre-wire margin.
+  // margin, not the guard.
+  //
+  // RESTATED 2026-08-10 (the open-turn commit fix). The reason used to be that an inflow
+  // which never closes leaves every byte inside the open turn "where the zone law admits
+  // nothing at any occupancy". That was the regression talking: the stale boundary was
+  // clamped to the fresh boundary, so an unclosed session had a zero-width stale zone and
+  // starved. Automation reaches an open excursion now, and the guard adjudicates it at
+  // the commit. Closing every turn still matters here for a simpler reason: it keeps the
+  // guard out of the picture entirely, so what the climb measures is the estimator and
+  // the margin rather than the guard-and-waiver case gate 56 owns.
   const climb = [];
   for (let step = 0; step < 12; step += 1) {
     const chars = bytesOf((await project(runtime)).messages);
@@ -5606,8 +5667,8 @@ async function gateFenceMarginAndDepth() {
     });
     if (status.overBudgetReduction) break;
     // One stage of inflow: a payload of the size this workload actually gathers, asked
-    // for by a user turn so the stage CLOSES. An inflow that never closes leaves every
-    // byte inside the open turn, where the zone law admits nothing at any occupancy.
+    // for by a user turn so the stage CLOSES, which keeps the current-turn guard out of
+    // a climb that is about the estimator.
     runtime.appendMessage({
       role: "user", content: [{ type: "text", text: `Stage ${step}, please.` }], timestamp: 700 + step,
     }, "inflow");
@@ -6533,15 +6594,70 @@ async function gateOverflowRecovery() {
     "The fold-side record does not join the rollback that caused it");
   const status = (await toolStatus(runtime)).details.automatic;
   assert.equal(status.recovery.pendingRejection, null, "The rejection was not cleared by recovery");
-  assert.equal(status.recovery.last.recovered, true, "The rebuilt request still does not fit");
   assert.equal(status.recovery.rollback.last.replayed, true);
+  // RECOVERY IS A CHANGE, NOT AN OPINION.
+  //
+  // RE-DERIVED 2026-08-10. This asserted `recovered === true` here, and `recovered` was
+  // `!measured.over`: our own estimator answering the question the provider had just
+  // answered differently. On this fixture the retried projection is 11,954 tokens of a
+  // 50,400-token budget and the recovery pass folds NOTHING, because there is nothing
+  // that needs folding -- so the old field reported a rescue for a request nobody
+  // rebuilt. Measured 2026-08-10 (luna-20260810 pifold rep 2), the same field reported
+  // recovered twice on a window that had not moved a byte, and the run died anyway.
+  //
+  // A rejection mutates nothing durable, so a pass that folds nothing hands the provider
+  // a byte-identical request. The verdict is therefore derived from what the pass DID,
+  // and the two facts it derives from ride the same record.
+  assert.equal(recoveryRecord.freed_tokens, 0, "The retried request came back smaller than the rejected one");
+  assert.equal(recoveryRecord.rejected_tokens, recoveryRecord.tokens_after,
+    "The rebuilt request differs in size from the one the provider rejected");
+  assert.equal(status.recovery.last.recovered, false,
+    "An unchanged request was reported as recovered from a provider rejection");
   const rebuiltTokens = Math.ceil(bytesOf(retried.messages) / status.projectionCharsPerToken);
   assert(rebuiltTokens <= budgetTokens || runtime.aborts >= 1,
     `A ${rebuiltTokens}-token request was rebuilt over a ${budgetTokens}-token budget`);
   const receipts = status.curation.receipts;
   const receipt = receipts.find((item) => item.kind === "overflow-recovery");
   assert(receipt, "The rollback was not receipted");
-  assert.match(String(receipt.note), /rollback was required/);
+  assert.equal(receipt.recovered, false, "The window receipt claimed a rescue the stream did not");
+  assert.match(String(receipt.note), /this pass made it no smaller/);
+  assert.match(String(receipt.note), /is not a recovery/);
+
+  // AND THE OTHER HALF OF THE VERDICT: A PASS THAT REALLY REBUILDS SAYS SO.
+  //
+  // The same lane on a window that is genuinely full of unfolded stale mass. The
+  // recovery loop runs at fence pressure, folds, the request comes back smaller, and
+  // only then is `recovered` true. Without this half, a runtime that reported recovered
+  // false unconditionally would pass the honesty assertions above.
+  const rebuilt = makeRuntime(
+    makeFixture({ turns: 20, resultChars: 12_000, contextWindow: window }),
+    { ...SEALED_SPINE, providerInputBudget: servingBudget(window) },
+  );
+  await startRuntime(rebuilt);
+  // Measurement passes only: marks accumulate and no commit runs, so the rejection
+  // arrives on a window nothing has folded yet.
+  for (const tokens of [40_000, 44_000, 47_000, 49_000]) {
+    await measure(rebuilt, tokens, window, undefined, "toolUse");
+  }
+  const rebuiltFrom = rebuilt.appended.length;
+  await overflow(rebuilt);
+  await project(rebuilt);
+  await settle();
+  const rebuiltRecovery = contextEvents(rebuilt, rebuiltFrom)
+    .find((record) => record.kind === "context.recovery");
+  assert(rebuiltRecovery, "The full window never ran the recovery lane");
+  assert(rebuiltRecovery.rejected_tokens > rebuiltRecovery.tokens_after,
+    `The retried request (${rebuiltRecovery.tokens_after}) is not smaller than the rejected one ` +
+      `(${rebuiltRecovery.rejected_tokens})`);
+  assert(rebuiltRecovery.freed_tokens > 0,
+    `The pass rebuilt a smaller request and reported ${rebuiltRecovery.freed_tokens} tokens freed`);
+  assert.equal(rebuiltRecovery.recovered, true,
+    "A pass that folded the request down inside the budget did not report a recovery");
+  const rebuiltReceipt = (await toolStatus(rebuilt)).details.automatic.curation.receipts
+    .find((item) => item.kind === "overflow-recovery");
+  assert(rebuiltReceipt, "The genuine recovery was not receipted");
+  assert.equal(rebuiltReceipt.recovered, true);
+  assert.match(String(rebuiltReceipt.note), /rollback was required/);
 
   // THE UNREPLAYABLE TAIL. A rolled-back tail with unanswered tool calls rolls back and
   // stops there: a user turn after an unsatisfied tool call is malformed for every
@@ -6616,6 +6732,9 @@ async function gateOverflowRecovery() {
     noticeChars: rollbackRecord.notice_chars,
     steeredMessages: runtime.steered.length,
     rebuiltTokens,
+    unchangedRequestRecovered: status.recovery.last.recovered,
+    genuineRecoveryFreedTokens: rebuiltRecovery.freed_tokens,
+    genuineRecoveryRecovered: rebuiltRecovery.recovered,
     replaySkipped: String(orphanRecord.replay_skip_reason).slice(0, 40),
     disarmedFailures: disarmed.probeFailures.length,
   };
@@ -9326,6 +9445,28 @@ async function gateFenceOpensTheMiddle() {
     "A commit applied marks the zone law does not offer at the fence");
   assert(runtime.aborts > abortsBeforeFence,
     "An untransmittable request went out instead of being aborted");
+  // AND IT SAYS SO. A commit pass that reaches the adjudication with nothing proposable
+  // used to return silently, which is how the rep-2 starvation stayed invisible for 25
+  // stages: the last call announced 274,173 tokens of unmarked stale spans and the pass
+  // that answered it left no record that a commit had even been attempted. It names
+  // itself now, and it carries the remainder beside the emptiness so the two facts sit
+  // on one record. The remainder here is legitimately nonzero: it counts every stale
+  // result outside the fresh tail, and the middle is agent judgment only. This record is
+  // a report, not an alarm; what makes it useful is that a starved window and a merely
+  // exhausted one are told apart by the stale boundary printed alongside.
+  const nothingProposable = contextEvents(runtime, beforeFence).filter((record) =>
+    record.kind === "context.commit" && record.reason === "nothing-proposable");
+  assert(nothingProposable.length >= 1,
+    "A commit pass with nothing to propose returned silently");
+  for (const record of nothingProposable) {
+    assert.equal(record.deferred, true);
+    assert.equal(record.applied_marks, 0);
+    assert.equal(record.pending_marks, 0);
+    assert(record.unmarked_stale_tokens > 0,
+      "The deferral reported no remainder, so it says nothing the silence did not");
+    assert(record.stale_boundary > 0,
+      "The deferral reported no stale boundary, so a starved zone reads like an exhausted one");
+  }
 
   // (c) AND THE ROLLBACK IS THE RECOVERY. The one thing left that can shorten this
   // window is taking the request that failed off the branch.
@@ -9348,8 +9489,223 @@ async function gateFenceOpensTheMiddle() {
     fenceSnapshotDeleted: true,
     latchedCommits: latched.length,
     fenceCommits: fenceCommits.length,
+    nothingProposableRecords: nothingProposable.length,
     fenceAborts: runtime.aborts,
     fenceRollbackReplayed: fenceRollback.replayed,
+  };
+}
+
+/**
+ * THE BAND TOP COMMITS IN A SESSION THAT NEVER CLOSES A TURN.
+ *
+ * Measured 2026-08-10 (luna-20260810 pifold rep 2, sealed run 3705e0d4). One user
+ * message and 24 assistant messages, every one of them stopReason "toolUse", so
+ * `completeTurns` was empty for the whole session and `currentTurnBoundary` sat at -1.
+ * The last call fired at 0.804 occupancy announcing 19 unmarked stale spans worth
+ * 274,173 tokens, and no commit of any kind ever fired. The window climbed to 375,830
+ * estimated tokens and the provider rejected it twice.
+ *
+ * Two independent defects each emptied the automatic selector on that shape, and either
+ * alone was enough to starve it. The stale boundary was clamped to the fresh boundary,
+ * which is 0 when no turn has closed, so every automatic rung read a zero-width stale
+ * zone. And the commit pass handed `currentTurnRefKeys` to the top-up as an exclusion,
+ * which on this shape is the entire window, so nothing was ever proposed and the guard
+ * waiver written for exactly this starvation never had a guarded mark to count.
+ *
+ * Counterfactual on the sealed state at ordinal 45: either fix alone yields 0 marks,
+ * both together yield 13 marks, 11 applied under a guard waiver of 11, about 167,321
+ * tokens freed.
+ */
+async function gateOpenTurnCommits() {
+  // THE FIXTURE IS THE SHAPE. One user message, then nothing but tool-calling assistants
+  // and their results. No terminal assistant anywhere, including the measurement
+  // messages, so no turn ever closes.
+  const sessionId = "open-turn-test";
+  const window = 100_000;
+  const providerInputBudget = 90_000;
+  const batches = 24;
+  const resultChars = 12_000;
+  const entries = [];
+  const messages = [];
+  const resultEntryIds = [];
+  let parentId = null;
+  let sequence = 0;
+  const add = (message) => {
+    const id = `${sessionId}-entry-${String(++sequence).padStart(3, "0")}`;
+    entries.push({ type: "message", id, parentId, message });
+    messages.push(message);
+    parentId = id;
+    return id;
+  };
+  add({
+    role: "user",
+    content: [{ type: "text", text: "One marathon task: read the repository and keep going." }],
+    timestamp: 1,
+  });
+  for (let step = 0; step < batches; step += 1) {
+    add({
+      role: "assistant",
+      content: [{ type: "toolCall", id: `open-${step}`, name: "read", arguments: { path: `open-${step}.txt` } }],
+      stopReason: "toolUse",
+      timestamp: 10 + step,
+    });
+    resultEntryIds.push(add({
+      role: "toolResult",
+      toolCallId: `open-${step}`,
+      toolName: "read",
+      content: [{ type: "text", text: `Open ${step}: ${"o".repeat(resultChars)}` }],
+      isError: false,
+      timestamp: 10 + step,
+    }));
+  }
+  const built = {
+    sessionId,
+    entries,
+    messages,
+    contextWindow: window,
+    turnEntries: [resultEntryIds],
+    snapshot: context.mapActiveContext({
+      sessionId, eventMessages: messages, contextEntries: entries, contextWindow: window,
+    }),
+  };
+  const runtime = makeRuntime(built, { providerInputBudget });
+  await startRuntime(runtime);
+
+  // (a) THE FIXTURE REALLY IS THE SHAPE.
+  const budgetTokens = (await toolStatus(runtime)).details.automatic.projectionBudgetTokens;
+  assert.equal(budgetTokens, providerInputBudget,
+    "The declared serving budget did not reach the runtime, so the netBudget path is not exercised");
+  const snapshot = context.mapActiveContext({
+    sessionId,
+    eventMessages: runtime.messages,
+    contextEntries: runtime.branch,
+    contextWindow: providerInputBudget,
+    netBudget: true,
+  });
+  assert.equal(snapshot.completeTurns.length, 0, "A turn closed in the open-turn fixture");
+  assert.equal(context.currentTurnBoundary(snapshot), -1,
+    "A terminal assistant message reached the open-turn fixture");
+  assert(bytesOf(runtime.messages) >= batches * resultChars,
+    "The fixture is smaller than the batches it declares");
+  assert(snapshot.policy.minToolChars <= resultChars,
+    "The fixture's results are under the minimum a tool batch may fold");
+
+  // (b) THE DIRECT REGRESSION ASSERTION. The stale zone is a byte prefix, so it has width
+  // even though no turn has ever closed. Clamping it to the fresh boundary made it zero.
+  assert.equal(snapshot.freshBoundary, 0,
+    "The fresh boundary is not zero, so the clamp is not being measured");
+  assert(snapshot.staleBoundary > 0,
+    "The stale zone is empty in a session that never closed a turn: the clamp is back");
+  assert(snapshot.staleBoundary < snapshot.messages.length,
+    "The stale zone swallowed the newest batch, so its byte width bounds nothing");
+
+  // (c) DRIVE PAST THE BAND TOP WITH ZERO AGENT MARKS. Every measurement stops on
+  // toolUse, so the turn stays open through the whole climb.
+  const bandTop = context.DEFAULT_THRESHOLDS.maxTarget * providerInputBudget;
+  await measure(runtime, 60_000, window, undefined, "toolUse");
+  await project(runtime);
+  await settle();
+  const climbFrom = runtime.appended.length;
+  await measure(runtime, Math.ceil(bandTop) + 2_000, window, undefined, "toolUse");
+  await project(runtime);
+  await settle();
+  const lastCall = contextEvents(runtime, climbFrom).find((record) => record.kind === "context.lastcall");
+  assert(lastCall, "The band top passed without a last call in a session that never closed a turn");
+  assert(lastCall.occupancy >= context.DEFAULT_THRESHOLDS.maxTarget,
+    `The last call fired at ${lastCall.occupancy}, below the band top`);
+  assert.equal(lastCall.pending_agent_marks, 0, "The fixture made an agent mark");
+
+  // (d) THE CONSISTENCY INVARIANT, checked at the exposure the last call describes.
+  //
+  // A last call that announces unmarked stale mass while holding no marks is a promise
+  // that the commit answering it has something to do. In rep 2 that promise was empty
+  // 19 spans and 274,173 tokens over, which is the contradiction this asserts away.
+  const exposureSnapshot = context.mapActiveContext({
+    sessionId,
+    eventMessages: runtime.messages,
+    contextEntries: runtime.branch,
+    contextWindow: providerInputBudget,
+    netBudget: true,
+  });
+  const exposureState = materialized(runtime, sessionId);
+  const remainder = context.unmarkedRemainder(exposureSnapshot, exposureState, 4);
+  assert(lastCall.unmarked_stale_tokens > 0 && remainder.spans > 0,
+    "The last call announced nothing, so there is no promise to keep");
+  assert(context.selectAutomaticSpan(exposureSnapshot, exposureState) !== null,
+    `The last call announced ${remainder.spans} unmarked stale spans the selector cannot propose`);
+  // AND THE SHAPE OF THE DEFECT, pinned so it cannot come back by another route. The
+  // open turn is the WHOLE window here, so excluding it at proposal time leaves the
+  // selector nothing; that is why the guard is adjudicated at the commit, where it has a
+  // waiver, and never at the proposal, where it does not.
+  const guarded = context.currentTurnRefKeys(exposureSnapshot);
+  assert.equal(guarded.size, batches,
+    "The guard does not hold the whole window, so the starving shape is not being measured");
+  assert.equal(context.selectAutomaticSpan(exposureSnapshot, exposureState, guarded), null,
+    "Excluding the open turn at proposal time left something proposable, so this fixture " +
+      "no longer demonstrates why the exclusion had to move to the commit");
+
+  // The commit lands on the pass after the round the last call opened. It lands at the
+  // pressure backstop rather than at the band top, and that is the ladder working as
+  // written: every mark on this shape belongs to the open turn, so applying any of them
+  // needs the guard waiver, and the waiver only releases a STARVED commit once occupancy
+  // has reached `refoldRatio` of the serving budget. Between the band top and the
+  // backstop this session marks and holds, which is the deferral the guard is for.
+  const backstop = context.ACTIVE_CONTEXT_POLICY.refoldRatio * providerInputBudget;
+  assert(backstop > bandTop, "The backstop is not above the band top on this deployment");
+  const commitFrom = runtime.appended.length;
+  await measure(runtime, Math.ceil(backstop) + 3_000, window, undefined, "toolUse");
+  await project(runtime);
+  await settle();
+  const commit = contextEvents(runtime, commitFrom)
+    .find((record) => record.kind === "context.commit" && record.deferred === false);
+  assert(commit, "The pass after the last call committed nothing in a session that never closed a turn");
+  assert(commit.applied_marks > 0, `The commit applied ${commit.applied_marks} marks`);
+  assert(commit.freed_tokens > 0, `The commit freed ${commit.freed_tokens} tokens`);
+  assert(commit.waived_marks > 0,
+    "The guard was not waived, so the commit did not apply the open turn's own evidence");
+  // AND THE COMMIT IS AS DEEP AS THE THERMOSTAT ASKED. This is the second defect's own
+  // assertion: the top-up is what carries a commit from whatever the per-pass ladder
+  // happened to mark down to the target line, and handing it the open turn as an
+  // exclusion made it propose nothing at all on this shape, because here the open turn
+  // is the entire window. A commit that reaches the target only by the marks a few
+  // measurement passes left lying around is the starvation with a smaller number on it.
+  assert(commit.topup_marks > 0,
+    "The top-up proposed nothing on a window that is one open turn");
+  assert.equal(commit.shortfall_share, 0,
+    `The commit fell ${commit.shortfall_share} short of its freeing target`);
+
+  // AND THE PROTECTIONS SURVIVE THE FIX. The newest batch is inside the fresh tail, and
+  // the fresh tail is a byte tail in `protectedIndices`, not a consequence of the clamp.
+  const committedState = materialized(runtime, sessionId);
+  const foldedKeys = new Set(committedState.folds.flatMap((fold) =>
+    fold.parts.flatMap((part) => (part.kind === "raw" ? [part.ref.entryId] : []))));
+  const newest = resultEntryIds.at(-1);
+  assert(foldedKeys.size > 0, "Nothing was folded, so the fresh tail proves nothing");
+  assert(!foldedKeys.has(newest), "The commit folded the newest batch out of the fresh tail");
+  const projection = await project(runtime);
+  const projected = json.stableStringify(projection.messages);
+  assert(projected.includes(`Open ${batches - 1}: `),
+    "The newest batch did not survive raw in the projection");
+  assert(!projected.includes(`Open 0: ${"o".repeat(resultChars)}`),
+    "The oldest batch survived raw, so the commit moved nothing the stale zone offered");
+
+  return {
+    completeTurns: snapshot.completeTurns.length,
+    currentTurnBoundary: context.currentTurnBoundary(snapshot),
+    freshBoundary: snapshot.freshBoundary,
+    staleBoundary: snapshot.staleBoundary,
+    messages: snapshot.messages.length,
+    lastCallOccupancy: lastCall.occupancy,
+    lastCallUnmarkedTokens: lastCall.unmarked_stale_tokens,
+    guardedRefKeys: guarded.size,
+    proposableWithoutTheExclusion: true,
+    proposableWithTheExclusion: false,
+    appliedMarks: commit.applied_marks,
+    topUpMarks: commit.topup_marks,
+    waivedMarks: commit.waived_marks,
+    shortfallShare: commit.shortfall_share,
+    freedTokens: commit.freed_tokens,
+    newestBatchFolded: false,
   };
 }
 
@@ -9820,6 +10176,7 @@ const gates = [
   [105, "Every completed tool batch folds unmarked", gateEveryToolBatchFoldsUnmarked],
   [103, "Guidance is two booleans, default on", gateGuidanceOption],
   [104, "The slate rides the commit boundary", gateSurfacingDeliveryRidesTheBoundary],
+  [106, "The band top commits with no turn ever closed", gateOpenTurnCommits],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

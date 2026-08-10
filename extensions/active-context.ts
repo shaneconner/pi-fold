@@ -1679,43 +1679,80 @@ export function registerActiveContext(pi: any, options: {
       };
     }
     if (rejected) {
+      const overflowBefore = projectedTokenEstimate(projected);
+      // RECOVERY IS A CHANGE, NOT AN OPINION.
+      //
+      // This read `!measured.over`: our own estimator answering the question the
+      // provider had just answered differently. A rejection is ground truth that the
+      // estimate was wrong, so the estimate cannot also be the evidence that the retry
+      // will work. And a rejection mutates nothing durable -- the rolled-back branch
+      // rebuilds the same projection -- so a pass that changed nothing hands the
+      // provider a byte-identical request and calls it a rescue. Measured 2026-08-10
+      // (luna-20260810 pifold rep 2): two rejections at stage 25, not one byte folded
+      // either time, both recorded recovered true, and the run died anyway.
+      //
+      // The baseline is the request that was actually REJECTED, which is the last
+      // projection this process built: it is written at the end of every pass that
+      // builds one, and this lane runs before the current pass overwrites it. Measuring
+      // against the projection handed to this function instead would credit only the
+      // recovery loop's own folds and miss the ordinary commit that already ran earlier
+      // in the same pass, which is the usual way a retried request gets smaller.
+      const rejectedTokens = measurements.lastProjectedEstimate;
+      const freedTokens = typeof rejectedTokens === "number"
+        ? Math.max(0, rejectedTokens - measured.tokens)
+        : 0;
+      // Smaller than what the provider refused, AND inside the budget. Either half alone
+      // is a claim this runtime has already been wrong about once.
+      const recovered = freedTokens > 0 && !measured.over;
       curation.lastRecovery = {
         status: curation.pendingRejection?.status ?? null,
         attempts,
         estimatedTokensAfter: measured.tokens,
         budgetTokens: measured.budgetTokens,
-        recovered: !measured.over,
+        recovered,
       };
       emit("context.recovery", {
         provider_status: curation.pendingRejection?.status ?? null,
         attempts,
         max_attempts: OVERFLOW_RECOVERY_MAX_ATTEMPTS,
-        tokens_before: projectedTokenEstimate(projected),
+        tokens_before: overflowBefore,
         tokens_after: measured.tokens,
         budget_tokens: measured.budgetTokens,
         margin_tokens: measured.marginTokens,
-        recovered: !measured.over,
+        recovered,
+        // What the verdict rests on, so a false claim cannot be read back as a true one:
+        // the size of the request the provider refused, and how much smaller this one is.
+        rejected_tokens: typeof rejectedTokens === "number" ? rejectedTokens : null,
+        freed_tokens: freedTokens,
+        // Whether the recovery loop itself folded, as distinct from the pass as a whole.
+        loop_reduced: reducedAtLeastOnce,
         // The join. `context.rollback` records what left the branch; this records what
         // the retried pass folded to make the shorter window fit, and the two are one
         // episode. Null when a rejection was recorded without a tree rollback.
         rollback_seq: typeof rollback.last?.seq === "number" ? rollback.last.seq : null,
       });
-      const overflowBefore = projectedTokenEstimate(projected);
+      const unchangedNote = "The provider rejected the last request and this pass made it no smaller, so the " +
+        `rebuilt request is ${measured.tokens} estimated tokens against a ${measured.budgetTokens}-token ` +
+        "serving budget. Our own estimate says it fits; the provider already said otherwise about a request " +
+        "this size, so this is not a recovery. Fold or protect deliberately, or the next request meets the " +
+        "same rejection.";
       deliverReceipt(contextReceipt({
         kind: "overflow-recovery",
         ordinal: markOrdinal(snapshot),
         trigger: `provider-rejection:${curation.pendingRejection?.status ?? "unknown"}`,
-        freedTokens: Math.max(0, overflowBefore - measured.tokens),
-        occupancyBefore: overflowBefore,
+        freedTokens,
+        occupancyBefore: typeof rejectedTokens === "number" ? rejectedTokens : overflowBefore,
         occupancyAfter: measured.tokens,
-        recovered: true,
+        recovered,
         note: measured.over
           ? `The rebuilt request is still ${measured.tokens} tokens against a ${measured.budgetTokens}-token ` +
             "serving budget, so the run stops here rather than sending a request the provider will reject again."
-          : "A rollback was required: the provider rejected the last request, which overfilled the serving " +
-            `budget at ${overflowBefore} estimated tokens against ${measured.budgetTokens}. ` +
-            `${attempts} reduction(s) landed it at ${measured.tokens} tokens. Nothing durable was written ` +
-            "for it, and the request was rebuilt inside the budget rather than dropped.",
+          : recovered
+            ? "A rollback was required: the provider rejected the last request, which overfilled the serving " +
+              `budget at ${rejectedTokens} estimated tokens against ${measured.budgetTokens}. This pass ` +
+              `landed it at ${measured.tokens} tokens. Nothing durable was written for it, and the request ` +
+              "was rebuilt inside the budget rather than dropped."
+            : unchangedNote,
       }));
       curation.pendingRejection = null;
     }
@@ -2188,6 +2225,22 @@ export function registerActiveContext(pi: any, options: {
       if (addition.added) { state = addition.state; peekAdded += 1; }
     }
     const guarded = currentTurnRefKeys(snapshot);
+    // THE GUARD IS ADJUDICATED AT COMMIT, NEVER AT PROPOSAL.
+    //
+    // `guarded` is every tool result since the last terminal assistant message. When no
+    // turn has ever closed, `currentTurnBoundary` is -1 and that set is the WHOLE
+    // window. Handing it to `topUpMarks` as `excludeRefKeys` therefore proposed nothing
+    // at all on that shape, so `guardWaiverCount` below counted zero guarded marks and
+    // the waiver it exists to grant could never fire. Measured 2026-08-10
+    // (luna-20260810 pifold rep 2): 274,173 tokens of unmarked stale spans, zero marks
+    // proposed, zero commits, two provider rejections.
+    //
+    // So the top-up proposes freely and `commitPendingMarks({ guardCurrentTurn: true,
+    // guardWaiver })` decides. That is the only place the guard has ever had a waiver,
+    // and one adjudicator is why the starvation case is reachable at all.
+    //
+    // Wedge absorption keeps the exclusion (below): it grows a mark backward over a
+    // gap without any waiver of its own, so the guard there has no second chance.
     // THE ZONE LAW IS UNCONDITIONAL.
     //
     // There was a fence-only snapshot here: at high occupancy it narrowed the fresh
@@ -2258,7 +2311,6 @@ export function registerActiveContext(pi: any, options: {
         snapshot,
         state,
         ordinal,
-        excludeRefKeys: guarded,
         eligibleOnly: true,
         targetShare: freeingTarget,
       })) {
@@ -2283,7 +2335,6 @@ export function registerActiveContext(pi: any, options: {
           snapshot,
           state,
           ordinal,
-          excludeRefKeys: guarded,
           eligibleOnly: true,
           targetShare: 1,
         })) {
@@ -2303,7 +2354,33 @@ export function registerActiveContext(pi: any, options: {
     });
     state = wedges.state;
     const accounting = markAccounting(snapshot, state);
-    if (!accounting.pending) return null;
+    // A COMMIT PASS THAT FINDS NOTHING SAYS SO.
+    //
+    // This was a bare `return null`, and it is how the rep-2 starvation stayed invisible
+    // for 25 stages: the last call announced 274,173 tokens of unmarked stale spans, the
+    // pass that answered it proposed nothing, and the stream carried no record that a
+    // commit had even been attempted. Every other deferral on this path already names
+    // itself; this one is the same shape with the reason that matters, and it reports
+    // the remainder beside the emptiness so the contradiction -- mass on the table, no
+    // proposal -- is readable on one record instead of inferred across two.
+    //
+    // Stream record, not a `context.receipt`: receipts are window carriers, and a pass
+    // that changed nothing must not add bytes to the projection to announce it.
+    if (!accounting.pending) {
+      const remainder = unmarkedRemainder(snapshot, state, projectionCharsPerToken());
+      emit("context.commit", {
+        trigger,
+        deferred: true,
+        reason: "nothing-proposable",
+        applied_marks: 0,
+        pending_marks: 0,
+        unmarked_stale_spans: remainder.spans,
+        unmarked_stale_tokens: remainder.tokens,
+        stale_boundary: snapshot.staleBoundary,
+        window_tokens: snapshot.contextWindow,
+      });
+      return null;
+    }
     // The reclaim floor. One structural mutation per model call is the budget, so a
     // commit that would free crumbs spends the whole budget on nothing: it defers and
     // the marks accumulate. A request whose projection exceeds the provider input budget

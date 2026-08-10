@@ -416,6 +416,13 @@ export function toolFreshIndices(
  * there, expansions persist there, raw stays raw there, and no automatic path proposes
  * anything there. That is the 2026-08-06 ruling that agent context is not sequential,
  * written as a region instead of as a preference.
+ *
+ * The middle can be EMPTY, and on a session that never closes a turn it always is: the
+ * fresh boundary walks back turn by turn and has nowhere to stop, so it sits at 0 while
+ * this prefix carries real width. The fresh tail is still protected there, by the byte
+ * tail in `protectedIndices` rather than by an ordering between the two numbers, and the
+ * threshold invariant `staleTail <= maxTarget - freshTail` is what keeps the zones from
+ * overlapping at the trigger.
  */
 export function staleBoundary(messages: unknown[], staleBytes: number): number {
   if (staleBytes <= 0) return 0;
@@ -514,7 +521,25 @@ export function mapActiveContext(input: {
   const freshBytes = zoneBytes(thresholds.freshTail, budgetTokens);
   const turns = completeTurns(input.eventMessages);
   const boundary = freshBoundary(input.eventMessages, turns, freshBytes);
-  const stale = Math.min(boundary, staleBoundary(input.eventMessages, zoneBytes(thresholds.staleTail, budgetTokens)));
+  // THE STALE ZONE IS A BYTE PREFIX, AND NOTHING ELSE CLIPS IT.
+  //
+  // This used to read `Math.min(boundary, ...)`, which made the automatic reach a
+  // function of the last CLOSED turn. A marathon session that never closes one has a
+  // fresh boundary of 0, so the clamp put the stale boundary at 0 too and every
+  // automatic rung -- chapters, tool batches, refolds, fold runs -- saw an empty zone.
+  // Measured 2026-08-10 (luna-20260810 pifold rep 2): one user message and 24 assistant
+  // messages, all stopReason "toolUse", so the last call announced 19 unmarked stale
+  // spans worth 274,173 tokens while the selector could propose nothing, no commit of
+  // any kind ever fired, and the window climbed to 375,830 estimated tokens and was
+  // rejected twice.
+  //
+  // The clamp was a SECOND copy of the open-turn protection, written as a zone. The
+  // first copy is the at-commit current-turn guard, and that one has a waiver for
+  // exactly this starvation; a zone has none, so the duplicate silently outranked the
+  // waiver and made it unreachable. The protections that remain are the ones that can
+  // be reasoned about: the fresh tail (a byte tail, set-shaped, in `protectedIndices`),
+  // the stale zone's own byte width, and the guard-with-waiver at commit time.
+  const stale = staleBoundary(input.eventMessages, zoneBytes(thresholds.staleTail, budgetTokens));
   const protectedIndices = unsafeChapterIndices(input.eventMessages);
   const toolProtectedIndices = toolFreshIndices(input.eventMessages, turns, freshBytes);
   // Chapter protection is set-shaped: preserve the newest complete turns and

@@ -2428,9 +2428,13 @@ try {
       new_leaf_id: "entry-parent", entries_abandoned: 1, occupancy_tokens_before: 49_700,
       tokens_rolled_back: 42, replayed: true, replay_skip_reason: null, notice_chars: 404,
       attempt_ordinal: 1, probes_passed: true }),
+    // The ordinary commit of the retried pass did the folding, so the recovery loop's own
+    // delta is zero and the episode's real cost is the freed count against the request
+    // the provider refused. A lens reading the delta alone would price this rescue at 0.
     custom({ kind: "context.recovery", seq: 11, ordinal: 40, provider_status: 400, attempts: 1,
-      max_attempts: 2, tokens_before: 51_000, tokens_after: 40_000, budget_tokens: 50_400,
-      margin_tokens: 2_520, recovered: true, rollback_seq: 10 }),
+      max_attempts: 2, tokens_before: 40_000, tokens_after: 40_000, budget_tokens: 50_400,
+      margin_tokens: 2_520, recovered: true, rejected_tokens: 51_000, freed_tokens: 11_000,
+      loop_reduced: false, rollback_seq: 10 }),
     // An unreplayable tail: the rollback still happened, the retry did not.
     custom({ kind: "context.rollback", seq: 20, ordinal: 55, trigger: "session_before_compact",
       armed: true, disarm_reason: null, error_entry_id: "entry-b", old_leaf_id: "entry-b",
@@ -2440,7 +2444,8 @@ try {
       notice_chars: 460, attempt_ordinal: 2, probes_passed: true }),
     custom({ kind: "context.recovery", seq: 21, ordinal: 55, provider_status: 400, attempts: 2,
       max_attempts: 2, tokens_before: 52_000, tokens_after: 52_000, budget_tokens: 50_400,
-      margin_tokens: 2_520, recovered: false, rollback_seq: 20 }),
+      margin_tokens: 2_520, recovered: false, rejected_tokens: 52_000, freed_tokens: 0,
+      loop_reduced: false, rollback_seq: 20 }),
     // A disarmed lane: nothing silent, and it never counts as a recovery.
     custom({ kind: "context.rollback", seq: 30, ordinal: 61, trigger: "message_end",
       armed: false, disarm_reason: "sessionManager.branch is missing", error_entry_id: null,
@@ -2468,14 +2473,37 @@ try {
   assert.equal(lens.join.joinedEpisodes, 2);
   assert.equal(lens.join.rollbacksWithoutRecovery, 1);
   assert.equal(lens.join.recoveriesWithoutRollback, 0);
+  // RECOVERY COST IS MEASURED AGAINST THE REQUEST THAT WAS REFUSED, not against the
+  // projection the recovery loop happened to start from. Both episodes here have a
+  // loop-local delta of zero; only the freed count separates the rescue from the
+  // unchanged request, and the cost number has to come from the same place the verdict
+  // does or the two disagree on the same episode.
   assert.equal(lens.foldedTokensToRecover, 11_000);
   assert.equal(lens.unrecovered, 1);
   const first = lens.table[0];
   assert.equal(first.seq, 10);
   assert.equal(first.recoverySeq, 11);
   assert.equal(first.recovered, true);
-  assert.equal(first.recoveredTokensBefore, 51_000);
+  assert.equal(first.recoveredTokensBefore, 40_000);
   assert.equal(first.recoveredTokensAfter, 40_000);
+  assert.equal(first.rejectedTokens, 51_000);
+  assert.equal(first.recoveredFreedTokens, 11_000);
+  assert.equal(lens.table[1].recoveredFreedTokens, 0,
+    "an unchanged request cost nothing to not recover");
+  // A stream from before the freed count exists still prices its episodes, from the only
+  // number it carries.
+  const legacy = contextEventMetrics([
+    custom({ kind: "context.rollback", seq: 40, ordinal: 70, trigger: "session_before_compact",
+      armed: true, disarm_reason: null, error_entry_id: "entry-d", old_leaf_id: "entry-d",
+      new_leaf_id: "entry-e", entries_abandoned: 1, occupancy_tokens_before: 49_000,
+      tokens_rolled_back: 40, replayed: true, replay_skip_reason: null, notice_chars: 400,
+      attempt_ordinal: 1, probes_passed: true }),
+    custom({ kind: "context.recovery", seq: 41, ordinal: 70, provider_status: 400, attempts: 1,
+      max_attempts: 2, tokens_before: 51_000, tokens_after: 40_000, budget_tokens: 50_400,
+      margin_tokens: 2_520, recovered: true, rollback_seq: 40 }),
+  ]).rollback;
+  assert.equal(legacy.foldedTokensToRecover, 11_000, "a pre-freed-count stream lost its cost");
+  assert.equal(legacy.table[0].recoveredFreedTokens, null);
   assert.equal(lens.table[2].recoverySeq, null, "a disarmed episode has no fold-side half");
   assert.equal(lens.table[2].disarmReason, "sessionManager.branch is missing");
   // A recovery with no rollback is a rejection recorded without a tree move, and it is
