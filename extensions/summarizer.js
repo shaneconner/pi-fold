@@ -129,12 +129,25 @@ export function createSummarizeContextSpan(summarizer = "session", loadHostModul
         typeof model.id !== "string" || !model.id) {
       throw new Error("Resolved summarizer model lacks provider/id attribution");
     }
+    // The generator bills outside the session, so this is the ONLY place its spend is
+    // visible. Passed through when the provider reports it and omitted when it does not,
+    // never defaulted to zero: an absent number and a free call are different facts.
+    const usage = response?.usage && typeof response.usage === "object"
+      ? {
+        ...(Number.isFinite(response.usage.input) ? { input: response.usage.input } : {}),
+        ...(Number.isFinite(response.usage.output) ? { output: response.usage.output } : {}),
+        ...(Number.isFinite(response.usage.cacheRead) ? { cacheRead: response.usage.cacheRead } : {}),
+        ...(Number.isFinite(response.usage.totalTokens) ? { totalTokens: response.usage.totalTokens } : {}),
+        ...(Number.isFinite(response.usage?.cost?.total) ? { costTotal: response.usage.cost.total } : {}),
+      }
+      : null;
     return {
       brief,
       provider: model.provider,
       model: model.id,
       effort,
       toolCalls: 0,
+      ...(usage && Object.keys(usage).length ? { usage } : {}),
     };
   };
 }

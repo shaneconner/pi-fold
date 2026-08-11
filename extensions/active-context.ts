@@ -749,6 +749,65 @@ export function registerActiveContext(pi: any, options: {
   };
 
   /**
+   * The generator, wrapped once so every brief it writes is on the record.
+   *
+   * Wrapping HERE rather than instrumenting the two call sites is deliberate. The inline
+   * path in `prepareFold` and the async upgrade lane both receive this function, so one
+   * wrapper covers both, no signature changes and no way to add a third caller that
+   * quietly escapes the ledger. It also covers a deployment's OWN summarizer, which is
+   * the case a call-site patch would have missed.
+   *
+   * A generator call is invisible everywhere else: it runs outside the session, so it
+   * lands in no provider ledger, and it runs off the turn, so it lands in no turn timing.
+   * Duration, queue wait and usage are therefore recorded here or nowhere.
+   *
+   * A failure is emitted and rethrown unchanged. This observes; it decides nothing, and
+   * the fallback to the deterministic brief stays exactly where it was.
+   */
+  const observedSummarize = options.summarizeContextSpan
+    ? async (request: Record<string, unknown>, summarizerCtx: unknown): Promise<Record<string, unknown>> => {
+      const startedAt = Date.now();
+      const queuedAt = typeof request.queuedAtMs === "number" ? request.queuedAtMs : null;
+      const sourceText = typeof request.sourceText === "string" ? request.sourceText : "";
+      const base = {
+        fold_id: typeof request.candidateId === "string" ? request.candidateId : "",
+        source_chars: sourceText.length,
+        source_sha256: typeof request.sourceSha256 === "string" ? request.sourceSha256 : sha256Text(sourceText),
+        ...(queuedAt === null ? {} : { queued_ms: Math.max(0, startedAt - queuedAt) }),
+      };
+      try {
+        const result = await options.summarizeContextSpan!(request, summarizerCtx);
+        const brief = typeof result?.brief === "string" ? result.brief.trim() : "";
+        emit("context.brief", {
+          ...base,
+          outcome: "ok",
+          duration_ms: Date.now() - startedAt,
+          provider: typeof result?.provider === "string" ? result.provider : "",
+          model: typeof result?.model === "string" ? result.model : "",
+          effort: typeof result?.effort === "string" ? result.effort : "",
+          brief_chars: brief.length,
+          brief_sha256: brief ? sha256Text(brief) : "",
+          // Absent when the provider reported none. Never defaulted: a call whose cost we
+          // do not know and a call that cost nothing are different facts.
+          usage: result?.usage && typeof result.usage === "object" ? clone(result.usage) : null,
+        });
+        return result;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        emit("context.brief", {
+          ...base,
+          // A timeout is not a refusal and not a provider fault, and telling them apart is
+          // the difference between raising the bound and changing the generator.
+          outcome: /exceeded \d+ms/.test(message) ? "timeout" : "error",
+          duration_ms: Date.now() - startedAt,
+          error: boundReceiptText(message, 240, "brief generator"),
+        });
+        throw error;
+      }
+    }
+    : undefined;
+
+  /**
    * Actions of ours that move bytes at or before a prefix position. Receipts, gate
    * notices and suggestions are appended after the whole projection, so they can only
    * move the tail and are never a prefix cause.
@@ -2009,7 +2068,7 @@ export function registerActiveContext(pi: any, options: {
       snapshot,
       state: capturedState,
       generation: capturedGeneration,
-      summarize: ladder.failedPreparations.has(id) ? undefined : options.summarizeContextSpan,
+      summarize: ladder.failedPreparations.has(id) ? undefined : observedSummarize,
       onSummarizerFailure: (error) => {
         ladder.lastPreparationError = error instanceof Error ? error.message : String(error);
         ladder.failedPreparations.add(id);
@@ -2323,7 +2382,7 @@ export function registerActiveContext(pi: any, options: {
     stateBeforeCommit: ActiveContextState,
     foldIds: readonly string[],
   ): void => {
-    if (!options.summarizeContextSpan || !persistence.state) return;
+    if (!observedSummarize || !persistence.state) return;
     for (const foldId of foldIds) {
       if (upgrades.queue.length >= MAX_BRIEF_UPGRADE_QUEUE) return;
       if (upgrades.failed.has(foldId) || upgrades.running.has(foldId) ||
@@ -2356,6 +2415,10 @@ export function registerActiveContext(pi: any, options: {
             afterText: orientation.afterText,
             afterSha256: sha256Text(orientation.afterText),
             maxBriefChars: snapshot.policy.maxBriefChars,
+            // Read by the observed wrapper and by nothing else, so a queue that backs up
+            // is visible as waiting rather than as a slow generator. The summarizer
+            // contract is on the RESULT, so an extra request field reaches it harmlessly.
+            queuedAtMs: Date.now(),
           },
         });
       } catch (error) {
@@ -2378,7 +2441,7 @@ export function registerActiveContext(pi: any, options: {
    * Returns whether a call was started, which is what lets the drain below stop.
    */
   const startBriefUpgrade = (snapshot: ActiveContextSnapshot, ctx: any): boolean => {
-    const summarize = options.summarizeContextSpan;
+    const summarize = observedSummarize;
     if (!summarize || lifecycle.shuttingDown || !upgrades.queue.length ||
         upgrades.running.size >= MAX_BRIEF_UPGRADES_IN_FLIGHT) return false;
     const entry = upgrades.queue.shift()!;
@@ -2563,7 +2626,7 @@ export function registerActiveContext(pi: any, options: {
       state: baseState,
       generation: generationAtStart,
       brief: input.brief,
-      summarize: options.summarizeContextSpan,
+      summarize: observedSummarize,
       ctx: input.ctx,
       signal: input.signal,
     });
@@ -5130,7 +5193,7 @@ export function registerActiveContext(pi: any, options: {
             state: staged,
             generation: lifecycle.generation,
             brief: item.brief,
-            summarize: options.summarizeContextSpan,
+            summarize: observedSummarize,
             ctx,
             signal,
           })

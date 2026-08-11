@@ -159,6 +159,14 @@ export type ContextEventKind =
   | "context.commit"
   /** One fold created, by the ladder or by the agent. */
   | "context.fold"
+  /**
+   * One generator call for a brief: what it read, what it wrote, and what it cost.
+   *
+   * The generator runs outside the session, so its spend appears in no provider ledger
+   * and its latency appears in no turn. Without this record a deployment cannot say what
+   * briefing costs it, which is the question the async lane exists to answer.
+   */
+  | "context.brief"
   /** One boundary sliver absorbed into its later neighbour. */
   | "context.absorb"
   /** One oversized span split into sequential bite-sized folds. */

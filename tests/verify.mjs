@@ -11810,6 +11810,135 @@ async function gateIncrementalEvidenceMap() {
   };
 }
 
+/**
+ * Every generator call is on the record, and nothing about it is invented.
+ *
+ * The generator runs outside the session and off the turn, so its spend reaches no
+ * provider ledger and its latency reaches no turn timing. Before this it was possible to
+ * run for four hours and be unable to say what briefing cost.
+ *
+ * The load-bearing assertion is the COUNT: one record per invocation, counted against the
+ * generator's own call log. That is what proves the wrapper sits on every path rather than
+ * on the one path a fixture happened to exercise.
+ */
+async function gateGeneratorCallsAreOnTheRecord() {
+  const shape = { turns: 12, resultChars: 10_000, contextWindow: 100_000, toolName: "bash" };
+  const USAGE = { input: 4321, output: 77, totalTokens: 4398, costTotal: 0.0123 };
+  const briefFor = (candidateId) =>
+    `The folded span records the completed bash inspection under ${candidateId} and its factual result.`;
+
+  const observed = [];
+  let mode = "usage";
+  const built = makeFixture(shape);
+  const runtime = makeRuntime(built, {
+    summarizeContextSpan: async (request) => {
+      observed.push(request);
+      return {
+        brief: briefFor(request.candidateId),
+        provider: "openai-codex",
+        model: "gpt-5.6-terra",
+        effort: "medium",
+        toolCalls: 0,
+        ...(mode === "usage" ? { usage: { ...USAGE } } : {}),
+      };
+    },
+  });
+  await startRuntime(runtime);
+  await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  await settle();
+
+  const briefed = contextEvents(runtime).filter((record) => record.kind === "context.brief");
+  // ANTI-VACUITY: the lane actually ran, so the equality below is not 0 === 0.
+  assert(observed.length > 0, "The generator was never called, so this gate proves nothing");
+  const laneCalls = observed.length;
+  assert.equal(briefed.length, laneCalls,
+    `${laneCalls} generator calls produced ${briefed.length} records: a call escaped the ledger`);
+
+  const ok = briefed.filter((record) => record.outcome === "ok");
+  assert.equal(ok.length, laneCalls, "A successful generator call was not recorded as ok");
+  const sample = ok[0];
+  assert(observed.some((request) => request.candidateId === sample.fold_id),
+    "The recorded fold id matches no span the generator was actually given");
+  assert.equal(sample.provider, "openai-codex");
+  assert.equal(sample.model, "gpt-5.6-terra");
+  assert.equal(sample.effort, "medium");
+  assert(sample.source_chars > 0 && /^[a-f0-9]{64}$/.test(sample.source_sha256),
+    "The record does not say what the generator read");
+  assert(sample.brief_chars > 0 && /^[a-f0-9]{64}$/.test(sample.brief_sha256),
+    "The record does not say what the generator wrote");
+  assert(Number.isInteger(sample.duration_ms) && sample.duration_ms >= 0, "No execution duration recorded");
+  assert(Number.isInteger(sample.queued_ms) && sample.queued_ms >= 0,
+    "No queue wait recorded, so a backed-up lane would read as a slow generator");
+  assert.deepEqual(sample.usage, USAGE, "Provider usage was not passed through verbatim");
+
+  // An absent cost and a zero cost are different facts, so the record must not invent one.
+  mode = "no-usage";
+  const quiet = makeFixture(shape);
+  const quietCalls = [];
+  const quietRuntime = makeRuntime(quiet, {
+    summarizeContextSpan: async (request) => {
+      quietCalls.push(request);
+      return {
+        brief: briefFor(request.candidateId),
+        provider: "openai-codex",
+        model: "gpt-5.6-terra",
+        effort: "medium",
+        toolCalls: 0,
+      };
+    },
+  });
+  await startRuntime(quietRuntime);
+  await runtimeCommit(quietRuntime, { tokens: 88_000, contextWindow: 100_000 });
+  await settle();
+  const quietRecords = contextEvents(quietRuntime).filter((record) => record.kind === "context.brief");
+  assert.equal(quietRecords.length, quietCalls.length,
+    "The no-usage fixture dropped a generator call from the ledger");
+  assert(quietRecords.length, "The no-usage fixture produced no generator records");
+  assert(quietRecords.every((record) => record.usage === null),
+    "A generator that reported no usage was recorded as having reported some");
+
+  // A failure is recorded and rethrown: this observes, it decides nothing, and the fold
+  // keeps the deterministic brief it committed with.
+  const failing = makeFixture(shape);
+  const failingRuntime = makeRuntime(failing, {
+    summarizeContextSpan: async () => { throw new Error("generator refused this span"); },
+  });
+  await startRuntime(failingRuntime);
+  await runtimeCommit(failingRuntime, { tokens: 88_000, contextWindow: 100_000 });
+  await settle();
+  const failures = contextEvents(failingRuntime).filter((record) => record.kind === "context.brief");
+  assert(failures.length, "A failing generator produced no record at all");
+  assert(failures.every((record) => record.outcome === "error"), "A generator failure was not recorded as an error");
+  assert(failures.every((record) => String(record.error).includes("generator refused this span")),
+    "The recorded failure does not say what went wrong");
+  assert(materialized(failingRuntime).folds.some((fold) => fold.provenance.kind === "deterministic"),
+    "A recorded failure changed the fallback: the fold no longer keeps its deterministic brief");
+
+  // A timeout is neither a refusal nor a provider fault, and telling them apart decides
+  // whether to raise the bound or change the generator. Driven by the message the timeout
+  // race actually throws, so the classifier is exercised without waiting out briefTimeoutMs.
+  const timedOut = makeFixture(shape);
+  const timedOutRuntime = makeRuntime(timedOut, {
+    summarizeContextSpan: async () => { throw new Error("Brief upgrade exceeded 120000ms"); },
+  });
+  await startRuntime(timedOutRuntime);
+  await runtimeCommit(timedOutRuntime, { tokens: 88_000, contextWindow: 100_000 });
+  await settle();
+  const timeouts = contextEvents(timedOutRuntime).filter((record) => record.kind === "context.brief");
+  assert(timeouts.length, "The timeout fixture produced no generator records");
+  assert(timeouts.every((record) => record.outcome === "timeout"),
+    "A timed-out generator call was recorded as an ordinary error");
+
+  return {
+    generatorCalls: laneCalls,
+    recordsEmitted: briefed.length,
+    usagePassedThrough: true,
+    absentUsageStaysAbsent: true,
+    failureRecordedAndRethrown: true,
+    timeoutDistinctFromError: true,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -11909,6 +12038,7 @@ const gates = [
   [111, "The calibration hazard the anchor narrows but does not remove", gateCalibrationHazard],
   [112, "A span already inside a fold is refused by name", gateOwnedSpanRefusal],
   [113, "Entry evidence is derived once, never rebuilt", gateIncrementalEvidenceMap],
+  [114, "Every generator call is on the record", gateGeneratorCallsAreOnTheRecord],
 ];
 
 const gateFilter = (process.env.GATES ?? "")
