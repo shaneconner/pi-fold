@@ -2551,6 +2551,119 @@ export function rollbackLens(events) {
   };
 }
 
+export const FOLD_RECORD_SUFFIX = "-fold-record";
+
+/**
+ * THE BRIEF PROVENANCE LENS, read at the END of the run.
+ *
+ * A fold record is content-addressed and immutable, so it states the brief the fold was
+ * CREATED with. That was the whole truth while a brief was written once. It is not any
+ * more: a ladder fold commits with a deterministic brief and is upgraded to a model brief
+ * at a later commit boundary, and the upgrade rides the `context.commit` record that
+ * carried it rather than rewriting the fold record. Counting creation alone therefore
+ * undercounts model briefs, to zero on a run where every ladder fold was later upgraded,
+ * which is exactly the regime this campaign exists to measure.
+ *
+ * So the reading is a JOIN: fold records keyed by fold id, against the ids the commit
+ * records name in `brief_upgrade_ids`. Any key other than `join` is a provenance kind.
+ *
+ * What the runtime guarantees: an upgrade applies only to a fold whose brief is still the
+ * deterministic one and whose override slot is empty, the failed set blocks a retry, and
+ * every applied upgrade is emitted on the commit record written in the same block. So a
+ * fold is upgraded at most once and no applied upgrade is missing from the stream. The
+ * lens does not lean on that: ids are deduplicated, and an id that matches no sealed
+ * deterministic fold record moves nothing and is counted under its reason.
+ *
+ * What the runtime does not record, so this lens cannot show it: a finished brief whose
+ * fold changed identity before the boundary is DROPPED silently, and the generator call it
+ * spent leaves no trace. That gap does not bias the buckets, because a dropped upgrade
+ * leaves the fold holding the deterministic brief its record already states.
+ * `upgradesWaitingAtLastCommit` is the other half of the same gap, the work still owed
+ * when the run ended, read off the last commit record that carries the field.
+ *
+ * One more brief mutation is NOT joined here and is stated rather than hidden: the agent's
+ * own `rebrief` writes through the same override map, so a fold the agent rebriefed ends
+ * the run with a supplied brief while its record still says how the fold was made. It is
+ * left out because it is a different mutation with a different trace: no commit record
+ * names it, and its fold id is in the tool-result payload rather than the event stream.
+ * Neither sealed run in the campaign contains one.
+ */
+export function endOfRunBriefProvenance(entries) {
+  assertExperiment(Array.isArray(entries), "Brief provenance requires session entries");
+  const custom = entries.filter((entry) => entry?.type === "custom" &&
+    typeof entry.customType === "string");
+  const foldRecords = custom.filter((entry) => entry.customType.endsWith(FOLD_RECORD_SUFFIX));
+  const commits = custom
+    .filter((entry) => entry.customType.endsWith(CONTEXT_EVENT_SUFFIX) && entry.data &&
+      typeof entry.data === "object" && entry.data.kind === "context.commit")
+    .map((entry) => entry.data);
+
+  const upgraded = new Set();
+  let repeatedUpgradeIds = 0;
+  let upgradeFailures = 0;
+  let upgradesWaitingAtLastCommit = null;
+  for (const commit of commits) {
+    const ids = typeof commit.brief_upgrade_ids === "string"
+      ? commit.brief_upgrade_ids.split(",").filter(Boolean) : [];
+    for (const id of ids) {
+      if (upgraded.has(id)) { repeatedUpgradeIds += 1; continue; }
+      upgraded.add(id);
+    }
+    if (Number.isFinite(commit.brief_upgrade_failures)) upgradeFailures += commit.brief_upgrade_failures;
+    // Last one wins: a run that predates the lane carries the field on no commit record
+    // and reports null, which is a different fact from nothing being owed.
+    if (Number.isFinite(commit.brief_upgrades_waiting)) {
+      upgradesWaitingAtLastCommit = commit.brief_upgrades_waiting;
+    }
+  }
+
+  const counts = { model: 0, deterministic: 0 };
+  const unmatchedReasons = {};
+  let foldsUpgradedToModel = 0;
+  for (const record of foldRecords) {
+    const created = record.data?.fold?.provenance?.kind ?? "unknown";
+    const foldId = record.data?.foldId;
+    if (typeof foldId === "string" && upgraded.has(foldId)) {
+      if (created === "deterministic") {
+        foldsUpgradedToModel += 1;
+        counts.model += 1;
+        continue;
+      }
+      // The runtime never queues a fold that is not deterministic, so this is a defect
+      // report, not a bucket: the fold is counted as the record states.
+      unmatchedReasons["fold-not-deterministic-at-creation"] =
+        (unmatchedReasons["fold-not-deterministic-at-creation"] ?? 0) + 1;
+    }
+    counts[created] = (counts[created] ?? 0) + 1;
+  }
+  const sealedFoldIds = new Set(foldRecords.map((record) => record.data?.foldId));
+  const withoutRecord = [...upgraded].filter((id) => !sealedFoldIds.has(id)).length;
+  if (withoutRecord > 0) unmatchedReasons["no-fold-record"] = withoutRecord;
+
+  return {
+    ...counts,
+    join: {
+      joinKey: "fold_id",
+      upgradedFolds: upgraded.size,
+      foldsUpgradedToModel,
+      unmatchedUpgrades: upgraded.size - foldsUpgradedToModel,
+      unmatchedUpgradeReasons: unmatchedReasons,
+      repeatedUpgradeIds,
+      // Counted, never joined: the lane never retries a fold whose upgrade failed, so each
+      // failure is a distinct fold, but the commit record carries the count and the last
+      // error text without the ids. A failed fold keeps its deterministic brief and is
+      // counted as deterministic above, so this number sits beside the buckets rather
+      // than inside them.
+      upgradeFailures,
+      upgradesWaitingAtLastCommit,
+      definition: "every key beside `join` is a brief provenance kind, counted per sealed " +
+        "fold record and moved to model where a later context.commit record names that " +
+        "fold id in brief_upgrade_ids; a run sealed before the upgrade lane carries no " +
+        "such field and reads exactly as the creation-time count did",
+    },
+  };
+}
+
 export function contextEventMetrics(entries) {
   assertExperiment(Array.isArray(entries), "Context event metrics require session entries");
   const events = entries

@@ -31,7 +31,9 @@ import {
   MUTATION_ABSOLUTE_TOLERANCE_TOKENS,
   TOKEN_ESTIMATOR_ID,
   CODE_WORD_PATTERN,
+  CONTEXT_EVENT_SUFFIX,
   CONVERSATION_PROBE_KINDS,
+  FOLD_RECORD_SUFFIX,
   REPO_PROBE_KINDS,
   armRuntimeConfiguration,
   assertBlindPacket,
@@ -43,6 +45,7 @@ import {
   MEMEX_FOLD_LANE_ACCEPT_RATE,
   corpusManifestSha256,
   deliverableTranscripts,
+  endOfRunBriefProvenance,
   estimateTokens,
   extractDefinitions,
   fileFacts,
@@ -2673,6 +2676,13 @@ try {
 // The descriptor now travels config -> manifest -> registration exactly as the serving
 // budget does, the adjudicator echoes it, and the per-fold provenance counts beside it say
 // what the run actually got, so a rep that quietly fell back to the fallback is visible.
+//
+// Those counts are read at the END of the run (Shane 2026-08-11). A ladder fold commits
+// with a deterministic brief and is upgraded to a model brief at a later commit boundary,
+// and the fold record is immutable, so the creation-time count this gate used to pin
+// reported the fallback for folds that finished the run model-briefed, potentially every
+// one of them. The lens joins fold ids to the `brief_upgrade_ids` the commit records
+// carry, and the second half of this gate pins that join.
 // ---------------------------------------------------------------------------
 {
   // A cheap model at medium effort: the brief is a bounded summary of a bounded span, and
@@ -2730,9 +2740,99 @@ try {
     "the adjudicator must echo the run's brief generator into the evidence");
   // The intended regime and the observed one are different facts, and the evidence
   // carries both: a generator that failed every call leaves a full deterministic count.
-  assert(adjudicator.includes("record.data?.fold?.provenance?.kind ?? \"unknown\"") &&
-    adjudicator.includes("{ model: 0, deterministic: 0 }"),
-  "the adjudicator must count brief provenance per fold, with both regimes always present");
+  assert(adjudicator.includes("briefProvenance: endOfRunBriefProvenance(entries)"),
+    "the adjudicator must read brief provenance through the end-of-run lens");
+
+  // THE LENS READS THE END OF THE RUN, NOT THE MOMENT OF CREATION. A ladder fold commits
+  // with a deterministic brief and is upgraded at a later commit boundary; the fold record
+  // is immutable, so the upgrade rides that commit record's `brief_upgrade_ids` and a
+  // creation-time count reports the fallback for a fold that ended the run model-briefed.
+  const foldRecordEntry = (foldId, kind) => ({
+    type: "custom",
+    customType: `pi-fold-active-context${FOLD_RECORD_SUFFIX}`,
+    data: { foldId, fold: { id: foldId, provenance: { kind } } },
+  });
+  const commitEntry = (fields) => ({
+    type: "custom",
+    customType: `pi-fold-${CONTEXT_EVENT_SUFFIX}`,
+    data: { kind: "context.commit", applied_marks: 1, ...fields },
+  });
+  const creationTimeCount = (sealed) => sealed
+    .filter((entry) => entry.customType.endsWith(FOLD_RECORD_SUFFIX))
+    .reduce((result, entry) => {
+      const kind = entry.data?.fold?.provenance?.kind ?? "unknown";
+      result[kind] = (result[kind] ?? 0) + 1;
+      return result;
+    }, { model: 0, deterministic: 0 });
+
+  const upgradedRun = [
+    foldRecordEntry("fold_aaaaaaaaaaaaaaaaaaaaaaaa", "deterministic"),
+    foldRecordEntry("fold_bbbbbbbbbbbbbbbbbbbbbbbb", "deterministic"),
+    foldRecordEntry("fold_cccccccccccccccccccccccc", "supplied"),
+    commitEntry({ brief_upgrades: 0, brief_upgrade_ids: "", brief_upgrade_failures: 0,
+      brief_upgrades_waiting: 2 }),
+    commitEntry({ brief_upgrades: 1, brief_upgrade_ids: "fold_aaaaaaaaaaaaaaaaaaaaaaaa",
+      brief_upgrade_failures: 1, brief_upgrade_error: "brief upgrade: summarizer unavailable",
+      brief_upgrades_waiting: 0 }),
+  ];
+  // ANTI-VACUITY. The reading this replaces is computed on the same fixture first: it
+  // reports zero model briefs, so the joined number below cannot be passing by accident.
+  const creationOnly = creationTimeCount(upgradedRun);
+  assert.deepEqual(creationOnly, { model: 0, deterministic: 2, supplied: 1 });
+  const joined = endOfRunBriefProvenance(upgradedRun);
+  assert.equal(creationOnly.model, 0);
+  assert.equal(joined.model, 1, "an upgraded fold must report the brief it ENDED the run with");
+  // The fold nobody upgraded is untouched, and a kind the lane never handles is untouched.
+  assert.equal(joined.deterministic, 1);
+  assert.equal(joined.supplied, 1);
+  assert.equal(joined.join.foldsUpgradedToModel, 1);
+  assert.equal(joined.join.unmatchedUpgrades, 0);
+  // A failure is a failure: counted, loud, and it moves nothing, because the fold kept the
+  // deterministic brief its record states.
+  assert.equal(joined.join.upgradeFailures, 1);
+  assert.equal(joined.join.upgradesWaitingAtLastCommit, 0);
+
+  // An upgrade naming a fold the run never sealed, and a fold named twice, are both
+  // reported rather than counted: the join is by identity, deduplicated, so neither can
+  // inflate the model bucket past the folds that exist.
+  const strayRun = [
+    foldRecordEntry("fold_aaaaaaaaaaaaaaaaaaaaaaaa", "deterministic"),
+    commitEntry({ brief_upgrades: 2, brief_upgrade_failures: 0,
+      brief_upgrade_ids: "fold_aaaaaaaaaaaaaaaaaaaaaaaa,fold_dddddddddddddddddddddddd" }),
+    commitEntry({ brief_upgrades: 1, brief_upgrade_failures: 0,
+      brief_upgrade_ids: "fold_aaaaaaaaaaaaaaaaaaaaaaaa" }),
+  ];
+  const stray = endOfRunBriefProvenance(strayRun);
+  assert.equal(stray.model, 1);
+  assert.equal(stray.deterministic, 0);
+  assert.equal(stray.join.repeatedUpgradeIds, 1);
+  assert.equal(stray.join.unmatchedUpgrades, 1);
+  assert.deepEqual(stray.join.unmatchedUpgradeReasons, { "no-fold-record": 1 });
+  assert.equal(stray.join.upgradesWaitingAtLastCommit, null,
+    "a commit record with no waiting field states null, which is not the same as nothing owed");
+
+  // THE PRE-LANE SHAPE. Every run sealed before the upgrade lane carries commit records
+  // with no brief fields at all (verified against the sealed luna-20260810 rep 3 and
+  // luna-20260807 rep 23 sessions), and those runs must read exactly as they always did.
+  const preLaneRun = [
+    foldRecordEntry("fold_aaaaaaaaaaaaaaaaaaaaaaaa", "deterministic"),
+    foldRecordEntry("fold_bbbbbbbbbbbbbbbbbbbbbbbb", "deterministic"),
+    commitEntry({ freed_tokens: 1_200 }),
+  ];
+  const preLane = endOfRunBriefProvenance(preLaneRun);
+  const { join: preLaneJoin, ...preLaneKinds } = preLane;
+  assert.deepEqual(preLaneKinds, creationTimeCount(preLaneRun));
+  assert.deepEqual(preLaneKinds, { model: 0, deterministic: 2 });
+  assert.equal(preLaneJoin.upgradedFolds, 0);
+  assert.equal(preLaneJoin.upgradeFailures, 0);
+  assert.equal(preLaneJoin.upgradesWaitingAtLastCommit, null);
+  // Both regimes present at zero on a run that folded nothing, which is the shape the
+  // arms without the runtime report through this same lens.
+  const empty = endOfRunBriefProvenance([]);
+  assert.equal(empty.model, 0);
+  assert.equal(empty.deterministic, 0);
+  assert(adjudicator.includes("briefProvenance: endOfRunBriefProvenance(runEntries)"),
+    "an arm that registers no runtime must report the same provenance shape");
 
   const jitiPath = join(PROJECT, "node_modules", "jiti", "lib", "jiti.mjs");
   assert(existsSync(jitiPath), "could not resolve package-local jiti to build the brief generator");

@@ -21,6 +21,7 @@ import {
   EXPERIMENT_CLOSED_BOOK_LABEL,
   EXPERIMENT_MARKER_ENTRY,
   EXPERIMENT_TOOL_NAME,
+  FOLD_RECORD_SUFFIX,
   armRuntimeConfiguration,
   assertExperiment,
   buildIncludeResolver,
@@ -32,6 +33,7 @@ import {
   corpusManifestSha256,
   deliverableTranscripts,
   echoVerdicts,
+  endOfRunBriefProvenance,
   estimateTokens,
   isWindowOverflow,
   nativeCompactionDisposition,
@@ -62,7 +64,6 @@ import {
   writeJsonExclusive,
 } from "./lib/pi_context_soak_attestation.mjs";
 
-const FOLD_RECORD_SUFFIX = "-fold-record";
 const NATIVE_ENTRY_MARKERS = ["native-compaction-receipt", "native-compaction-decision"];
 
 function validateHashChain(records, label) {
@@ -268,15 +269,13 @@ function curation({ entries, foldRecords, contextToolName, workerEvents = [], wo
       result[kind] = (result[kind] ?? 0) + 1;
       return result;
     }, {}),
-    // Which generator wrote each brief, counted off the sealed fold records. Seeded with
-    // both regimes at zero so a run that produced no model brief SAYS so rather than
-    // omitting the key: the deterministic brief is the failure fallback, and a rep whose
-    // folds all carry it measured the fallback, not the mechanism.
-    briefProvenance: foldRecords.reduce((result, record) => {
-      const kind = record.data?.fold?.provenance?.kind ?? "unknown";
-      result[kind] = (result[kind] ?? 0) + 1;
-      return result;
-    }, { model: 0, deterministic: 0 }),
+    // Which generator wrote each brief, read at the END of the run: the sealed fold
+    // records joined to the commit records that upgraded them, because a ladder fold
+    // commits deterministic and is upgraded at a later boundary. Seeded with both regimes
+    // at zero so a run that produced no model brief SAYS so rather than omitting the key:
+    // the deterministic brief is the failure fallback, and a rep whose folds all carry it
+    // measured the fallback, not the mechanism.
+    briefProvenance: endOfRunBriefProvenance(entries),
   };
 }
 
@@ -463,7 +462,9 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
       headlineMutationMetric: "usage.mutations", voluntaryFolds: 0, automaticFolds: 0,
       voluntaryFoldShare: null, expandCalls: 0, protectCalls: 0, unprotectCalls: 0,
       refoldCalls: 0, peekCalls: 0, foldKinds: {},
-      briefProvenance: { model: 0, deterministic: 0 } };
+      // The same lens on an arm that folds nothing: it reads the empty run rather than
+      // stating a hand-written zero, so the two arms can never report different shapes.
+      briefProvenance: endOfRunBriefProvenance(runEntries) };
   // The runtime's own canonical stream: exact mutation accounting and the
   // mechanism-limited counterfactual. Arms without the extension emit no stream, and the
   // wire series above remains their only mutation lens.
