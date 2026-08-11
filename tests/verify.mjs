@@ -677,18 +677,28 @@ function foldableSpan(runtime, built, contextWindow = 100_000) {
   return { state, snapshot, roots, indexOf, covered, turn };
 }
 
-/** A span that starts strictly inside one root fold and ends outside every fold. */
+/**
+ * A span that starts strictly inside one root fold and ends outside every fold, and that
+ * the snap can actually correct.
+ *
+ * The constructibility test is not decoration. Under the count law a parent can span ten
+ * children plus their gaps, and absorbing one of those into a CHAPTER reading exceeds the
+ * few-turn chapter limit, so which crossing has a corrected reading is a property of the
+ * forest the ladder happened to build. The gate is about the correction being reported by
+ * name, so the span it asks about is searched for rather than assumed. A forest where NO
+ * crossing is constructible returns null and the caller says so.
+ */
 function crossingSpan(runtime, built, contextWindow = 100_000) {
-  const { snapshot, roots, covered } = foldableSpan(runtime, built, contextWindow);
+  const { state, snapshot, roots, covered } = foldableSpan(runtime, built, contextWindow);
   for (const root of roots) {
     for (let inside = root.start + 1; inside <= root.end; inside += 1) {
       if (!snapshot.mapped[inside]?.ref) continue;
       for (let after = root.end + 1; after < snapshot.mapped.length; after += 1) {
         if (!snapshot.mapped[after]?.ref || covered(after)) continue;
-        return {
-          root,
-          ids: [snapshot.mapped[inside].ref.entryId, snapshot.mapped[after].ref.entryId],
-        };
+        const ids = [snapshot.mapped[inside].ref.entryId, snapshot.mapped[after].ref.entryId];
+        try { context.snapFoldCandidate(snapshot, state, ids, { allowProtected: true }); }
+        catch { continue; }
+        return { root, ids };
       }
     }
   }
@@ -1159,9 +1169,9 @@ async function gateAutonomousLadder() {
   const refoldState = materialized(refoldRuntime);
   assert.deepEqual(refoldState.expanded, []);
 
-  // The consolidation rung is gone; ONE counting rule stands in its place. Six adjacent
-  // stale roots are below it, so automation steps over every placeholder and no
-  // consolidation exists to select. Pressure does not buy one: the rule counts folds.
+  // The consolidation rung is gone; the count law stands in its place. Six adjacent
+  // stale roots are under the width, so the count owes no parent and automation steps
+  // over every placeholder. Pressure does not buy one: the law counts folds.
   const narrow = await chapterForest(6);
   const narrowSnapshot = context.mapActiveContext({
     sessionId: narrow.sessionId,
@@ -1169,7 +1179,7 @@ async function gateAutonomousLadder() {
     contextEntries: narrow.entries,
     contextWindow: 100_000,
   });
-  assert.equal(context.foldsAreSpanMaterial(narrowSnapshot, narrow.state), false);
+  assert.deepEqual(context.selectAutomaticConsolidations(narrowSnapshot, narrow.state), []);
   const narrowSpan = context.selectAutomaticSpan(narrowSnapshot, narrow.state);
   assert.equal(narrowSpan.kind, "chapter", "Below the rule, automation stopped folding raw spans");
   assert(narrowSpan.parts.every((part) => part.kind === "raw"),
@@ -1180,7 +1190,9 @@ async function gateAutonomousLadder() {
     "A below-threshold forest still exposed a consolidation",
   );
 
-  // At the counting rule the placeholders ARE the span, and the epoch folds them.
+  // At the count the parent is owed and the epoch builds it. Eleven roots owe ONE parent
+  // of exactly ten, stalest first; the eleventh is remainder and is left alone, which is
+  // where this differs from the crossing rule it replaced (that one took the whole run).
   const forest = await chapterForest(11);
   const runtimeForestSnapshot = context.mapActiveContext({
     sessionId: forest.sessionId,
@@ -1205,7 +1217,8 @@ async function gateAutonomousLadder() {
   const consolidated = consolidationState.folds.find((fold) => fold.kind === "consolidation");
   assert(consolidated, JSON.stringify(consolidationStatus.details.automatic));
   assert.equal(consolidated.parentId, null);
-  assert.equal(consolidated.parts.length, 11, "The consolidated span left contiguous roots behind");
+  assert.equal(consolidated.parts.length, context.DEFAULT_THRESHOLDS.consolidateAfter,
+    "The parent took other than consolidateAfter roots");
   assert(consolidated.parts.every((part) => part.kind === "fold"));
 
   const chapterBuilt = makeFixture({
@@ -1729,64 +1742,162 @@ async function gateExpandLeases() {
   };
 }
 
+/**
+ * CONSOLIDATION IS A PURE FUNCTION OF THE COUNT (Shane 2026-08-10).
+ *
+ * The old gate read a crossing: at or above CONSOLIDATE_AFTER unpinned folds,
+ * placeholders became ordinary span material and one run per pass composed. That premise
+ * is gone. What is pinned here is the arithmetic: from a count of n visible unheld roots,
+ * n / consolidateAfter parents MUST exist, each holding exactly consolidateAfter
+ * consecutive roots stalest first, the remainder left alone, and all of them formed in
+ * ONE commit epoch rather than one per pass. A hold splits the run and each side counts
+ * on its own; gap material between children falls into the parent; nothing is nested that
+ * cannot be read back out.
+ *
+ * The count is over EVERY kind, a parent included, so the rule runs to a fixpoint and the
+ * forest gets DEEPER: ten parents are a group and their grandparent is what puts the
+ * oldest context several layers down after a long session (Shane 2026-08-10).
+ */
 async function gateConsolidationCountingRule() {
-  // ONE counting rule replaces the width rung: at or above CONSOLIDATE_AFTER unpinned
-  // folds in the stale region, placeholders are ordinary span material.
-  const belowRule = await chapterForest(context.DEFAULT_THRESHOLDS.consolidateAfter - 1);
-  const belowSnapshot = context.mapActiveContext({
-    sessionId: belowRule.sessionId,
-    eventMessages: belowRule.messages,
-    contextEntries: belowRule.entries,
+  const width = context.DEFAULT_THRESHOLDS.consolidateAfter;
+  const snapshotOf = (built) => context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: built.messages,
+    contextEntries: built.entries,
     contextWindow: 100_000,
   });
-  assert.equal(
-    context.unpinnedStaleFolds(belowSnapshot, belowRule.state).length,
-    context.DEFAULT_THRESHOLDS.consolidateAfter - 1,
-  );
-  assert.equal(context.foldsAreSpanMaterial(belowSnapshot, belowRule.state), false);
-  assert.equal(context.selectAutomaticFoldRun(belowSnapshot, belowRule.state), null,
-    "A below-rule forest still composed a run of placeholders");
+
+  // Below the width the count owes nothing, and no automatic span may take a placeholder
+  // by any other route: chapters are raw material at every count now.
+  const belowRule = await chapterForest(width - 1);
+  const belowSnapshot = snapshotOf(belowRule);
+  assert.equal(context.unpinnedStaleFolds(belowSnapshot, belowRule.state).length, width - 1);
+  assert.deepEqual(context.selectAutomaticConsolidations(belowSnapshot, belowRule.state), [],
+    "A below-count forest still owed a parent");
   const belowSpan = context.selectAutomaticSpan(belowSnapshot, belowRule.state);
   assert(!belowSpan || belowSpan.parts.every((part) => part.kind === "raw"),
-    "A below-rule automatic span swallowed a placeholder");
-  // The count is read LIVE, so a commit that folds raw spans can carry the same session
-  // over the rule inside one epoch. That is the law, not an escape: what the rule
-  // forbids is a span composed of placeholders while the count is under the line, which
-  // is exactly what the three assertions above read off the selector.
+    "A below-count automatic span swallowed a placeholder");
 
-  // At the rule the same forest, one fold wider, nests. The rule counts folds and
-  // nothing else: no pressure term, no width shaping, no boundary walk.
-  const wide = await chapterForest(context.DEFAULT_THRESHOLDS.consolidateAfter);
-  const originalRoots = wide.state.folds.filter((fold) => fold.parentId === null).map((fold) => fold.id);
-  const wideSnapshot = context.mapActiveContext({
-    sessionId: wide.sessionId,
-    eventMessages: wide.messages,
-    contextEntries: wide.entries,
-    contextWindow: 100_000,
+  // TWO FULL GROUPS AND A REMAINDER, IN ONE EPOCH. 21 roots owe exactly two parents:
+  // the first ten under the first, the next ten under the second, one left alone.
+  const wide = await chapterForest(2 * width + 1);
+  const wideSnapshot = snapshotOf(wide);
+  const eligible = context.unpinnedStaleFolds(wideSnapshot, wide.state)
+    .map(({ fold }) => fold.id);
+  assert(eligible.length >= 2 * width, `The fixture offered only ${eligible.length} eligible roots`);
+  const groups = context.selectAutomaticConsolidations(wideSnapshot, wide.state);
+  assert.equal(groups.length, Math.floor(eligible.length / width),
+    `${eligible.length} roots owed ${Math.floor(eligible.length / width)} parents, got ${groups.length}`);
+  groups.forEach((group, index) => {
+    assert.equal(group.kind, "consolidation");
+    assert.deepEqual(
+      group.parts.flatMap((part) => part.kind === "fold" ? [part.foldId] : []),
+      eligible.slice(index * width, (index + 1) * width),
+      "A parent took other than its consolidateAfter consecutive roots, stalest first",
+    );
   });
-  assert.equal(context.foldsAreSpanMaterial(wideSnapshot, wide.state), true);
-  const run = context.selectAutomaticFoldRun(wideSnapshot, wide.state);
-  assert.equal(run.kind, "consolidation");
-  assert.deepEqual(run.parts.map((part) => part.foldId), originalRoots);
   const runtime = makeRuntime(wide, { initialEntries: [
     ...wide.entries,
-    stateEntry(wide.sessionId, wide.state, "width-state", wide.entries.at(-1).id),
+    stateEntry(wide.sessionId, wide.state, "count-state", wide.entries.at(-1).id),
   ] });
   await startRuntime(runtime);
-  await measureAndCommit(runtime, 88_000, 100_000, "counting-rule-commit");
+  await measureAndCommit(runtime, 88_000, 100_000, "count-law-commit");
   const state = materialized(runtime);
-  const consolidation = state.folds.find((fold) =>
-    fold.kind === "consolidation" && fold.parentId === null);
-  assert(consolidation, JSON.stringify(state.folds.map((fold) => [fold.kind, fold.parentId])));
-  assert.deepEqual(consolidation.parts.map((part) => part.foldId), originalRoots);
-  // Consolidation NESTS, never removes: every child is still in the forest, under it.
-  for (const id of originalRoots) {
-    assert.equal(state.folds.find((fold) => fold.id === id)?.parentId, consolidation.id);
+  const parents = state.folds.filter((fold) => fold.kind === "consolidation");
+  assert.equal(parents.length, groups.length,
+    `One epoch owed ${groups.length} parents and built ${parents.length}`);
+  for (const parent of parents) {
+    assert.equal(parent.parts.filter((part) => part.kind === "fold").length, width,
+      "A parent carried other than consolidateAfter children");
+    for (const part of parent.parts) {
+      if (part.kind !== "fold") continue;
+      assert.equal(state.folds.find((fold) => fold.id === part.foldId)?.parentId, parent.id,
+        "Consolidation removed a child instead of nesting it");
+    }
   }
+  // And the state the law forbids does not survive its own epoch: no unheld run of
+  // eligible roots is left standing at or above the width.
+  const afterSnapshot = context.mapActiveContext({
+    sessionId: wide.sessionId,
+    eventMessages: runtime.messages,
+    contextEntries: runtime.branch,
+    contextWindow: 100_000,
+  });
+  assert.deepEqual(context.selectAutomaticConsolidations(afterSnapshot, state), [],
+    "A full group survived the epoch that was supposed to form it");
 
-  // Pins are the only exemption. One pinned root is neither counted by the rule nor
-  // included by the span that the remaining roots compose.
-  const pinnedForest = await chapterForest(context.DEFAULT_THRESHOLDS.consolidateAfter + 1);
+  // GAPS FALL IN, HOLDS SPLIT THE RUN. Ten roots with raw turns between them: the parent's
+  // span runs first child to last child and swallows the gaps. Pin one gap and the run
+  // splits into two shorter runs, so the count owes nothing at all.
+  const gapped = makeFixture({
+    turns: 30,
+    tools: false,
+    chapterChars: 3_500,
+    policy: { minChapterChars: 1 },
+    thresholds: NO_FRESH_TAIL,
+    contextWindow: 100_000,
+  });
+  let gappedState = context.emptyActiveContextState(gapped.sessionId);
+  for (let turn = 0; turn < 2 * width; turn += 2) {
+    const candidate = context.manualFoldCandidate(gapped.snapshot, gappedState,
+      [gapped.turnEntries[turn][0], gapped.turnEntries[turn].at(-1)]);
+    gappedState = (await commitCandidate(gappedState, gapped.snapshot, candidate, {
+      brief: `Complete chapter ${turn} remains independently pageable and exactly recoverable.`,
+      now: turn + 1,
+    })).state;
+  }
+  const gappedSnapshot = snapshotOf(gapped);
+  const gapGroups = context.selectAutomaticConsolidations(gappedSnapshot, gappedState);
+  assert.equal(gapGroups.length, 1, "Ten roots across raw gaps owed one parent");
+  assert.equal(gapGroups[0].parts.filter((part) => part.kind === "fold").length, width);
+  assert(gapGroups[0].parts.some((part) => part.kind === "raw"),
+    "The parent's span skipped the raw gaps between its children instead of absorbing them");
+  const gapRefs = gapGroups[0].parts.flatMap((part) => part.kind === "raw" ? [part.ref] : []);
+  const heldState = {
+    ...gappedState,
+    protected: [structuredClone(gapRefs[Math.floor(gapRefs.length / 2)])],
+  };
+  assert.deepEqual(context.selectAutomaticConsolidations(gappedSnapshot, heldState), [],
+    "A pinned span inside a gap was absorbed instead of splitting the run");
+
+  // DEPTH. A parent is a root like any other, so `consolidateAfter` parents are a group
+  // and what they make is a grandparent. Read at width 3 rather than 10, because the
+  // property is the arithmetic running to a fixpoint and not the size of the fixture:
+  // nine roots make three parents, and three parents make one grandparent.
+  const deepWidth = 3;
+  const deep = await chapterForest(deepWidth * deepWidth);
+  const deepSnapshot = context.mapActiveContext({
+    sessionId: deep.sessionId,
+    eventMessages: deep.messages,
+    contextEntries: deep.entries,
+    contextWindow: 100_000,
+    thresholds: { ...NO_FRESH_TAIL, consolidateAfter: deepWidth },
+  });
+  let deepState = deep.state;
+  const layers = [];
+  for (let round = 0; round < 4; round += 1) {
+    const owed = context.selectAutomaticConsolidations(deepSnapshot, deepState);
+    if (!owed.length) break;
+    layers.push(owed.length);
+    for (const candidate of owed) {
+      assert.equal(candidate.parts.filter((part) => part.kind === "fold").length, deepWidth);
+      deepState = (await commitCandidate(deepState, deepSnapshot, candidate, {
+        brief: context.deterministicConsolidationBrief(candidate, deepState),
+      })).state;
+    }
+  }
+  assert.deepEqual(layers, [deepWidth, 1],
+    `The count did not run to a fixpoint over its own parents: ${JSON.stringify(layers)}`);
+  const deepRoots = deepState.folds.filter((fold) => fold.parentId === null);
+  assert.equal(deepRoots.length, 1, "The fixpoint left more than one root standing");
+  const depthOf = (fold) => 1 + Math.max(0, ...fold.parts
+    .flatMap((part) => part.kind === "fold"
+      ? [depthOf(deepState.folds.find((item) => item.id === part.foldId))]
+      : []));
+  assert.equal(depthOf(deepRoots[0]), 3, "The oldest context did not end up three layers down");
+
+  // A PINNED ROOT IS A HOLD TOO, and the roots either side of it count separately.
+  const pinnedForest = await chapterForest(width + 1);
   const pinnedRoots = pinnedForest.state.folds
     .filter((fold) => fold.parentId === null).map((fold) => fold.id);
   const pinnedFold = pinnedForest.state.folds.find((fold) => fold.id === pinnedRoots[0]);
@@ -1794,23 +1905,37 @@ async function gateConsolidationCountingRule() {
     ...pinnedForest.state,
     protected: context.flattenFoldRefs(pinnedFold, pinnedForest.state).map((ref) => structuredClone(ref)),
   };
-  const pinnedSnapshot = context.mapActiveContext({
-    sessionId: pinnedForest.sessionId,
-    eventMessages: pinnedForest.messages,
-    contextEntries: pinnedForest.entries,
-    contextWindow: 100_000,
-  });
-  assert.equal(
-    context.unpinnedStaleFolds(pinnedSnapshot, pinnedState).length,
-    context.DEFAULT_THRESHOLDS.consolidateAfter,
-    "The pinned fold is still counted by the rule",
-  );
-  const pinnedRun = context.selectAutomaticFoldRun(pinnedSnapshot, pinnedState);
-  assert(pinnedRun.parts.every((part) => part.foldId !== pinnedRoots[0]),
-    "The automatic span swallowed a pinned fold");
+  const pinnedSnapshot = snapshotOf(pinnedForest);
+  assert.equal(context.unpinnedStaleFolds(pinnedSnapshot, pinnedState).length, width,
+    "The pinned fold is still counted by the law");
+  const pinnedGroups = context.selectAutomaticConsolidations(pinnedSnapshot, pinnedState);
+  assert.equal(pinnedGroups.length, 1);
+  assert(pinnedGroups[0].parts.every((part) => part.foldId !== pinnedRoots[0]),
+    "The parent swallowed a pinned fold");
+
+  // LOSSLESS THROUGH THE PARENT. A nested child is still peekable by its own id and the
+  // rescue read still resolves the parent to the original bytes.
+  const nestedChild = parents[0].parts.find((part) => part.kind === "fold").foldId;
+  const childSource = context.peekFoldSource({
+    foldId: nestedChild,
+    state,
+    entries: runtime.branch,
+    sessionId: wide.sessionId,
+    maximumBytes: context.ACTIVE_CONTEXT_POLICY.maxChapterChars,
+  }).source;
+  const originalText = String(context.contentText(context.exactMapped(
+    afterSnapshot, context.flattenFoldRefs(state.folds.find((fold) => fold.id === nestedChild), state)[0],
+  ).message)).slice(0, 64);
+  assert(childSource.includes(originalText), "A nested child stopped serving its own verbatim source");
+  assert(json.stableStringify(context.recoverFoldMessages({
+    foldId: parents[0].id,
+    state,
+    entries: runtime.branch,
+    sessionId: wide.sessionId,
+  })).includes(originalText), "The rescue read stopped resolving the parent to the original bytes");
 
   // And a consolidation still has to pay for itself in bytes.
-  const children = originalRoots.slice(0, 2).map((id) => wide.state.folds.find((fold) => fold.id === id));
+  const children = eligible.slice(0, 2).map((id) => wide.state.folds.find((fold) => fold.id === id));
   const parts = children.map((fold) => ({ kind: "fold", foldId: fold.id }));
   const sourceRefs = children.flatMap((fold) => context.flattenFoldRefs(fold, wide.state));
   await assert.rejects(() => context.prepareFold({
@@ -1821,12 +1946,18 @@ async function gateConsolidationCountingRule() {
     brief: `A factual but deliberately non-shrinking consolidation ${"x".repeat(1_100)}`,
   }), /materially reduce/);
   return {
-    consolidateAfter: context.DEFAULT_THRESHOLDS.consolidateAfter,
-    belowRuleFolds: context.DEFAULT_THRESHOLDS.consolidateAfter - 1,
-    belowRuleConsolidations: 0,
-    selectedRoots: consolidation.parts.map((part) => part.foldId),
-    nestedChildren: originalRoots.length,
-    pinnedExcluded: true,
+    consolidateAfter: width,
+    belowCountRoots: width - 1,
+    belowCountParents: 0,
+    eligibleRoots: eligible.length,
+    parentsOwed: groups.length,
+    parentsBuiltInOneEpoch: parents.length,
+    remainderLeftAlone: eligible.length % width,
+    gapsAbsorbed: true,
+    pinnedGapSplitsTheRun: true,
+    pinnedRootExcluded: true,
+    fixpointLayers: layers,
+    oldestDepth: depthOf(deepRoots[0]),
     byteShrinkGate: "enforced",
   };
 }
@@ -4445,7 +4576,9 @@ async function gateMarkAccumulation() {
   const status = await toolStatus(runtime);
   const epoch = status.details.automatic.lastAutomaticAction.epoch;
   assert.equal(epoch.refusedMarks, 0);
-  assert.equal(epoch.appliedMarks, epoch.pendingMarks);
+  // Applied = pending + closing. The epoch re-reads its own root count after its marks
+  // land and parents what it just made, so it applies marks that were never pending.
+  assert.equal(epoch.appliedMarks, epoch.pendingMarks + epoch.closingMarks);
   assert(epoch.pendingMarks > epoch.topUpMarks, "The top-up out-marked the accumulated epoch");
   assert(epoch.freedBudgetShare >= epoch.targetBudgetShare,
     "A full epoch freed less than the thermostat's own freeing target");
@@ -5173,8 +5306,13 @@ async function gateEpochBatchingUnderFullLevers() {
     .filter((record) => record.kind === "context.commit" && record.deferred === false);
   assert.equal(closingCommits.length, 1,
     `The released batch took ${closingCommits.length} commits over three request cycles`);
-  assert.equal(closingCommits[0].applied_marks, pendingAtClose,
-    `The commit applied ${closingCommits[0].applied_marks} of the ${pendingAtClose} marks the guard released`);
+  // Plus whatever parents the epoch's own closing count owed over the folds it just
+  // landed: those were never pending, and counting them as released would be a fiction.
+  assert.equal(
+    closingCommits[0].applied_marks - closingCommits[0].closing_consolidation_marks,
+    pendingAtClose,
+    `The commit applied ${closingCommits[0].applied_marks} of the ${pendingAtClose} marks the guard released`,
+  );
   assert.equal(closingCommits[0].refused_marks, 0, "A released mark was refused rather than applied");
   assert(closingCommits[0].freed_tokens > 0, "The released batch freed nothing");
   assert(materialized(runtime).folds.length > foldsAtClose,
@@ -7789,8 +7927,12 @@ async function gateFrozenSurface() {
     "The fold event only appended; it never folded",
   );
   // MECHANISM 2, the other half: the folds appear once the event materializes them.
+  // A ROOT, because one epoch can now build a parent as well as its children and a
+  // nested child is behind its parent's placeholder by design; what the projection owes
+  // is the forest read from its roots.
   assert(materialized(runtime).folds.length >= 1);
-  assert(after.includes(materialized(runtime).folds[0].id),
+  const rootFold = materialized(runtime).folds.find((fold) => fold.parentId === null);
+  assert(rootFold && after.includes(rootFold.id),
     "The committed fold never reached the projection");
 
   // MECHANISM 3, and the pass this gate was missing. The fold event is allowed ONE
@@ -8697,7 +8839,13 @@ async function gateRiderIsOneLiteralPerEpoch() {
   // new eligible mass, then hold pressure at the plateau until a commit applies it.
   // The rider must be REPLACED, not stacked, and the event stream must carry at
   // most one context.rider per epoch.
-  await toolCall(runtime, { action: "expand", id: state.folds[0].id });
+  // A ROOT read at call time, not the fold this gate saw first: the passes between then
+  // and here run the ladder, and the count law may have nested that fold under a parent,
+  // where expanding it is refused until the parent opens.
+  await toolCall(runtime, {
+    action: "expand",
+    id: materialized(runtime).folds.find((fold) => fold.parentId === null).id,
+  });
   for (let index = 0; index < 10 && materialized(runtime).rider.epoch === firstEpoch; index += 1) {
     await measure(runtime, 86_500 + index, 100_000, `rider-epoch-${index}`);
     await project(runtime);
@@ -9026,10 +9174,11 @@ async function gateThresholdNoticesAppendOnce() {
  * THE UNIFIED SPAN LAW, WHERE IT IS NEW.
  *
  * One law selects stale material at commit time, and what the span contains decides the
- * fold. Below the counting rule an automatic span is raw material only. At or above it
- * the placeholders are ordinary material, so folds nest inside folds; pins are the one
- * exemption; and the nesting is exactly ONE level deep, because the parent stores its
- * children as placeholders rather than swallowing their bytes.
+ * fold. An automatic CHAPTER is raw material at every count. Placeholders nest by one
+ * route only, the count law, which owes a parent for every consolidateAfter eligible
+ * roots; pins are exempt from the count and from the span; and the nesting is exactly ONE
+ * level deep, because the parent stores its children as placeholders rather than
+ * swallowing their bytes.
  */
 async function gateUnifiedSpanLaw() {
   const below = await chapterForest(context.DEFAULT_THRESHOLDS.consolidateAfter - 1);
@@ -9043,7 +9192,7 @@ async function gateUnifiedSpanLaw() {
   assert(belowSpan, "The below-rule law proposed nothing at all");
   assert(belowSpan.parts.every((part) => part.kind === "raw"),
     "A below-rule automatic span included a placeholder");
-  assert.equal(context.selectAutomaticFoldRun(belowSnapshot, below.state), null);
+  assert.deepEqual(context.selectAutomaticConsolidations(belowSnapshot, below.state), []);
 
   // At the rule, one pinned fold and the rest as material.
   const forest = await chapterForest(context.DEFAULT_THRESHOLDS.consolidateAfter + 1);
@@ -10622,7 +10771,7 @@ const gates = [
   [10, "Persistence chain", gatePersistenceChain],
   [11, "Marking is doorless below the band top", gateDoorlessMarking],
   [12, "B2 expand leases", gateExpandLeases],
-  [13, "Consolidation counting rule", gateConsolidationCountingRule],
+  [13, "Consolidation is the root count", gateConsolidationCountingRule],
   [14, "B4 quiet warming", gateQuietWarming],
   [15, "B5 fold_candidates detail", gateFoldCandidatesDetail],
   [16, "No tool call causes a rewrite", gateNoToolCallRewrite],

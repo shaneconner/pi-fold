@@ -319,8 +319,20 @@ export function validateFoldForest(folds: ActiveFold[]): ActiveFold[] {
         (!fold.parts.length || fold.parts.some((part) => part.kind !== "raw" || part.ref.role !== "toolResult"))) {
       throw new Error("Tool-result fold must own one validated assistant batch of tool results");
     }
-    if (fold.kind === "consolidation" && fold.parts.some((part) => part.kind !== "fold")) {
-      throw new Error("Consolidation folds may contain only child folds");
+    // WHAT A PARENT IS, RE-DERIVED UNDER THE COUNT LAW (Shane 2026-08-10).
+    //
+    // Two shape rules stood here and both described the old approximation. "Only child
+    // folds" forbade the raw gaps between children, and a parent's span runs from its
+    // first child to its last one, so the gap material inside it is the parent's or the
+    // span is not a span. "Only chapter or consolidation children" forbade tool-result
+    // children, which was true while a bare tool batch nested through a chapter span;
+    // automatic chapters no longer take placeholders at any count, so that rule would
+    // now leave every tool fold as an obstacle no parent could ever reclaim.
+    //
+    // What survives is the one thing that makes a consolidation a consolidation: it
+    // groups folds. A parent with no child fold is a chapter wearing the wrong name.
+    if (fold.kind === "consolidation" && !fold.parts.some((part) => part.kind === "fold")) {
+      throw new Error("Consolidation folds must contain at least one child fold");
     }
     byId.set(fold.id, fold);
   }
@@ -342,19 +354,6 @@ export function validateFoldForest(folds: ActiveFold[]): ActiveFold[] {
   }
   for (const fold of values) {
     if ((parent.get(fold.id) ?? null) !== fold.parentId) throw new Error(`Fold ${fold.id} parent drift`);
-    // A chapter's children are whatever its span contained. The old law let a chapter
-    // hold tool-result folds only, which made a wide agent span across chapters the
-    // automation itself had made unconstructible: the agent could not curate over its
-    // own history. Nesting never removes anything, so there is nothing for a kind rule
-    // to protect here. What stays is the shape of the two composed kinds: a tool-result
-    // fold owns one raw batch (checked above), and a consolidation groups composed
-    // folds, because a bare tool batch nests through a chapter span instead.
-    for (const childId of childFoldIds(fold)) {
-      const child = byId.get(childId)!;
-      if (fold.kind === "consolidation" && child.kind === "tool-result") {
-        throw new Error(`Consolidation ${fold.id} may contain only chapter or consolidation folds`);
-      }
-    }
   }
   for (const fold of values) {
     const refs = flattenFoldRefs(fold, { folds: values });

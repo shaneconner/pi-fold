@@ -344,13 +344,16 @@ export function deterministicConsolidationBrief(candidate: FoldCandidate, state:
 /**
  * Every fold kind, as a span may contain it.
  *
- * The agent path composes with this set: a mark's span may include folds of any kind and
- * any count, and the fold it commits re-parents them. Automation composes with a NARROWER
- * set, because its own restraint is the counting rule (placeholders are span material
- * only at or above `thresholds.consolidateAfter`), not a rule about shape.
+ * The agent path composes with this set, and so does the count law's parent: a fold is a
+ * fold, whatever kind made it, and a parent may take any of them. What an automatic
+ * CHAPTER may take is nothing of the sort, at any count: a placeholder reaches an
+ * automatic fold through exactly one route now, which is the count (Shane 2026-08-10).
  */
 export const ALL_FOLD_KINDS: ReadonlySet<FoldKind> =
   new Set<FoldKind>(["tool-result", "chapter", "consolidation"]);
+
+/** No placeholder is span material. What an automatic chapter composes is raw entries. */
+export const NO_FOLD_KINDS: ReadonlySet<FoldKind> = new Set<FoldKind>();
 
 /** The first pinned fold a span would nest, or null when the span swallows no pin. */
 export function pinnedChildFold(
@@ -434,12 +437,20 @@ export function chapterUnits(snapshot: ActiveContextSnapshot): ChapterUnit[] {
 }
 
 /**
- * Folds the automatic law may treat as span material.
+ * The automatic jurisdiction, as a list of roots: THE ROOTS THE COUNT COUNTS.
  *
- * Membership, not position: every visible collapsed root counts unless the agent pinned
- * it or the fresh tail covers it, and an EXPANDED fold is not a placeholder at all. One
- * predicate answers all of it, because that is the same question `refsProtected` already
- * asks of a span's evidence.
+ * Membership, not position, and not kind. Every visible collapsed root belongs unless the
+ * agent pinned it or the fresh tail covers it, and an EXPANDED fold is not a placeholder
+ * at all. One predicate answers all of it, because that is the same question
+ * `refsProtected` already asks of a span's evidence.
+ *
+ * A consolidation counts here like anything else. A consolidated fold is not a different
+ * species of span, and depth is the point: ten visible parents make a grandparent, and
+ * under gradual accrual the stalest parent is simply the stalest member of the next group
+ * of ten, so the oldest context sits a few layers down after a long session. The only
+ * folds outside the count are the held ones, because a counted fold must be groupable and
+ * a held one is exactly the fold that cannot be (Shane 2026-08-10). A fold already nested
+ * inside a parent is not a root and is never counted separately.
  */
 export function unpinnedStaleFolds(
   snapshot: ActiveContextSnapshot,
@@ -449,62 +460,173 @@ export function unpinnedStaleFolds(
     .filter(({ fold }) => !refsProtected(flattenFoldRefs(fold, state), state, snapshot));
 }
 
-/** Whether fold placeholders currently count as ordinary material for an automatic span. */
-export function foldsAreSpanMaterial(
+/** Everything a pending mark already speaks for: whole folds by id, raw evidence by key. */
+export function pendingMarkClaims(
+  state: ActiveContextState,
+): { foldIds: Set<string>; refKeys: Set<string> } {
+  const foldIds = new Set<string>();
+  const refKeys = new Set<string>();
+  for (const mark of state.pendingMarks ?? []) {
+    if (mark.mark === "refold") {
+      foldIds.add(mark.id);
+      continue;
+    }
+    for (const part of mark.parts) {
+      if (part.kind === "fold") foldIds.add(part.foldId);
+      else refKeys.add(objectRefKey(part.ref));
+    }
+  }
+  return { foldIds, refKeys };
+}
+
+/** Whether the raw material between two roots is material a parent may swallow. */
+function absorbableGap(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
+  from: number,
+  to: number,
+  claims: { refKeys: Set<string> },
 ): boolean {
-  return unpinnedStaleFolds(snapshot, state).length >= snapshot.thresholds.consolidateAfter;
+  if (from > to) return true;
+  // No fold kind is admitted, so any root sitting in the gap -- a parent the count
+  // already made, a fold the agent expanded, a fold the agent pinned -- refuses the
+  // range outright and splits the run there.
+  const parts = partsForRange(snapshot, state, from, to, NO_FOLD_KINDS);
+  if (!parts) return false;
+  const refs = parts.flatMap((part) => part.kind === "raw" ? [part.ref] : []);
+  if (refs.length !== parts.length || refsProtected(refs, state, snapshot)) return false;
+  return !refs.some((ref) => claims.refKeys.has(objectRefKey(ref)));
+}
+
+/** Every tool call in the window, by id, with the assistant and the result that close it. */
+function windowToolLinkage(snapshot: ActiveContextSnapshot): Map<string, { call: number; result: number }> {
+  const linkage = new Map<string, { call: number; result: number }>();
+  const at = (id: string): { call: number; result: number } => {
+    const existing = linkage.get(id);
+    if (existing) return existing;
+    const created = { call: -1, result: -1 };
+    linkage.set(id, created);
+    return created;
+  };
+  for (let index = 0; index < snapshot.messages.length; index += 1) {
+    const message = snapshot.messages[index];
+    const role = messageRole(message);
+    if (role === "assistant") {
+      for (const part of denseOwnArrayValues(ownValue(message, "content")) ?? []) {
+        if (ownValue(part, "type") !== "toolCall") continue;
+        const id = ownValue(part, "id");
+        if (typeof id === "string" && id) at(id).call = index;
+      }
+    } else if (role === "toolResult") {
+      const id = ownValue(message, "toolCallId");
+      if (typeof id === "string" && id) at(id).result = index;
+    }
+  }
+  return linkage;
 }
 
 /**
- * The stalest contiguous run of unpinned folds, read as ONE span.
+ * The parent's span, widened until hiding it keeps every tool call with its result.
  *
- * This is not a rung with a trigger of its own: it only ever runs once placeholders are
- * span material, and then it is just the case where the span happens to contain nothing
- * but folds. A tool-result placeholder nests through the chapter span instead, which is
- * where the forest law already allows it.
+ * A collapsed parent renders as ONE entry, so a span that opens on a tool-result fold
+ * would hide the result while its call stayed visible, and the projection guard rejects
+ * that split outright. The widening is the same raw absorption the law already grants
+ * between children, applied at the edges: it takes the calling assistant in, never a
+ * fold, and if the material it needs is not absorbable the group does not form.
  */
-export function selectAutomaticFoldRun(
+function linkageClosedSpan(
+  snapshot: ActiveContextSnapshot,
+  start: number,
+  end: number,
+): { start: number; end: number } {
+  const linkage = windowToolLinkage(snapshot);
+  let from = start;
+  let to = end;
+  for (let pass = 0; pass <= linkage.size; pass += 1) {
+    let moved = false;
+    for (const { call, result } of linkage.values()) {
+      if (call < 0 || result < 0) continue;
+      const callInside = call >= from && call <= to;
+      const resultInside = result >= from && result <= to;
+      if (callInside === resultInside) continue;
+      if (call < from) { from = call; moved = true; }
+      if (result > to) { to = result; moved = true; }
+    }
+    if (!moved) break;
+  }
+  return { start: from, end: to };
+}
+
+/** One group of exactly `consolidateAfter` roots, read as the parent it must become. */
+function consolidationCandidate(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
+  members: Array<{ fold: ActiveFold; start: number; end: number }>,
+  claims: { refKeys: Set<string> },
 ): FoldCandidate | null {
-  // The counting rule is the whole trigger: below it there is no run to compose.
-  if (!foldsAreSpanMaterial(snapshot, state)) return null;
-  // A fold's own evidence is claimed BY that fold, so the raw-key claim set every other
-  // selector reads says nothing here. What a run must not touch is a fold some pending
-  // mark already spoke for, which is a claim on the fold ITSELF.
-  const spokenFor = new Set<string>();
-  for (const mark of state.pendingMarks ?? []) {
-    if (mark.mark === "refold") spokenFor.add(mark.id);
-    else for (const part of mark.parts) if (part.kind === "fold") spokenFor.add(part.foldId);
-  }
-  const roots = unpinnedStaleFolds(snapshot, state).filter(({ fold }) =>
-    (fold.kind === "chapter" || fold.kind === "consolidation") && !spokenFor.has(fold.id));
-  // No shaping constants: the run is as wide as the transcript makes it, trimmed only by
-  // the one bound a fold record has, which is how many exact references it may carry.
-  const candidateFor = (selected: typeof roots): FoldCandidate | null => {
-    for (let width = selected.length; width >= 2; width -= 1) {
-      const parts: FoldPart[] = selected.slice(0, width)
-        .map(({ fold }) => ({ kind: "fold", foldId: fold.id }));
-      const sourceRefs = candidateSourceRefs(parts, state);
-      if (sourceRefs.length <= snapshot.policy.maxFoldSourceRefs) {
-        return { kind: "consolidation", parts, sourceRefs };
-      }
+  const span = linkageClosedSpan(snapshot, members[0].start, members.at(-1)!.end);
+  const parts = partsForRange(snapshot, state, span.start, span.end, ALL_FOLD_KINDS);
+  if (!parts) return null;
+  const ids = new Set(members.map(({ fold }) => fold.id));
+  const children = parts.flatMap((part) => part.kind === "fold" ? [part.foldId] : []);
+  if (children.length !== ids.size || children.some((id) => !ids.has(id))) return null;
+  const raw = parts.flatMap((part) => part.kind === "raw" ? [part.ref] : []);
+  if (refsProtected(raw, state, snapshot)) return null;
+  if (raw.some((ref) => claims.refKeys.has(objectRefKey(ref)))) return null;
+  const sourceRefs = candidateSourceRefs(parts, state);
+  // THE ONE PHYSICAL BOUND, HANDLED LOUDLY. A record carries at most
+  // `maxFoldSourceRefs` exact references. A group over that bound is left UNFORMED
+  // rather than quietly shrunk: shrinking would make the parent a function of the
+  // record format instead of the count, and the law is the count.
+  if (sourceRefs.length > snapshot.policy.maxFoldSourceRefs) return null;
+  return { kind: "consolidation", parts, sourceRefs };
+}
+
+/**
+ * CONSOLIDATION IS A PURE FUNCTION OF THE COUNT (Shane 2026-08-10).
+ *
+ * Not a crossing event, not a paced rung, and not one candidate per pass. Count the
+ * visible unheld roots of every kind; each `consolidateAfter` consecutive ones, stalest
+ * first, MUST be under a parent, and the remainder is left alone. From a count of n that
+ * is `n / consolidateAfter` parents, and all of them form in the epoch that notices,
+ * because a rule that formed one per commit would leave a count the rule says is
+ * impossible standing for as many commits as it takes to drain.
+ *
+ * A parent it made is a root like any other, so the epoch applies the rule to a FIXPOINT:
+ * ten parents are a group, and the grandparent that follows is how the oldest context
+ * ends up several layers down after a long session.
+ *
+ * The run is where the count is taken. A hold -- a pin, the fresh tail, an expanded fold,
+ * evidence a pending mark spoke for -- cannot be swallowed, so it splits the run and each
+ * side counts on its own; a run shorter than the width waits as remainder. Gaps of raw
+ * context between children fall into the parent, which is what makes the span one
+ * contiguous range instead of a list of islands.
+ */
+export function selectAutomaticConsolidations(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+): FoldCandidate[] {
+  const width = snapshot.thresholds.consolidateAfter;
+  if (!Number.isInteger(width) || width < 1) return [];
+  const claims = pendingMarkClaims(state);
+  const eligible = unpinnedStaleFolds(snapshot, state)
+    .filter(({ fold }) => !claims.foldIds.has(fold.id));
+  const groups: FoldCandidate[] = [];
+  let run: typeof eligible = [];
+  const close = (): void => {
+    for (let at = 0; at + width <= run.length; at += width) {
+      const candidate = consolidationCandidate(snapshot, state, run.slice(at, at + width), claims);
+      if (candidate) groups.push(candidate);
     }
-    return null;
+    run = [];
   };
-  let run: typeof roots = [];
-  for (const root of roots) {
-    if (!run.length || root.start === run.at(-1)!.end + 1) {
-      run.push(root);
-      continue;
-    }
-    const candidate = candidateFor(run);
-    if (candidate) return candidate;
-    run = [root];
+  for (const root of eligible) {
+    const previous = run.at(-1);
+    if (previous && !absorbableGap(snapshot, state, previous.end + 1, root.start - 1, claims)) close();
+    run.push(root);
   }
-  return candidateFor(run);
+  close();
+  return groups;
 }
 
 /** One completed batch the automatic law may take, with the indices it covers. */

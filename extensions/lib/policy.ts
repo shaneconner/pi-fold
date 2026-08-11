@@ -367,6 +367,14 @@ export function servingBudgetTokens(window: number): number {
 export const MAX_PENDING_MARKS = 256;
 /** Enough batches to actually reach the floor on a wide window before the loop exits. */
 export const EPOCH_MAX_TOPUP_MARKS = 64;
+/**
+ * How many times one commit re-reads its own eligible-root count.
+ *
+ * A termination bound, not a cadence: a parent is excluded from the count that produced
+ * it, so each round divides the standing roots by `consolidateAfter` and the sequence
+ * closes in two rounds at any window a session can carry.
+ */
+export const EPOCH_CONSOLIDATION_ROUNDS = 4;
 /** Estimate only; provider token accounting always comes from a measured response. */
 export const ESTIMATED_BYTES_PER_TOKEN = 4;
 /** Rendered navigation/topology overhead assumed around a brief when estimating a placeholder. */

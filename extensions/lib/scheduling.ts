@@ -54,6 +54,7 @@ import {
   chapterRangeIsUnitAligned,
   partsForRange,
   peekedSourceFoldIds,
+  selectAutomaticConsolidations,
   spanBytes,
   deterministicChapterCandidateBrief,
   deterministicConsolidationBrief,
@@ -602,12 +603,35 @@ export function markedFoldIds(state: ActiveContextState): Set<string> {
 }
 
 /**
+ * THE COUNT LAW, AS MARKS. Every parent the eligible-root count owes right now, all of
+ * them, in the epoch that notices.
+ *
+ * Separate from the top-up on purpose. The top-up is pressure arithmetic: it stops the
+ * moment the marks in hand reach the freeing target, which is the right rule for how
+ * DEEP a commit cuts and the wrong rule entirely for a law that says a count of eligible
+ * roots at or above the width is a state that must not persist. So this runs at every
+ * commit epoch and it runs first, whatever the pressure and whatever the top-up would
+ * have proposed (Shane 2026-08-10).
+ */
+export function consolidationMarks(input: {
+  snapshot: ActiveContextSnapshot;
+  state: ActiveContextState;
+  ordinal: number;
+}): PendingFoldMark[] {
+  return selectAutomaticConsolidations(input.snapshot, input.state).map((candidate) => foldMarkFor({
+    candidate,
+    ...automaticMarkBrief(input.snapshot, input.state, candidate),
+    origin: "ladder",
+    ordinal: input.ordinal,
+  }));
+}
+
+/**
  * Agent judgment leads; automation guarantees the floor. If the marks the agent made
  * would free less than the target share of the window, automation adds the stalest
- * unprotected eligible SPANS until they do: completed tool batches, raw narrative
- * chapters, and, once the window carries enough unpinned folds, the placeholders
- * themselves. One law proposes all three, which is what makes chapters and nested folds
- * reachable from the commit path at all.
+ * unprotected eligible SPANS until they do: completed tool batches and raw narrative
+ * chapters. Placeholders are not on that list any more; a placeholder gets a parent from
+ * the count law above, which is not pressure arithmetic and does not stop at a target.
  */
 export function topUpMarks(input: {
   snapshot: ActiveContextSnapshot;

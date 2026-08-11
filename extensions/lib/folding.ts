@@ -71,14 +71,14 @@ import {
   automaticToolBrief,
   candidateSourceRefs,
   chapterUnits,
+  unpinnedStaleFolds,
   deterministicChapterCandidateBrief,
-  foldsAreSpanMaterial,
+  NO_FOLD_KINDS,
   partsForRange,
   resultCall,
-  selectAutomaticFoldRun,
+  selectAutomaticConsolidations,
   selectAutomaticRefold,
   selectAutomaticToolBatch,
-  unpinnedStaleFolds,
 } from "./selection.ts";
 
 export function selectAutomaticChapter(
@@ -92,12 +92,12 @@ export function selectAutomaticChapter(
   // what keeps it off the running excursion's own evidence is the guard adjudicated at
   // the commit. There is no position filter here: a unit is composable or it is not.
   const units = chapterUnits(snapshot);
-  // The counting rule, applied to the span the automation composes: below the line a
-  // span is raw material only and steps over every placeholder; at or above it the
-  // placeholders are ordinary material and the span swallows them, so folds nest.
-  const allowedChildren = foldsAreSpanMaterial(snapshot, state)
-    ? new Set<FoldKind>(["tool-result"])
-    : new Set<FoldKind>();
+  // An automatic chapter is raw material, always. Letting a chapter swallow placeholders
+  // once the root count reached `consolidateAfter` was the old approximation of
+  // consolidation, and the count law replaces it outright: a placeholder gets a parent
+  // when the count says it must, under a fold that says what it is, not as a side effect
+  // of which chapter happened to be composable that pass (Shane 2026-08-10).
+  const allowedChildren = NO_FOLD_KINDS;
   for (let unitIndex = 0; unitIndex < units.length; unitIndex += 1) {
     const first = units[unitIndex];
     let best: FoldCandidate | null = null;
@@ -139,11 +139,14 @@ export function selectAutomaticChapter(
  *
  * There is no chapter rung and no consolidation rung any more, each with its own
  * trigger: automation proposes the stalest eligible SPAN, and what the span contains
- * decides the fold's kind. Raw narrative folds as a chapter. Once the window
- * carries `thresholds.consolidateAfter` unpinned folds, placeholders are span material,
- * so a span of whole folds folds as a consolidation and a mixed span nests its
- * tool-result children inside a chapter. Nothing here is pressure-scaled: the epoch's
- * own commit trigger decides WHEN, and this decides WHAT.
+ * decides the fold's kind. Raw narrative folds as a chapter; a parent the root count
+ * requires folds as a consolidation. Nothing here is pressure-scaled: the epoch's own
+ * commit trigger decides WHEN, and this decides WHAT.
+ *
+ * One candidate, because that is what a single inline rung can apply. The count law
+ * itself is not rationed this way: the commit epoch takes EVERY group the count requires
+ * in one pass, and this is the leftover route by which the stalest of them can also ride
+ * an epoch's own rewrite.
  */
 export function selectAutomaticStaleSpan(
   snapshot: ActiveContextSnapshot,
@@ -151,7 +154,7 @@ export function selectAutomaticStaleSpan(
   claimed: ReadonlySet<string> = new Set<string>(),
 ): FoldCandidate | null {
   const chapter = selectAutomaticChapter(snapshot, state, snapshot.policy.maxFoldSourceRefs, claimed);
-  const folds = selectAutomaticFoldRun(snapshot, state);
+  const folds = selectAutomaticConsolidations(snapshot, state)[0] ?? null;
   if (!chapter || !folds) return chapter ?? folds;
   const at = (candidate: FoldCandidate): number =>
     exactMapped(snapshot, candidate.sourceRefs[0])?.index ?? Number.MAX_SAFE_INTEGER;
@@ -292,8 +295,9 @@ export function foldCandidatesDetail(
     } : null,
     wouldFireNow,
     blockedBy,
-    // The one position that still cuts anything, plus the counting rule read as the
-    // number it counts.
+    // The one position that still cuts anything, plus the count law read as the
+    // arithmetic it is: the roots it counts, the width it divides by, and how many
+    // parents that count owes right now.
     zones: {
       freshBoundary: snapshot.freshBoundary,
       budgetTokens: snapshot.budgetTokens,
@@ -301,6 +305,7 @@ export function foldCandidatesDetail(
     width: {
       visibleRoots: unpinnedStaleFolds(snapshot, state).length,
       threshold: snapshot.thresholds.consolidateAfter,
+      groupsDue: selectAutomaticConsolidations(snapshot, state).length,
     },
   };
 }

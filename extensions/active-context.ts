@@ -102,6 +102,7 @@ import {
   COMMIT_RECLAIM_FLOOR_SHARE,
   CONTEXT_RECEIPT_BLOCK_BYTES,
   DEFAULT_CONTEXT_WINDOW,
+  EPOCH_CONSOLIDATION_ROUNDS,
   MAX_THRESHOLD_NOTICES,
   THRESHOLD_NOTICE_SHARES,
   resolveGuidance,
@@ -160,6 +161,7 @@ import {
   addPendingMark,
   claimedRefKeys,
   commitPendingMarks,
+  consolidationMarks,
   ephemeralPeekMarks,
   epochCommitDue,
   estimatedTokens,
@@ -2443,9 +2445,22 @@ export function registerActiveContext(pi: any, options: {
     let state = persistence.state!;
     let peekAdded = 0;
     let topUpAdded = 0;
+    let consolidationAdded = 0;
+    let closingAdded = 0;
     for (const mark of ephemeralPeekMarks({ snapshot, state, ordinal })) {
       const addition = addPendingMark(state, mark);
       if (addition.added) { state = addition.state; peekAdded += 1; }
+    }
+    // THE COUNT LAW RUNS AT EVERY COMMIT EPOCH, BEFORE ANYTHING ELSE PROPOSES.
+    //
+    // The number of parents the eligible-root count owes is arithmetic, not a judgment
+    // about pressure, so it is not the top-up's to make and not the user commit's to
+    // skip: at any point the count allows k groups, k parents form. Running first is
+    // what makes the rest coherent -- the groups claim their children before the top-up
+    // reads the claim set, so nothing proposes a span over a fold a parent is taking.
+    for (const mark of consolidationMarks({ snapshot, state, ordinal })) {
+      const addition = addPendingMark(state, mark);
+      if (addition.added) { state = addition.state; consolidationAdded += 1; }
     }
     const guarded = currentTurnRefKeys(snapshot);
     // THE GUARD IS ADJUDICATED AT COMMIT, NEVER AT PROPOSAL.
@@ -2643,7 +2658,7 @@ export function registerActiveContext(pi: any, options: {
         !markTouchesCurrentTurn(state, mark, guarded) &&
         markEligibility(snapshot, state, mark) === "eligible").length,
     });
-    const result = await commitPendingMarks({
+    let result = await commitPendingMarks({
       snapshot,
       state,
       generation: lifecycle.generation,
@@ -2651,6 +2666,41 @@ export function registerActiveContext(pi: any, options: {
       guardCurrentTurn: true,
       guardWaiver,
     });
+    // THE EPOCH CLOSES ITS OWN COUNT.
+    //
+    // The folds this commit just landed are eligible roots the moment they exist, and
+    // the law is about the count, not about which pass noticed it. Leaving them for the
+    // next epoch is what let the pile stand between commits: measured 2026-08-10 (PT-3),
+    // a commit that landed 26 tool folds left 32 visible roots up until the next band
+    // crossing four cycles later. So the epoch re-reads its own count and parents what
+    // it just made, inside the rewrite it has already paid for. No waiver here: a parent
+    // this round cannot apply is held by the ordinary guard and waits, exactly like any
+    // other fold. It converges because a parent is excluded from the count it came from.
+    for (let round = 0; round < EPOCH_CONSOLIDATION_ROUNDS; round += 1) {
+      let closing = result.state;
+      for (const mark of consolidationMarks({ snapshot, state: closing, ordinal })) {
+        const addition = addPendingMark(closing, mark);
+        if (addition.added) { closing = addition.state; closingAdded += 1; }
+      }
+      if (closing === result.state) break;
+      const closed = await commitPendingMarks({
+        snapshot,
+        state: closing,
+        generation: lifecycle.generation,
+        retainIneligible: true,
+        guardCurrentTurn: true,
+      });
+      if (!closed.applied.length) break;
+      // A mark the guard RETAINED is still pending, so the closing round sees it again
+      // and reports it again; only the terminal refusals accumulate, and the last round
+      // is the truth about what is still held.
+      result = {
+        ...closed,
+        applied: [...result.applied, ...closed.applied],
+        refused: [...result.refused.filter((mark) => !mark.retained), ...closed.refused],
+        waived: [...result.waived, ...closed.waived],
+      };
+    }
     persistence.state = result.state;
     // The upgrade wedge: model briefs written since the last boundary replace their
     // deterministic ones HERE, inside the mutation this commit already pays for, before
@@ -2695,6 +2745,8 @@ export function registerActiveContext(pi: any, options: {
       ladder_marks: accounting.ladderMarks,
       peek_marks: peekAdded,
       topup_marks: topUpAdded,
+      consolidation_marks: consolidationAdded,
+      closing_consolidation_marks: closingAdded,
       absorbed_wedges: wedges.absorbed.length,
       // The upgrade is a mutation of a fold whose `context.fold` record was written at
       // creation, so the stream would otherwise show a brief that silently changed. The
@@ -2832,6 +2884,10 @@ export function registerActiveContext(pi: any, options: {
       ladderMarks: accounting.ladderMarks,
       peekMarks: peekAdded,
       topUpMarks: topUpAdded,
+      consolidationMarks: consolidationAdded,
+      // Parents formed over the folds THIS commit landed. They were never in
+      // `pendingMarks`, so an epoch's arithmetic is applied = pending + closing.
+      closingMarks: closingAdded,
       absorbedWedges: wedges.absorbed.length,
       absorbed: wedges.absorbed,
       // What the commit actually folded, the way an agent counts it, so the receipt can
