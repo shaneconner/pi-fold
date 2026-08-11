@@ -19,6 +19,7 @@ import {
   foldInterval,
   budgetOccupancy,
   hardFenceRatio,
+  mappedByKey,
   orderedRoots,
   refsProtected,
   toolRefsProtected,
@@ -175,6 +176,40 @@ export function markTouchesCurrentTurn(
     })()
     : candidateSourceRefs(mark.parts, state);
   return refs.some((ref) => currentTurn.has(objectRefKey(ref)));
+}
+
+/**
+ * The real staleness of a mark: the earliest window index its span covers, in branch
+ * order.
+ *
+ * A mark's `ordinal` is the transcript position at MARK time, so across epochs it
+ * carries when the DECISION was made and nothing about the age of what the decision
+ * covers, and inside one epoch every mark shares one value. Ordering a release by it
+ * therefore fell through to comparing mark ids, which are content hashes. Measured on the
+ * sealed rep-3 state 2026-08-10: the bounded release held back the marks covering window
+ * indices 101 and 111 and surrendered the one covering 117, the newest material on the
+ * table, so the two marks the guard kept were not the two it exists to keep.
+ *
+ * A span that no longer maps sorts past the newest entry: there is no staleness to read
+ * on material that has left the branch, and releasing such a mark frees no window byte.
+ */
+export function markSpanStart(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+  mark: PendingMark,
+): number {
+  const refs = mark.mark === "refold"
+    ? (() => {
+      const fold = state.folds.find((item) => item.id === mark.id);
+      return fold ? flattenFoldRefs(fold, state) : [];
+    })()
+    : candidateSourceRefs(mark.parts, state);
+  const indexed = mappedByKey(snapshot);
+  const indices = refs.flatMap((ref) => {
+    const item = indexed.get(objectRefKey(ref));
+    return item ? [item.index] : [];
+  });
+  return indices.length ? Math.min(...indices) : snapshot.mapped.length;
 }
 
 /**
@@ -818,7 +853,7 @@ export interface CommitEpochResult {
   applied: AppliedMark[];
   refused: RefusedMark[];
   retained: PendingMark[];
-  /** Guarded marks the pressure waiver released into this commit, oldest first. */
+  /** Guarded marks the pressure waiver released into this commit, oldest material first. */
   waived: PendingMark[];
 }
 
@@ -846,7 +881,7 @@ export async function commitPendingMarks(input: {
    */
   guardCurrentTurn?: boolean;
   /**
-   * How many guarded marks the pressure waiver releases anyway, oldest first. The
+   * How many guarded marks the pressure waiver releases anyway, oldest material first. The
    * guard protects an in-flight excursion; it may never cost the session its ability
    * to send a request at all. See `guardWaiverCount`.
    */
@@ -866,9 +901,16 @@ export async function commitPendingMarks(input: {
       if (markTouchesCurrentTurn(input.state, mark, currentTurn)) guarded.push(mark);
       else applicable.push(mark);
     }
-    // Oldest first: the newest reads are the ones the excursion is about to use, so
-    // they are the last evidence the waiver surrenders.
-    guarded.sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id));
+    // Oldest MATERIAL first: the newest reads are the ones the excursion is about to
+    // use, so they are the last evidence the waiver surrenders. Staleness is a property
+    // of the span, never of when the mark was proposed; see `markSpanStart`. The id
+    // comparison is the final tiebreak between marks covering the same start, and
+    // nothing else.
+    const spanStart = new Map(guarded.map((mark) =>
+      [pendingMarkKey(mark), markSpanStart(input.snapshot, input.state, mark)] as const));
+    guarded.sort((left, right) =>
+      spanStart.get(pendingMarkKey(left))! - spanStart.get(pendingMarkKey(right))! ||
+      left.id.localeCompare(right.id));
     const waiverCount = Math.max(0, Math.min(guarded.length, Math.trunc(input.guardWaiver ?? 0)));
     for (const [index, mark] of guarded.entries()) {
       if (index < waiverCount) {

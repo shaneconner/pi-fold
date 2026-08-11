@@ -5373,6 +5373,116 @@ async function gateProjectionBudgetFence() {
   assert.equal(waiver(0.99, 1), 1, "The hard fence honoured the batch floor it must ignore");
   assert.equal(waiver(null, 8), 0, "An unmeasured ratio waived the guard");
 
+  // AND THE RELEASE ORDER IS REAL STALENESS, NOT THE MARK-ID ACCIDENT.
+  //
+  // Added 2026-08-10. Every mark one epoch proposes carries the same `ordinal`: it is the
+  // transcript position at MARK time, so it records when the DECISION was made and
+  // nothing about the age of what the decision covers. Ordering the release by it
+  // therefore fell through to comparing mark ids, which are content hashes, and a digest
+  // decided which evidence the guard surrendered first. What the waiver protects is the
+  // newest reads an in-flight excursion is about to use, and that is a property of the
+  // SPAN, so the order is the earliest window index each span covers, oldest first.
+  //
+  // The fixture is a session that never closes a turn, so the guard holds every mark and
+  // the waiver is the only thing that can release one. Its mark ids and its span order
+  // disagree, and that disagreement is asserted BEFORE the outcome: without it the check
+  // would pass under either ordering.
+  const orderSession = "waiver-order-test";
+  const orderBatches = 8;
+  // The newest batches sit in the fresh byte tail, where no candidate forms at all, so
+  // the marks are the six oldest and the waiver's protection is measured among those.
+  const orderMarked = 6;
+  const orderEntries = [];
+  const orderMessages = [];
+  const orderResultIds = [];
+  let orderParent = null;
+  const orderAdd = (message) => {
+    const id = `${orderSession}-entry-${String(orderEntries.length + 1).padStart(3, "0")}`;
+    orderEntries.push({ type: "message", id, parentId: orderParent, message });
+    orderMessages.push(message);
+    orderParent = id;
+    return id;
+  };
+  orderAdd({
+    role: "user",
+    content: [{ type: "text", text: "One marathon task: keep reading and keep going." }],
+    timestamp: 1,
+  });
+  for (let step = 0; step < orderBatches; step += 1) {
+    orderAdd({
+      role: "assistant",
+      content: [{ type: "toolCall", id: `order-${step}`, name: "read", arguments: { path: `order-${step}.txt` } }],
+      stopReason: "toolUse",
+      timestamp: 10 + step,
+    });
+    orderResultIds.push(orderAdd({
+      role: "toolResult",
+      toolCallId: `order-${step}`,
+      toolName: "read",
+      content: [{ type: "text", text: `Order ${step}: ${"z".repeat(6_000)}` }],
+      isError: false,
+      timestamp: 10 + step,
+    }));
+  }
+  const orderSnapshot = context.mapActiveContext({
+    sessionId: orderSession,
+    eventMessages: orderMessages,
+    contextEntries: orderEntries,
+    contextWindow: 100_000,
+  });
+  assert.equal(context.currentTurnBoundary(orderSnapshot), -1,
+    "A turn closed in the waiver-order fixture, so the guard does not hold every mark");
+  assert.equal(context.currentTurnRefKeys(orderSnapshot).size, orderBatches,
+    "The guard does not hold every batch, so the release order is not being measured");
+  assert(orderBatches > orderMarked, "The fixture marked into the fresh tail");
+  let orderState = context.emptyActiveContextState(orderSession);
+  for (const resultId of orderResultIds.slice(0, orderMarked)) {
+    const candidate = context.manualFoldCandidate(
+      orderSnapshot, orderState, [resultId], { allowProtected: true });
+    orderState = context.addPendingMark(orderState, context.foldMarkFor({
+      candidate,
+      brief: context.automaticToolBrief(orderSnapshot, candidate),
+      briefProvenance: { kind: "deterministic" },
+      origin: "ladder",
+      // ONE epoch proposed all of them, which is the shape that makes the ordinal mute.
+      ordinal: context.markOrdinal(orderSnapshot),
+    })).state;
+  }
+  const orderMarks = context.pendingMarks(orderState);
+  assert.equal(orderMarks.length, orderMarked, "The waiver-order fixture did not mark every batch it names");
+  assert.equal(new Set(orderMarks.map((mark) => mark.ordinal)).size, 1,
+    "The fixture's marks carry more than one ordinal, so the degenerate case is not being measured");
+  const bySpan = [...orderMarks]
+    .sort((left, right) => context.markSpanStart(orderSnapshot, orderState, left) -
+      context.markSpanStart(orderSnapshot, orderState, right))
+    .map((mark) => mark.id);
+  const byMarkId = [...orderMarks].sort((left, right) => left.id.localeCompare(right.id))
+    .map((mark) => mark.id);
+  // The bounded count and its arming threshold are the ones asserted above, reached
+  // through the same arithmetic: only the ORDER is new.
+  const orderWaiver = context.guardWaiverCount({
+    snapshot: orderSnapshot, ratio: 0.86, guardedMarks: orderMarks.length, otherApplicableMarks: 0,
+  });
+  assert.equal(orderWaiver, orderMarked - context.GUARD_WAIVER_PROTECTED_MARKS,
+    `The bounded release moved: ${orderWaiver} of ${orderMarked} guarded marks`);
+  // The fixture is only worth running while the two orders genuinely disagree, and this
+  // is the disagreement that matters: by mark id the release reaches the NEWEST span in
+  // the set, which is the one evidence the guard exists to hold back.
+  assert(byMarkId.slice(0, orderWaiver).includes(bySpan.at(-1)),
+    "Mark-id order no longer releases the newest span, so this fixture cannot tell the orders apart");
+  const released = await context.commitPendingMarks({
+    snapshot: orderSnapshot,
+    state: orderState,
+    generation: 1,
+    guardCurrentTurn: true,
+    guardWaiver: orderWaiver,
+  });
+  assert.deepEqual(released.waived.map((mark) => mark.id), bySpan.slice(0, orderWaiver),
+    "The waiver released marks in an order span staleness does not explain");
+  assert.deepEqual(context.pendingMarks(released.state).map((mark) => mark.id).sort(),
+    [...bySpan.slice(orderWaiver)].sort(),
+    "The guard held back something other than the newest material");
+
   // A session whose PROJECTION is far past the serving budget while the last measured
   // ratio is calm: exactly the rep11 shape, where the excursion outgrew the window
   // between one provider response and the next request.
@@ -5585,6 +5695,10 @@ async function gateProjectionBudgetFence() {
     waiverBelowBackstop: 0,
     waiverWhenStarved: waiver(0.86, 8),
     waiverAtFence: waiver(0.99, 3),
+    orderGuardedMarks: orderMarked,
+    orderWaiver,
+    orderIdOrderDiffersFromSpanOrder: true,
+    orderReleasedStalestFirst: true,
     budgetTokens,
     projectedTokensBefore: reduction.estimatedTokensBefore,
     projectedTokensAfter: reduction.estimatedTokensAfter,
