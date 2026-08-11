@@ -10802,8 +10802,11 @@ async function gateBriefUpgradesRideTheBoundary() {
   assert(commits.length, "The second boundary never committed");
   const carrier = commits.find((record) => record.brief_upgrades > 0);
   assert(carrier, "No commit record reported the upgrade it carried");
-  assert(carrier.brief_upgrades <= context.MAX_BRIEF_UPGRADES_PER_COMMIT,
-    "A single boundary applied more upgrades than the cap allows");
+  // The ceiling on one boundary is the work the lane can have outstanding, a queue's
+  // worth waiting plus the calls in flight, because every finished brief lands.
+  const outstandingBound = context.MAX_BRIEF_UPGRADE_QUEUE + context.MAX_BRIEF_UPGRADES_IN_FLIGHT;
+  assert(carrier.brief_upgrades <= outstandingBound,
+    "A single boundary applied more upgrades than the lane can have outstanding");
   assert(carrier.brief_upgrade_ids.split(",").includes(target.id),
     "The commit record did not name the fold it upgraded");
   const afterSecond = materialized(runtime);
@@ -10863,10 +10866,138 @@ async function gateBriefUpgradesRideTheBoundary() {
   assert(failedState.folds.some((fold) => context.foldProvenance(fold, failedState).kind === "deterministic"),
     "A failed upgrade did not leave the deterministic brief in place");
 
+  // THE DRAIN RATE.
+  //
+  // A slow generator is the ordinary case, not the failure case: the live run of
+  // 2026-08-10 measured 6.9s, 9.4s and 14.3s a call. What the lane must not do is let
+  // that latency, or the gap between ladder passes, decide how many folds carry a model
+  // brief. This leg holds every call open on purpose, so what the lane does with the
+  // time is observable rather than inferred from a race.
+  const held = [];
+  let open = 0;
+  let peakOpen = 0;
+  // Flipped for the window where the test drives no pass at all, so a call that starts
+  // inside it can only have been started by another call finishing.
+  let passesFrozen = false;
+  const slowShape = { turns: 12, resultChars: 10_000, contextWindow: 100_000, toolName: "bash" };
+  let grown = makeFixture(slowShape);
+  const slow = makeRuntime(grown, {
+    summarizeContextSpan: async (request) => {
+      open += 1;
+      peakOpen = Math.max(peakOpen, open);
+      const call = {
+        candidateId: request.candidateId,
+        openAtStart: open,
+        startedWithoutPass: passesFrozen,
+        release: null,
+      };
+      const completion = new Promise((resolve) => { call.release = resolve; });
+      held.push(call);
+      await completion;
+      open -= 1;
+      return {
+        brief: upgradeText(request.candidateId),
+        provider: "openai-codex",
+        model: "gpt-5.6-luna",
+        effort: "medium",
+        toolCalls: 0,
+      };
+    },
+  });
+  await startRuntime(slow);
+  const ageAndCommit = async (round) => {
+    const previous = grown.entries.length;
+    grown = makeFixture({ ...slowShape, turns: 12 + 12 * round, sessionId: grown.sessionId });
+    for (const entry of grown.entries.slice(previous)) slow.branch.push(entry);
+    slow.messages.length = 0;
+    slow.messages.push(...grown.messages);
+    const at = slow.appended.length;
+    await runtimeCommit(slow, { tokens: 88_000, contextWindow: 100_000, suffix: `slow-${round}` });
+    await settle();
+    return contextEvents(slow, at).filter((record) =>
+      record.kind === "context.commit" && record.deferred === false);
+  };
+  let slowCommits = [];
+  for (let round = 1; round <= 4; round += 1) slowCommits = [...slowCommits, ...await ageAndCommit(round)];
+  assert(slowCommits.length >= 2, "The slow-generator fixture never reached a second boundary");
+
+  // THE BOUND. More folds were offered to the lane than it may brief at once, and it
+  // started exactly the constant, so the assertion below is not describing an idle lane.
+  assert(held.length > 1, "The lane never held a second generator call open");
+  assert.equal(peakOpen, context.MAX_BRIEF_UPGRADES_IN_FLIGHT,
+    "The lane did not fill, or overran, its in-flight bound");
+  assert.equal(held.length, context.MAX_BRIEF_UPGRADES_IN_FLIGHT,
+    "A call started past the in-flight bound while every earlier call was still open");
+  const backedUp = slowCommits.filter((record) =>
+    record.brief_upgrades_waiting > context.MAX_BRIEF_UPGRADES_IN_FLIGHT);
+  assert(backedUp.length, "Nothing was waiting behind the in-flight calls, so the bound never bound");
+  assert.equal(slowCommits.every((record) => record.brief_upgrades === 0), true,
+    "A brief landed on a boundary while its generator call was still open");
+
+  // ANTI-VACUITY. The second call started while the first was still open, so a lane with
+  // one slot could not have started it, and no call here finished before its release:
+  // under the previous behavior this timeline produces exactly one brief per boundary.
+  assert.equal(held[1].openAtStart, 2,
+    "The second call did not overlap the first, so the fixture proves nothing about concurrency");
+
+  // A FINISHED CALL STARTS THE NEXT ONE. No pass runs inside this window.
+  passesFrozen = true;
+  const beforeRelease = held.length;
+  held[0].release();
+  await settle();
+  assert(held.length > beforeRelease,
+    "A finished call started nothing; the lane still waits for a ladder pass to drain");
+  assert(held.at(-1).startedWithoutPass, "The lane's own drain did not start the last call");
+  for (const call of held) call.release();
+  await settle();
+
+  // THE BOUNDARY CARRIES EVERY BRIEF THAT IS READY, WHICH IS MORE THAN ONE.
+  const drainFrom = slow.appended.length;
+  await ageAndCommit(5);
+  const drained = contextEvents(slow, drainFrom).filter((record) =>
+    record.kind === "context.commit" && record.deferred === false);
+  const drainCarrier = drained.find((record) => record.brief_upgrades > 0);
+  assert(drainCarrier, "No boundary carried the briefs the generator had written");
+  assert(drainCarrier.brief_upgrades > 1,
+    `A boundary carried ${drainCarrier.brief_upgrades} upgrade with more than one ready`);
+  const carried = drainCarrier.brief_upgrade_ids.split(",").filter(Boolean);
+  assert.equal(carried.length, drainCarrier.brief_upgrades);
+  assert(drainCarrier.brief_upgrades <= outstandingBound,
+    "A drained boundary carried more upgrades than the lane can have outstanding");
+  const beyondOneSlot = carried.filter((id) => {
+    const call = held.find((item) => item.candidateId === id);
+    return call && (call.openAtStart > 1 || call.startedWithoutPass);
+  });
+  assert(beyondOneSlot.length >= carried.length - 1,
+    "The boundary's extra upgrades came from calls a one-slot lane could also have made");
+  const drainedState = materialized(slow);
+  for (const id of carried) {
+    const fold = drainedState.folds.find((item) => item.id === id);
+    assert(fold, `The commit record named a fold ${id} that is not in state`);
+    const provenance = context.foldProvenance(fold, drainedState);
+    assert.equal(provenance.kind, "model", `The upgrade named for ${id} did not land`);
+    assert.equal(provenance.model, "gpt-5.6-luna");
+    // Still the override map, still an immutable record underneath, at any drain rate.
+    assert.equal(fold.provenance.kind, "deterministic");
+  }
+  // Nothing was held back for a later boundary: what the lane finished, the boundary took.
+  const laterCarriers = drained.filter((record) =>
+    record !== drainCarrier && record.brief_upgrades > 0);
+  assert.equal(laterCarriers.length, 0, "A finished brief waited for a second boundary");
+  // Nothing the lane started may outlive the gate: the drain keeps starting calls, so
+  // the sweep runs until the queue behind it is empty.
+  for (let sweep = 0; sweep < 4; sweep += 1) {
+    for (const call of held) call.release();
+    await settle();
+  }
+
   return {
     upgradedFolds: carrier.brief_upgrades,
-    perBoundaryCap: context.MAX_BRIEF_UPGRADES_PER_COMMIT,
+    inFlightBound: context.MAX_BRIEF_UPGRADES_IN_FLIGHT,
+    peakInFlight: peakOpen,
     queueCap: context.MAX_BRIEF_UPGRADE_QUEUE,
+    upgradesOnTheDrainedBoundary: drainCarrier.brief_upgrades,
+    beyondOneSlot: beyondOneSlot.length,
     projectionStableBetweenBoundaries: true,
     suppliedUntouched: true,
     failureIsLoud: loud.brief_upgrade_failures,

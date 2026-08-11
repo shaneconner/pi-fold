@@ -112,7 +112,7 @@ import {
   ESTIMATED_BYTES_PER_TOKEN,
   entryTypeNamespace,
   MAX_BRIEF_UPGRADE_QUEUE,
-  MAX_BRIEF_UPGRADES_PER_COMMIT,
+  MAX_BRIEF_UPGRADES_IN_FLIGHT,
   MAX_FOLD_SPAN_CHARS,
   MAX_PINNED_SHARE,
   MAX_WEDGE_ABSORB_TOKENS,
@@ -474,8 +474,12 @@ export function registerActiveContext(pi: any, options: {
   const upgrades = {
     /** Folds committed deterministic, holding the exact source their brief will cover. */
     queue: [] as Array<{ foldId: string; sourceSha256: string; request: Record<string, unknown> }>,
-    /** One generator call in flight at a time, cancel-safe on session change or shutdown. */
-    running: null as { foldId: string; controller: AbortController; promise: Promise<void> } | null,
+    /**
+     * Generator calls in flight, keyed by the fold each one briefs, bounded by a constant
+     * and cancel-safe on session change or shutdown. Keyed rather than counted because
+     * the queue has to know a fold is already being briefed.
+     */
+    running: new Map<string, { controller: AbortController; promise: Promise<void> }>(),
     /** Written briefs waiting for a boundary. They never apply anywhere else. */
     ready: [] as Array<{ foldId: string; sourceSha256: string; brief: string; provenance: BriefProvenance }>,
     /** A generator that failed a fold does not get it back: one attempt, then deterministic stands. */
@@ -2142,7 +2146,7 @@ export function registerActiveContext(pi: any, options: {
     if (!options.summarizeContextSpan || !persistence.state) return;
     for (const foldId of foldIds) {
       if (upgrades.queue.length >= MAX_BRIEF_UPGRADE_QUEUE) return;
-      if (upgrades.failed.has(foldId) || upgrades.running?.foldId === foldId ||
+      if (upgrades.failed.has(foldId) || upgrades.running.has(foldId) ||
           upgrades.queue.some((entry) => entry.foldId === foldId) ||
           upgrades.ready.some((entry) => entry.foldId === foldId)) continue;
       const fold = persistence.state.folds.find((item) => item.id === foldId);
@@ -2190,14 +2194,17 @@ export function registerActiveContext(pi: any, options: {
    * One generator call, between boundaries, cancel-safe. It writes nothing durable: a
    * finished brief waits in `ready` for a commit to carry it, and an aborted or failed
    * call leaves the fold exactly as it committed.
+   *
+   * Returns whether a call was started, which is what lets the drain below stop.
    */
-  const startBriefUpgrade = (snapshot: ActiveContextSnapshot, ctx: any): void => {
+  const startBriefUpgrade = (snapshot: ActiveContextSnapshot, ctx: any): boolean => {
     const summarize = options.summarizeContextSpan;
-    if (!summarize || lifecycle.shuttingDown || upgrades.running || !upgrades.queue.length) return;
+    if (!summarize || lifecycle.shuttingDown || !upgrades.queue.length ||
+        upgrades.running.size >= MAX_BRIEF_UPGRADES_IN_FLIGHT) return false;
     const entry = upgrades.queue.shift()!;
     const controller = new AbortController();
-    const slot = { foldId: entry.foldId, controller, promise: Promise.resolve() };
-    upgrades.running = slot;
+    const slot = { controller, promise: Promise.resolve() };
+    upgrades.running.set(entry.foldId, slot);
     const capturedSessionId = snapshot.sessionId;
     const capturedGeneration = lifecycle.generation;
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -2250,13 +2257,32 @@ export function registerActiveContext(pi: any, options: {
       );
     }).finally(() => {
       clearTimeout(timeout);
-      if (upgrades.running === slot) upgrades.running = null;
+      if (upgrades.running.get(entry.foldId) === slot) upgrades.running.delete(entry.foldId);
+      // A finished call starts the next one, so the drain rate is the generator's latency
+      // rather than however often a ladder pass happens to look. Still between
+      // boundaries: nothing here touches the projection, and the generation check is the
+      // same fence `cancelBriefUpgrades` is called behind, so a session that moved on
+      // cannot be restarted by a call that outlived it.
+      if (!lifecycle.shuttingDown && lifecycle.generation === capturedGeneration) {
+        startBriefUpgrades(snapshot, ctx);
+      }
     });
+    return true;
+  };
+
+  /**
+   * Fill the in-flight slots from the queue. The bound is a constant, not a pace: the
+   * lane starts everything it is allowed to start the moment there is work, because a
+   * fold whose brief is written late is a fold the session read deterministic in the
+   * meantime.
+   */
+  const startBriefUpgrades = (snapshot: ActiveContextSnapshot, ctx: any): void => {
+    while (startBriefUpgrade(snapshot, ctx)) { /* Bounded by the in-flight constant. */ }
   };
 
   const cancelBriefUpgrades = (): void => {
-    upgrades.running?.controller.abort();
-    upgrades.running = null;
+    for (const slot of upgrades.running.values()) slot.controller.abort();
+    upgrades.running.clear();
     upgrades.queue = [];
     upgrades.ready = [];
   };
@@ -2279,13 +2305,21 @@ export function registerActiveContext(pi: any, options: {
    * immutable: rewriting one in place reports a conflicting durable fold at the next
    * persist and suspends automatic management, which is precisely why the override map
    * exists.
+   *
+   * EVERY finished brief lands, and there is no per-boundary cap. A prefix cache is
+   * invalidated from the FIRST byte that differs, so the commit's mutation point is the
+   * position of the earliest fold it upgrades and every later upgrade in the same commit
+   * sits inside a suffix that break already re-sent: the second and third upgrade on one
+   * boundary cost nothing the first did not already cost. Holding one back does not save
+   * that cost, it defers the same break to a later commit and pays it there on top of
+   * whatever that commit does. What bounds the count is the work that can be outstanding,
+   * MAX_BRIEF_UPGRADE_QUEUE waiting plus MAX_BRIEF_UPGRADES_IN_FLIGHT running, and the
+   * boundary that clears them.
    */
   const applyBriefUpgrades = (): string[] => {
     if (!upgrades.ready.length || !persistence.state) return [];
     const applied: string[] = [];
-    const held: typeof upgrades.ready = [];
     for (const entry of upgrades.ready) {
-      if (applied.length >= MAX_BRIEF_UPGRADES_PER_COMMIT) { held.push(entry); continue; }
       const state = persistence.state;
       const fold = state.folds.find((item) => item.id === entry.foldId);
       if (!fold || fold.sourceSha256 !== entry.sourceSha256 ||
@@ -2300,7 +2334,7 @@ export function registerActiveContext(pi: any, options: {
       };
       applied.push(fold.id);
     }
-    upgrades.ready = held;
+    upgrades.ready = [];
     return applied;
   };
 
@@ -2755,7 +2789,10 @@ export function registerActiveContext(pi: any, options: {
       brief_upgrade_ids: upgradedFolds.join(","),
       brief_upgrade_failures: upgradeFailures,
       brief_upgrade_error: upgradeError,
-      brief_upgrades_waiting: upgrades.ready.length + upgrades.queue.length,
+      // Everything still owed to a fold: queued, in flight, and (always zero once the
+      // wedge above ran) written but uncarried. In flight is counted because the lane
+      // now holds several calls open and work nobody can see is work nobody bounds.
+      brief_upgrades_waiting: upgrades.ready.length + upgrades.queue.length + upgrades.running.size,
       freed_bytes: freedBytes,
       freed_tokens: estimatedTokens(freedBytes),
       rewrite_tokens: accounting.rewriteTokens,
@@ -3594,10 +3631,12 @@ export function registerActiveContext(pi: any, options: {
   ): Promise<Record<string, unknown> | null> => {
     const operation = ladder.actionQueue.then(async () => {
       const action = await runAutomaticRungTransaction(snapshot, ratio, ctx, phase, rungOptions);
-      // The one place the generator is started: after the transaction, so the call sits
-      // BETWEEN boundaries. A fold queued by the commit this pass just made is briefed
-      // now and lands on the next commit, which is the whole shape of the lane.
-      startBriefUpgrade(snapshot, ctx);
+      // Where the generator is started from a pass: after the transaction, so the calls
+      // sit BETWEEN boundaries. Folds queued by the commit this pass just made are
+      // briefed now and land on the next commit, which is the whole shape of the lane.
+      // Afterwards each finishing call starts the next, so this is the lane's ignition
+      // rather than its pace.
+      startBriefUpgrades(snapshot, ctx);
       return action;
     });
     ladder.actionQueue = operation.catch(() => undefined);

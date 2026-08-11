@@ -568,20 +568,26 @@ export const MAX_FOLD_SPAN_CHARS = 16_000;
  */
 export const MAX_WEDGE_ABSORB_TOKENS = 256;
 /**
- * How many model-written briefs may replace deterministic ones inside ONE commit.
+ * How many generator calls the upgrade lane may hold open at once.
  *
- * A brief upgrade rewrites bytes at a fold that is already in the projection, so its
- * divergence sits EARLIER in the prefix than the spans the same commit is folding: the
- * cache break the commit already pays for gets deeper, it does not get cheaper. Two per
- * boundary keeps that deepening bounded and still drains a queue that only fills at one
- * generator call at a time, and an upgrade over the cap waits for the next boundary
- * rather than opening a mutation point of its own.
+ * The lane has to write briefs at the rate the ladder makes folds, or the folds that
+ * carry a model brief are a shrinking fraction of the folds a long session holds. One
+ * call in flight, started once per ladder pass, is not that rate: the live pressure run
+ * of 2026-08-10 measured completions at 6.9s, 9.4s and 14.3s while passes came about
+ * half a minute apart, so the lane spent most of its time idle and produced exactly one
+ * brief per commit boundary while four folds sat waiting. Two in flight, with a finished
+ * call starting the next one itself, makes production a function of generator latency
+ * instead of pass cadence. Two rather than more because provider calls are real money
+ * and real concurrency: the ladder makes about one leaf fold per boundary, and a lane
+ * that outruns the ladder by a wider margin only buys idle capacity.
  */
-export const MAX_BRIEF_UPGRADES_PER_COMMIT = 2;
+export const MAX_BRIEF_UPGRADES_IN_FLIGHT = 2;
 /**
  * How many folds may be waiting on a generator at once. The queue holds each fold's
  * exact source, so it is a memory bound as much as a work bound, and a fold dropped for
- * a full queue simply keeps the deterministic brief it committed with.
+ * a full queue simply keeps the deterministic brief it committed with. With the queue
+ * capped here and calls capped above, the work a session can have outstanding is a
+ * constant, and so is the number of briefs any one boundary can be asked to carry.
  */
 export const MAX_BRIEF_UPGRADE_QUEUE = 4;
 /** What a peek returns without an explicit widening argument. */
