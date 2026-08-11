@@ -1,4 +1,5 @@
 import { objectRefKey } from "../json.ts";
+import type { EvidenceRef } from "../json.ts";
 import {
   bytes,
   clone,
@@ -45,6 +46,7 @@ import type {
   ActiveContextSnapshot,
   ActiveContextState,
   FoldCandidate,
+  FoldPart,
   MarkOrigin,
   PendingFoldMark,
   PendingMark,
@@ -136,6 +138,80 @@ export function markOrdinal(snapshot: Pick<ActiveContextSnapshot, "mapped">): nu
   return snapshot.mapped.length;
 }
 
+export interface MarkSpanRefs {
+  /** Every evidence ref the mark's parts resolve to against the state in hand. */
+  refs: EvidenceRef[];
+  /**
+   * The first part naming a fold the state does not hold, or null when the span reads
+   * in full. `pending` is the difference between a defer and a drop: a mark still
+   * standing carries the id its committed fold will have, so that fold is about to
+   * exist, and where no mark names it nothing ever will.
+   */
+  unresolved: { foldId: string; pending: boolean } | null;
+}
+
+/**
+ * THE ONE READING OF A MARK'S SPAN, AND IT ANSWERS RATHER THAN THROWS.
+ *
+ * A mark's parts name folds by id. Between the mark and the commit the state can stop
+ * holding one: `reboundary` dissolves a root while consulting only `fold.parentId`, so
+ * nothing there consults the pending marks, and the mark is left naming a fold that is
+ * gone. `candidateSourceRefs` answers that with `Missing candidate child`, which is
+ * right for a candidate being prepared and wrong for every reading that merely reports
+ * on a mark: accounting, eligibility, staleness, the current-turn guard, the claimed
+ * keys and wedge absorption all ran that throw out of a status call or a commit pass,
+ * on state the runtime itself produced (Shane 2026-08-10).
+ *
+ * So the readings share this, and it is total. Raw parts resolve; a held child is
+ * flattened; an unheld child is REPORTED, with the refs either side of it still
+ * collected, because a partial span is the honest reading of a partly resolvable mark
+ * and a guard that can see half the evidence is better than one that sees none. A
+ * repeated fold on the path reads as unresolved and not pending: a corrupt forest costs
+ * one mark the ordinary drop rather than hanging the caller, which is the same stop the
+ * apply order's `placing` set carries.
+ */
+export function markSpanRefs(state: ActiveContextState, mark: PendingMark): MarkSpanRefs {
+  const byId = new Map(state.folds.map((fold) => [fold.id, fold] as const));
+  const marks = pendingMarks(state);
+  const refs: EvidenceRef[] = [];
+  let unresolved: MarkSpanRefs["unresolved"] = null;
+  const path = new Set<string>();
+  const miss = (foldId: string, pending: boolean): void => {
+    if (!unresolved) unresolved = { foldId, pending };
+  };
+  const collect = (parts: readonly FoldPart[]): void => {
+    for (const part of parts) {
+      if (part.kind === "raw") {
+        refs.push(part.ref);
+        continue;
+      }
+      const child = byId.get(part.foldId);
+      if (!child) {
+        miss(part.foldId, marks.some((item) => item.mark === "fold" && item.id === part.foldId));
+        continue;
+      }
+      if (path.has(child.id)) {
+        miss(child.id, false);
+        continue;
+      }
+      path.add(child.id);
+      collect(child.parts);
+      path.delete(child.id);
+    }
+  };
+  if (mark.mark === "refold") {
+    const fold = byId.get(mark.id);
+    if (!fold) {
+      miss(mark.id, marks.some((item) => item.mark === "fold" && item.id === mark.id));
+    } else {
+      path.add(fold.id);
+      collect(fold.parts);
+      path.delete(fold.id);
+    }
+  } else collect(mark.parts);
+  return { refs, unresolved };
+}
+
 /**
  * Estimated bytes a mark would remove from the projection. Fold marks use a
  * placeholder estimate rather than a trial fold: the number is presentational, so
@@ -163,20 +239,21 @@ export function markFreedBytes(
   return Math.max(0, bytes(source) - placeholder);
 }
 
-/** Whether a pending mark covers any evidence the current excursion just gathered. */
+/**
+ * Whether a pending mark covers any evidence the current excursion just gathered.
+ *
+ * Read off whatever the span resolves to. A mark naming an unheld fold still answers
+ * here, on the parts that DO resolve, so a span holding both fresh raw evidence and a
+ * child that has not landed is guarded on the fresh evidence instead of throwing the
+ * whole commit.
+ */
 export function markTouchesCurrentTurn(
   state: ActiveContextState,
   mark: PendingMark,
   currentTurn: ReadonlySet<string>,
 ): boolean {
   if (!currentTurn.size) return false;
-  const refs = mark.mark === "refold"
-    ? (() => {
-      const fold = state.folds.find((item) => item.id === mark.id);
-      return fold ? flattenFoldRefs(fold, state) : [];
-    })()
-    : candidateSourceRefs(mark.parts, state);
-  return refs.some((ref) => currentTurn.has(objectRefKey(ref)));
+  return markSpanRefs(state, mark).refs.some((ref) => currentTurn.has(objectRefKey(ref)));
 }
 
 /**
@@ -193,18 +270,18 @@ export function markTouchesCurrentTurn(
  *
  * A span that no longer maps sorts past the newest entry: there is no staleness to read
  * on material that has left the branch, and releasing such a mark frees no window byte.
+ * A span that does not resolve in full sorts there too, for the same reason and by the
+ * same number: while a named fold is missing there is no start to read, and the apply
+ * order places such a mark off its naming rather than off this reading.
  */
 export function markSpanStart(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
   mark: PendingMark,
 ): number {
-  const refs = mark.mark === "refold"
-    ? (() => {
-      const fold = state.folds.find((item) => item.id === mark.id);
-      return fold ? flattenFoldRefs(fold, state) : [];
-    })()
-    : candidateSourceRefs(mark.parts, state);
+  const span = markSpanRefs(state, mark);
+  if (span.unresolved) return snapshot.mapped.length;
+  const refs = span.refs;
   const indexed = mappedByKey(snapshot);
   const indices = refs.flatMap((ref) => {
     const item = indexed.get(objectRefKey(ref));
@@ -272,6 +349,11 @@ export type MarkEligibility = "eligible" | "protected" | "unfulfillable";
  * protected it, and both conditions expire. "unfulfillable" is terminal: the evidence
  * or the fold the mark names has left the branch, so no later commit can honour it.
  * Collapsing the two is what made a refusal look like a drop.
+ *
+ * A mark naming a fold the state does not hold is judged by the same two words, and
+ * the classification is the whole answer: a fold another pending mark is about to mint
+ * is a span still WAITING to be readable, and a fold nothing will mint has left the
+ * branch exactly as lost evidence has. No third word (Shane 2026-08-10).
  */
 export function markEligibility(
   snapshot: ActiveContextSnapshot,
@@ -283,7 +365,9 @@ export function markEligibility(
     if (!fold || !foldInterval(fold, state, snapshot)) return "unfulfillable";
     return state.expanded.includes(mark.id) ? "eligible" : "unfulfillable";
   }
-  const refs = candidateSourceRefs(mark.parts, state);
+  const span = markSpanRefs(state, mark);
+  if (span.unresolved) return span.unresolved.pending ? "protected" : "unfulfillable";
+  const refs = span.refs;
   if (!refs.length) return "unfulfillable";
   const mapped = new Set(snapshot.mapped.flatMap((item) => item.ref ? [objectRefKey(item.ref)] : []));
   if (refs.some((ref) => !mapped.has(objectRefKey(ref)))) return "unfulfillable";
@@ -340,11 +424,7 @@ export function markAccounting(
       eligibleMarks += 1;
       eligibleFreedBytes += freed;
     } else if (eligibility === "protected") retainedMarks += 1;
-    const fold = mark.mark === "refold" ? state.folds.find((item) => item.id === mark.id) : null;
-    const refs = mark.mark === "refold"
-      ? (fold ? flattenFoldRefs(fold, state) : [])
-      : candidateSourceRefs(mark.parts, state);
-    for (const ref of refs) {
+    for (const ref of markSpanRefs(state, mark).refs) {
       const index = indexByKey.get(objectRefKey(ref));
       if (index === undefined) continue;
       if (earliest < 0 || index < earliest) earliest = index;
@@ -565,7 +645,7 @@ export function claimedRefKeys(state: ActiveContextState): Set<string> {
   }
   for (const mark of pendingMarks(state)) {
     if (mark.mark !== "fold") continue;
-    for (const ref of candidateSourceRefs(mark.parts, state)) keys.add(objectRefKey(ref));
+    for (const ref of markSpanRefs(state, mark).refs) keys.add(objectRefKey(ref));
   }
   return keys;
 }
@@ -762,7 +842,7 @@ export function absorbWedgeMarks(input: {
   const indexByKey = new Map(snapshot.mapped.flatMap((item) =>
     item.ref ? [[objectRefKey(item.ref), item.index] as const] : []));
   const markInterval = (mark: PendingFoldMark): { start: number; end: number } | null => {
-    const indices = candidateSourceRefs(mark.parts, state)
+    const indices = markSpanRefs(state, mark).refs
       .map((ref) => indexByKey.get(objectRefKey(ref)))
       .filter((index): index is number => index !== undefined);
     return indices.length ? { start: Math.min(...indices), end: Math.max(...indices) } : null;
@@ -893,23 +973,16 @@ export async function commitPendingMarks(input: {
   const waived: PendingMark[] = [];
   const guardReasons = new Map<string, string>();
   const held = new Set(input.state.folds.map((fold) => fold.id));
+  const deferred: PendingMark[] = [];
   /**
-   * Whether the mark names a child fold nobody holds yet: either a sibling mark in this
-   * epoch will mint it, or nothing ever will. Until it exists there is no span to read
-   * and no eligibility to judge, because `candidateSourceRefs` cannot resolve the part
-   * and throws. Both readings below defer to the apply loop instead of asking.
+   * Whether the mark names a fold some other standing mark is about to mint. Until that
+   * fold exists there is no eligibility worth judging: the question is about material
+   * the child owns, and the apply loop is where it gets asked, after the child has
+   * landed. A mark naming a fold NOBODY will mint is not this case; it is judged
+   * normally, and the apply loop drops it by name.
    */
-  const namesUnheldChild = (mark: PendingMark): boolean =>
-    mark.mark === "fold" && childFoldIds(mark).some((id) => !held.has(id));
-  /**
-   * The staleness reading, where the span can be read at all. A mark whose child is not
-   * held sorts past the newest entry, the same place a span that has left the branch
-   * sorts; the dependency pass below is what actually places it.
-   */
-  const spanStart = (mark: PendingMark): number =>
-    namesUnheldChild(mark)
-      ? input.snapshot.mapped.length
-      : markSpanStart(input.snapshot, input.state, mark);
+  const awaitingMintedChild = (mark: PendingMark): boolean =>
+    markSpanRefs(input.state, mark).unresolved?.pending === true;
   const currentTurn = input.guardCurrentTurn
     ? currentTurnRefKeys(input.snapshot)
     : new Set<string>();
@@ -926,7 +999,7 @@ export async function commitPendingMarks(input: {
     // comparison is the final tiebreak between marks covering the same start, and
     // nothing else.
     const guardedStart = new Map(guarded.map((mark) =>
-      [pendingMarkKey(mark), spanStart(mark)] as const));
+      [pendingMarkKey(mark), markSpanStart(input.snapshot, input.state, mark)] as const));
     guarded.sort((left, right) =>
       guardedStart.get(pendingMarkKey(left))! - guardedStart.get(pendingMarkKey(right))! ||
       left.id.localeCompare(right.id));
@@ -949,11 +1022,11 @@ export async function commitPendingMarks(input: {
   if (input.retainIneligible) {
     const applicable: PendingMark[] = [];
     for (const mark of marks) {
-      // A mark naming an unheld child is not judged here. Its eligibility is a question
-      // about material the child fold owns, and that fold is what this commit is about to
-      // create; asking now would throw on the missing part instead of answering. The apply
-      // loop asks it once the child has landed, and refuses by name if it never does.
-      if (!namesUnheldChild(mark) &&
+      // A mark awaiting a child another mark will mint is not judged here. Its
+      // eligibility is a question about material the child fold owns, and that fold is
+      // what this commit is about to create. The apply loop asks it once the child has
+      // landed, and answers by name when it does not.
+      if (!awaitingMintedChild(mark) &&
           markEligibility(input.snapshot, input.state, mark) === "protected") retained.push(mark);
       else applicable.push(mark);
     }
@@ -989,7 +1062,8 @@ export async function commitPendingMarks(input: {
   // decided nothing and the order fell through to comparing content hashes.
   const minting = new Map(marks.flatMap((mark) =>
     mark.mark === "fold" && !held.has(mark.id) ? [[mark.id, mark] as const] : []));
-  const applyStart = new Map(marks.map((mark) => [pendingMarkKey(mark), spanStart(mark)] as const));
+  const applyStart = new Map(marks.map((mark) =>
+    [pendingMarkKey(mark), markSpanStart(input.snapshot, input.state, mark)] as const));
   const base = [...marks].sort((left, right) =>
     applyStart.get(pendingMarkKey(left))! - applyStart.get(pendingMarkKey(right))! ||
     left.id.localeCompare(right.id));
@@ -1027,7 +1101,33 @@ export async function commitPendingMarks(input: {
         continue;
       }
       const parts = clone(mark.parts);
-      const sourceRefs = candidateSourceRefs(parts, state);
+      // THE ANSWER TO A NAME THE STATE CANNOT RESOLVE, AND IT IS TWO ANSWERS.
+      //
+      // A mark still standing will mint the fold this one names, so the span becomes
+      // readable at the next commit: that is a DEFER, and the mark stays pending. This
+      // is the child a guard held while its parent was applicable, which the epoch used
+      // to discard outright. Nothing standing names it and it is a DROP: `reboundary`
+      // dissolved the fold, or the mark that would have minted it was itself refused,
+      // and no later commit can honour the decision. Same two words the eligibility
+      // reading uses, and the same receipt shape a dropped brief upgrade gets.
+      const span = markSpanRefs(state, mark);
+      if (span.unresolved) {
+        const { foldId, pending } = span.unresolved;
+        if (pending) deferred.push(mark);
+        refused.push({
+          mark: mark.mark,
+          id: mark.id,
+          origin: mark.origin,
+          reason: pending
+            ? `pending fold mark ${mark.id} names fold ${foldId}, which a still-pending mark ` +
+              "has not minted yet; the mark stays pending until that fold lands"
+            : `pending fold mark ${mark.id} names fold ${foldId}, which the context no longer ` +
+              "holds and no pending mark will mint; the decision cannot be honoured",
+          retained: pending,
+        });
+        continue;
+      }
+      const sourceRefs = span.refs;
       const blocked = mark.kind === "tool-result"
         ? toolRefsProtected(sourceRefs, state, input.snapshot)
         : refsProtected(sourceRefs, state, input.snapshot);
@@ -1068,6 +1168,13 @@ export async function commitPendingMarks(input: {
         retained: false,
       });
     }
+  }
+  // Deferrals rejoin the pending set. A mark the loop could not read yet is a standing
+  // decision exactly as a guard-held one is, and `retained` is what the commit record
+  // counts as deferred, so both live in the same list.
+  if (deferred.length) {
+    state = withPendingMarks(state, [...pendingMarks(state), ...deferred]);
+    retained.push(...deferred);
   }
   return { state, applied, refused, retained, waived };
 }

@@ -3540,9 +3540,18 @@ async function gateEpochMarkCommit() {
   assert(orderIndexOfEntry(orderPair.parent.parts[0].ref.entryId) <
     orderIndexOfEntry(orderPair.child.parts[0].ref.entryId),
     "The parent's material does not start before its child's, so oldest-material-first would not invert them");
-  assert.throws(() => context.markSpanStart(orderSnapshot, orderState, orderPair.parent),
+  // The unreadable start is now an ANSWER rather than a throw, and the answer is the
+  // same number the retired local helper produced: past the newest entry. Re-derived
+  // here because the readings stopped throwing, not because the claim changed; the
+  // claim is still that the parent's start cannot be read while its child is a mark,
+  // and `candidateSourceRefs` is asserted below to show the fixture is genuinely
+  // dangling rather than quietly resolvable.
+  assert.throws(() => context.candidateSourceRefs(orderPair.parent.parts, orderState),
     /Missing candidate child/,
-    "A span naming an unminted child has a readable start, so the transcript reading is no longer unavailable");
+    "The fixture's parent resolves after all, so nothing here is measuring an unminted child");
+  assert.equal(context.markSpanStart(orderSnapshot, orderState, orderPair.parent),
+    orderSnapshot.mapped.length,
+    "A span naming an unminted child does not sort past the newest entry");
   // The negative probe: the same parent with no child to find is refused and DISCARDED,
   // which is exactly what the parent-first order produced.
   const orderAlone = await context.commitPendingMarks({
@@ -3552,7 +3561,10 @@ async function gateEpochMarkCommit() {
     retainIneligible: true,
   });
   assert.equal(orderAlone.applied.length, 0, "A span whose child does not exist folded anyway");
-  assert.match(orderAlone.refused[0]?.reason ?? "", /Missing candidate child/,
+  // Re-derived reason: the apply loop no longer lets `Missing candidate child` escape as
+  // the receipt. Nothing pending names this child, so the mark can never resolve and the
+  // drop says so by name. The disposition is unchanged, which is what this probe is for.
+  assert.match(orderAlone.refused[0]?.reason ?? "", /no pending mark will mint/,
     "A span naming a fold nobody holds was refused for some other reason");
   assert.equal(orderAlone.refused[0].retained, false,
     "The refusal is retained, so applying the parent early no longer costs the decision");
@@ -10998,6 +11010,231 @@ async function gateProjectedStaleBasis() {
   };
 }
 
+/**
+ * A NAME THE STATE CANNOT RESOLVE IS ANSWERED, NOT THROWN AND NOT DISCARDED BLIND.
+ *
+ * A mark's parts name folds by id, and the state can stop holding one between the mark
+ * and the commit: the `reboundary` dissolve removes a root while consulting only
+ * `fold.parentId`, so nothing there consults the pending marks. Every reading that
+ * merely REPORTS on a mark used to resolve that name through `candidateSourceRefs`,
+ * which throws by design for a candidate being prepared, so `markAccounting` and
+ * `schedulingStatus` threw out of an agent-facing status call and out of every commit
+ * pass, on state the runtime itself had produced (Shane 2026-08-10).
+ *
+ * Two answers, and only two, because the eligibility reading already carries exactly
+ * this vocabulary. Nothing standing will mint the fold: the decision can never be
+ * honoured, so it is DROPPED with a receipt naming the fold, the way a brief upgrade
+ * whose fold changed identity is dropped rather than deferred. Something standing will
+ * mint it: the span is only unreadable this pass, so the mark DEFERS and stays pending.
+ *
+ * Anti-vacuity: each half asserts the unguarded resolution still throws on the very
+ * parts under test, before asserting the answer, so a fixture that quietly stopped
+ * dangling would fail here rather than pass hollow. The deferring half additionally
+ * asserts the SAME parent is dropped when nothing pending names its child, so the
+ * deferral is a decision rather than a blanket retain.
+ */
+async function gateDanglingChildMarks() {
+  const childMarkAt = (snap, state, index) => {
+    const candidate = context.manualFoldCandidate(snap, state, [snap.mapped[index].ref.entryId]);
+    return context.foldMarkFor({
+      candidate,
+      brief: context.automaticToolBrief(snap, candidate),
+      briefProvenance: { kind: "deterministic" },
+      origin: "ladder",
+      ordinal: context.markOrdinal(snap),
+    });
+  };
+  // The absorbing span, named off the child the way `foldMarkFor` already names it: two
+  // raw entries and the fold. Neither raw part is a tool result, which is what lets the
+  // turn boundary hold the child without holding the parent.
+  const parentMarkAt = (snap, index, child) => context.foldMarkFor({
+    candidate: {
+      kind: "chapter",
+      parts: [
+        { kind: "raw", ref: snap.mapped[index - 2].ref },
+        { kind: "raw", ref: snap.mapped[index - 1].ref },
+        { kind: "fold", foldId: child.id },
+      ],
+      // Empty on purpose: the refs cannot be resolved while the child is a mark.
+      sourceRefs: [],
+    },
+    brief: "One task turn kept whole, with the read it made already behind a placeholder.",
+    briefProvenance: { kind: "deterministic" },
+    origin: "ladder",
+    ordinal: context.markOrdinal(snap),
+  });
+
+  // HALF ONE: the fold is gone for good.
+  const built = makeFixture({
+    sessionId: "dangling-child-test", turns: 12, resultChars: 6_000, contextWindow: 100_000,
+  });
+  const snapshot = epochSnapshot(built);
+  const empty = context.emptyActiveContextState(built.sessionId);
+  let dissolveIndex = -1;
+  for (const item of snapshot.mapped) {
+    if (item.ref?.role !== "toolResult" || item.index < 2) continue;
+    if (context.markEligibility(snapshot, empty, childMarkAt(snapshot, empty, item.index)) === "eligible") {
+      dissolveIndex = item.index;
+      break;
+    }
+  }
+  assert(dissolveIndex >= 0, "No stale batch in the fixture can fold, so nothing can be left dangling");
+  const child = childMarkAt(snapshot, empty, dissolveIndex);
+  const parent = parentMarkAt(snapshot, dissolveIndex, child);
+  const childCommit = await context.commitPendingMarks({
+    snapshot, state: context.addPendingMark(empty, child).state, generation: 1, retainIneligible: true,
+  });
+  assert.deepEqual(childCommit.applied.map((mark) => mark.id), [child.id], "The child never folded");
+  const holding = context.addPendingMark(childCommit.state, parent).state;
+  // The control: while the fold is held every reading is ordinary.
+  assert.equal(context.markEligibility(snapshot, holding, parent), "eligible",
+    "The parent is not applicable even before the dissolve, so the dissolve proves nothing");
+  assert.equal(context.markAccounting(snapshot, holding).eligibleMarks, 1);
+
+  // The dissolve, as `reboundary` performs it: the fold leaves the forest, the parents
+  // are re-derived, and the pending mark naming it is never consulted.
+  const dissolved = {
+    ...holding,
+    revision: holding.revision + 1,
+    folds: context.deriveFoldParents(holding.folds.filter((fold) => fold.id !== child.id)),
+    expanded: holding.expanded.filter((id) => id !== child.id),
+  };
+  assert.equal(dissolved.folds.length, holding.folds.length - 1, "The dissolve removed no fold");
+  assert.throws(() => context.candidateSourceRefs(parent.parts, dissolved),
+    /Missing candidate child/,
+    "The dissolved fold still resolves, so nothing below is measuring a dangling mark");
+
+  const accounting = context.markAccounting(snapshot, dissolved);
+  assert.equal(accounting.pending, 1);
+  assert.equal(accounting.eligibleMarks, 0, "A mark naming a dissolved fold counted as applicable");
+  assert.equal(accounting.retainedMarks, 0, "A mark that can never resolve counted as waiting");
+  const status = context.schedulingStatus({ snapshot, state: dissolved, ratio: 0.9 });
+  assert.equal(status.marks.length, 1);
+  assert.equal(status.marks[0].eligibility, "unfulfillable",
+    "A mark naming a fold nothing will mint is not reported terminal");
+  assert.equal(context.markSpanStart(snapshot, dissolved, parent), snapshot.mapped.length,
+    "An unreadable span does not sort past the newest entry");
+  assert.equal(context.markTouchesCurrentTurn(dissolved, parent, new Set(["dangling-probe"])), false);
+  assert(context.claimedRefKeys(dissolved).size >= 2,
+    "The claimed keys lost the raw parts the dangling mark still names");
+  assert.equal(context.markFreedBytes(snapshot, dissolved, parent), 0);
+
+  const dropCommit = await context.commitPendingMarks({
+    snapshot, state: dissolved, generation: 2, retainIneligible: true, guardCurrentTurn: true,
+  });
+  assert.equal(dropCommit.applied.length, 0, "A mark naming a dissolved fold folded anyway");
+  assert.equal(dropCommit.refused.length, 1);
+  assert.equal(dropCommit.refused[0].retained, false, "A mark that can never resolve was kept pending");
+  assert(dropCommit.refused[0].reason.includes(child.id),
+    "The drop receipt does not name the fold the decision lost");
+  assert.match(dropCommit.refused[0].reason, /no pending mark will mint/);
+  assert.equal(context.pendingMarks(dropCommit.state).length, 0, "The dropped mark is still pending");
+
+  // HALF TWO: the fold is not gone, it is held back this pass.
+  const openBuilt = makeFixture({
+    sessionId: "dangling-defer-test", turns: 12, resultChars: 6_000, contextWindow: 100_000,
+  });
+  const openMessages = [...openBuilt.messages];
+  const openEntries = [...openBuilt.entries];
+  let tailId = openEntries.at(-1).id;
+  const appendOpen = (message) => {
+    const id = `${openBuilt.sessionId}-excursion-${openEntries.length}`;
+    openEntries.push({ type: "message", id, parentId: tailId, message });
+    openMessages.push(message);
+    tailId = id;
+  };
+  // An excursion that never closes its turn: five reads, no terminal assistant message.
+  for (let step = 0; step < 5; step += 1) {
+    appendOpen({
+      role: "assistant",
+      content: [{
+        type: "toolCall", id: `excursion-${step}`, name: "read",
+        arguments: { path: `excursion-${step}.txt` },
+      }],
+      stopReason: "toolUse",
+      timestamp: 900 + step * 2,
+    });
+    appendOpen({
+      role: "toolResult",
+      toolCallId: `excursion-${step}`,
+      toolName: "read",
+      content: [{ type: "text", text: `Result excursion ${step}: ${"e".repeat(6_000)}` }],
+      isError: false,
+      timestamp: 901 + step * 2,
+    });
+  }
+  const openSnapshot = context.mapActiveContext({
+    sessionId: openBuilt.sessionId,
+    eventMessages: openMessages,
+    contextEntries: openEntries,
+    contextWindow: openBuilt.contextWindow,
+    readOnlyContextActions: context.PEEK_READ_ONLY_CONTEXT_ACTIONS,
+  });
+  const openEmpty = context.emptyActiveContextState(openBuilt.sessionId);
+  const turnKeys = context.currentTurnRefKeys(openSnapshot);
+  assert.equal(turnKeys.size, 5, "The excursion did not leave five reads inside an open turn");
+  const heldIndex = openSnapshot.mapped.findIndex((item) =>
+    item.ref && turnKeys.has(json.objectRefKey(item.ref)));
+  assert(heldIndex >= 2, "The open turn starts too early in the window to carry a parent span");
+  const heldChild = childMarkAt(openSnapshot, openEmpty, heldIndex);
+  const heldParent = parentMarkAt(openSnapshot, heldIndex, heldChild);
+  let openState = context.addPendingMark(openEmpty, heldChild).state;
+  openState = context.addPendingMark(openState, heldParent).state;
+  // The guard, and only the guard, is what holds the child: with the turn closed the
+  // same child applies, so the deferral below is not measuring some other hold.
+  const closedTurn = await context.commitPendingMarks({
+    snapshot: openSnapshot, state: context.addPendingMark(openEmpty, heldChild).state,
+    generation: 1, retainIneligible: true,
+  });
+  assert.deepEqual(closedTurn.applied.map((mark) => mark.id), [heldChild.id],
+    "The child is held by something other than the turn guard, so this half measures the wrong hold");
+  assert.equal(context.markTouchesCurrentTurn(openState, heldChild, turnKeys), true,
+    "The excursion's own read is outside the open turn, so nothing guards the child");
+  assert.equal(context.markTouchesCurrentTurn(openState, heldParent, turnKeys), false,
+    "The parent's readable parts sit inside the open turn, so the guard would hold it too");
+  assert.throws(() => context.candidateSourceRefs(heldParent.parts, openState),
+    /Missing candidate child/,
+    "The parent already resolves, so the deferral below is not being measured");
+
+  const deferCommit = await context.commitPendingMarks({
+    snapshot: openSnapshot, state: openState, generation: 1,
+    retainIneligible: true, guardCurrentTurn: true,
+  });
+  assert.equal(deferCommit.applied.length, 0, "The guarded child folded anyway");
+  const parentReceipt = deferCommit.refused.find((item) => item.id === heldParent.id);
+  assert(parentReceipt, "The parent whose child the guard held produced no receipt");
+  assert.equal(parentReceipt.retained, true,
+    "The parent naming a guard-held child was discarded rather than deferred");
+  assert.match(parentReceipt.reason, /has not minted yet/);
+  assert(parentReceipt.reason.includes(heldChild.id), "The deferral receipt does not name the fold it waits on");
+  const stillPending = context.pendingMarks(deferCommit.state).map((mark) => mark.id);
+  assert(stillPending.includes(heldParent.id), "The deferred parent is not pending for the next commit");
+  assert(stillPending.includes(heldChild.id), "The guarded child is not pending for the next commit");
+  assert(deferCommit.retained.some((mark) => mark.id === heldParent.id),
+    "The commit record does not count the deferred parent as deferred");
+
+  // The contrast: the same parent, with nothing standing to mint its child, is dropped.
+  const aloneCommit = await context.commitPendingMarks({
+    snapshot: openSnapshot, state: context.addPendingMark(openEmpty, heldParent).state,
+    generation: 1, retainIneligible: true, guardCurrentTurn: true,
+  });
+  assert.equal(aloneCommit.refused.length, 1);
+  assert.equal(aloneCommit.refused[0].retained, false,
+    "A parent with nothing to wait for was deferred, so the defer is a blanket retain");
+  assert.match(aloneCommit.refused[0].reason, /no pending mark will mint/);
+
+  return {
+    dissolvedFoldIndex: dissolveIndex,
+    accountingAnswersAfterDissolve: true,
+    statusEligibilityAfterDissolve: status.marks[0].eligibility,
+    droppedRetained: dropCommit.refused[0].retained,
+    openTurnReads: turnKeys.size,
+    deferredParentRetained: parentReceipt.retained,
+    deferredStillPending: stillPending.length,
+    sameParentDroppedAlone: aloneCommit.refused[0].retained,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -11092,6 +11329,7 @@ const gates = [
   [106, "The band top commits with no turn ever closed", gateOpenTurnCommits],
   [107, "Model briefs upgrade on the commit boundary", gateBriefUpgradesRideTheBoundary],
   [108, "A folded head never limits reach", gateProjectedStaleBasis],
+  [109, "A mark naming a fold that is gone or held is answered", gateDanglingChildMarks],
 ];
 
 const gateFilter = (process.env.GATES ?? "")
