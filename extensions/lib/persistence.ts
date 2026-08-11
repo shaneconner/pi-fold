@@ -281,7 +281,12 @@ export function foldMap(state: Pick<ActiveContextState, "folds">): Map<string, A
   return new Map(state.folds.map((fold) => [fold.id, fold]));
 }
 
-export function childFoldIds(fold: ActiveFold): string[] {
+/**
+ * The folds a span names as children. Read off the parts alone, so a PENDING fold mark
+ * answers it too: a mark carries the id its committed fold will get, so the ids here are
+ * exactly the folds that must already exist when this span applies.
+ */
+export function childFoldIds(fold: Pick<ActiveFold, "parts">): string[] {
   return fold.parts.filter((part): part is Extract<FoldPart, { kind: "fold" }> => part.kind === "fold")
     .map((part) => part.foldId);
 }

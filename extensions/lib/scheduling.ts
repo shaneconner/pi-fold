@@ -25,6 +25,7 @@ import {
   toolRefsProtected,
 } from "./measurement.ts";
 import {
+  childFoldIds,
   clearPrepared,
   flattenFoldRefs,
   foldIdFor,
@@ -891,6 +892,24 @@ export async function commitPendingMarks(input: {
   const retained: PendingMark[] = [];
   const waived: PendingMark[] = [];
   const guardReasons = new Map<string, string>();
+  const held = new Set(input.state.folds.map((fold) => fold.id));
+  /**
+   * Whether the mark names a child fold nobody holds yet: either a sibling mark in this
+   * epoch will mint it, or nothing ever will. Until it exists there is no span to read
+   * and no eligibility to judge, because `candidateSourceRefs` cannot resolve the part
+   * and throws. Both readings below defer to the apply loop instead of asking.
+   */
+  const namesUnheldChild = (mark: PendingMark): boolean =>
+    mark.mark === "fold" && childFoldIds(mark).some((id) => !held.has(id));
+  /**
+   * The staleness reading, where the span can be read at all. A mark whose child is not
+   * held sorts past the newest entry, the same place a span that has left the branch
+   * sorts; the dependency pass below is what actually places it.
+   */
+  const spanStart = (mark: PendingMark): number =>
+    namesUnheldChild(mark)
+      ? input.snapshot.mapped.length
+      : markSpanStart(input.snapshot, input.state, mark);
   const currentTurn = input.guardCurrentTurn
     ? currentTurnRefKeys(input.snapshot)
     : new Set<string>();
@@ -906,10 +925,10 @@ export async function commitPendingMarks(input: {
     // of the span, never of when the mark was proposed; see `markSpanStart`. The id
     // comparison is the final tiebreak between marks covering the same start, and
     // nothing else.
-    const spanStart = new Map(guarded.map((mark) =>
-      [pendingMarkKey(mark), markSpanStart(input.snapshot, input.state, mark)] as const));
+    const guardedStart = new Map(guarded.map((mark) =>
+      [pendingMarkKey(mark), spanStart(mark)] as const));
     guarded.sort((left, right) =>
-      spanStart.get(pendingMarkKey(left))! - spanStart.get(pendingMarkKey(right))! ||
+      guardedStart.get(pendingMarkKey(left))! - guardedStart.get(pendingMarkKey(right))! ||
       left.id.localeCompare(right.id));
     const waiverCount = Math.max(0, Math.min(guarded.length, Math.trunc(input.guardWaiver ?? 0)));
     for (const [index, mark] of guarded.entries()) {
@@ -930,7 +949,12 @@ export async function commitPendingMarks(input: {
   if (input.retainIneligible) {
     const applicable: PendingMark[] = [];
     for (const mark of marks) {
-      if (markEligibility(input.snapshot, input.state, mark) === "protected") retained.push(mark);
+      // A mark naming an unheld child is not judged here. Its eligibility is a question
+      // about material the child fold owns, and that fold is what this commit is about to
+      // create; asking now would throw on the missing part instead of answering. The apply
+      // loop asks it once the child has landed, and refuses by name if it never does.
+      if (!namesUnheldChild(mark) &&
+          markEligibility(input.snapshot, input.state, mark) === "protected") retained.push(mark);
       else applicable.push(mark);
     }
     marks.length = 0;
@@ -946,10 +970,50 @@ export async function commitPendingMarks(input: {
       "span is still fresh or protected; the mark stays pending until it is eligible",
     retained: true,
   }));
-  // Oldest first, then by id: a chapter mark that absorbs an earlier tool-result
-  // mark must find that child already folded, which is transcript order.
-  const ordered = [...marks].sort((left, right) =>
-    left.ordinal - right.ordinal || left.id.localeCompare(right.id));
+  // CHILDREN BEFORE THE SPANS THAT ABSORB THEM, AND TRANSCRIPT ORDER IS NOT THAT ORDER.
+  //
+  // The invariant is real: a span whose parts name another mark's fold must find that
+  // fold in the forest when it applies. `foldMarkFor` gives a mark the id its committed
+  // fold will carry, so the naming is exact and readable off the parts. What it is NOT is
+  // geometry. A parent CONTAINS its child, so the earliest window index a parent covers
+  // is at or before its child's, and ordering oldest material first applies the parent
+  // FIRST in exactly the case the invariant exists for. The cost is not a reordering:
+  // `candidateSourceRefs` throws `Missing candidate child` on the unresolved part, the
+  // apply loop catches it, and the mark is refused with `retained: false`, so the parent
+  // applied one place too early loses the agent's decision outright rather than waiting.
+  //
+  // So the dependency is the law and the sort key is the tiebreak. Among marks with no
+  // such tie, real transcript order: the earliest window index the span covers, oldest
+  // material first, id last. The `ordinal` this used to sort on is the transcript position
+  // at MARK time, one value shared by every mark an epoch proposes, so within an epoch it
+  // decided nothing and the order fell through to comparing content hashes.
+  const minting = new Map(marks.flatMap((mark) =>
+    mark.mark === "fold" && !held.has(mark.id) ? [[mark.id, mark] as const] : []));
+  const applyStart = new Map(marks.map((mark) => [pendingMarkKey(mark), spanStart(mark)] as const));
+  const base = [...marks].sort((left, right) =>
+    applyStart.get(pendingMarkKey(left))! - applyStart.get(pendingMarkKey(right))! ||
+    left.id.localeCompare(right.id));
+  const ordered: PendingMark[] = [];
+  const placed = new Set<string>();
+  const placing = new Set<string>();
+  const place = (mark: PendingMark): void => {
+    const key = pendingMarkKey(mark);
+    // `placing` is the cycle stop. Fold ids are hashes OF the parts, so a cycle would
+    // need a hash to name its own ancestor; the guard is here so a corrupt state loses
+    // one mark to the ordinary refusal rather than hanging the commit.
+    if (placed.has(key) || placing.has(key)) return;
+    placing.add(key);
+    if (mark.mark === "fold") {
+      for (const childId of childFoldIds(mark)) {
+        const child = minting.get(childId);
+        if (child) place(child);
+      }
+    }
+    placing.delete(key);
+    placed.add(key);
+    ordered.push(mark);
+  };
+  for (const mark of base) place(mark);
   for (const mark of ordered) {
     try {
       if (mark.mark === "refold") {

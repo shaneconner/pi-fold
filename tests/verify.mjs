@@ -3451,6 +3451,127 @@ async function gateEpochMarkCommit() {
   assert.equal(materialized(blocked).folds.some((fold) => fold.id === pending.id), false,
     "A protected span produced a fold record");
 
+  // THE APPLY ORDER IS THE DEPENDENCY, NOT THE DIGEST, AND NOT TRANSCRIPT ORDER EITHER.
+  //
+  // Added 2026-08-10. Every mark one epoch proposes carries the same `ordinal`, so the
+  // retired sort, `ordinal` then id, was mark-id order inside an epoch: a content hash
+  // decided which span applied first. Its own comment named the invariant that matters,
+  // that a span absorbing another mark's fold finds that child already folded, and
+  // "oldest material first" is not that invariant: a parent CONTAINS its child, so the
+  // earliest window index a parent covers is at or before the child's and transcript
+  // order applies the PARENT first in exactly the case the invariant exists for.
+  //
+  // The cost of getting it wrong is not a reordering. `candidateSourceRefs` cannot
+  // resolve a part naming a fold nobody holds, the apply loop catches the throw, and the
+  // mark is refused with `retained: false`, so the parent applied one place too early
+  // loses the decision outright. That refusal is asserted below as the negative probe.
+  //
+  // The fixture is one chapter and the tool-result fold it absorbs, placed at the batch
+  // position where the digest order genuinely inverts them, and both disagreements are
+  // asserted BEFORE the outcome: without them the check would pass under either ordering.
+  const orderBuilt = makeFixture({
+    sessionId: "apply-order-test", turns: 12, resultChars: 6_000, contextWindow: 100_000,
+  });
+  const orderSnapshot = epochSnapshot(orderBuilt);
+  const orderEmpty = context.emptyActiveContextState(orderBuilt.sessionId);
+  const orderIndexOfEntry = (entryId) =>
+    orderSnapshot.mapped.findIndex((item) => item.ref?.entryId === entryId);
+  // One whole task turn, read as the parent of its own batch: user text, the assistant
+  // call, and the tool-result fold. The parent names the child by the id the child's
+  // commit will mint, which is the id `foldMarkFor` already gives the mark.
+  const orderPairAt = (index) => {
+    const childCandidate = context.manualFoldCandidate(
+      orderSnapshot, orderEmpty, [orderSnapshot.mapped[index].ref.entryId]);
+    const child = context.foldMarkFor({
+      candidate: childCandidate,
+      brief: context.automaticToolBrief(orderSnapshot, childCandidate),
+      briefProvenance: { kind: "deterministic" },
+      origin: "ladder",
+      ordinal: context.markOrdinal(orderSnapshot),
+    });
+    const parent = context.foldMarkFor({
+      candidate: {
+        kind: "chapter",
+        parts: [
+          { kind: "raw", ref: orderSnapshot.mapped[index - 2].ref },
+          { kind: "raw", ref: orderSnapshot.mapped[index - 1].ref },
+          { kind: "fold", foldId: child.id },
+        ],
+        // Empty on purpose: the refs this span covers cannot be resolved while its child
+        // is a mark rather than a fold, and `foldMarkFor` reads only the kind and parts.
+        sourceRefs: [],
+      },
+      brief: "One task turn kept whole, with the read it made already behind a placeholder.",
+      briefProvenance: { kind: "deterministic" },
+      origin: "ladder",
+      ordinal: context.markOrdinal(orderSnapshot),
+    });
+    return { child, parent, index };
+  };
+  let orderPair = null;
+  for (const item of orderSnapshot.mapped) {
+    if (item.ref?.role !== "toolResult" || item.index < 2) continue;
+    const pair = orderPairAt(item.index);
+    // Only a position whose digests invert is worth running, and only a span that is
+    // genuinely stale, so the commit refuses nothing for a reason other than order.
+    if (pair.parent.id.localeCompare(pair.child.id) < 0 &&
+        context.markEligibility(orderSnapshot, orderEmpty, pair.child) === "eligible") {
+      orderPair = pair;
+      break;
+    }
+  }
+  assert(orderPair, "No stale batch in the fixture puts the parent first by mark id, so the orders cannot be told apart");
+  let orderState = context.addPendingMark(orderEmpty, orderPair.child).state;
+  orderState = context.addPendingMark(orderState, orderPair.parent).state;
+  const orderMarks = context.pendingMarks(orderState);
+  assert.equal(orderMarks.length, 2, "The apply-order fixture did not hold both marks");
+  assert.equal(new Set(orderMarks.map((mark) => mark.ordinal)).size, 1,
+    "The fixture's marks carry more than one ordinal, so the degenerate case is not being measured");
+  // Disagreement one: the retired key applies the absorbing span first.
+  assert.deepEqual(
+    [...orderMarks].sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id))
+      .map((mark) => mark.id),
+    [orderPair.parent.id, orderPair.child.id],
+    "Ordinal-then-id no longer applies the parent first, so this fixture cannot tell the orders apart",
+  );
+  // Disagreement two: the parent's own material starts earlier, so oldest-material-first
+  // would invert them too; and while the child is a mark the parent has no readable span
+  // at all, which is why the order is read off the naming and not off the geometry.
+  assert(orderIndexOfEntry(orderPair.parent.parts[0].ref.entryId) <
+    orderIndexOfEntry(orderPair.child.parts[0].ref.entryId),
+    "The parent's material does not start before its child's, so oldest-material-first would not invert them");
+  assert.throws(() => context.markSpanStart(orderSnapshot, orderState, orderPair.parent),
+    /Missing candidate child/,
+    "A span naming an unminted child has a readable start, so the transcript reading is no longer unavailable");
+  // The negative probe: the same parent with no child to find is refused and DISCARDED,
+  // which is exactly what the parent-first order produced.
+  const orderAlone = await context.commitPendingMarks({
+    snapshot: orderSnapshot,
+    state: context.addPendingMark(orderEmpty, orderPair.parent).state,
+    generation: 1,
+    retainIneligible: true,
+  });
+  assert.equal(orderAlone.applied.length, 0, "A span whose child does not exist folded anyway");
+  assert.match(orderAlone.refused[0]?.reason ?? "", /Missing candidate child/,
+    "A span naming a fold nobody holds was refused for some other reason");
+  assert.equal(orderAlone.refused[0].retained, false,
+    "The refusal is retained, so applying the parent early no longer costs the decision");
+  const orderCommit = await context.commitPendingMarks({
+    snapshot: orderSnapshot,
+    state: orderState,
+    generation: 1,
+    retainIneligible: true,
+  });
+  assert.deepEqual(orderCommit.applied.map((mark) => mark.id), [orderPair.child.id, orderPair.parent.id],
+    "The commit did not apply the child before the span that absorbs it");
+  assert.equal(orderCommit.refused.length, 0, "The apply-order commit refused a mark");
+  const orderParentFold = orderCommit.state.folds.find((fold) => fold.id === orderPair.parent.id);
+  assert(orderParentFold, "The absorbing span never folded");
+  assert(context.childFoldIds(orderParentFold).includes(orderPair.child.id),
+    "The parent folded without the child it names");
+  assert.equal(orderCommit.state.folds.find((fold) => fold.id === orderPair.child.id)?.parentId,
+    orderPair.parent.id, "The child did not end up nested under the span that absorbed it");
+
   return {
     toolActions: context.ACTIVE_CONTEXT_TOOL_ACTIONS.length,
     markedFolds: marked.folds.length,
@@ -3459,6 +3580,10 @@ async function gateEpochMarkCommit() {
     committedFolds: after.folds.length,
     pendingAfterCommit: 0,
     protectedHeld: refusal.deferredMarks,
+    applyOrderIndex: orderPair.index,
+    applyOrderIdOrderInvertsDependency: true,
+    applyOrderParentDiscardedAlone: orderAlone.refused.length,
+    applyOrderChildFirst: true,
   };
 }
 
