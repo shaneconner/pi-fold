@@ -73,6 +73,7 @@ import {
   chapterUnits,
   unpinnedStaleFolds,
   deterministicChapterCandidateBrief,
+  deterministicConsolidationBrief,
   NO_FOLD_KINDS,
   partsForRange,
   resultCall,
@@ -368,6 +369,69 @@ export function encodedFoldSource(
   }));
 }
 
+/**
+ * What a generator reads to brief a PARENT: its children at depth one.
+ *
+ * `encodedFoldSource` renders a parent's children through `renderFold`, which yields their
+ * placeholders, so a parent's source was the children's briefs. Briefing that produces a
+ * summary of summaries, and by the second rung the material itself is three descriptions
+ * away. So each child is opened here instead: its own brief for orientation, then its
+ * contents, with ITS children left as placeholders. Depth one is the whole rule. It bounds
+ * the read at one level per rung whatever the ladder's height, and it is the same view an
+ * agent gets from expanding the parent, so a brief written from it describes what expanding
+ * would actually return.
+ *
+ * When the opened children do not fit, the LARGEST collapses back to brief-only first, and
+ * again until the rest fit. Size is what decides, not position: dropping in span order
+ * would spend the whole budget on an early giant and close every child behind it, while
+ * taking the giant out first buys back the most room for the fewest subjects lost. A
+ * collapsed child still appears, in span order, carrying its brief and saying it is
+ * collapsed, so the generator can tell a child it read from a child it only heard about.
+ */
+export function consolidationSourceText(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+  parts: FoldPart[],
+): string {
+  const byId = foldMap(state);
+  const entries = parts.map((part, index) => {
+    if (part.kind === "raw") {
+      const item = exactMapped(snapshot, part.ref);
+      if (!item) throw new Error(`Exact Pi evidence drift for ${part.ref.entryId}`);
+      return { index, foldId: null, kind: "raw" as const, brief: null, messages: [clone(item.message)] };
+    }
+    const child = byId.get(part.foldId);
+    if (!child) throw new Error(`Consolidation source lost child fold ${part.foldId}`);
+    const messages = renderFoldParts(child.parts, state, snapshot);
+    if (!messages) throw new Error(`Consolidation source projection drifted at ${child.id}`);
+    return { index, foldId: child.id, kind: child.kind, brief: foldBrief(child, state), messages };
+  });
+  const collapsed = new Set<number>();
+  const render = (): string => stableStringify(entries.map((entry) => ({
+    child: entry.index + 1,
+    of: entries.length,
+    ...(entry.foldId === null ? {} : { foldId: entry.foldId }),
+    kind: entry.kind,
+    ...(entry.brief === null ? {} : { brief: entry.brief }),
+    ...(collapsed.has(entry.index)
+      ? { collapsed: "brief only: this child did not fit expanded" }
+      : { contents: entry.messages }),
+  })));
+  // Largest first, and only as many as the budget forces: each collapse is a subject the
+  // brief must describe from one sentence instead of from its contents.
+  const bySize = entries
+    .filter((entry) => entry.foldId !== null)
+    .map((entry) => ({ index: entry.index, size: bytes(entry.messages) }))
+    .sort((a, b) => b.size - a.size || a.index - b.index);
+  let text = render();
+  for (const entry of bySize) {
+    if (bytes(text) <= snapshot.policy.maxSourceChars) break;
+    collapsed.add(entry.index);
+    text = render();
+  }
+  return text;
+}
+
 export function boundedOrientation(
   snapshot: ActiveContextSnapshot,
   sourceRefs: EvidenceRef[],
@@ -393,6 +457,89 @@ export function boundedOrientation(
   const beforeText = before.length ? encodedRefs(snapshot, before) : "[]";
   const after = collect(snapshot.mapped.slice(indices.at(-1)! + 1));
   return { beforeRefs: before, beforeText, afterRefs: after.refs, afterText: after.text };
+}
+
+/**
+ * What is wrong with a generated brief, said in words its author can act on, or null.
+ *
+ * Length is a criterion we set, so a brief that misses it is answered rather than cut.
+ * Truncating a long brief silently loses whatever the generator put last, which on a group
+ * is the last children it covered; the cure is to hand the complaint back and let the
+ * generator spend the budget itself. Coverage cannot be checked the same way: no test tells
+ * whether a sentence stands for a child, so coverage is instructed in the request and
+ * defended by the deterministic index underneath, and what is checked here is the pair of
+ * failures that were silent before.
+ */
+export function briefContractComplaint(
+  brief: string,
+  maxBriefChars: number,
+  toolName: string,
+): string | null {
+  if (!brief) return "You returned no brief text. Reply with the brief itself and nothing else.";
+  if (brief.length > maxBriefChars) {
+    return `Your brief was ${brief.length} characters and the limit is ${maxBriefChars}. ` +
+      "Rewrite it within the limit. Cut detail, not subjects: every subject you named must " +
+      "still be named in the shorter brief.";
+  }
+  if (!usefulBrief(brief, maxBriefChars, toolName)) {
+    return "Your brief carried no factual content once fold navigation lines were dropped. " +
+      "Name concrete things from the span: files, identifiers, decisions, results, errors.";
+  }
+  return null;
+}
+
+/**
+ * One brief from the generator, with one chance to cure a criterion it missed.
+ *
+ * The no-retry rule this lane was built with holds for what it was written about: a
+ * generator that fails on a span fails on it again, and looping would spend the session's
+ * calls proving it. A contract complaint is the other case. The request stated a limit, the
+ * answer missed it, and the complaint names exactly what to change, so the second ask is
+ * new information rather than the same ask twice. It is bounded at one, and only a
+ * complaint earns it: transport faults, timeouts and attribution drift still fail on the
+ * first answer. Both attempts sit inside the caller's timeout, so a brief costs no more
+ * wall clock than it did.
+ */
+export async function generatedBrief(input: {
+  summarize: (request: Record<string, unknown>, ctx?: unknown) => Promise<Record<string, unknown>>;
+  request: Record<string, unknown>;
+  ctx?: unknown;
+  maxBriefChars: number;
+  toolName: string;
+}): Promise<{ brief: string; provenance: BriefProvenance; cured: boolean }> {
+  let complaint: string | null = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const result = await input.summarize(
+      complaint === null ? input.request : { ...input.request, cure: complaint },
+      input.ctx,
+    );
+    const brief = typeof result?.brief === "string" ? result.brief.trim() : "";
+    const digest = result?.launchContractDigest;
+    // Attribution is the harness's own wiring, not the generator's judgment, so it is never
+    // handed back to be cured: a summarizer that cannot say which model wrote a brief is
+    // broken in a way a second ask cannot mend.
+    if (typeof result?.provider !== "string" || !result.provider ||
+        typeof result?.model !== "string" || !result.model ||
+        typeof result?.effort !== "string" || !result.effort || result.toolCalls !== 0 ||
+        (digest !== undefined && (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)))) {
+      throw new Error("Model context brief attribution, zero-tool, or digest contract drift");
+    }
+    complaint = briefContractComplaint(brief, input.maxBriefChars, input.toolName);
+    if (complaint === null) {
+      return {
+        brief,
+        provenance: {
+          kind: "model",
+          provider: result.provider,
+          model: result.model,
+          effort: result.effort,
+          ...(typeof digest === "string" ? { launchContractDigest: digest } : {}),
+        },
+        cured: attempt > 0,
+      };
+    }
+  }
+  throw new Error(`Model context brief usefulness contract drift after one cure: ${complaint}`);
 }
 
 export async function prepareFold(input: {
@@ -422,6 +569,10 @@ export async function prepareFold(input: {
     throw new Error("Fold source is not exact, stale, and unprotected");
   }
   const sourceText = encodedFoldSource(snapshot, state, candidate.parts, candidate.kind);
+  const groupChildren = candidate.parts.filter((part) => part.kind === "fold").length;
+  const readableSource = groupChildren
+    ? consolidationSourceText(snapshot, state, candidate.parts)
+    : sourceText;
   const orientation = boundedOrientation(snapshot, candidate.sourceRefs);
   const sourceSha256 = sha256Text(sourceText);
   const beforeSha256 = sha256Text(orientation.beforeText);
@@ -452,7 +603,7 @@ export async function prepareFold(input: {
       input.signal?.addEventListener("abort", relayAbort, { once: true });
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
-        if (bytes(sourceText) > snapshot.policy.maxSourceChars) {
+        if (bytes(readableSource) > snapshot.policy.maxSourceChars) {
           throw new Error("Fold source exceeds the bounded model-summary request");
         }
         const timed = new Promise<never>((_resolve, reject) => {
@@ -461,39 +612,31 @@ export async function prepareFold(input: {
             reject(new Error(`Context brief exceeded ${snapshot.policy.briefTimeoutMs}ms`));
           }, snapshot.policy.briefTimeoutMs);
         });
-        const result = await Promise.race([input.summarize({
-          candidateId,
-          sourceRefs: clone(candidate.sourceRefs),
-          sourceText,
-          sourceSha256,
-          beforeRefs: clone(orientation.beforeRefs),
-          beforeText: orientation.beforeText,
-          beforeSha256,
-          afterRefs: clone(orientation.afterRefs),
-          afterText: orientation.afterText,
-          afterSha256,
-          maxBriefChars: snapshot.policy.maxBriefChars,
-          signal: controller.signal,
-        }, input.ctx), timed]);
-        const generated = typeof result?.brief === "string" ? result.brief.trim() : "";
-        const digest = result?.launchContractDigest;
-        if (!usefulBrief(generated, snapshot.policy.maxBriefChars, snapshot.toolName) ||
-            typeof result?.provider !== "string" || !result.provider ||
-            typeof result?.model !== "string" || !result.model ||
-            typeof result?.effort !== "string" || !result.effort || result.toolCalls !== 0 ||
-            (digest !== undefined && (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)))) {
-          throw new Error("Model context brief attribution, zero-tool, digest, or usefulness contract drift");
-        }
-        modelBrief = {
-          brief: generated,
-          provenance: {
-            kind: "model",
-            provider: result.provider,
-            model: result.model,
-            effort: result.effort,
-            ...(typeof digest === "string" ? { launchContractDigest: digest } : {}),
+        const generated = await Promise.race([generatedBrief({
+          summarize: input.summarize,
+          request: {
+            candidateId,
+            sourceRefs: clone(candidate.sourceRefs),
+            // What the generator READS, which for a group is its children opened one level
+            // rather than the placeholders `sourceText` renders. The fold's own identity
+            // stays `sourceSha256` above: what a span IS does not change with how it is read.
+            sourceText: readableSource,
+            sourceSha256: sha256Text(readableSource),
+            children: groupChildren,
+            beforeRefs: clone(orientation.beforeRefs),
+            beforeText: orientation.beforeText,
+            beforeSha256,
+            afterRefs: clone(orientation.afterRefs),
+            afterText: orientation.afterText,
+            afterSha256,
+            maxBriefChars: snapshot.policy.maxBriefChars,
+            signal: controller.signal,
           },
-        };
+          ctx: input.ctx,
+          maxBriefChars: snapshot.policy.maxBriefChars,
+          toolName: snapshot.toolName,
+        }), timed]);
+        modelBrief = { brief: generated.brief, provenance: generated.provenance };
       } catch (error) {
         if (input.signal?.aborted) throw error;
         input.onSummarizerFailure?.(error);
@@ -506,7 +649,11 @@ export async function prepareFold(input: {
       brief = modelBrief.brief;
       provenance = modelBrief.provenance;
     } else {
-      brief = deterministicChapterCandidateBrief(snapshot, candidate);
+      // By kind, not by assumption: a group that loses its generator falls back to the
+      // index of its children, and only a chapter falls back to a chapter's brief.
+      brief = candidate.kind === "consolidation"
+        ? deterministicConsolidationBrief(candidate, state)
+        : deterministicChapterCandidateBrief(snapshot, candidate);
       provenance = { kind: "deterministic" };
     }
   }

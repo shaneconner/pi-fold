@@ -82,7 +82,14 @@ export function buildActiveContextTool(input: {
             required: ["ids"],
             properties: {
               ids: { type: "array", minItems: 1, maxItems: 64, items: { type: "string", minLength: 1 } },
-              brief: { type: "string", minLength: 1, maxLength: input.maxBriefChars },
+              brief: {
+                type: "string",
+                minLength: 1,
+                maxLength: input.maxBriefChars,
+                description: "Write one for every span you mark. You know why the span mattered and " +
+                  "what you will want back from it; a generator reading the span alone does not. " +
+                  "Leaving it out hands the brief to the summarizer rather than skipping it.",
+              },
             },
           },
         },

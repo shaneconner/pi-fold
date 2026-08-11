@@ -14,7 +14,6 @@ import {
   ownValue,
   sessionEntryMessages,
   uniqueMessageDigestAnchor,
-  usefulBrief,
 } from "./lib/canonical.ts";
 import {
   activeContextStatus,
@@ -22,8 +21,10 @@ import {
   boundedOrientation,
   boundStatusPayload,
   commitPreparedFold,
+  consolidationSourceText,
   descendantIds,
   encodedFoldSource,
+  generatedBrief,
   foldCandidatesDetail,
   foldTreeDetail,
   peekFoldSource,
@@ -494,6 +495,14 @@ export function registerActiveContext(pi: any, options: {
     ready: [] as Array<{ foldId: string; sourceSha256: string; brief: string; provenance: BriefProvenance }>,
     /** A generator that failed a fold does not get it back: one attempt, then deterministic stands. */
     failed: new Set<string>(),
+    /**
+     * Parents whose turn has not come: a group is read at depth one, so a child still
+     * waiting on its own brief would be read through the sentence that brief is about to
+     * replace. They are retried at every boundary and never dropped, because the wait ends
+     * the moment the lane drains and a parent that was skipped once is a parent no
+     * generator ever writes.
+     */
+    deferred: new Set<string>(),
     /** Failures since the last commit record carried them, so none of this is silent. */
     failures: 0,
     lastError: null as string | null,
@@ -2372,10 +2381,13 @@ export function registerActiveContext(pi: any, options: {
    * These are the bytes `prepareFold` already hashed into the fold's identity, so the
    * generator briefs the span that was folded and nothing else.
    *
-   * Leaves only. A consolidation's deterministic brief is derived from its children's
-   * briefs, and those children can be upgraded under it, so a consolidation is re-derived
-   * rather than model-written; sending a model the stale child briefs would brief the
-   * summary instead of the source.
+   * A PARENT is queued too, and reads its children at depth one rather than through their
+   * briefs: `consolidationSourceText` opens each child and leaves the grandchildren folded,
+   * so the group is briefed from material instead of from a summary of summaries. The one
+   * thing it must not race is a child's own upgrade, so a parent whose children are still
+   * in this lane is deferred to the next boundary instead of reading briefs about to be
+   * replaced. Unlike a leaf, a parent's source keeps: its children are folds, and folds
+   * stay resolvable after the commit that nested them.
    */
   const queueBriefUpgrades = (
     snapshot: ActiveContextSnapshot,
@@ -2383,21 +2395,50 @@ export function registerActiveContext(pi: any, options: {
     foldIds: readonly string[],
   ): void => {
     if (!observedSummarize || !persistence.state) return;
-    for (const foldId of foldIds) {
-      if (upgrades.queue.length >= MAX_BRIEF_UPGRADE_QUEUE) return;
+    const pending = (id: string): boolean => upgrades.running.has(id) ||
+      upgrades.queue.some((entry) => entry.foldId === id) ||
+      upgrades.ready.some((entry) => entry.foldId === id) ||
+      upgrades.deferred.has(id);
+    // Parents that waited are considered first and at every boundary, so the wait ends as
+    // soon as the children settle rather than whenever the ladder happens to build another.
+    for (const foldId of [...upgrades.deferred, ...foldIds]) {
+      const full = upgrades.queue.length >= MAX_BRIEF_UPGRADE_QUEUE;
       if (upgrades.failed.has(foldId) || upgrades.running.has(foldId) ||
           upgrades.queue.some((entry) => entry.foldId === foldId) ||
           upgrades.ready.some((entry) => entry.foldId === foldId)) continue;
       const fold = persistence.state.folds.find((item) => item.id === foldId);
       // A supplied brief is agent judgment and outranks the generator; a model brief is
-      // already what this lane exists to produce.
-      if (!fold || foldProvenance(fold, persistence.state).kind !== "deterministic") continue;
-      const refs = fold.parts.every((part) => part.kind === "raw")
-        ? fold.parts.map((part) => (part as { kind: "raw"; ref: EvidenceRef }).ref)
-        : null;
+      // already what this lane exists to produce. A fold that is no longer there is no
+      // longer owed anything, so a rolled-back parent leaves the wait rather than sitting
+      // in it.
+      if (!fold || foldProvenance(fold, persistence.state).kind !== "deterministic") {
+        upgrades.deferred.delete(foldId);
+        continue;
+      }
+      const parent = fold.parts.some((part) => part.kind === "fold");
+      // A parent waits rather than being shed: its children are folds, so its source is
+      // still there whenever the lane has room, and a group that loses its turn at a busy
+      // boundary would otherwise keep the index its children could not write. A leaf is the
+      // other way round. Its source is exact active evidence at this commit and a
+      // placeholder after it, so a full queue drops it here and the receipt says so.
+      if (parent && (full || childFoldIds(fold).some(pending))) {
+        upgrades.deferred.add(foldId);
+        continue;
+      }
+      if (full) continue;
+      upgrades.deferred.delete(foldId);
+      const refs = parent
+        ? flattenFoldRefs(fold, persistence.state)
+        : fold.parts.every((part) => part.kind === "raw")
+          ? fold.parts.map((part) => (part as { kind: "raw"; ref: EvidenceRef }).ref)
+          : null;
       if (!refs) continue;
       try {
-        const sourceText = encodedFoldSource(snapshot, stateBeforeCommit, fold.parts, fold.kind);
+        // The parent reads the state that holds its children and their upgraded briefs;
+        // a leaf reads the state where its own span was still raw active evidence.
+        const sourceText = parent
+          ? consolidationSourceText(snapshot, persistence.state, fold.parts)
+          : encodedFoldSource(snapshot, stateBeforeCommit, fold.parts, fold.kind);
         if (bytes(sourceText) > snapshot.policy.maxSourceChars) continue;
         const orientation = boundedOrientation(snapshot, refs);
         upgrades.queue.push({
@@ -2408,6 +2449,7 @@ export function registerActiveContext(pi: any, options: {
             sourceRefs: clone(refs),
             sourceText,
             sourceSha256: sha256Text(sourceText),
+            children: parent ? childFoldIds(fold).length : 0,
             beforeRefs: clone(orientation.beforeRefs),
             beforeText: orientation.beforeText,
             beforeSha256: sha256Text(orientation.beforeText),
@@ -2458,34 +2500,26 @@ export function registerActiveContext(pi: any, options: {
           reject(new Error(`Brief upgrade exceeded ${snapshot.policy.briefTimeoutMs}ms`));
         }, snapshot.policy.briefTimeoutMs);
       });
-      const result = await Promise.race([
-        summarize({ ...entry.request, signal: controller.signal }, ctx),
+      // The same contract `prepareFold` holds a generated brief to, through the same
+      // function: an upgrade with its own copy of the check would drift from the fold
+      // path's, and the cure a missed criterion earns belongs to both or to neither.
+      const generated = await Promise.race([
+        generatedBrief({
+          summarize: (request, callCtx) => summarize({ ...request, signal: controller.signal }, callCtx),
+          request: entry.request,
+          ctx,
+          maxBriefChars: snapshot.policy.maxBriefChars,
+          toolName: snapshot.toolName,
+        }),
         timed,
       ]);
-      const brief = typeof result?.brief === "string" ? result.brief.trim() : "";
-      const digest = result?.launchContractDigest;
-      // The same contract `prepareFold` holds a generated brief to: an upgrade that
-      // skipped it would let attribution the fold path refuses in through a side door.
-      if (!usefulBrief(brief, snapshot.policy.maxBriefChars, snapshot.toolName) ||
-          typeof result?.provider !== "string" || !result.provider ||
-          typeof result?.model !== "string" || !result.model ||
-          typeof result?.effort !== "string" || !result.effort || result.toolCalls !== 0 ||
-          (digest !== undefined && (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)))) {
-        throw new Error("Model context brief attribution, zero-tool, digest, or usefulness contract drift");
-      }
       if (controller.signal.aborted ||
           !sessionIdentityStillValid(ctx, capturedSessionId, capturedGeneration)) return;
       upgrades.ready.push({
         foldId: entry.foldId,
         sourceSha256: entry.sourceSha256,
-        brief,
-        provenance: {
-          kind: "model",
-          provider: result.provider,
-          model: result.model,
-          effort: result.effort,
-          ...(typeof digest === "string" ? { launchContractDigest: digest } : {}),
-        },
+        brief: generated.brief,
+        provenance: generated.provenance,
       });
     })().catch((error) => {
       if (controller.signal.aborted) return;
@@ -2507,7 +2541,7 @@ export function registerActiveContext(pi: any, options: {
       // same fence `cancelBriefUpgrades` is called behind, so a session that moved on
       // cannot be restarted by a call that outlived it.
       if (!lifecycle.shuttingDown && lifecycle.generation === capturedGeneration) {
-        startBriefUpgrades(snapshot, ctx);
+        resumeBriefUpgrades(snapshot, ctx);
       }
     });
     return true;
@@ -2523,11 +2557,27 @@ export function registerActiveContext(pi: any, options: {
     while (startBriefUpgrade(snapshot, ctx)) { /* Bounded by the in-flight constant. */ }
   };
 
+  /**
+   * Take up the waiting parents, then fill the slots.
+   *
+   * A deferred parent was waiting on the lane, so the lane finishing is the news, not the
+   * next commit. Boundaries are where briefs APPLY; hanging the retry on them too would
+   * leave a session that stops folding holding parents whose children were briefed long
+   * ago, and the last group the ladder built is exactly the one a session ends beside.
+   */
+  const resumeBriefUpgrades = (snapshot: ActiveContextSnapshot, ctx: any): void => {
+    if (upgrades.deferred.size && persistence.state) {
+      queueBriefUpgrades(snapshot, persistence.state, []);
+    }
+    startBriefUpgrades(snapshot, ctx);
+  };
+
   const cancelBriefUpgrades = (): void => {
     for (const slot of upgrades.running.values()) slot.controller.abort();
     upgrades.running.clear();
     upgrades.queue = [];
     upgrades.ready = [];
+    upgrades.deferred.clear();
   };
 
   /**
@@ -3878,8 +3928,9 @@ export function registerActiveContext(pi: any, options: {
       // sit BETWEEN boundaries. Folds queued by the commit this pass just made are
       // briefed now and land on the next commit, which is the whole shape of the lane.
       // Afterwards each finishing call starts the next, so this is the lane's ignition
-      // rather than its pace.
-      startBriefUpgrades(snapshot, ctx);
+      // rather than its pace. Parents waiting on their children are taken up here too:
+      // a pass is the other place we know the lane may have room.
+      resumeBriefUpgrades(snapshot, ctx);
       return action;
     });
     ladder.actionQueue = operation.catch(() => undefined);

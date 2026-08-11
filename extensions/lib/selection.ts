@@ -22,6 +22,7 @@ import {
 import {
   directFoldOwners,
   flattenFoldRefs,
+  foldBrief,
   foldMap,
 } from "./persistence.ts";
 import {
@@ -327,19 +328,71 @@ export function automaticToolBrief(snapshot: ActiveContextSnapshot, candidate: F
   return `Completed one read-only ${names} batch with ${calls.length} exact results${target}; every stale output remains recoverable from this fold.`;
 }
 
+/** The narrowest entry in a parent's index that still names a subject rather than a stub. */
+const MIN_SUBJECT_CHARS = 24;
+
+/** Cut to a character budget without splitting a surrogate pair, marked where it cut. */
+function boundedSubject(text: string, budget: number): string {
+  if (text.length <= budget) return text;
+  let kept = text.slice(0, Math.max(0, budget - 3)).trimEnd();
+  const finalCode = kept.charCodeAt(kept.length - 1);
+  if (finalCode >= 0xd800 && finalCode <= 0xdbff) kept = kept.slice(0, -1);
+  return `${kept}...`;
+}
+
+/**
+ * A parent's fallback brief: an index of its children, one entry each.
+ *
+ * This used to concatenate the children's briefs and slice the result at the cap, which
+ * cannot represent them. Ten children whose briefs may each run to the cap need ten times
+ * the cap, so the slice landed inside the first child or two and the rest of the group
+ * left no trace at all. In the 2026-08-11 rep every parent came out at exactly the cap,
+ * the bottom rung showed five of ten children and every rung above it showed ONE: at rung
+ * two the first child was itself a capped parent, so it spent the whole budget alone.
+ *
+ * The budget is divided instead. Children shorter than an even share hand their remainder
+ * to the longer ones, so the cut falls on the children that are actually long rather than
+ * on whoever sorts last, and every child appears whatever its neighbours cost. Coverage is
+ * the property being defended: this is the brief a group carries when no generator wrote
+ * it one, and a group that cannot say what a member holds cannot be navigated back into.
+ */
 export function deterministicConsolidationBrief(candidate: FoldCandidate, state: ActiveContextState): string {
   const byId = foldMap(state);
   const subjects = candidate.parts.flatMap((part) => {
     if (part.kind !== "fold") return [];
     const child = byId.get(part.foldId);
-    return child ? [child.brief.replace(/\s+/g, " ").trim()] : [];
+    // Through the override map, never off the record: a child upgraded since it committed
+    // presents the model's brief, and reading the record here would index the sentence
+    // that brief replaced.
+    return child ? [foldBrief(child, state).replace(/\s+/g, " ").trim()] : [];
   });
-  const text = `Grouped completed context covering: ${subjects.join(" ")}`.replace(/\s+/g, " ").trim();
-  if (text.length <= ACTIVE_CONTEXT_POLICY.maxBriefChars) return text;
-  let bounded = text.slice(0, ACTIVE_CONTEXT_POLICY.maxBriefChars - 1).trimEnd();
-  const finalCode = bounded.charCodeAt(bounded.length - 1);
-  if (finalCode >= 0xd800 && finalCode <= 0xdbff) bounded = bounded.slice(0, -1);
-  return `${bounded}.`;
+  if (!subjects.length) return "Grouped completed context covering no readable folds.";
+  const separator = " | ";
+  const lead = `Grouped completed context covering ${subjects.length} folds: `;
+  // Below this width an entry says nothing a reader could act on, so a group too wide to
+  // give every child that much names as many as it can and then says, in the brief itself,
+  // how many it could not name. A count is a poor substitute for a subject and a truthful
+  // one; a slice through the middle of the third child is neither.
+  const room = ACTIVE_CONTEXT_POLICY.maxBriefChars - lead.length - 1;
+  const named = Math.max(1, Math.min(subjects.length,
+    Math.floor((room + separator.length) / (MIN_SUBJECT_CHARS + separator.length))));
+  const omitted = subjects.length - named;
+  const tail = omitted ? `${separator}${omitted} more folds in this group` : "";
+  const budget = room - tail.length - separator.length * (named - 1);
+  // Shortest first, so every subject that fits whole releases what it did not use to the
+  // subjects still to be measured. `owed` is always the even share of what is left among
+  // those that remain, which is the largest floor that still leaves room for all of them.
+  const order = subjects.slice(0, named).map((text, index) => ({ text, index })).sort((a, b) =>
+    a.text.length - b.text.length || a.index - b.index);
+  const bounded = new Array<string>(named);
+  let left = budget;
+  for (let taken = 0; taken < order.length; taken += 1) {
+    const owed = Math.max(1, Math.floor(left / (order.length - taken)));
+    const kept = boundedSubject(order[taken].text, owed);
+    bounded[order[taken].index] = kept;
+    left -= kept.length;
+  }
+  return `${lead}${bounded.join(separator)}${tail}.`.replace(/\s+/g, " ").trim();
 }
 
 /**

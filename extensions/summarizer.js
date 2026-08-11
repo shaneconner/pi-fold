@@ -48,7 +48,29 @@ function orientationBlock(label, text) {
  * makes the second job possible: an abstract description of a span is not a statement of
  * what is recoverable from it.
  */
+/**
+ * A GROUP is briefed under one extra rule: every child gets a share.
+ *
+ * A parent is what the ladder builds when folds pile up, and its brief is the only index
+ * of what the group holds. A brief that covers the first two children richly and drops the
+ * other eight closes them: the agent has no way to know the eighth is in there, so it never
+ * expands to find out. Coverage beats depth at this rung, and the children are numbered in
+ * the payload so "every one of them" is a countable instruction rather than a wish.
+ */
+function groupCoverageRule(children) {
+  return `The span is a GROUP of ${children} folded children, numbered 1 to ${children} ` +
+    "below, each with its own brief and then its contents; folds nested inside a child " +
+    "stay folded and appear as placeholders, and a child marked collapsed shows only its " +
+    "brief. Your brief is the only index of this group, so give EVERY one of the " +
+    `${children} children a share of it: name what each one holds in the order they ` +
+    "appear. A child you leave out is a child the agent cannot know to look for. Prefer " +
+    "one concrete clause per child over a full account of the first few.";
+}
+
 function briefRequestPrompt(request) {
+  const children = Number.isInteger(request.children) && request.children > 1
+    ? request.children
+    : 0;
   return [
     `Write a factual brief of at most ${request.maxBriefChars} characters covering the ` +
     "SPAN TO BRIEF below, and nothing else. The brief does two jobs at once: it " +
@@ -58,10 +80,16 @@ function briefRequestPrompt(request) {
     "concrete things inside it: files, identifiers, decisions, results, errors. Do not " +
     "describe the span abstractly. The BEFORE and AFTER sections are orientation only: " +
     "they say where the span sits in the larger conversation, and their content is not " +
-    "part of what you are briefing. Use no preamble and no Markdown headers.",
+    "part of what you are briefing. Use no preamble and no Markdown headers." +
+    (children ? `\n\n${groupCoverageRule(children)}` : ""),
     orientationBlock("BEFORE THE SPAN (orientation only, do not brief)", request.beforeText),
     `SPAN TO BRIEF:\n${request.sourceText}`,
     orientationBlock("AFTER THE SPAN (orientation only, do not brief)", request.afterText),
+    // A second ask, and the only reason there is one: the first answer missed a criterion
+    // this request stated, and the caller would otherwise have to cut the brief itself.
+    ...(typeof request.cure === "string" && request.cure
+      ? [`YOUR PREVIOUS ANSWER DID NOT MEET THE CRITERIA. ${request.cure}\nWrite the brief again.`]
+      : []),
   ].join("\n\n");
 }
 

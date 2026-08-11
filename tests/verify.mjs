@@ -11939,6 +11939,360 @@ async function gateGeneratorCallsAreOnTheRecord() {
   };
 }
 
+/**
+ * A parent's brief indexes EVERY child, and a group is briefed from material.
+ *
+ * The 2026-08-11 rep is the case. A parent's fallback brief concatenated its children's
+ * briefs and sliced the result at the cap, so ten children whose briefs may each fill the
+ * cap needed ten times the budget and the cut landed inside the first one or two. Every
+ * parent in that run came out at exactly 1,200 characters; the bottom rung showed five of
+ * ten children and every rung above it showed ONE, because at rung two the first child was
+ * itself a capped parent and spent the whole budget alone. A group that cannot say what a
+ * member holds cannot be navigated back into, and the agent went to disk instead.
+ *
+ * Two properties, at both rungs. COVERAGE: the budget is divided, so every child appears
+ * whatever its neighbours cost, and a child short enough to fit keeps its whole sentence
+ * because the ones that fit hand their remainder to the ones that do not. MATERIAL: the
+ * generator reads the group at depth one, its children opened and the grandchildren left
+ * as placeholders, so a brief describes the span rather than summarizing summaries; when
+ * the opened children do not fit, the LARGEST collapses back to brief-only first, and only
+ * as many collapse as the budget forces.
+ *
+ * The cure is the third: length is a criterion the request states, so a brief that misses
+ * it is handed back once with the complaint rather than cut. One cure, and only for a
+ * criterion: attribution drift is the harness's own wiring and fails on the first answer.
+ */
+async function gateParentBriefCoversEveryChild() {
+  const cap = context.ACTIVE_CONTEXT_POLICY.maxBriefChars;
+  const snapshotOf = (built, thresholds = NO_FRESH_TAIL, policy) => context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: built.messages,
+    contextEntries: built.entries,
+    contextWindow: 100_000,
+    thresholds,
+    ...(policy ? { policy } : {}),
+  });
+  const marker = (index) => `SUBJECT${index}MARKER`;
+  // A child brief that fills the cap by itself, which is what every parent in the rep was:
+  // ten of these need ten times the budget, and that ratio is why no cap could hold a
+  // concatenation. The marker is how the assertion below asks whether a child left a trace.
+  const fatBrief = (index) => `${marker(index)} ${"recoverable detail ".repeat(200)}`.slice(0, cap);
+  /** Rewrite every visible root's brief, keeping the marker each one was given. */
+  const heavyBriefs = (state, text = fatBrief, offset = 0) => {
+    const markers = new Map();
+    let index = 0;
+    const folds = state.folds.map((fold) => {
+      if (fold.parentId !== null) return fold;
+      const at = offset + index;
+      index += 1;
+      markers.set(fold.id, marker(at));
+      return { ...fold, brief: text(at) };
+    });
+    return { state: { ...state, folds }, markers };
+  };
+
+  // RUNG ONE, at the real width: ten children, each brief at the cap.
+  const width = context.DEFAULT_THRESHOLDS.consolidateAfter;
+  const forest = await chapterForest(width);
+  const snapshot = snapshotOf(forest);
+  const heavy = heavyBriefs(forest.state);
+  const [group] = context.selectAutomaticConsolidations(snapshot, heavy.state);
+  assert(group, "The fixture owed no consolidation, so nothing below is being tested");
+  const children = group.parts.flatMap((part) => part.kind === "fold" ? [part.foldId] : []);
+  assert.equal(children.length, width, "The group did not take the full width");
+  // ANTI-VACUITY: the children genuinely overflow, so coverage is a result and not an
+  // accident of a fixture whose briefs happened to fit.
+  const concatenated = children
+    .map((id) => heavy.state.folds.find((fold) => fold.id === id).brief).join(" ");
+  assert(concatenated.length > cap * 3,
+    `The children total ${concatenated.length} characters against a ${cap} cap: too small to press it`);
+  const parentBrief = context.deterministicConsolidationBrief(group, heavy.state);
+  assert(parentBrief.length <= cap,
+    `A parent brief ran to ${parentBrief.length} characters over a ${cap} cap`);
+  const uncovered = children.filter((id) => !parentBrief.includes(heavy.markers.get(id)));
+  assert.deepEqual(uncovered, [],
+    `${uncovered.length} of ${width} children left no trace in their parent's brief`);
+
+  // SLACK. A child that fits keeps its whole sentence: what the short ones do not spend is
+  // what the long ones are cut with, so an even share is a floor and not a ceiling.
+  const shortAt = 3;
+  const shortText = `${marker(shortAt)} short and complete.`;
+  const mixed = heavyBriefs(forest.state, (at) => at === shortAt ? shortText : fatBrief(at));
+  const mixedBrief = context.deterministicConsolidationBrief(group, mixed.state);
+  assert(mixedBrief.includes(shortText),
+    "A child brief short enough to fit whole was cut anyway, so the share is a ceiling");
+  assert(mixedBrief.length <= cap, "The mixed group overran the cap");
+
+  // RUNG TWO, where the old shape collapsed to one of ten: every child here is itself a
+  // parent whose brief fills the cap. Read at width three rather than ten because the law
+  // is coverage and not arithmetic: nine chapters make three parents, three parents make
+  // one grandparent, and the question at each rung is the same one.
+  const deepWidth = 3;
+  const deep = await chapterForest(deepWidth * deepWidth);
+  const deepThresholds = { ...NO_FRESH_TAIL, consolidateAfter: deepWidth };
+  const deepSnapshot = snapshotOf(deep, deepThresholds);
+  let deepState = deep.state;
+  const rungs = [];
+  for (let rung = 0; rung < 2; rung += 1) {
+    const round = heavyBriefs(deepState, fatBrief, (rung + 1) * 100);
+    const owed = context.selectAutomaticConsolidations(deepSnapshot, round.state);
+    assert(owed.length, `Rung ${rung} owed no group`);
+    let next = round.state;
+    for (const candidate of owed) {
+      const brief = context.deterministicConsolidationBrief(candidate, next);
+      assert(brief.length <= cap, `A rung-${rung} parent brief overran the ${cap} cap`);
+      const missing = candidate.parts.flatMap((part) => part.kind === "fold" &&
+        !brief.includes(round.markers.get(part.foldId)) ? [part.foldId] : []);
+      assert.deepEqual(missing, [],
+        `Rung ${rung} closed ${missing.length} children: their parent's brief never names them`);
+      next = (await commitCandidate(next, deepSnapshot, candidate, { brief })).state;
+    }
+    deepState = next;
+    rungs.push(owed.length);
+  }
+  assert.deepEqual(rungs, [deepWidth, 1], `The fixture did not build two rungs: ${rungs}`);
+
+  // MATERIAL, AT DEPTH ONE. The grandparent's children are opened and ITS grandchildren
+  // stay folded, which is both the bound on the read and the same view expanding gives.
+  const grandparent = deepState.folds.find((fold) => fold.parentId === null);
+  const opened = JSON.parse(context.consolidationSourceText(deepSnapshot, deepState, grandparent.parts));
+  assert.equal(opened.length, deepWidth, "The payload lost a child");
+  assert(opened.every((entry, at) => entry.child === at + 1 && entry.of === deepWidth),
+    "The children are not numbered in span order, so the request cannot count them");
+  assert(opened.every((entry) => Array.isArray(entry.contents) && entry.contents.length),
+    "A child arrived closed, so the generator would be briefing a brief");
+  const nested = JSON.stringify(opened.map((entry) => entry.contents));
+  assert(nested.includes("Expand exactly"),
+    "The grandchildren were opened too: depth one is the bound the read is built on");
+  const placeholdersOnly = context.encodedFoldSource(
+    deepSnapshot, deepState, grandparent.parts, "consolidation");
+  assert(nested.length > placeholdersOnly.length * 2,
+    "The opened payload is no larger than the placeholders it replaces, so nothing was opened");
+
+  // LARGEST FIRST. Three children of deliberately unequal size: one parent holding three
+  // chapters beside two lone chapters. Taking the big one out buys back the most room for
+  // the fewest subjects lost, which is why size decides and not position.
+  const unevenWidth = 3;
+  const uneven = await chapterForest(unevenWidth + 2);
+  const unevenThresholds = { ...NO_FRESH_TAIL, consolidateAfter: unevenWidth };
+  const unevenSnapshot = snapshotOf(uneven, unevenThresholds);
+  const [firstGroup] = context.selectAutomaticConsolidations(unevenSnapshot, uneven.state);
+  assert(firstGroup, "The uneven fixture owed no first group");
+  const unevenState = (await commitCandidate(uneven.state, unevenSnapshot, firstGroup, {
+    brief: context.deterministicConsolidationBrief(firstGroup, uneven.state),
+  })).state;
+  const [wideGroup] = context.selectAutomaticConsolidations(unevenSnapshot, unevenState);
+  assert(wideGroup, "The uneven fixture owed no second group");
+  const fullText = context.consolidationSourceText(unevenSnapshot, unevenState, wideGroup.parts);
+  const full = JSON.parse(fullText);
+  const sizes = full.map((entry) => JSON.stringify(entry.contents).length);
+  const biggest = sizes.indexOf(Math.max(...sizes));
+  assert(sizes[biggest] > Math.min(...sizes) * 2,
+    `The children are too even to show which collapses first: ${sizes}`);
+  // A budget that fits once the biggest child is closed and not before.
+  const tightSnapshot = snapshotOf(uneven, unevenThresholds,
+    { maxSourceChars: fullText.length - sizes[biggest] + 500 });
+  const packed = JSON.parse(context.consolidationSourceText(tightSnapshot, unevenState, wideGroup.parts));
+  assert.equal(packed.length, full.length, "Packing dropped a child instead of collapsing one");
+  const collapsed = packed.flatMap((entry, at) => entry.collapsed ? [at] : []);
+  assert.deepEqual(collapsed, [biggest],
+    `Packing collapsed ${JSON.stringify(collapsed)} rather than the largest child alone`);
+  assert(packed[biggest].brief && packed[biggest].foldId,
+    "A collapsed child lost the brief and the id that are all it has left");
+  assert(packed.every((entry, at) => entry.child === at + 1),
+    "Packing reordered the children: what collapses is chosen by size, what SHOWS stays in span order");
+
+  // THE CURE. A brief over the stated limit is answered with the complaint rather than cut,
+  // exactly once, and the second answer stands on its own.
+  const attribution = { provider: "openai-codex", model: "gpt-5.6-terra", effort: "medium", toolCalls: 0 };
+  const good = `${marker(0)} the curl HTTP/2 stage, its CMakeLists survey, and the failing test it named.`;
+  const asked = [];
+  const cured = await context.generatedBrief({
+    summarize: async (request) => {
+      asked.push(request);
+      return { ...attribution, brief: asked.length === 1 ? "x".repeat(cap + 400) : good };
+    },
+    request: { candidateId: "fold_cure", maxBriefChars: cap },
+    maxBriefChars: cap,
+    toolName: "pi_fold_context",
+  });
+  assert.equal(asked.length, 2, "An over-long brief was accepted or cut instead of being cured");
+  assert.equal(cured.brief, good, "The cured answer was not the one kept");
+  assert.equal(cured.cured, true, "A cured brief did not report that it took two asks");
+  assert.equal(asked[0].cure, undefined, "The first ask carried a complaint about nothing");
+  assert(String(asked[1].cure).includes(String(cap + 400)) && String(asked[1].cure).includes(String(cap)),
+    `The complaint does not say what was wrong: ${asked[1].cure}`);
+  assert.equal(cured.provenance.kind, "model", "A cured brief lost its model provenance");
+
+  // Twice wrong is loud. Nothing is truncated into place, and the failure names the criterion.
+  let stubborn = 0;
+  await assert.rejects(async () => context.generatedBrief({
+    summarize: async () => {
+      stubborn += 1;
+      return { ...attribution, brief: "y".repeat(cap + 1) };
+    },
+    request: { candidateId: "fold_stubborn", maxBriefChars: cap },
+    maxBriefChars: cap,
+    toolName: "pi_fold_context",
+  }), (error) => /cure/.test(error.message) && error.message.includes(String(cap)),
+  "A brief that stayed over the limit was not refused by the criterion it missed");
+  assert.equal(stubborn, 2, "The cure is bounded at one extra ask");
+
+  // Attribution is the harness's own wiring, so it is never handed back to be cured.
+  let unattributed = 0;
+  await assert.rejects(async () => context.generatedBrief({
+    summarize: async () => {
+      unattributed += 1;
+      return { brief: good, provider: "", model: "", effort: "", toolCalls: 0 };
+    },
+    request: { candidateId: "fold_unattributed", maxBriefChars: cap },
+    maxBriefChars: cap,
+    toolName: "pi_fold_context",
+  }), /attribution/, "Attribution drift was treated as something a second ask could mend");
+  assert.equal(unattributed, 1, "Attribution drift bought a retry it must never buy");
+
+  // THE LANE TAKES PARENTS. A group with a child still waiting on its own brief defers to
+  // the next boundary rather than reading the sentence that brief is about to replace, and
+  // when it does run it reads the numbered depth-one payload.
+  const laneRequests = [];
+  const laneThresholds = { ...context.DEFAULT_THRESHOLDS, consolidateAfter: 2 };
+  const laneBuilt = makeFixture({
+    turns: 14, resultChars: 9_000, contextWindow: 100_000, toolName: "bash",
+    thresholds: laneThresholds,
+  });
+  const laneRuntime = makeRuntime(laneBuilt, {
+    thresholds: laneThresholds,
+    summarizeContextSpan: async (request) => {
+      laneRequests.push(request);
+      return { ...attribution, brief: `${marker(laneRequests.length)} briefed span with concrete detail.` };
+    },
+  });
+  await startRuntime(laneRuntime);
+  await runtimeCommit(laneRuntime, { tokens: 88_000, contextWindow: 100_000 });
+  await settle();
+  await runtimeCommit(laneRuntime, { tokens: 92_000, contextWindow: 100_000 });
+  await settle();
+  // A deferred parent waits for a boundary, so the boundaries keep coming: the wait is
+  // the mechanism, and a lane that never drains it would show up right here.
+  await runtimeCommit(laneRuntime, { tokens: 94_000, contextWindow: 100_000 });
+  await settle();
+  const groups = laneRequests.filter((request) => Number.isInteger(request.children) && request.children > 0);
+  const parents = materialized(laneRuntime).folds.filter((fold) => fold.kind === "consolidation");
+  assert(parents.length, "The lane fixture built no parent, so the queueing law is untested here");
+  assert(groups.length, "A parent was built and no group was ever sent to the generator");
+  const laneGroup = JSON.parse(groups[0].sourceText);
+  assert.equal(laneGroup.length, groups[0].children, "The group payload and its stated child count disagree");
+  assert(laneGroup.every((entry) => entry.brief && (entry.contents || entry.collapsed)),
+    "A child reached the generator with neither its brief nor its contents");
+
+  return {
+    width,
+    childrenCovered: children.length,
+    childrenBriefChars: concatenated.length,
+    parentBriefChars: parentBrief.length,
+    rungs,
+    openedChildren: opened.length,
+    collapsedLargestFirst: collapsed,
+    curedInOneExtraAsk: true,
+    parentsBriefedByGenerator: groups.length,
+  };
+}
+
+/**
+ * No fold goes without a brief, and the agent is asked for it first.
+ *
+ * A mark is a decision about a span, and the agent making it knows why the span mattered
+ * and what it will want back; a generator reading the span alone knows only what the span
+ * says. So the request asks the agent for the brief, and the summarizer is the fallback
+ * rather than the default. What must never happen is a fold with nothing in its place: the
+ * placeholder is all that stands where the bytes were, and an empty one closes the span to
+ * whoever comes back for it.
+ *
+ * Three orders, one property. A supplied brief is kept verbatim and no generator is spent
+ * on it. A mark with no brief is filled by the generator, and the receipt says who wrote
+ * it. A generator that fails leaves the deterministic brief standing and the fold eligible
+ * for the lane, so the gap is filled late rather than never.
+ */
+async function gateNoFoldWithoutABrief() {
+  const shape = { turns: 10, resultChars: 9_000, contextWindow: 100_000, toolName: "bash" };
+  const written = "The completed bash inspection printed the paths under lib and its exact output stays here.";
+  const attribution = { provider: "openai-codex", model: "gpt-5.6-terra", effort: "medium", toolCalls: 0 };
+
+  // THE SURFACE ASKS. A mark's brief is optional in the schema because the fallback exists,
+  // so the request has to carry the expectation the schema cannot.
+  const built = makeFixture(shape);
+  const asked = [];
+  const runtime = makeRuntime(built, {
+    summarizeContextSpan: async (request) => {
+      asked.push(request);
+      return { ...attribution, brief: written };
+    },
+  });
+  await startRuntime(runtime);
+  const tool = [...runtime.tools.values()][0];
+  const markBrief = tool.parameters.properties.marks.items.properties.brief;
+  assert(typeof markBrief.description === "string" && /summarizer/i.test(markBrief.description),
+    "The mark schema does not tell the agent that leaving the brief out hands it to the summarizer");
+
+  // NO BRIEF: the generator fills it, and the mark says the model wrote it.
+  const filled = await toolCall(runtime, { action: "fold", ids: [built.turnEntries[0][2]] });
+  assert.equal(filled.details.ok, true, "A mark without a brief was refused instead of filled");
+  assert(asked.length, "A mark arrived without a brief and no generator was asked for one");
+  const gapMark = materialized(runtime).pendingMarks.at(-1);
+  assert.equal(gapMark.brief, written, "The generated brief is not the one the mark carries");
+  assert.equal(gapMark.briefProvenance.kind, "model",
+    "A generated brief was recorded as though the agent had written it");
+
+  // SUPPLIED: kept verbatim, and no generator call is spent on it.
+  const supplied = "The second inspection is stale; its exact stdout and the failing path stay recoverable.";
+  const spentBefore = asked.length;
+  const kept = await toolCall(runtime, {
+    action: "fold", ids: [built.turnEntries[1][2]], brief: supplied,
+  });
+  assert.equal(kept.details.ok, true);
+  const keptMark = materialized(runtime).pendingMarks.at(-1);
+  assert.equal(keptMark.brief, supplied, "A supplied brief was rewritten");
+  assert.equal(keptMark.briefProvenance.kind, "supplied", "A supplied brief lost its attribution");
+  assert.equal(asked.length, spentBefore,
+    "A generator call was spent on a span the agent had already briefed");
+
+  // EVERY FOLD, AFTER THE LADDER RUNS. The lane and the fallbacks together leave nothing
+  // standing with an empty placeholder.
+  await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  await settle();
+  const folds = materialized(runtime).folds;
+  assert(folds.length, "The fixture committed no folds, so this proves nothing");
+  const empty = folds.filter((fold) => typeof fold.brief !== "string" || !fold.brief.trim());
+  assert.deepEqual(empty.map((fold) => fold.id), [], "A committed fold carries no brief at all");
+
+  // A FAILING GENERATOR still leaves a brief: the deterministic one, standing where the
+  // model's would have been, and the fold stays eligible for the lane to fill later.
+  const failingBuilt = makeFixture(shape);
+  const failingRuntime = makeRuntime(failingBuilt, {
+    summarizeContextSpan: async () => { throw new Error("generator refused this span"); },
+  });
+  await startRuntime(failingRuntime);
+  const survived = await toolCall(failingRuntime, {
+    action: "fold", ids: [failingBuilt.turnEntries[0][2]],
+  });
+  assert.equal(survived.details.ok, true, "A generator failure refused the agent's mark");
+  const fallbackMark = materialized(failingRuntime).pendingMarks.at(-1);
+  assert(typeof fallbackMark.brief === "string" && fallbackMark.brief.trim(),
+    "A generator failure left the mark with no brief at all");
+  assert.equal(fallbackMark.briefProvenance.kind, "deterministic",
+    "A failed generator was recorded as the author of the fallback");
+
+  return {
+    schemaAsksForABrief: true,
+    generatedWhenOmitted: true,
+    suppliedKeptVerbatim: true,
+    generatorCallsSpent: asked.length,
+    committedFolds: folds.length,
+    foldsWithoutABrief: empty.length,
+    fallbackSurvivesFailure: true,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -12039,6 +12393,8 @@ const gates = [
   [112, "A span already inside a fold is refused by name", gateOwnedSpanRefusal],
   [113, "Entry evidence is derived once, never rebuilt", gateIncrementalEvidenceMap],
   [114, "Every generator call is on the record", gateGeneratorCallsAreOnTheRecord],
+  [115, "A parent brief covers every child", gateParentBriefCoversEveryChild],
+  [116, "No fold goes without a brief", gateNoFoldWithoutABrief],
 ];
 
 const gateFilter = (process.env.GATES ?? "")
