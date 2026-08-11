@@ -309,6 +309,33 @@ export function flattenFoldRefs(fold: ActiveFold, state: Pick<ActiveContextState
   return visit(fold);
 }
 
+/**
+ * Which fold DIRECTLY owns each raw evidence key.
+ *
+ * One derivation, two readers (Shane 2026-08-11). The forest invariant below reads it to
+ * reject a second owner, and the agent-facing candidate builder reads it BEFORE it builds
+ * anything, so a span naming evidence some fold already holds comes back as a refusal
+ * that names the owner instead of this invariant escaping the tool call as an exception.
+ *
+ * The two readings stay distinguishable because the input differs. Called on the folds
+ * already in state it can only throw when the stored forest is itself corrupt, which no
+ * agent input can produce: every state reaches storage through `validateFoldForest`.
+ * Called on a forest that includes a candidate the caller just built, a duplicate means
+ * the REQUEST collided with an existing fold, and that is the refusal case.
+ */
+export function directFoldOwners(folds: readonly ActiveFold[]): Map<string, string> {
+  const owner = new Map<string, string>();
+  for (const fold of folds) {
+    for (const part of fold.parts) {
+      if (part.kind !== "raw") continue;
+      const key = objectRefKey(part.ref);
+      if (owner.has(key)) throw new Error(`Evidence ${part.ref.entryId} has multiple direct fold owners`);
+      owner.set(key, fold.id);
+    }
+  }
+  return owner;
+}
+
 export function validateFoldForest(folds: ActiveFold[]): ActiveFold[] {
   const rawValues = denseOwnArrayValues(folds);
   if (!rawValues || rawValues.some((fold) => !validFoldShape(fold))) {
@@ -341,15 +368,11 @@ export function validateFoldForest(folds: ActiveFold[]): ActiveFold[] {
     }
     byId.set(fold.id, fold);
   }
+  directFoldOwners(values);
   const parent = new Map<string, string>();
-  const rawOwner = new Map<string, string>();
   for (const fold of values) {
     for (const part of fold.parts) {
-      if (part.kind === "raw") {
-        const key = objectRefKey(part.ref);
-        if (rawOwner.has(key)) throw new Error(`Evidence ${part.ref.entryId} has multiple direct fold owners`);
-        rawOwner.set(key, fold.id);
-      } else {
+      if (part.kind === "fold") {
         if (!byId.has(part.foldId) || part.foldId === fold.id || parent.has(part.foldId)) {
           throw new Error(`Invalid or multiply owned child fold ${part.foldId}`);
         }

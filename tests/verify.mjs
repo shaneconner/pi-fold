@@ -11623,6 +11623,108 @@ async function gateCalibrationHazard() {
   };
 }
 
+/**
+ * A span whose evidence a fold already owns is REFUSED by name, never thrown at.
+ *
+ * The collision this gate reproduces is the campaign's ordinary case, not a race: the
+ * ladder folds a span under window pressure and the agent, curating alongside it, then
+ * names evidence inside that span. Every other collision in this runtime answers with a
+ * receipt and a correction; this one used to answer with "Evidence <id> has multiple
+ * direct fold owners", the forest invariant, thrown out of the tool call.
+ *
+ * ANTI-VACUITY. The first leg builds by hand the exact candidate the old builder handed
+ * to preparation and asserts it still reaches that invariant and still fails loudly. So
+ * the fixture is proved to be a real collision before the refusal is asserted, and the
+ * loud path is proved to still be loud: a corrupt forest is not made polite.
+ */
+async function gateOwnedSpanRefusal() {
+  const built = makeFixture({ turns: 8, resultChars: 10_000, contextWindow: 100_000 });
+  const snapshot = built.snapshot;
+  const empty = context.emptyActiveContextState(built.sessionId);
+  // The ladder's own span: one whole turn, tool result and all, folded as a chapter.
+  const turn = built.turnEntries[1];
+  const chapter = context.manualFoldCandidate(snapshot, empty, [turn[0], turn.at(-1)]);
+  assert.equal(chapter.kind, "chapter");
+  const resultRef = chapter.parts
+    .flatMap((part) => part.kind === "raw" && part.ref.role === "toolResult" ? [part.ref] : [])[0];
+  assert(resultRef, "The folded turn carried no tool result, so nothing inside it can be named again");
+  const committed = await commitCandidate(empty, snapshot, chapter, {
+    brief: "One completed inspection turn, its exact request and result recoverable behind this placeholder.",
+  });
+  const owner = committed.state.folds.find((fold) => fold.id === committed.prepared.id);
+  assert(owner, "The chapter never landed in the forest");
+
+  // ANTI-VACUITY: the pre-fix path, on this fixture, still throws the invariant.
+  const collided = {
+    kind: "tool-result",
+    parts: [{ kind: "raw", ref: structuredClone(resultRef) }],
+    sourceRefs: [structuredClone(resultRef)],
+  };
+  assert.notEqual(context.foldIdFor(collided.kind, collided.parts), owner.id,
+    "The hand-built candidate is the owner itself, so it would fail as a duplicate rather than a collision");
+  await assert.rejects(
+    context.prepareFold({ candidate: collided, snapshot, state: committed.state, generation: 2 }),
+    /multiple direct fold owners/,
+    "Preparing a span the forest already owns no longer reaches the invariant, so the refusal below proves nothing",
+  );
+
+  // THE FIX: the same span, asked for the way an agent asks for it, comes back named.
+  assert.throws(
+    () => context.manualFoldCandidate(snapshot, committed.state, [resultRef.entryId]),
+    (error) => error.message.includes(owner.id) && error.message.includes(resultRef.entryId) &&
+      /peek/.test(error.message) && /expand/.test(error.message) &&
+      !/multiple direct fold owners/.test(error.message),
+    "A span already inside a fold was not refused by the owner's name with a next move",
+  );
+  // The mark path relaxes eligibility, never structure, so it is refused the same way.
+  assert.throws(
+    () => context.manualFoldCandidate(snapshot, committed.state, [resultRef.entryId], { allowProtected: true }),
+    /is already folded inside/,
+    "The mark path built a candidate over evidence a fold already owns",
+  );
+  // And a genuine corruption, which no agent input can produce because every stored state
+  // passes the forest validator, is still the exception it always was.
+  assert.throws(
+    () => context.directFoldOwners([owner, { ...owner, id: `${owner.id}-twin` }]),
+    /multiple direct fold owners/,
+    "A forest with two owners for one ref was answered politely instead of loudly");
+
+  // END TO END, through the tool the agent actually calls. The state does not move and
+  // the attempt is recorded not-ok with the refusal text, which is what a rejected
+  // context call looks like everywhere in this runtime.
+  const runtime = makeRuntime(built);
+  await startRuntime(runtime);
+  const foldedTurn = built.turnEntries[1];
+  await toolCall(runtime, { action: "fold", ids: [foldedTurn[0], foldedTurn.at(-1)] });
+  await runtimeCommit(runtime, { tokens: 95_000, contextWindow: 100_000 });
+  const live = materialized(runtime).folds.find((fold) =>
+    fold.parts.some((part) => part.ref?.entryId === resultRef.entryId));
+  assert(live, "The runtime leg never folded the turn, so nothing owns the evidence yet");
+  const before = materialized(runtime);
+  const from = runtime.appended.length;
+  await assert.rejects(
+    toolCall(runtime, { action: "fold", ids: [resultRef.entryId] }),
+    (error) => error.message.includes(live.id) && /already folded inside/.test(error.message) &&
+      /peek/.test(error.message) && /expand/.test(error.message) &&
+      !/multiple direct fold owners/.test(error.message),
+    "The tool call did not refuse a span the forest already owns by the owner's name",
+  );
+  const attempts = contextEvents(runtime, from).filter((record) => record.kind === "context.attempt");
+  assert.equal(attempts.length, 1);
+  assert.equal(attempts[0].ok, false, "A refused context call was recorded as accepted");
+  assert(attempts[0].error.includes(live.id), "The recorded refusal does not name the owning fold");
+  assert.deepEqual(materialized(runtime), before, "A refused fold moved durable state");
+  return {
+    ownerKind: owner.kind,
+    preFixInvariantStillThrows: true,
+    refusalNamesOwner: true,
+    refusalNamesPeekAndExpand: true,
+    corruptForestStillLoud: true,
+    toolAttemptOk: false,
+    stateUnchanged: true,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -11720,6 +11822,7 @@ const gates = [
   [109, "A mark naming a fold that is gone or held is answered", gateDanglingChildMarks],
   [110, "Occupancy is anchored to what the provider counted", gateAnchoredOccupancy],
   [111, "The calibration hazard the anchor narrows but does not remove", gateCalibrationHazard],
+  [112, "A span already inside a fold is refused by name", gateOwnedSpanRefusal],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

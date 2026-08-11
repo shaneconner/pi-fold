@@ -20,6 +20,7 @@ import {
   visibleCollapsedRoots,
 } from "./measurement.ts";
 import {
+  directFoldOwners,
   flattenFoldRefs,
   foldMap,
 } from "./persistence.ts";
@@ -387,6 +388,25 @@ export function pinnedNestingRefusal(pinned: ActiveFold, toolName: string): stri
   return `fold refused: ${pinned.id} is pinned, and nesting it would hide context you asked to keep. ` +
     `Release it with ${toolName} {"action":"unprotect","ids":["${pinned.id}"]} first, ` +
     "or name a span that stops at its boundary.";
+}
+
+/**
+ * The span you named is already folded, said the way every other collision here is said.
+ *
+ * A fold that already owned the evidence used to reach the agent as
+ * "Evidence <id> has multiple direct fold owners", an invariant message thrown out of the
+ * tool call with no next move in it. The collision is ordinary: automatic folding and an
+ * agent curate the same window, so the ladder taking a span the agent was about to name
+ * is the campaign working, not a race. So it reads like the pin refusal above: name the
+ * fold holding it, give the two verbs that open it, and name the span that would work.
+ *
+ * One sentence covers the three ways a caller can point at folded material: an entry a
+ * fold directly owns, a span sitting inside one, and a span whose only reading IS one.
+ */
+export function foldedSpanRefusal(ownerId: string, subject: string, toolName: string): string {
+  return `fold refused: ${subject} is already folded inside ${ownerId}, so there is nothing ` +
+    `left to fold there. Read it with ${toolName} {"action":"peek","id":"${ownerId}"}, restore it ` +
+    `with ${toolName} {"action":"expand","id":"${ownerId}"}, or name a span that reaches past it.`;
 }
 
 export function partsForRange(
@@ -1102,9 +1122,30 @@ export function manualFoldCandidate(
     !options.allowProtected && toolRefsProtected(refs, state, snapshot);
   const blocked = (refs: EvidenceRef[]): boolean =>
     !options.allowProtected && refsProtected(refs, state, snapshot);
+  // The forest as it stands, read once. Building it here can only throw when the STORED
+  // forest is already corrupt, which is the loud case and stays loud; every collision
+  // between this request and a fold that exists is answered below by name.
+  const owners = directFoldOwners(state.folds);
   const bounded = (candidate: FoldCandidate): FoldCandidate => {
     if (candidate.sourceRefs.length > snapshot.policy.maxFoldSourceRefs) {
       throw new Error(`Folds may include at most ${snapshot.policy.maxFoldSourceRefs} exact source references`);
+    }
+    // Every reading of a requested span leaves through here, so one check covers the
+    // tool-batch, consolidation and chapter readings alike. It runs before anything is
+    // prepared or persisted: no brief is generated, no state is touched, and the caller
+    // gets a span it can act on instead of an invariant it cannot.
+    for (const part of candidate.parts) {
+      if (part.kind !== "raw") continue;
+      const ownerId = owners.get(objectRefKey(part.ref));
+      if (ownerId) throw new Error(foldedSpanRefusal(ownerId, part.ref.entryId, snapshot.toolName));
+    }
+    // A reading that is exactly one fold that already exists is not a fold to make. It
+    // wraps a placeholder in a placeholder, reclaims nothing, and buries the fold the
+    // caller was pointing at one level deeper, so it is the same refusal: the span is
+    // already folded, and here is what opens it.
+    const only = candidate.parts.length === 1 ? candidate.parts[0] : null;
+    if (only?.kind === "fold") {
+      throw new Error(foldedSpanRefusal(only.foldId, "that span", snapshot.toolName));
     }
     return candidate;
   };
@@ -1149,7 +1190,7 @@ export function manualFoldCandidate(
     const cut = orderedRoots(state, snapshot).filter((root) => root.start <= end && start <= root.end);
     const container = cut.find((root) => root.start <= start && root.end >= end);
     throw new Error(container
-      ? `That span is already folded inside ${container.fold.id}; peek or expand ${container.fold.id} instead`
+      ? foldedSpanRefusal(container.fold.id, "that span", snapshot.toolName)
       : `Fold span partially overlaps ${cut.map((root) => root.fold.id).join(", ")}`);
   }
   const swallowedPin = pinnedChildFold(parts, state, snapshot);
