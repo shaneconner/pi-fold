@@ -26,6 +26,7 @@ import {
   EXPERIMENT_MODES,
   EXPERIMENT_MODE_PLANS,
   EXPERIMENT_PROTOCOL_VERSION,
+  EXPERIMENT_PROVIDER_RETRY,
   EXPERIMENT_REPOS,
   EXPERIMENT_SCHEDULING_SOURCE,
   MUTATION_ABSOLUTE_TOLERANCE_TOKENS,
@@ -53,6 +54,7 @@ import {
   nativeCompactionDisposition,
   probeAnswerPattern,
   probeTranscripts,
+  providerWeather,
   seededShuffle,
   stageCallDisposition,
   stageCodeWords,
@@ -2891,6 +2893,236 @@ try {
     prompts[0].includes("expanding or peeking this fold later"),
   "the arm must brief through the package's own request contract, not a harness copy");
   checks.briefGeneratorThreadedFromCampaignPinToRegistration = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 51 - a provider error the session RECOVERED from is the provider's weather, not
+// the trial's result, and does not fail the run (Shane 2026-08-11). Pi retries a
+// retryable assistant error by re-sending the same request after a backoff, having first
+// removed the failed attempt from agent state while keeping it in the session as history,
+// so the retried payload is byte-identical and the failed attempt bills zero tokens:
+// nothing the trial measures moved. The latch counted every one of them anyway, which
+// failed rep 1 of luna-20260810 after it completed every stage it planned, and would have
+// failed rep 4 six times over while it ran clean.
+//
+// Held, not forgiven, and the gate's job is that distinction. An error only stops counting
+// once a later assistant response actually succeeds; one still held when the session shuts
+// down latches, because the run ended on it. Two exclusions keep the real failures red:
+// the window wall is never weather (Pi will not retry it either, since context overflow is
+// compaction's job), and only "error" is eligible, because an abort means something
+// cancelled the run and "length" means the answer itself came back truncated. Rep 2 of
+// this campaign died at the wall and MUST stay red, so that case is pinned by name.
+//
+// The recovery is reported rather than absorbed: a rep that stumbled forty times is a
+// different quality of datum from one that never stumbled, and both reading as clean would
+// be the real dishonesty.
+// ---------------------------------------------------------------------------
+{
+  const jitiPath = join(PI_INSTALL_ROOT, "node_modules", "jiti", "lib", "jiti.mjs");
+  const typeboxPath = join(PI_INSTALL_ROOT, "node_modules", "typebox", "build", "index.mjs");
+  const { createJiti } = await import(pathToFileURL(jitiPath));
+  const { createPiContextExperimentExtension } = await createJiti(import.meta.url, {
+    alias: { typebox: typeboxPath },
+  }).import(join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"));
+
+  const readLines = (runDir, name) => {
+    const path = join(runDir, name);
+    if (!existsSync(path)) return [];
+    return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  };
+  // One assistant response per provider request, which is the shape the extension enforces:
+  // a message_end with no request in flight is its own latch and would mask this one.
+  const driveStops = (arm, stops) => {
+    const runDir = mkdtempSync(join(tmpdir(), `pi-fold-weather-${arm}-`));
+    const handlers = new Map();
+    const pi = {
+      on(name, handler) {
+        if (!handlers.has(name)) handlers.set(name, []);
+        handlers.get(name).push(handler);
+      },
+      registerTool() {}, registerCommand() {}, sendMessage() {}, async appendEntry() {},
+    };
+    createPiContextExperimentExtension({
+      version: EXPERIMENT_PROTOCOL_VERSION,
+      runId: `weather-${arm}`,
+      runDir,
+      campaignId: "gate-51",
+      arm,
+      mode: "smoke",
+      firstChallenge: "a".repeat(64),
+      stageCount: EXPERIMENT_MODE_PLANS.smoke.stageCount,
+      watchdogMs: EXPERIMENT_MODE_PLANS.smoke.watchdogMs,
+    }).factory(pi);
+    const ctx = {
+      sessionManager: { getLeafId: () => "leaf-1", getBranch: () => [] },
+      model: { provider: "openai-codex", id: "gpt-5.6-luna" },
+      thinkingLevel: "xhigh",
+      getSystemPrompt: () => "system",
+      getEntries: () => [],
+    };
+    // The pifold arm puts the runtime on message_end and session_shutdown too, and the
+    // experiment registers its own AFTER it, so the experiment's handler is the last one.
+    // The counts are pinned: a reordering that would drive the runtime's handler instead
+    // fails here rather than silently measuring nothing.
+    const own = (name, expected) => {
+      const list = handlers.get(name) ?? [];
+      assert.equal(list.length, expected,
+        `the ${name} registration shape changed; this gate would drive the wrong handler`);
+      return list[list.length - 1];
+    };
+    const runtimeShares = arm === "pifold" ? 2 : 1;
+    const request = own("before_provider_request", 1);
+    const messageEnd = own("message_end", runtimeShares);
+    for (const stop of stops) {
+      request({ payload: { tools: [] } }, ctx);
+      messageEnd({
+        message: {
+          role: "assistant",
+          stopReason: stop.reason,
+          errorMessage: stop.errorMessage ?? "",
+          provider: "openai-codex",
+          model: "gpt-5.6-luna",
+        },
+      });
+    }
+    own("session_shutdown", runtimeShares)();
+    return {
+      failures: readLines(runDir, "failure-latch.jsonl"),
+      events: readLines(runDir, "worker-events.jsonl"),
+    };
+  };
+
+  const OVERLOAD = "Codex error: Our servers are currently overloaded. Please try again later.";
+  const WALL = "Codex error: Your input exceeds the context window of this model.";
+
+  // Rep 4's shape at full size: an overload, three more in one sequence, every one of them
+  // answered by a later success. The run is clean and the weather is on the record.
+  const recoveredRun = driveStops("pifold", [
+    { reason: "toolUse" },
+    { reason: "error", errorMessage: OVERLOAD },
+    { reason: "toolUse" },
+    { reason: "error", errorMessage: OVERLOAD },
+    { reason: "error", errorMessage: OVERLOAD },
+    { reason: "error", errorMessage: OVERLOAD },
+    { reason: "toolUse" },
+    { reason: "stop" },
+  ]);
+  assert.deepEqual(recoveredRun.failures, [],
+    "a provider error the session recovered from must not fail the run");
+  const recoveries = recoveredRun.events.filter((row) => row.kind === "provider-error-recovered");
+  assert.equal(recoveries.length, 2, "each recovered sequence gets exactly one record");
+  assert.deepEqual(recoveries.map((row) => row.details.attempts), [1, 3],
+    "the record must carry what the sequence cost in failed attempts");
+  // Anti-vacuity: the reading this gate replaces latched on this very run. Without it the
+  // assertions above would pass on an extension that simply stopped latching anything.
+  assert.equal(recoveredRun.events.filter((row) =>
+    row.kind === "non-terminal-provider-response").length, 4,
+  "the four errors must still be observed; only the verdict on them changed");
+  const weather = providerWeather(recoveredRun.events);
+  assert.equal(weather.recoveredSequences, 2);
+  assert.equal(weather.recoveredAttempts, 4);
+  assert.equal(weather.longestSequenceAttempts, 3);
+  assert.equal(weather.nonTerminalStops, 4);
+
+  // A recovered error costs the trial nothing in tokens and nothing in model input, but it
+  // can still cost the whole prefix cache: the pinned transport rides WebSocket delta
+  // requests, and a connection the error dropped re-sends the context cold. That lands on
+  // pooled cache share, which is this campaign's headline, so it is counted rather than
+  // absorbed. Rep 4 of luna-20260810 is the fixture's source: three cold restarts against
+  // an unmoved projection, one restart whose cache survived.
+  const responseLedger = (rows) => rows.flatMap((row) => [
+    { kind: "context-projection", projectedChars: row.chars },
+    { kind: "provider-request" },
+    { kind: "provider-response", stopReason: row.stop, usage: { cacheRead: row.cacheRead, input: row.input } },
+  ]);
+  const cache = providerWeather([], responseLedger([
+    // Cache intact across the stumble: the connection held.
+    { stop: "toolUse", chars: 1000, cacheRead: 150_000, input: 3_000 },
+    { stop: "error", chars: 1000, cacheRead: 0, input: 0 },
+    { stop: "toolUse", chars: 1000, cacheRead: 152_000, input: 1_400 },
+    // Cold restart: same projection either side, cache read fell to zero.
+    { stop: "error", chars: 1000, cacheRead: 0, input: 0 },
+    { stop: "toolUse", chars: 1000, cacheRead: 0, input: 163_000 },
+    // The cache rebuilt, so the next stumble has something to lose again.
+    { stop: "toolUse", chars: 1000, cacheRead: 160_000, input: 2_000 },
+    // A fold moved the projection, so folding explains this miss just as well. The
+    // experiment's own subject must never be laundered into the weather column.
+    { stop: "error", chars: 1000, cacheRead: 0, input: 0 },
+    { stop: "toolUse", chars: 400, cacheRead: 0, input: 84_000 },
+  ]));
+  assert.equal(cache.coldRestarts, 1, "only a miss against an unmoved projection is weather");
+  assert.equal(cache.coldRestartFreshTokens, 163_000,
+    "the fresh tokens a cold restart cost must be readable, not just its count");
+  assert.equal(cache.cacheSurvivedRestarts, 1, "a stumble whose cache survived is not a cold restart");
+  assert.equal(cache.unattributableCacheMisses, 1,
+    "a miss a fold explains equally well is charged to neither column");
+
+  // The cache half reads a run sealed before the recovery events existed, because it comes
+  // off the provider ledger every run already carries. Pre-lane runs must not read as clean
+  // weather simply because they predate the events.
+  assert.equal(cache.recoveredSequences, 0, "no recovery events means no recovery counts");
+  assert(cache.coldRestarts > 0, "but the cache reading still works without them");
+
+  // The run ended on the error: nothing ever came back, so it was never survived.
+  const strandedRun = driveStops("pifold", [
+    { reason: "toolUse" },
+    { reason: "error", errorMessage: OVERLOAD },
+  ]);
+  assert.equal(strandedRun.failures.length, 1, "an error the run never got past must latch");
+  assert.equal(strandedRun.failures[0].phase, "provider-error-unrecovered");
+  assert.deepEqual(providerWeather(strandedRun.events).recoveredSequences, 0,
+    "an error that was never survived is a latch entry, never a recovery");
+
+  // Rep 2 of luna-20260810 died here, and this is the case that must never be forgiven:
+  // the wall is the one thing a managed arm exists to avoid. A later success does not
+  // rescue it, which is exactly what separates it from weather.
+  const wallRun = driveStops("pifold", [
+    { reason: "error", errorMessage: WALL },
+    { reason: "toolUse" },
+    { reason: "stop" },
+  ]);
+  assert.equal(wallRun.failures.length, 1, "a window-overflow error must latch on a managed arm");
+  assert.match(wallRun.failures[0].detail, /window-overflow/);
+  assert.equal(providerWeather(wallRun.events).recoveredSequences, 0,
+    "the wall must never be counted as weather the run recovered from");
+
+  // An abort means something cancelled the run and a truncated answer is a changed answer.
+  // Neither is the provider's weather, and a later success does not clear either.
+  for (const reason of ["aborted", "length"]) {
+    const run = driveStops("pifold", [
+      { reason },
+      { reason: "toolUse" },
+      { reason: "stop" },
+    ]);
+    assert.equal(run.failures.length, 1, `a ${reason} stop must still latch`);
+    assert.equal(run.failures[0].detail, reason);
+  }
+
+  // The unmanaged arm ends at the wall by design and latches none of this, and the native
+  // arm's overflow breaths stay its own bounded lifecycle. Neither may be disturbed.
+  assert.deepEqual(driveStops("unmanaged", [
+    { reason: "error", errorMessage: WALL },
+  ]).failures, [], "the unmanaged arm's overflow point is its datum, not a failure");
+  const nativeBreaths = driveStops("native", [
+    { reason: "error", errorMessage: WALL },
+    { reason: "toolUse" },
+    { reason: "stop" },
+  ]);
+  assert.deepEqual(nativeBreaths.failures, [],
+    "a native overflow breath is compaction's lifecycle, bounded elsewhere by its budget");
+
+  // The budget is pinned rather than ambient: retry settings otherwise come from whatever
+  // the machine's settings files say, which is not a property a sealed run can state. Eight
+  // because Pi's default of 3 was fully spent by one rep-4 sequence with no margin left.
+  assert.deepEqual({ ...EXPERIMENT_PROVIDER_RETRY },
+    { enabled: true, maxRetries: 8, baseDelayMs: 2_000 });
+  const worker = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
+  assert(worker.includes("retry: { ...EXPERIMENT_PROVIDER_RETRY }"),
+    "the worker must hand the pinned retry budget to the session it builds");
+  assert(worker.includes("Run provider retry pin did not reach the session"),
+    "a retry budget that did not reach the session must be loud, like the transport pin");
+
+  checks.recoveredProviderWeatherDoesNotFailTheRun = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

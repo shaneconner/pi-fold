@@ -145,6 +145,8 @@ export function createPiContextExperimentExtension(config) {
   // Native-arm overflow errors are compaction breaths, bounded so a stuck loop latches.
   const OVERFLOW_BREATH_BUDGET = 12;
   let overflowBreaths = 0;
+  // Provider errors waiting to learn whether the session recovered from them.
+  const pendingProviderErrors = [];
   let inFlightProviderRequest = null;
   let pendingStopTheWorld = null;
   const usedToolCallIds = new Set();
@@ -568,8 +570,9 @@ export function createPiContextExperimentExtension(config) {
         if (reason === "error" || reason === "aborted" || reason === "length") {
           // The unmanaged arm is EXPECTED to end this way: the overflow point is its datum.
           appendEvent("non-terminal-provider-response", { stopReason: reason, stage: expectedStage });
-          const overflowBreath = config.arm === "native" && reason === "error" &&
-            isWindowOverflow(event.message?.errorMessage ?? "");
+          const errorMessage = event.message?.errorMessage ?? "";
+          const windowOverflow = isWindowOverflow(errorMessage);
+          const overflowBreath = config.arm === "native" && reason === "error" && windowOverflow;
           if (overflowBreath) {
             // Overflow -> native compaction -> retry is the native arm's lifecycle and a
             // stop-the-world datum, not an integrity failure (rep 1: 3 breaths, 64/64
@@ -580,8 +583,44 @@ export function createPiContextExperimentExtension(config) {
               appendFailure(config, "non-terminal-provider-response", `${reason}:overflow-loop`);
             }
           } else if (config.arm !== "unmanaged") {
-            appendFailure(config, "non-terminal-provider-response", reason);
+            // A transport error the session then recovers from is the provider's weather,
+            // not this trial's result. Pi retries a retryable assistant error and, in its
+            // own words, removes the error message from agent state while keeping it in
+            // the session for history, so the retried request carries a byte-identical
+            // payload and the failed attempt bills zero tokens: nothing the trial measures
+            // moved. Rep 4 of luna-20260810 is that case six times over, and rep 1 was
+            // failed for it while completing every stage it planned (Shane 2026-08-11).
+            //
+            // Held, not forgiven. The error becomes a failure unless a later assistant
+            // response actually succeeds, and anything still pending at shutdown latches.
+            // Two exclusions keep the real failures red: the window wall is never weather
+            // (Pi will not retry it either, since context overflow is compaction's job and
+            // not retry's), and only "error" is eligible, because an abort means something
+            // cancelled the run and "length" means the answer itself was truncated.
+            if (reason === "error" && !windowOverflow) {
+              pendingProviderErrors.push({
+                stage: expectedStage,
+                detail: errorMessage.slice(0, 2_048),
+                wallMs: Date.now(),
+                monotonicMs: monotonicMs(),
+              });
+            } else {
+              appendFailure(config, "non-terminal-provider-response",
+                windowOverflow ? `${reason}:window-overflow` : reason);
+            }
           }
+        } else if (reason && pendingProviderErrors.length) {
+          // The session got an answer, so every error it was still carrying was survived.
+          // Recorded with what it cost in attempts and wall time: a rep that recovered
+          // forty times is a different quality of datum from one that never stumbled,
+          // and that has to stay visible rather than being absorbed into silence.
+          const recovered = pendingProviderErrors.splice(0, pendingProviderErrors.length);
+          appendEvent("provider-error-recovered", {
+            attempts: recovered.length,
+            stage: expectedStage,
+            recoveredAfterMs: monotonicMs() - recovered[0].monotonicMs,
+            firstDetail: recovered[0].detail,
+          });
         }
         appendEvent("message-end", {
           role: event.message?.role ?? null,
@@ -596,6 +635,11 @@ export function createPiContextExperimentExtension(config) {
       pi.on("session_shutdown", () => {
         if (inFlightProviderRequest) {
           appendFailure(config, "provider-request-without-response", inFlightProviderRequest.recordSha256);
+        }
+        // Held errors are only weather while the session goes on to answer. One still
+        // held here never was survived: the run ended on it.
+        for (const held of pendingProviderErrors.splice(0, pendingProviderErrors.length)) {
+          appendFailure(config, "provider-error-unrecovered", held.detail || "error");
         }
         if (pendingStopTheWorld) {
           // An event that never saw another productive request still gets a record, with an

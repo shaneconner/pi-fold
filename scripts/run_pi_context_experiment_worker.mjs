@@ -20,6 +20,7 @@ import {
   closedBookSystemPrompt,
   EXPERIMENT_PIFOLD_EXTRA_TOOLS,
   EXPERIMENT_PROTOCOL_VERSION,
+  EXPERIMENT_PROVIDER_RETRY,
   EXPERIMENT_RUNNER_MODE,
   EXPERIMENT_TERMINAL_STABILIZATION_MS,
   EXPERIMENT_TOOL_NAME,
@@ -207,6 +208,9 @@ try {
     // Pinned transport: "auto" rides WebSocket delta requests whose connection drops
     // re-send the full context cold. Old run configs carry no key and keep Pi's default.
     ...(config.transport === undefined ? {} : { transport: config.transport }),
+    // Every arm gets the same weather budget, so surviving a Codex overload is not a
+    // difference between arms.
+    retry: { ...EXPERIMENT_PROVIDER_RETRY },
   });
   const loader = new DefaultResourceLoader({
     cwd: config.repoDir,
@@ -242,6 +246,11 @@ try {
     `Arm ${config.arm} did not get its compaction configuration: ${JSON.stringify(settings)}`);
   assertExperiment(session.settingsManager.getTransport() === (config.transport ?? "auto"),
     `Run transport pin did not reach the session: ${session.settingsManager.getTransport()}`);
+  const retrySettings = session.settingsManager.getRetrySettings();
+  assertExperiment(retrySettings.enabled === EXPERIMENT_PROVIDER_RETRY.enabled &&
+    retrySettings.maxRetries === EXPERIMENT_PROVIDER_RETRY.maxRetries &&
+    retrySettings.baseDelayMs === EXPERIMENT_PROVIDER_RETRY.baseDelayMs,
+  `Run provider retry pin did not reach the session: ${JSON.stringify(retrySettings)}`);
   const discoveredToolNames = session.getActiveToolNames().sort();
   const requiredTools = closedBook ? [] : [
     ...EXPERIMENT_ALLOWED_TOOLS,

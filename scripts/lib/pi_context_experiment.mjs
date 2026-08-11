@@ -105,6 +105,21 @@ export const EXPERIMENT_BRIEF_GENERATOR = Object.freeze({
   model: "gpt-5.6-luna",
   effort: "medium",
 });
+// How much provider weather one run is allowed to survive. Pi retries a retryable
+// assistant error by re-sending the same request after a backoff, having removed the
+// failed attempt from agent state, so a retry costs zero tokens and changes nothing the
+// trial measures. The budget therefore buys survival and nothing else, and Pi's default
+// of 3 is too thin for a marathon: rep 4 of luna-20260810 spent all three on a single
+// Codex overload sequence and lived with no margin left. Eight is the pin because the
+// backoff doubles uncapped from the base, so a fully spent budget costs about eight and
+// a half minutes inside a run bounded at just over five hours.
+// Pinned rather than left ambient: retry settings otherwise come from whatever the
+// machine's settings files happen to say, which is not a property a sealed run can state.
+export const EXPERIMENT_PROVIDER_RETRY = Object.freeze({
+  enabled: true,
+  maxRetries: 8,
+  baseDelayMs: 2_000,
+});
 
 // The package's own summarizer contract, revalidated on this side of the wire: the
 // runtime accepts "session" or a provider/model/effort descriptor, and the harness only
@@ -2973,4 +2988,89 @@ export function assertBlindPacket(packet) {
   };
   walk(packet, "packet");
   return packet;
+}
+
+// What the provider's weather cost this run, kept beside the result rather than inside
+// it. A recovered error changes nothing the trial measures (Pi re-sends the identical
+// request and the failed attempt bills zero tokens), so it must not count against the
+// arm; but a rep that stumbled forty times is a different quality of datum from one that
+// never stumbled, and reading the same number from both would be the real dishonesty.
+// Errors that were never survived do not appear here at all: those are latch entries.
+export function providerWeather(workerEvents, providerLedger = []) {
+  assertExperiment(Array.isArray(workerEvents), "Provider weather requires the worker event ledger");
+  assertExperiment(Array.isArray(providerLedger), "Provider weather requires the provider ledger");
+  const recovered = workerEvents.filter((row) => row?.kind === "provider-error-recovered");
+  const observed = workerEvents.filter((row) => row?.kind === "non-terminal-provider-response");
+  const attempts = recovered.reduce((total, row) => total + (Number(row.details?.attempts) || 0), 0);
+  const recoveryMs = recovered.reduce((total, row) =>
+    total + (Number(row.details?.recoveredAfterMs) || 0), 0);
+  const worstRun = recovered.reduce((worst, row) =>
+    Math.max(worst, Number(row.details?.attempts) || 0), 0);
+  // What the weather cost the CACHE, which is the part that actually moves a headline.
+  // The failed attempt bills nothing and the retried payload is byte identical, so the
+  // model's input never changes; but the pinned transport rides WebSocket delta requests,
+  // and a connection the error dropped re-sends the whole context cold. Observed on rep 4
+  // of luna-20260810: three sequences came back with cacheRead at zero against a projection
+  // whose char count had not moved, and one came back with its cache intact.
+  //
+  // Only an unchanged projection can be charged to weather. When the projection moved, a
+  // fold rewrote the prefix and would have broken the cache by itself, which is the
+  // experiment's own subject and must never be laundered into the weather column: those
+  // are counted apart and attributed to neither.
+  const responses = [];
+  let projectedChars = null;
+  for (const row of providerLedger) {
+    if (row?.kind === "context-projection") projectedChars = row.projectedChars ?? null;
+    if (row?.kind === "provider-response") {
+      responses.push({
+        stopReason: row.stopReason ?? null,
+        cacheRead: Number(row.usage?.cacheRead) || 0,
+        input: Number(row.usage?.input) || 0,
+        projectedChars,
+      });
+    }
+  }
+  let coldRestarts = 0;
+  let coldRestartFreshTokens = 0;
+  let cacheSurvived = 0;
+  let unattributable = 0;
+  for (let index = 0; index < responses.length; index += 1) {
+    if (responses[index].stopReason !== "error") continue;
+    let after = index;
+    while (after < responses.length && responses[after].stopReason === "error") after += 1;
+    let before = index - 1;
+    while (before >= 0 && responses[before].stopReason === "error") before -= 1;
+    // The projection the LAST failed attempt carried: the retry re-sends that same request,
+    // so this pair is the identical-payload check, not a comparison across the whole gap.
+    const lastAttemptChars = responses[after - 1].projectedChars;
+    index = after - 1;
+    if (after >= responses.length || before < 0) continue;
+    const unchanged = responses[after].projectedChars !== null &&
+      responses[after].projectedChars === lastAttemptChars;
+    if (responses[after].cacheRead === 0 && responses[before].cacheRead > 0) {
+      if (unchanged) {
+        coldRestarts += 1;
+        coldRestartFreshTokens += responses[after].input;
+      } else unattributable += 1;
+    } else if (responses[after].cacheRead > 0) cacheSurvived += 1;
+  }
+  return {
+    // Sequences the session came back from, and the failed attempts they cost.
+    recoveredSequences: recovered.length,
+    recoveredAttempts: attempts,
+    // The longest single sequence: how close this run came to spending its whole budget.
+    longestSequenceAttempts: worstRun,
+    msSpentRecovering: recoveryMs,
+    // Every non-terminal stop the run saw, recovered or not, so the two can be compared
+    // without opening the latch: a gap between them is errors that were never survived.
+    nonTerminalStops: observed.length,
+    stages: recovered.map((row) => Number(row.details?.stage) || null),
+    // Retries that reconnected cold, and the fresh tokens that would have been cache reads
+    // had the weather held. Subtract these before reading a cache share as the arm's own.
+    coldRestarts,
+    coldRestartFreshTokens,
+    cacheSurvivedRestarts: cacheSurvived,
+    // A cache miss a fold could equally explain. Charged to neither column, on purpose.
+    unattributableCacheMisses: unattributable,
+  };
 }
