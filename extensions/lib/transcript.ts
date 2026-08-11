@@ -408,6 +408,57 @@ export function toolFreshIndices(
   return protectedIndices;
 }
 
+type EntryEvidence = { message: unknown; ref: BranchObject["ref"] };
+
+/**
+ * Evidence for ONE session entry, derived once and kept.
+ *
+ * A session is append-only, and `buildContextEntries` hands back the session manager's own
+ * stored entry objects rather than copies, so an entry mapped once cannot change shape
+ * underneath us. Keying on the entry OBJECT rather than its id means a replaced entry
+ * misses and is recomputed instead of served stale: there is no invalidation rule here to
+ * get wrong, and a branch switch is simply a different path over the same stable objects.
+ *
+ * What this removes is not loop overhead. It is a `stableStringify` and a `sha256` per
+ * message over the WHOLE history on every call, while the window that history projects
+ * into stays the same size. That is superlinear in total session bytes, and it spent 135
+ * of the 258 minutes of the 2026-08-11 rep, more than the run spent waiting on the model.
+ *
+ * `branchIndex` is deliberately NOT cached. It is a position in the branch being mapped
+ * now, and a different leaf yields a different path across the same entries.
+ */
+const ENTRY_EVIDENCE = new WeakMap<object, {
+  sessionId: string;
+  projectEntry: (entry: Record<string, unknown>) => unknown[];
+  items: EntryEvidence[];
+}>();
+
+function entryEvidence(
+  entry: Record<string, unknown>,
+  entryId: string,
+  sessionId: string,
+  projectEntry: (entry: Record<string, unknown>) => unknown[],
+): EntryEvidence[] {
+  const cached = ENTRY_EVIDENCE.get(entry);
+  if (cached && cached.sessionId === sessionId && cached.projectEntry === projectEntry) {
+    return cached.items;
+  }
+  const items: EntryEvidence[] = [];
+  const projected = denseOwnArrayValues(projectEntry(entry));
+  if (projected) {
+    for (let messageIndex = 0; messageIndex < projected.length; messageIndex += 1) {
+      const message = projected[messageIndex];
+      try {
+        items.push({ message, ref: evidenceRef(sessionId, entryId, message) });
+      } catch {
+        // Unknown persisted shapes stay unavailable rather than weakening exact refs.
+      }
+    }
+  }
+  ENTRY_EVIDENCE.set(entry, { sessionId, projectEntry, items });
+  return items;
+}
+
 export function mapActiveContext(input: {
   sessionId: string;
   eventMessages: unknown[];
@@ -431,19 +482,8 @@ export function mapActiveContext(input: {
     const entry = input.contextEntries[entryIndex];
     const entryId = typeof entry?.id === "string" ? entry.id : "";
     if (!entryId) continue;
-    const projected = denseOwnArrayValues(projectEntry(entry));
-    if (!projected) continue;
-    for (let messageIndex = 0; messageIndex < projected.length; messageIndex += 1) {
-      const message = projected[messageIndex];
-      try {
-        branchObjects.push({
-          branchIndex: branchObjects.length,
-          message,
-          ref: evidenceRef(input.sessionId, entryId, message),
-        });
-      } catch {
-        // Unknown persisted shapes stay unavailable rather than weakening exact refs.
-      }
+    for (const item of entryEvidence(entry, entryId, input.sessionId, projectEntry)) {
+      branchObjects.push({ branchIndex: branchObjects.length, message: item.message, ref: item.ref });
     }
   }
 

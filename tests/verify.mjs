@@ -11725,6 +11725,91 @@ async function gateOwnedSpanRefusal() {
   };
 }
 
+/**
+ * Evidence for an entry is derived once, and deriving it again answers the same bytes.
+ *
+ * The defect this pins cost 135 of 258 minutes on the 2026-08-11 rep: every snapshot
+ * re-derived a stableStringify and a sha256 for every message the session had ever held,
+ * so the work grew with total history while the window it projected into stayed flat.
+ *
+ * This gate asserts the INVARIANT, never a wall clock. A timing threshold would pass or
+ * fail on machine load; "an entry already mapped is not mapped again" is the property,
+ * and it is counted through the caller's own projectEntry rather than any exported
+ * internal, so the cache has no test-only surface.
+ */
+async function gateIncrementalEvidenceMap() {
+  const entryFor = (id, text) => ({
+    id,
+    type: "message",
+    message: { role: "user", content: [{ type: "text", text }], timestamp: 1 },
+  });
+  const BASE = 300;
+  const APPENDED = 5;
+  const entries = Array.from({ length: BASE }, (_, index) =>
+    entryFor(`e${index}`, `body ${index} ${"x".repeat(160)}`));
+
+  let derivations = 0;
+  const counting = (entry) => { derivations += 1; return [entry.message]; };
+  const mapWith = (list) => context.mapActiveContext({
+    sessionId: "incremental-session",
+    eventMessages: list.map((entry) => entry.message),
+    contextEntries: list,
+    projectEntry: counting,
+  });
+
+  const first = mapWith(entries);
+  // ANTI-VACUITY: the first pass really did derive all of them, so a small second pass
+  // cannot be an artifact of a fixture that never had work to do.
+  assert.equal(derivations, BASE,
+    `The first mapping derived ${derivations} of ${BASE} entries, so this gate proves nothing`);
+  assert(first.mapped.some((entry) => entry.ref), "The first mapping produced no evidence refs at all");
+
+  const appended = [...entries, ...Array.from({ length: APPENDED }, (_, index) =>
+    entryFor(`n${index}`, `appended ${index}`))];
+  derivations = 0;
+  const second = mapWith(appended);
+  assert.equal(derivations, APPENDED,
+    `Mapping after appending ${APPENDED} entries re-derived ${derivations}: an entry already mapped was mapped again`);
+
+  // EQUIVALENCE: the same session through objects the cache has never seen. Structurally
+  // identical, referentially fresh, so this is a genuine rebuild rather than a second hit.
+  const cloned = appended.map((entry) => structuredClone(entry));
+  derivations = 0;
+  const rebuilt = mapWith(cloned);
+  assert.equal(derivations, cloned.length,
+    "The clone did not force a full rebuild, so the equivalence comparison below is vacuous");
+  assert.equal(
+    json.stableStringify(second.mapped.map((entry) => entry.ref)),
+    json.stableStringify(rebuilt.mapped.map((entry) => entry.ref)),
+    "The memoized mapping and a full rebuild disagreed: this is a different answer, not a saved one",
+  );
+
+  // A different session over the same entry objects must not serve the first one's refs,
+  // because an evidence ref is scoped to its session.
+  derivations = 0;
+  const otherSession = context.mapActiveContext({
+    sessionId: "a-different-session",
+    eventMessages: appended.map((entry) => entry.message),
+    contextEntries: appended,
+    projectEntry: counting,
+  });
+  assert.equal(derivations, appended.length, "A second session reused the first session's cached evidence");
+  assert.notEqual(
+    json.stableStringify(otherSession.mapped.map((entry) => entry.ref)),
+    json.stableStringify(second.mapped.map((entry) => entry.ref)),
+    "Two different sessions produced identical evidence refs",
+  );
+
+  return {
+    baseEntries: BASE,
+    firstPassDerivations: BASE,
+    secondPassDerivations: APPENDED,
+    rebuildDerivations: cloned.length,
+    refsIdenticalToRebuild: true,
+    sessionScoped: true,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -11823,6 +11908,7 @@ const gates = [
   [110, "Occupancy is anchored to what the provider counted", gateAnchoredOccupancy],
   [111, "The calibration hazard the anchor narrows but does not remove", gateCalibrationHazard],
   [112, "A span already inside a fold is refused by name", gateOwnedSpanRefusal],
+  [113, "Entry evidence is derived once, never rebuilt", gateIncrementalEvidenceMap],
 ];
 
 const gateFilter = (process.env.GATES ?? "")
