@@ -11366,6 +11366,263 @@ async function gateDanglingChildMarks() {
   };
 }
 
+/**
+ * OCCUPANCY IS WHAT THE PROVIDER COUNTED, PLUS WHAT ARRIVED AFTER IT.
+ *
+ * A whole-projection estimate divides every byte in the window by one rate, and one rate
+ * does not fit the window's contents. Measured 2026-08-10 on the sealed rep-23 run, byte
+ * exact against that run's own projection records: the estimate is unbiased at the
+ * pre-commit peaks (provider over estimate, mean 1.004 across six) and over-reads the
+ * post-fold troughs by 22 to 35 percent (mean ratio 0.784 across six). Encrypted
+ * reasoning-signature blobs grew from 14.6 to 51.3 percent of projection bytes over that
+ * run and price at a fitted 24.8 chars per token against 3.957 for ordinary content, so a
+ * projection's rate depends on what it is made of. The runtime believed its floor climbed
+ * 0.298 to 0.490 of budget while the provider read 0.276 to 0.382.
+ *
+ * Three cases, and the gate pins all three:
+ *   - APPENDED: the provider's count for the projection this one extends, plus the rate
+ *     applied to the appended bytes only.
+ *   - REWRITTEN: the pass right after a commit rebuilds rather than appends, so the anchor
+ *     describes a projection this one does not begin with. The whole-projection estimate
+ *     stands, error and all, and the record says which reading it used. Measured on rep 23,
+ *     that residual error is +27 to +35 percent, and this build does not fix it.
+ *   - UNMEASURED: no accepted count, so the reading is exactly what it was before.
+ *
+ * ANTI-VACUITY: the two readings are shown to DIFFER on the fixture before anything asserts
+ * which one the runtime used.
+ */
+async function gateAnchoredOccupancy() {
+  const window = 400_000;
+  const runtime = makeRuntime(
+    makeFixture({ turns: 24, resultChars: 6_000, contextWindow: window }),
+    { providerInputBudget: 360_000 },
+  );
+  await startRuntime(runtime);
+  const projections = () => contextEvents(runtime).filter((event) => event.kind === "context.projection");
+
+  // CASE 1: nothing measured yet. Exactly the old reading, and the record says so.
+  const unmeasured = projections().at(-1);
+  assert.equal(unmeasured.estimate_basis, "unmeasured", "A session with no provider count claimed an anchor");
+  assert.equal(unmeasured.anchor_tokens, null);
+  assert.equal(unmeasured.estimated_tokens, Math.ceil(unmeasured.chars / unmeasured.chars_per_token),
+    "The unmeasured reading is not the whole-projection estimate it was before this build");
+
+  // One ordinary pairing sets the calibration window, and the SIGNATURE-HEAVY pairing
+  // after it declares eight serialized chars per token for the same session. The
+  // calibration takes the minimum over its window, so later passes still divide by four:
+  // that gap between the session's declared composition and its own rate is exactly the
+  // trough over-read rep 23 measured, and it is what separates the two readings here.
+  const ordinary = projections().at(-1);
+  await measure(runtime, Math.ceil(ordinary.chars / 4), window);
+  await project(runtime);
+  await settle();
+  const anchoredProjection = projections().at(-1);
+  const anchorTokens = Math.ceil(anchoredProjection.chars / 8);
+  await measure(runtime, anchorTokens, window);
+  const afterAnchor = await project(runtime);
+  await settle();
+
+  // CASE 2: appended. The two readings are separable BEFORE anything asserts which one ran.
+  const anchored = projections().at(-1);
+  const estimateOnly = Math.ceil(anchored.chars / anchored.chars_per_token);
+  const expectedAnchored = anchorTokens + Math.ceil((anchored.chars - anchoredProjection.chars) / anchored.chars_per_token);
+  assert(Math.abs(estimateOnly - expectedAnchored) > expectedAnchored * 0.5,
+    `The two readings agree to within ${Math.abs(estimateOnly - expectedAnchored)} tokens, so this fixture proves nothing`);
+  assert.equal(anchored.estimate_basis, "anchored", "An appended projection did not use the provider's count");
+  assert.equal(anchored.anchor_tokens, anchorTokens, "The record names a different anchor than the provider reported");
+  assert.equal(anchored.delta_chars, anchored.chars - anchoredProjection.chars,
+    "The delta is not the bytes appended since the anchored projection");
+  assert.equal(anchored.estimated_tokens, expectedAnchored,
+    "The anchored reading is not the provider count plus the appended delta");
+  assert(bytesOf(afterAnchor.messages) > 0, "The anchored pass returned nothing");
+  const anchoredStatus = (await toolStatus(runtime)).details.automatic;
+  assert.equal(anchoredStatus.projectionEstimateBasis, "anchored");
+  assert.equal(anchoredStatus.projectionAnchorTokens, anchorTokens);
+  assert.equal(anchoredStatus.projectionEstimatedTokens, expectedAnchored,
+    "Status reports a number no decision was made on");
+
+  // CASE 3: the anchor is dropped when it can no longer describe the session. A model or
+  // thinking-level change is a different tokenizer, so its counts describe nothing here.
+  await runtime.handlers.get("model_select")({}, runtime.ctx);
+  await project(runtime);
+  await settle();
+  const afterModelChange = projections().at(-1);
+  assert.equal(afterModelChange.estimate_basis, "unmeasured",
+    "A count taken under the previous model still anchored the reading");
+  assert.equal(afterModelChange.estimated_tokens,
+    Math.ceil(afterModelChange.chars / afterModelChange.chars_per_token));
+
+  // CASE 4: rewritten. A commit rebuilds the projection, so the anchored one is no longer
+  // a prefix of it: the reading falls back and SAYS it fell back.
+  const pressured = makeRuntime(
+    makeFixture({ turns: 20, resultChars: 6_000, contextWindow: 200_000 }),
+    { providerInputBudget: 40_000 },
+  );
+  await startRuntime(pressured);
+  const pressuredProjections = () => contextEvents(pressured).filter((event) => event.kind === "context.projection");
+  const basis = new Set();
+  for (let step = 0; step < 4; step += 1) {
+    const current = pressuredProjections().at(-1);
+    await measure(pressured, Math.ceil(current.chars / 4), 200_000, undefined, "toolUse");
+    await project(pressured);
+    await settle();
+    basis.add(pressuredProjections().at(-1).estimate_basis);
+  }
+  const rewritten = pressuredProjections().filter((event) => event.estimate_basis === "rewritten");
+  assert(rewritten.length >= 1, "The pressured fixture never rebuilt a projection, so the fallback is untested");
+  for (const record of rewritten) {
+    assert.equal(record.estimated_tokens, Math.ceil(record.chars / record.chars_per_token),
+      "A rewritten projection was read as an anchor plus a delta");
+    assert.equal(record.delta_chars, null, "A rewritten projection reported a delta it cannot have");
+  }
+
+  // THE LAW, over every projection either runtime emitted: anchored readings are the
+  // anchor plus the delta, and every other reading is the whole-projection estimate.
+  const all = [...projections(), ...pressuredProjections()];
+  for (const record of all) {
+    if (record.estimate_basis === "anchored") {
+      assert.equal(record.estimated_tokens,
+        record.anchor_tokens + Math.ceil(record.delta_chars / record.chars_per_token),
+        "An anchored reading is not its own parts");
+    } else {
+      assert.equal(record.estimated_tokens, Math.ceil(record.chars / record.chars_per_token),
+        "A fallback reading is not the whole-projection estimate");
+    }
+  }
+
+  return {
+    unmeasuredTokens: unmeasured.estimated_tokens,
+    anchorTokens,
+    anchoredDeltaChars: anchored.delta_chars,
+    anchoredTokens: anchored.estimated_tokens,
+    estimateOnlyTokens: estimateOnly,
+    separationTokens: Math.abs(estimateOnly - expectedAnchored),
+    droppedOnModelChange: afterModelChange.estimate_basis,
+    rewrittenReadings: rewritten.length,
+    basisSeenUnderPressure: [...basis].sort(),
+  };
+}
+
+/**
+ * THE CALIBRATION HAZARD THIS BUILD DOES NOT FIX.
+ *
+ * The rate the fence divides by is the MINIMUM serialized chars per token over a window of
+ * recent provider pairings, taken as the pessimistic choice: a rate that is too high
+ * under-counts tokens and transmits a request the provider will reject. Measured 2026-08-10
+ * on the sealed rep-23 run, that rule is not reliably pessimistic. Composition moves the
+ * true rate: encrypted reasoning-signature blobs price at a fitted 24.8 chars per token
+ * against 3.957 for ordinary content, and they grew from 14.6 to 51.3 percent of projection
+ * bytes over one run. Once a signature-heavy phase has pushed every pairing in the window
+ * up, fresh raw tool output arrives at a much lower true rate and the fence divides it by
+ * the high one. Worst observed on that run: 3.1 percent under-read at 0.64 occupancy,
+ * harmless there, not harmless near the fence.
+ *
+ * This gate pins the honest current behavior rather than asserting a property the rule
+ * cannot deliver. Changing the calibration rule is a separate mechanism and is NOT part of
+ * this build; anchoring occupancy narrows the hazard, it does not remove it:
+ *   - what anchoring DOES fix: the rate no longer prices the bytes the provider already
+ *     counted, so a mispriced calibration can only be wrong about the material appended
+ *     since that count. Gate 110 measures that separation directly.
+ *   - what it does NOT fix: the rate still prices the delta, and it prices the WHOLE
+ *     projection on the one pass per cycle that rebuilds rather than appends. A raw-heavy
+ *     delta after a signature-heavy phase is read at half its true size, and the fence
+ *     transmits it.
+ */
+async function gateCalibrationHazard() {
+  const window = 40_000;
+  const budgetTokens = 36_000;
+  // The signature-heavy phase: every pairing in the calibration window declares eight
+  // serialized chars per token, which is what a projection half made of signature blobs
+  // measures at. The window is six deep, so six of them leave the minimum at eight.
+  const signatureRate = 8;
+  // What raw tool output actually costs, fitted at 3.957 on rep 23 and rounded down here
+  // so the gate never overstates the gap.
+  const rawRate = 4;
+  const runtime = makeRuntime(
+    makeFixture({ turns: 24, resultChars: 5_000, contextWindow: window }),
+    { providerInputBudget: budgetTokens },
+  );
+  await startRuntime(runtime);
+  const projections = () => contextEvents(runtime).filter((event) => event.kind === "context.projection");
+  for (let pass = 0; pass < 6; pass += 1) {
+    const current = projections().at(-1);
+    await measure(runtime, Math.ceil(current.chars / signatureRate), window);
+    await project(runtime);
+    await settle();
+  }
+  const calibrated = (await toolStatus(runtime)).details.automatic;
+  // Within a rounding step of the declared rate: each pairing divides an integer char
+  // count by an integer token count, so the minimum lands just under it.
+  assert(Math.abs(calibrated.projectionCharsPerToken - signatureRate) < 0.01,
+    `The window calibrated to ${calibrated.projectionCharsPerToken} chars per token, not the declared ${signatureRate}`);
+  const anchorTokens = calibrated.projectionAnchorTokens;
+  assert(typeof anchorTokens === "number" && anchorTokens > 0, "The signature-heavy phase left no anchor");
+
+  // Now the raw-heavy excursion: ninety thousand chars of plain tool output, which the
+  // fence divides by eight because that is every pairing it holds.
+  const rawChars = 90_000;
+  const chunk = Math.floor(rawChars / 6);
+  for (let step = 0; step < 6; step += 1) {
+    runtime.appendMessage({
+      role: "assistant",
+      content: [{ type: "toolCall", id: `raw-${step}`, name: "read", arguments: { path: `raw-${step}.txt` } }],
+      stopReason: "toolUse",
+      timestamp: 8_000 + step,
+    }, "raw-excursion");
+    runtime.appendMessage({
+      role: "toolResult",
+      toolCallId: `raw-${step}`,
+      toolName: "read",
+      content: [{ type: "text", text: `Raw ${step}: ${"r".repeat(chunk)}` }],
+      isError: false,
+      timestamp: 8_000 + step,
+    }, "raw-excursion");
+  }
+  const abortsBefore = runtime.aborts;
+  await project(runtime);
+  await settle();
+  const raw = projections().at(-1);
+  assert.equal(raw.estimate_basis, "anchored",
+    "The raw excursion rebuilt the projection, so this measures the fallback rather than the delta");
+  assert(raw.delta_chars >= rawChars, `Only ${raw.delta_chars} chars were appended`);
+
+  // THE UNDER-READ, stated in the numbers the runtime actually used. The delta is priced
+  // at the signature rate; at the raw rate it is twice that.
+  const readTokens = raw.estimated_tokens;
+  const trueTokens = anchorTokens + Math.ceil(raw.delta_chars / rawRate);
+  assert.equal(readTokens, anchorTokens + Math.ceil(raw.delta_chars / calibrated.projectionCharsPerToken),
+    "The reading is not the anchor plus the delta at the calibrated rate");
+  assert(readTokens < budgetTokens,
+    `The fixture reads ${readTokens} against a ${budgetTokens} budget, so nothing was transmitted under-read`);
+  assert(trueTokens > budgetTokens,
+    `At the raw rate the request is ${trueTokens} tokens, inside the ${budgetTokens} budget; the hazard is not reproduced`);
+  // AND IT IS TRANSMITTED. No abort, no reduction: the fence saw a request that fits.
+  assert.equal(runtime.aborts, abortsBefore, "The fixture aborted, so the under-read did not reach the wire");
+  assert.equal((await toolStatus(runtime)).details.automatic.overBudgetReduction, null,
+    "The fence reduced, so this is not the silent case the hazard names");
+
+  // WHAT ANCHORING BOUGHT, on the same numbers: the mispriced rate reached the delta only.
+  // Without the anchor the same rate would have priced every byte in the projection, and
+  // that is the one pass per cycle -- the rebuild right after a commit -- where it still
+  // does. Stated as a ratio so it cannot pass by accident.
+  const exposedChars = raw.delta_chars;
+  const exposureShare = exposedChars / raw.chars;
+  assert(exposureShare < 0.5,
+    `The rate priced ${(exposureShare * 100).toFixed(1)}% of the projection, so the anchor bounded nothing here`);
+
+  return {
+    calibratedCharsPerToken: calibrated.projectionCharsPerToken,
+    anchorTokens,
+    deltaChars: raw.delta_chars,
+    readTokens,
+    trueTokensAtRawRate: trueTokens,
+    budgetTokens,
+    underReadTokens: trueTokens - readTokens,
+    transmittedOverBudget: trueTokens > budgetTokens && runtime.aborts === abortsBefore,
+    rateExposedShareOfProjection: Number(exposureShare.toFixed(3)),
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -11461,6 +11718,8 @@ const gates = [
   [107, "Model briefs upgrade on the commit boundary", gateBriefUpgradesRideTheBoundary],
   [108, "A folded head never limits reach", gateProjectedStaleBasis],
   [109, "A mark naming a fold that is gone or held is answered", gateDanglingChildMarks],
+  [110, "Occupancy is anchored to what the provider counted", gateAnchoredOccupancy],
+  [111, "The calibration hazard the anchor narrows but does not remove", gateCalibrationHazard],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

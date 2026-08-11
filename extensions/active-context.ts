@@ -232,6 +232,16 @@ import {
   unansweredToolCalls,
 } from "./lib/rollback.ts";
 
+/**
+ * How a projection's token reading was reached.
+ *
+ * "anchored": the provider's own count for the projection this one extends, plus a rate
+ * estimate of the bytes appended after it. "rewritten": the current projection does not
+ * begin with the measured one, so there is nothing to add a delta to and the whole
+ * projection is estimated. "unmeasured": no accepted provider count yet.
+ */
+export type ProjectionReadingBasis = "anchored" | "rewritten" | "unmeasured";
+
 // Test seam only; the package API is registerPiFold because package.json exports block deep imports.
 export * from "./lib/canonical.ts";
 export * from "./lib/curation.ts";
@@ -511,6 +521,25 @@ export function registerActiveContext(pi: any, options: {
     lastProjectedEstimate: null as number | null,
     /** Whether that estimate used a measured ratio rather than the bootstrap constant. */
     lastProjectedEstimateCalibrated: false,
+    /** How that reading was reached, so an audit can tell an anchor from a fallback. */
+    lastProjectedEstimateBasis: "unmeasured" as ProjectionReadingBasis,
+    /** That projection's own size at one rate, the baseline a reduction is measured from. */
+    lastProjectedSizeTokens: null as number | null,
+    /**
+     * The provider's own count for the last projection this process TRANSMITTED, held
+     * with that projection's serialized text so a later projection can be tested against
+     * it by construction. `head` is the serialization minus its closing bracket, which is
+     * what makes "the same projection with more appended after it" a byte-exact prefix
+     * test rather than a size comparison.
+     */
+    projectionAnchor: null as {
+      tokens: number;
+      chars: number;
+      head: string;
+      messageSha256: string;
+      sessionId: string;
+      generation: number;
+    } | null,
     /** Signed estimator error against recent measurements, as a share of measured tokens. */
     estimatorErrors: [] as number[],
     /** Growth in measured tokens between consecutive requests. */
@@ -886,6 +915,8 @@ export function registerActiveContext(pi: any, options: {
     lifecycle.latestSnapshotError = null;
     measurements.latestRatio = null;
     measurements.lastProviderMeasurement = null;
+    measurements.projectionAnchor = null;
+    measurements.lastProjectedEstimateBasis = "unmeasured";
     ladder.pendingManual = false;
     if (!preserveThresholdDecision) nativeCompaction.lastThresholdDecision = null;
     ladder.lastPreparationError = null;
@@ -1526,8 +1557,126 @@ export function registerActiveContext(pi: any, options: {
     );
   };
 
-  const projectedTokenEstimate = (projected: unknown[]): number =>
-    Math.ceil(bytes(projected) / projectionCharsPerToken());
+  /**
+   * Bind the provider's count to the projection it counted.
+   *
+   * The anchor is the number the provider reported for a request this process actually
+   * TRANSMITTED, held with that projection's serialized bytes. Identity is carried three
+   * ways so a stale anchor cannot pass for a fresh one: the session it belongs to, the
+   * attribution generation (a model or thinking-level change is a different tokenizer, so
+   * its counts describe nothing here), and the projection text itself, which the reading
+   * re-checks byte for byte before adding anything to it.
+   */
+  const noteProviderProjectionAnchor = (measurement: ProviderContextMeasurement): void => {
+    // ONE ANCHOR PER MEASURED RESPONSE. A pass that re-observes the same assistant
+    // message -- the retry after a provider rejection, or any pass the host runs without
+    // a new response -- would otherwise re-bind that count to a newer projection the
+    // provider never counted, and the count would silently describe the wrong bytes.
+    if (measurements.projectionAnchor?.messageSha256 === measurement.messageSha256) return;
+    const text = instrumentation.previousText;
+    // Only a TRANSMITTED projection can be anchored: an aborted pass built a projection
+    // the provider never saw, so no reported count describes it.
+    if (!text || text.length < 2 || !text.endsWith("]") || !persistence.state) {
+      measurements.projectionAnchor = null;
+      return;
+    }
+    const chars = bytes(text);
+    // AND THE COUNT HAS TO FIT THE BYTES IT IS BOUND TO.
+    //
+    // An anchor is exact for the bytes it covers only if it actually describes them. A
+    // pairing that implies fewer serialized chars per token than any tokenizer produces
+    // is not describing this projection, and taken at face value it would put the fence
+    // under permanent pressure a projection of that size cannot explain. The calibration
+    // window already refuses such a ratio through the same floor; the anchor refuses it
+    // outright and falls back to the estimate. Only the FLOOR applies: a rate ABOVE the
+    // calibration ceiling is the signature-heavy composition this mechanism exists to
+    // read, and clamping it would throw away the measurement that motivated the build.
+    if (!(measurement.tokens > 0) || chars / measurement.tokens < PROJECTION_CHARS_PER_TOKEN_FLOOR) {
+      measurements.projectionAnchor = null;
+      return;
+    }
+    measurements.projectionAnchor = {
+      tokens: measurement.tokens,
+      chars,
+      head: text.slice(0, -1),
+      messageSha256: measurement.messageSha256,
+      sessionId: persistence.state.sessionId,
+      generation: lifecycle.generation,
+    };
+  };
+
+  /**
+   * THE OCCUPANCY READING: what the provider counted, plus only what arrived after it.
+   *
+   * A whole-projection estimate divides every byte in the window by one rate, and one
+   * rate does not fit the window's contents. Measured 2026-08-10 on the sealed rep-23
+   * run, byte exact against that run's own projection records: the estimate is unbiased
+   * at the pre-commit PEAKS (provider over estimate, mean 1.004 across six) and over-reads
+   * the post-fold TROUGHS by 22 to 35 percent (mean ratio 0.784 across six). It is a phase
+   * effect, not drift: encrypted reasoning-signature blobs on assistant messages grew from
+   * 14.6 to 51.3 percent of projection bytes over that run and price at a fitted 24.8 chars
+   * per token against 3.957 for ordinary content, so a projection's rate depends on what it
+   * is made of. The runtime therefore believed its floor climbed 0.298 to 0.490 of budget
+   * while the provider read 0.276 to 0.382: roughly 45 percent of the apparent floor rise
+   * was measurement error, five of six true troughs sat at or below the 0.35 minTarget, and
+   * the ladder was folding past its own floor without seeing it.
+   *
+   * So the rate is applied to the DELTA only. The provider's count for the projection this
+   * one extends is exact for every byte it covers, whatever those bytes are made of, and
+   * only the material appended since is estimated. Measured on the same run: mean absolute
+   * occupancy error across all requests falls from 8.38 to 3.08 percent, and inside every
+   * post-fold refill window it drops from the +9 to +27 percent band to under 4 percent from
+   * the second request onward.
+   *
+   * Two things this deliberately does NOT do. It does not move the commit trigger: at all
+   * twelve commit points of that run the delta since the last provider count was exactly
+   * zero, because the commit hook runs after the response and its usage record have landed.
+   * And it does not fix the one pass per cycle where the projection is REWRITTEN rather than
+   * appended, right after a commit: the anchor describes a projection this one does not
+   * begin with, so there is nothing to add a delta to and the whole-projection estimate
+   * stands, error and all (+27 to +35 percent, measured). That case is detected by
+   * construction, not by the sign of the delta: the current serialization must begin with
+   * the anchored one verbatim, up to the array separator.
+   *
+   * The anchor is the provider's TOTAL for that request, which includes the output tokens
+   * of the response the next projection appends and then prices again as bytes. That is one
+   * response's worth of double count, it runs HIGH rather than low, and it keeps a single
+   * definition of "the provider's number" across occupancy, the ratio and the calibration
+   * instead of a second one that only this reading would use.
+   */
+  const projectedTokenReading = (projected: unknown[]): {
+    tokens: number;
+    basis: ProjectionReadingBasis;
+    chars: number;
+    anchorTokens: number | null;
+    deltaChars: number | null;
+  } => {
+    const text = stableStringify(projected);
+    const chars = Buffer.byteLength(text, "utf8");
+    const charsPerToken = projectionCharsPerToken();
+    const estimate = Math.ceil(chars / charsPerToken);
+    const anchor = measurements.projectionAnchor;
+    if (!anchor || anchor.generation !== lifecycle.generation ||
+        anchor.sessionId !== persistence.state?.sessionId) {
+      return { tokens: estimate, basis: "unmeasured", chars, anchorTokens: null, deltaChars: null };
+    }
+    // By construction: the anchored serialization minus its closing bracket must be a
+    // byte-exact prefix, and the byte after it must be the array separator or the close.
+    // A message that merely GREW in place fails this, because the anchored head ends with
+    // that message's own closing brace.
+    const separator = text.length > anchor.head.length ? text[anchor.head.length] : "";
+    if (!text.startsWith(anchor.head) || (separator !== "," && separator !== "]")) {
+      return { tokens: estimate, basis: "rewritten", chars, anchorTokens: anchor.tokens, deltaChars: null };
+    }
+    const deltaChars = chars - anchor.chars;
+    return {
+      tokens: Math.max(0, anchor.tokens + Math.ceil(deltaChars / charsPerToken)),
+      basis: "anchored",
+      chars,
+      anchorTokens: anchor.tokens,
+      deltaChars,
+    };
+  };
 
   /** The largest recent estimator error, as a share. Unmeasured sessions assume none. */
   const estimatorErrorShare = (): number => measurements.estimatorErrors.length
@@ -1580,7 +1729,18 @@ export function registerActiveContext(pi: any, options: {
    * transmission, which is the whole point of having a fence.
    */
   const projectionExceedsBudget = (projected: unknown[], ctx: any): {
+    /** Occupancy: what the provider counted, plus what was appended after it. */
     tokens: number;
+    /**
+     * This projection's OWN size, every byte of it at one rate. Occupancy answers "how
+     * full is the window"; a before-and-after comparison between two projections answers
+     * "did this pass make the request smaller", and those are different questions. A
+     * reduction is measured in size space on both sides, because the projection the pass
+     * rebuilds is a rewrite the anchor does not describe, and subtracting an anchored
+     * reading from an unanchored one reports a change that no folding caused.
+     */
+    sizeTokens: number;
+    basis: ProjectionReadingBasis;
     budgetTokens: number;
     marginTokens: number;
     /** Past the wire: this request must not be transmitted at all. */
@@ -1592,12 +1752,16 @@ export function registerActiveContext(pi: any, options: {
     const budgetTokens = Number.isFinite(capacity.budgetTokens) && capacity.budgetTokens > 0
       ? capacity.budgetTokens
       : Number.POSITIVE_INFINITY;
-    const tokens = projectedTokenEstimate(projected);
+    const reading = projectedTokenReading(projected);
+    const tokens = reading.tokens;
+    const sizeTokens = Math.ceil(reading.chars / projectionCharsPerToken());
     const marginTokens = Number.isFinite(budgetTokens)
       ? projectionMarginTokens(tokens, capacity.window)
       : 0;
     return {
       tokens,
+      sizeTokens,
+      basis: reading.basis,
       budgetTokens,
       marginTokens,
       over: tokens > budgetTokens,
@@ -1708,8 +1872,11 @@ export function registerActiveContext(pi: any, options: {
     }
     if (reducedAtLeastOnce) {
       ladder.overBudgetReduction = {
-        estimatedTokensBefore: projectedTokenEstimate(projected),
-        estimatedTokensAfter: measured.tokens,
+        // Size space on both sides: what this pass CHANGED, not how full the window is.
+        estimatedTokensBefore: trigger.sizeTokens,
+        estimatedTokensAfter: measured.sizeTokens,
+        occupancyTokensAfter: measured.tokens,
+        occupancyBasis: measured.basis,
         budgetTokens: trigger.budgetTokens,
         marginTokens: trigger.marginTokens,
         estimatorErrorShare: estimatorErrorShare(),
@@ -1722,7 +1889,7 @@ export function registerActiveContext(pi: any, options: {
       };
     }
     if (rejected) {
-      const overflowBefore = projectedTokenEstimate(projected);
+      const overflowBefore = trigger.sizeTokens;
       // RECOVERY IS A CHANGE, NOT AN OPINION.
       //
       // This read `!measured.over`: our own estimator answering the question the
@@ -1740,9 +1907,14 @@ export function registerActiveContext(pi: any, options: {
       // against the projection handed to this function instead would credit only the
       // recovery loop's own folds and miss the ordinary commit that already ran earlier
       // in the same pass, which is the usual way a retried request gets smaller.
-      const rejectedTokens = measurements.lastProjectedEstimate;
+      //
+      // Size space on both sides. Occupancy is anchored to the provider's count for the
+      // projection it measured, and the projection this lane rebuilds is a rewrite that
+      // anchor does not describe, so a rejected-minus-retried subtraction across the two
+      // bases reports a change no folding caused.
+      const rejectedTokens = measurements.lastProjectedSizeTokens;
       const freedTokens = typeof rejectedTokens === "number"
-        ? Math.max(0, rejectedTokens - measured.tokens)
+        ? Math.max(0, rejectedTokens - measured.sizeTokens)
         : 0;
       // Smaller than what the provider refused, AND inside the budget. Either half alone
       // is a claim this runtime has already been wrong about once.
@@ -1750,7 +1922,7 @@ export function registerActiveContext(pi: any, options: {
       curation.lastRecovery = {
         status: curation.pendingRejection?.status ?? null,
         attempts,
-        estimatedTokensAfter: measured.tokens,
+        estimatedTokensAfter: measured.sizeTokens,
         budgetTokens: measured.budgetTokens,
         recovered,
       };
@@ -1759,7 +1931,9 @@ export function registerActiveContext(pi: any, options: {
         attempts,
         max_attempts: OVERFLOW_RECOVERY_MAX_ATTEMPTS,
         tokens_before: overflowBefore,
-        tokens_after: measured.tokens,
+        tokens_after: measured.sizeTokens,
+        occupancy_tokens_after: measured.tokens,
+        occupancy_basis: measured.basis,
         budget_tokens: measured.budgetTokens,
         margin_tokens: measured.marginTokens,
         recovered,
@@ -1785,7 +1959,7 @@ export function registerActiveContext(pi: any, options: {
         trigger: `provider-rejection:${curation.pendingRejection?.status ?? "unknown"}`,
         freedTokens,
         occupancyBefore: typeof rejectedTokens === "number" ? rejectedTokens : overflowBefore,
-        occupancyAfter: measured.tokens,
+        occupancyAfter: measured.sizeTokens,
         recovered,
         note: measured.over
           ? `The rebuilt request is still ${measured.tokens} tokens against a ${measured.budgetTokens}-token ` +
@@ -1793,7 +1967,7 @@ export function registerActiveContext(pi: any, options: {
           : recovered
             ? "A rollback was required: the provider rejected the last request, which overfilled the serving " +
               `budget at ${rejectedTokens} estimated tokens against ${measured.budgetTokens}. This pass ` +
-              `landed it at ${measured.tokens} tokens. Nothing durable was written for it, and the request ` +
+              `landed it at ${measured.sizeTokens} tokens. Nothing durable was written for it, and the request ` +
               "was rebuilt inside the budget rather than dropped."
             : unchangedNote,
       }));
@@ -2084,14 +2258,20 @@ export function registerActiveContext(pi: any, options: {
     const charsPerToken = projectionCharsPerToken();
     const causes = instrumentation.sinceHandoff.filter((event) =>
       PREFIX_MUTATING_KINDS.has(event.kind));
+    // The reading this projection was judged by, with the pieces it was built from, so
+    // the anchored series is readable from the stream instead of reconstructed.
+    const reading = projectedTokenReading(projected);
     emit("context.projection", {
       change: comparison.change,
       previous_count: comparison.previousCount,
       next_count: comparison.nextCount,
       appended_count: comparison.appendedCount,
       first_divergent_index: comparison.firstDivergentIndex,
-      chars: bytes(projected),
-      estimated_tokens: projectedTokenEstimate(projected),
+      chars: reading.chars,
+      estimated_tokens: reading.tokens,
+      estimate_basis: reading.basis,
+      anchor_tokens: reading.anchorTokens,
+      delta_chars: reading.deltaChars,
       chars_per_token: charsPerToken,
     });
     // Emission only. Which of these is a provider-side miss and which is a rewrite we
@@ -3752,6 +3932,10 @@ export function registerActiveContext(pi: any, options: {
     if (persistence.state?.prepared) persistence.state = clearPrepared(persistence.state);
     measurements.latestRatio = null;
     measurements.lastProviderMeasurement = null;
+    // A different model or thinking level is a different tokenizer, so counts taken
+    // under the old one describe nothing here. The generation the anchor carries would
+    // already refuse it; dropping it releases the projection text it held as well.
+    measurements.projectionAnchor = null;
     nativeCompaction.lastThresholdDecision = null;
     updateStatus(ctx);
   };
@@ -3822,6 +4006,10 @@ export function registerActiveContext(pi: any, options: {
           // Calibrate BEFORE the new measurement becomes the previous one: the inflow
           // step is the difference between them.
           noteProjectionCalibration(observedMeasurement);
+          // Anchor before this pass builds anything: `previousText` is still the
+          // projection the provider just counted, and the projection built below is the
+          // one that either extends it or does not.
+          noteProviderProjectionAnchor(observedMeasurement);
           measurements.lastProviderMeasurement = observedMeasurement;
           startPreparation(snapshot, measurements.latestRatio, ctx);
           if (!ladder.automaticFailure && measurements.latestRatio >= hardFenceRatio(snapshot) && ladder.preparing) {
@@ -3869,8 +4057,11 @@ export function registerActiveContext(pi: any, options: {
       // already-large session out of calibrating at all: its first projection aborts
       // under the uncalibrated constant, so nothing is ever sent, so nothing ever
       // measures the ratio, so it aborts forever.
-      measurements.lastProjectedChars = bytes(projected);
-      measurements.lastProjectedEstimate = projectedTokenEstimate(projected);
+      const reading = projectedTokenReading(projected);
+      measurements.lastProjectedChars = reading.chars;
+      measurements.lastProjectedEstimate = reading.tokens;
+      measurements.lastProjectedEstimateBasis = reading.basis;
+      measurements.lastProjectedSizeTokens = Math.ceil(reading.chars / projectionCharsPerToken());
       measurements.lastProjectedEstimateCalibrated = measurements.projectionCalibrations.length > 0;
       // An aborted request still returns the PROJECTION. Handing back the raw branch
       // instead makes the aborted turn the largest message list the session ever
@@ -4530,15 +4721,15 @@ export function registerActiveContext(pi: any, options: {
           projectionCharsPerToken: projectionCharsPerToken(),
           projectionEstimatorErrorShare: estimatorErrorShare(),
           projectionExpectedInflowTokens: expectedInflowTokens(),
-          projectionMarginTokens: measurements.lastProjectedChars === null
+          // What the fence actually weighed, not a second arithmetic over the same bytes:
+          // once occupancy is anchored, re-deriving it here from chars alone would report
+          // a number no decision was made on.
+          projectionMarginTokens: measurements.lastProjectedEstimate === null
             ? null
-            : projectionMarginTokens(
-              Math.ceil(measurements.lastProjectedChars / projectionCharsPerToken()),
-              currentCapacity(ctx).window,
-            ),
-          projectionEstimatedTokens: measurements.lastProjectedChars === null
-            ? null
-            : Math.ceil(measurements.lastProjectedChars / projectionCharsPerToken()),
+            : projectionMarginTokens(measurements.lastProjectedEstimate, currentCapacity(ctx).window),
+          projectionEstimatedTokens: measurements.lastProjectedEstimate,
+          projectionEstimateBasis: measurements.lastProjectedEstimateBasis,
+          projectionAnchorTokens: measurements.projectionAnchor?.tokens ?? null,
           automaticSuspended: ladder.automaticFailure !== null,
           automaticFailure: ladder.automaticFailure ? clone(ladder.automaticFailure) : null,
           lastCompactionDecision: nativeCompaction.lastThresholdDecision,
