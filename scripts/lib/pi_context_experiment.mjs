@@ -100,9 +100,15 @@ export const EXPERIMENT_PROVIDER_INPUT_BUDGETS = Object.freeze({
 // brief regime of a sealed run is a readable fact rather than an inference from silence.
 // A cheap model at medium effort: the brief is a bounded summary of a bounded span, and
 // the frontier model's turn is the thing under measurement, not the summarizing.
+// gpt-5.6-luna wrote this until 2026-08-11, when it went to 38 percent availability for
+// this account for hours and took rep 4 with it while every other model on the same
+// account answered. terra is the same generation, answers 4 of 4, and bills less per
+// brief. The choice deliberately is not the session's own model: the descriptor exists
+// because briefing with the arm's frontier model would bill the comparison for its own
+// summarizing and confound the thing under measurement.
 export const EXPERIMENT_BRIEF_GENERATOR = Object.freeze({
   provider: "openai-codex",
-  model: "gpt-5.6-luna",
+  model: "gpt-5.6-terra",
   effort: "medium",
 });
 // How much provider weather one run is allowed to survive. Pi retries a retryable

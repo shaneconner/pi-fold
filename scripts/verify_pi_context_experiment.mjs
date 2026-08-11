@@ -2689,8 +2689,17 @@ try {
 {
   // A cheap model at medium effort: the brief is a bounded summary of a bounded span, and
   // the arm's own frontier model is the thing under measurement, not the summarizing.
+  // gpt-5.6-luna held this until 2026-08-11, when it sat at 38 percent availability for
+  // this account for hours while every other model on it answered 4 of 4.
   assert.deepEqual({ ...EXPERIMENT_BRIEF_GENERATOR },
-    { provider: "openai-codex", model: "gpt-5.6-luna", effort: "medium" });
+    { provider: "openai-codex", model: "gpt-5.6-terra", effort: "medium" });
+  // The generator must never be the model the arm itself runs. That is the whole reason
+  // this is a descriptor rather than "session": briefing with the arm's own frontier model
+  // would bill the comparison for its own summarizing and confound what is measured.
+  for (const sessionModel of ["gpt-5.6-sol", "gpt-5.6-luna"]) {
+    assert.notEqual(EXPERIMENT_BRIEF_GENERATOR.model, sessionModel,
+      "the brief generator must not be a model an arm runs as its own session model");
+  }
 
   // Only the arm that registers the runtime writes briefs, so only it may carry a
   // generator: on any other arm the descriptor would be a fact about nothing.
@@ -2855,7 +2864,13 @@ try {
   // Driven against a FAKE host module: verification resolves no model and calls no
   // provider. What is under test is that the harness reaches the PACKAGE's builder, so the
   // arm briefs the way a consumer's deployment briefs.
-  const briefModel = { provider: "openai-codex", id: "gpt-5.6-luna", reasoning: true };
+  // Read off the pin rather than restated: a fixture that names the model itself goes
+  // stale the day the pin moves, which is exactly what happened when luna was replaced.
+  const briefModel = {
+    provider: EXPERIMENT_BRIEF_GENERATOR.provider,
+    id: EXPERIMENT_BRIEF_GENERATOR.model,
+    reasoning: true,
+  };
   const prompts = [];
   const generate = experimentSummarizeContextSpan(
     { arm: "pifold", briefGenerator: EXPERIMENT_BRIEF_GENERATOR },
