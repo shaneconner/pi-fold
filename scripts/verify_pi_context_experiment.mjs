@@ -842,6 +842,25 @@ assert(launcher.startsWith("#!/bin/bash -p") &&
   launcher.includes("UnsetEnvironment=NODE_OPTIONS") &&
   launcher.includes("refusing an experiment launch from a dirty worktree"),
 "the launcher must sanitize its environment and refuse a dirty worktree");
+// The unit deadline is DERIVED from the plan's watchdog and sits strictly above it.
+//
+// It was the literal `RuntimeMaxSec=305m`, correct only while the watchdog was 300
+// minutes. Raising full mode to 360 on 2026-08-11 left it behind, and systemd then
+// killed every full run 55 minutes early, during or after the closing phase and always
+// before a seal: no full-mode run has sealed since, including one that had finished all
+// 64 stages. Two literals that must agree and are written in different languages will
+// drift again, so the launcher reads the number rather than restating it, and this
+// asserts that it cannot go back to a literal.
+assert(!/RuntimeMaxSec=[0-9]+(m|s|min)/.test(launcher),
+  "the launcher writes a literal unit deadline again instead of deriving it from the plan");
+assert(/WATCHDOG_MS=.*watchdogMs/.test(launcher) &&
+  launcher.includes("RUNTIME_MAX_SEC=$(( WATCHDOG_MS / 1000 + 300 ))") &&
+  launcher.includes('RuntimeMaxSec=${RUNTIME_MAX_SEC}s'),
+"the launcher must derive its unit deadline from the plan's own watchdog, above that watchdog");
+for (const [name, plan] of Object.entries(EXPERIMENT_MODE_PLANS)) {
+  assert(Number.isFinite(plan.watchdogMs) && plan.watchdogMs > 0,
+    `mode ${name} declares no usable watchdogMs for the launcher to derive a deadline from`);
+}
 assert(staging.includes("worktree\", \"add\", \"--quiet\", \"--detach\"") &&
   staging.includes("expected the pinned"),
 "staging must fetch the pinned commit and check it out as a detached worktree");

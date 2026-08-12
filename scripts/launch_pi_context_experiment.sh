@@ -75,6 +75,22 @@ if [ ! -f "$PLAN" ]; then
 fi
 [ -f "$PLAN" ] || { echo "staging did not produce $PLAN" >&2; exit 1; }
 
+# The unit deadline is DERIVED from the plan's own watchdog, never written here.
+#
+# It used to be the literal 305m, five minutes past a 300-minute watchdog. When the full
+# mode's watchdog was raised to 360 minutes on 2026-08-11 this line was not raised with
+# it, so systemd began killing every full run 55 minutes before its own watchdog could
+# fire, during or after the closing phase and always before a seal. No full-mode run has
+# sealed since, including one that had finished all 64 stages. The supervisor's watchdog
+# is the liveness bound that knows how to stop a run and write its evidence; this
+# deadline exists only to catch a supervisor that has itself stopped answering, so it
+# must sit strictly ABOVE the watchdog and follow it rather than restate it.
+WATCHDOG_MS=$(/usr/bin/node -e 'const p=require(process.argv[1]);const v=p.watchdogMs;if(!Number.isFinite(v)||v<=0){process.exit(1)}process.stdout.write(String(v))' "$PLAN") ||
+  { echo "plan $PLAN declares no usable watchdogMs" >&2; exit 1; }
+# Five minutes past the watchdog, the margin the 300-minute era used, so a supervisor
+# that is still shutting down cleanly is never killed out from under its own seal.
+RUNTIME_MAX_SEC=$(( WATCHDOG_MS / 1000 + 300 ))
+
 UNITS=
 OLD_IFS=$IFS
 IFS=,
@@ -106,7 +122,7 @@ for ARM in $ARMS; do
     --property="UnsetEnvironment=NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS LD_PRELOAD LD_LIBRARY_PATH BASH_ENV ENV NODE_TLS_REJECT_UNAUTHORIZED PI_CODING_AGENT_DIR OPENAI_BASE_URL OPENAI_API_BASE HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR DBUS_SESSION_BUS_ADDRESS GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_CEILING_DIRECTORIES GIT_NAMESPACE" \
     --property="WorkingDirectory=$ROOT" \
     --property="TimeoutStartSec=6h" \
-    --property="RuntimeMaxSec=305m" \
+    --property="RuntimeMaxSec=${RUNTIME_MAX_SEC}s" \
     --property="KillMode=mixed" \
     --property="StandardOutput=append:$LOG" \
     --property="StandardError=append:$LOG" \
