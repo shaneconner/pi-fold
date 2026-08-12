@@ -590,6 +590,21 @@ export const MAX_BRIEF_UPGRADES_IN_FLIGHT = 2;
  * constant, and so is the number of briefs any one boundary can be asked to carry.
  */
 export const MAX_BRIEF_UPGRADE_QUEUE = 4;
+/**
+ * How many spans one generator call may brief at once.
+ *
+ * A commit folds its spans together, so they are briefed together: one call, one answer,
+ * one brief per span. Sending them one at a time is what left the 2026-08-11 rep with 14
+ * model briefs across 87 committed folds, because the ladder makes about a dozen folds per
+ * boundary and the lane could hold four.
+ *
+ * Ten because that is the ladder's own group width (`consolidateAfter`), so a batch is
+ * never asked for more briefs than a consolidation would produce, and the answer stays
+ * bounded at ten brief caps. The batch's SOURCE is bounded by `maxSourceChars`, the same
+ * budget a single span was always held to, so the queue's memory bound does not move: it
+ * is still MAX_BRIEF_UPGRADE_QUEUE requests of at most one source budget each.
+ */
+export const MAX_BRIEF_BATCH_SPANS = 10;
 /** What a peek returns without an explicit widening argument. */
 export const PEEK_DEFAULT_MAX_BYTES = 16_000;
 /** Head share of a truncated peek; the remainder is the tail, where conclusions live. */
@@ -658,7 +673,24 @@ export const ACTIVE_CONTEXT_POLICY = Object.freeze({
   maxChapterTurns: 4,
   maxSourceChars: 200_000,
   maxFoldSourceRefs: 256,
-  maxBriefChars: 1_200,
+  /**
+   * 2,000 (Shane 2026-08-11), raised from 1,200.
+   *
+   * The cap is a limit the generator is told and can be cured against, not a truncation
+   * point, so it should sit where a good brief stops rather than where a cheap one does.
+   * Measured against what a stop-the-world compaction hands forward: this harness's own
+   * native-arm summaries ran 8,000 to 20,000 characters for a whole session, and a folded
+   * window carries about ten briefs, so a per-fold budget of roughly a tenth of a handoff
+   * is 800 to 2,000. The ceiling of that range is the right end to sit at, because ten
+   * briefs at the cap is 20,000 characters against a serving budget measured in hundreds
+   * of thousands, and because the cost of a brief that is too short is a fold the agent
+   * cannot decide whether to expand.
+   *
+   * It binds rarely by design: the run before this one averaged well under 1,200 on the
+   * calls that were not being truncated by a token ceiling. `context.brief` records every
+   * cure so the next run says how often it binds at all.
+   */
+  maxBriefChars: 2_000,
   briefTimeoutMs: 120_000,
   orientationMessages: 2,
   maxOrientationChars: 12_000,

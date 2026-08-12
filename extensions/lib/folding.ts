@@ -514,32 +514,98 @@ export async function generatedBrief(input: {
       input.ctx,
     );
     const brief = typeof result?.brief === "string" ? result.brief.trim() : "";
-    const digest = result?.launchContractDigest;
-    // Attribution is the harness's own wiring, not the generator's judgment, so it is never
-    // handed back to be cured: a summarizer that cannot say which model wrote a brief is
-    // broken in a way a second ask cannot mend.
-    if (typeof result?.provider !== "string" || !result.provider ||
-        typeof result?.model !== "string" || !result.model ||
-        typeof result?.effort !== "string" || !result.effort || result.toolCalls !== 0 ||
-        (digest !== undefined && (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)))) {
-      throw new Error("Model context brief attribution, zero-tool, or digest contract drift");
-    }
+    const provenance = generatorAttribution(result);
     complaint = briefContractComplaint(brief, input.maxBriefChars, input.toolName);
-    if (complaint === null) {
-      return {
-        brief,
-        provenance: {
-          kind: "model",
-          provider: result.provider,
-          model: result.model,
-          effort: result.effort,
-          ...(typeof digest === "string" ? { launchContractDigest: digest } : {}),
-        },
-        cured: attempt > 0,
-      };
-    }
+    if (complaint === null) return { brief, provenance, cured: attempt > 0 };
   }
   throw new Error(`Model context brief usefulness contract drift after one cure: ${complaint}`);
+}
+
+/**
+ * Attribution is the harness's own wiring, not the generator's judgment, so it is never
+ * handed back to be cured: a summarizer that cannot say which model wrote a brief is broken
+ * in a way a second ask cannot mend. Shared by the single and batched paths so the two
+ * cannot drift.
+ */
+function generatorAttribution(result: Record<string, unknown> | null | undefined): BriefProvenance {
+  const digest = result?.launchContractDigest;
+  if (typeof result?.provider !== "string" || !result.provider ||
+      typeof result?.model !== "string" || !result.model ||
+      typeof result?.effort !== "string" || !result.effort || result.toolCalls !== 0 ||
+      (digest !== undefined && (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)))) {
+    throw new Error("Model context brief attribution, zero-tool, or digest contract drift");
+  }
+  return {
+    kind: "model",
+    provider: result.provider,
+    model: result.model,
+    effort: result.effort,
+    ...(typeof digest === "string" ? { launchContractDigest: digest } : {}),
+  };
+}
+
+/**
+ * Many briefs from one call, with one chance to cure the ones that missed.
+ *
+ * The lane used to send one request per fold, two at a time, which meant most folds never
+ * reached a generator at all: the 2026-08-11 rep committed 87 folds and applied 14 model
+ * briefs, the rest keeping the deterministic sentence because the queue was full. A commit
+ * folds its spans together, so they are briefed together, and coverage stops competing with
+ * throughput.
+ *
+ * The cure is per-span and the retry carries only the spans that failed, so one bad brief
+ * does not make the model rewrite eleven good ones. A span still failing after its cure
+ * keeps its deterministic brief and is named in the error, which is the same outcome a
+ * single-span failure has always had; the difference is that its neighbours still land.
+ */
+export async function generatedBriefs(input: {
+  summarize: (request: Record<string, unknown>, ctx?: unknown) => Promise<Record<string, unknown>>;
+  request: Record<string, unknown>;
+  spans: Array<Record<string, unknown>>;
+  ctx?: unknown;
+  maxBriefChars: number;
+  toolName: string;
+}): Promise<{
+  briefs: Array<{ brief: string; provenance: BriefProvenance } | null>;
+  cured: number;
+  complaints: string[];
+}> {
+  const settled = new Array<{ brief: string; provenance: BriefProvenance } | null>(input.spans.length)
+    .fill(null);
+  let pending = input.spans.map((span, index) => ({ span, index }));
+  let cured = 0;
+  let complaints: string[] = [];
+  for (let attempt = 0; attempt < 2 && pending.length; attempt += 1) {
+    const asked = pending;
+    const result = await input.summarize({
+      ...input.request,
+      spans: asked.map((item) => item.span),
+      ...(complaints.length
+        ? {
+          cure: asked.map((item, at) =>
+            `Brief ${at + 1}: ${complaints[at] ?? "did not meet the stated criteria."}`).join(" "),
+        }
+        : {}),
+    }, input.ctx);
+    const provenance = generatorAttribution(result);
+    const written = Array.isArray(result?.briefs) ? result.briefs : [];
+    const failed: typeof pending = [];
+    const next: string[] = [];
+    for (let at = 0; at < asked.length; at += 1) {
+      const brief = typeof written[at] === "string" ? (written[at] as string).trim() : "";
+      const complaint = briefContractComplaint(brief, input.maxBriefChars, input.toolName);
+      if (complaint === null) {
+        settled[asked[at].index] = { brief, provenance };
+        if (attempt > 0) cured += 1;
+        continue;
+      }
+      failed.push(asked[at]);
+      next.push(complaint);
+    }
+    pending = failed;
+    complaints = next;
+  }
+  return { briefs: settled, cured, complaints };
 }
 
 export async function prepareFold(input: {

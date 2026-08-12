@@ -67,7 +67,90 @@ function groupCoverageRule(children) {
     "one concrete clause per child over a full account of the first few.";
 }
 
+/** The marker a batched answer separates its briefs with. On its own line, so a brief that
+ * happens to mention one cannot split itself. */
+const BATCH_MARKER = (ordinal) => `=== BRIEF ${ordinal} ===`;
+const BATCH_MARKER_PATTERN = /^===[ \t]*BRIEF[ \t]+(\d+)[ \t]*===[ \t]*$/;
+
+/**
+ * Many spans, one call.
+ *
+ * A commit folds a dozen spans at once and the lane used to send a dozen separate requests,
+ * two at a time, so most folds never reached a generator at all: rep 2 of sol-20260811
+ * committed 87 folds and applied 14 model briefs. Batching is not only cheaper per brief,
+ * it is what makes coverage reachable. It also buys something a single-span call cannot
+ * have: the spans of one commit are consecutive, so each one is the orientation for the
+ * next, and a brief can say this continues the work two spans back because the model can
+ * see that it does. Orientation is therefore given ONCE around the whole run rather than
+ * per span, which is both smaller and truer.
+ */
+function batchBriefRequestPrompt(request) {
+  const spans = request.spans;
+  const bodies = spans.map((span, at) => [
+    `SPAN ${at + 1} OF ${spans.length}`,
+    ...(Number.isInteger(span.children) && span.children > 1
+      ? [groupCoverageRule(span.children)]
+      : []),
+    span.sourceText,
+  ].join("\n"));
+  return [
+    `Write ${spans.length} factual briefs, one for each of the ${spans.length} numbered ` +
+    "SPANS below. Each brief covers its own span and nothing else, and each is at most " +
+    `${request.maxBriefChars} characters. A brief does two jobs at once: it summarizes what ` +
+    "its span contains, and it tells an agent what it would get back by expanding or " +
+    "peeking that fold later, so the agent can decide whether to dig back in. Once a span " +
+    "is folded its brief is the only visible trace, so name the concrete things inside it: " +
+    "files, identifiers, decisions, results, errors. Do not describe a span abstractly. " +
+    "The spans are consecutive, so where one continues the work of an earlier one you may " +
+    "say so by number; do not let that replace naming what is actually in the span. The " +
+    "BEFORE and AFTER sections are orientation only: they say where the whole run of spans " +
+    "sits in the larger conversation, and their content belongs to no brief. Use no " +
+    "preamble and no Markdown headers.\n\n" +
+    `Answer with exactly ${spans.length} sections and nothing else. Begin each section ` +
+    `with its marker alone on a line: ${BATCH_MARKER(1)} then the first brief, ` +
+    `${BATCH_MARKER(2)} then the second, and so on through ` +
+    `${BATCH_MARKER(spans.length)}.`,
+    orientationBlock("BEFORE THE SPANS (orientation only, do not brief)", request.beforeText),
+    bodies.join("\n\n"),
+    orientationBlock("AFTER THE SPANS (orientation only, do not brief)", request.afterText),
+    ...(typeof request.cure === "string" && request.cure
+      ? [`YOUR PREVIOUS ANSWER DID NOT MEET THE CRITERIA. ${request.cure}\n` +
+        `Write all ${spans.length} briefs again, each under its own marker.`]
+      : []),
+  ].join("\n\n");
+}
+
+/**
+ * Split a batched answer back into one brief per span, by marker.
+ *
+ * Ordinals rather than fold ids: an id is 24 hex characters the model has no reason to
+ * reproduce faithfully, and a single transposed character would attach a brief to the wrong
+ * span silently. A position it can count. Anything before the first marker is preamble the
+ * request asked for none of, and it is dropped rather than prepended to brief one.
+ */
+function splitBatchedBriefs(text, expected) {
+  const briefs = new Array(expected).fill("");
+  let at = null;
+  let buffer = [];
+  const flush = () => {
+    if (at !== null && at >= 0 && at < expected) briefs[at] = buffer.join("\n").trim();
+    buffer = [];
+  };
+  for (const line of String(text).split(/\r?\n/)) {
+    const marked = BATCH_MARKER_PATTERN.exec(line.trim());
+    if (marked) {
+      flush();
+      at = Number(marked[1]) - 1;
+      continue;
+    }
+    if (at !== null) buffer.push(line);
+  }
+  flush();
+  return briefs;
+}
+
 function briefRequestPrompt(request) {
+  if (Array.isArray(request.spans)) return batchBriefRequestPrompt(request);
   const children = Number.isInteger(request.children) && request.children > 1
     ? request.children
     : 0;
@@ -112,8 +195,14 @@ export function createSummarizeContextSpan(summarizer = "session", loadHostModul
   };
 
   return async (request, ctx) => {
-    if (typeof request?.sourceText !== "string" ||
-        !Number.isInteger(request?.maxBriefChars) || request.maxBriefChars < 1) {
+    const batch = Array.isArray(request?.spans) ? request.spans : null;
+    if (batch && (!batch.length || !batch.every((span) => typeof span?.sourceText === "string"))) {
+      throw new Error("Summarizer batch requires a nonempty spans array, each with sourceText");
+    }
+    if (!batch && typeof request?.sourceText !== "string") {
+      throw new Error("Summarizer request requires sourceText and a positive maxBriefChars integer");
+    }
+    if (!Number.isInteger(request?.maxBriefChars) || request.maxBriefChars < 1) {
       throw new Error("Summarizer request requires sourceText and a positive maxBriefChars integer");
     }
 
@@ -180,13 +269,23 @@ export function createSummarizeContextSpan(summarizer = "session", loadHostModul
         ...(Number.isFinite(response.usage?.cost?.total) ? { costTotal: response.usage.cost.total } : {}),
       }
       : null;
-    return {
-      brief,
+    const attribution = {
       provider: model.provider,
       model: model.id,
       effort,
       toolCalls: 0,
       ...(usage && Object.keys(usage).length ? { usage } : {}),
     };
+    // A batch answers with one brief per span, split by marker and returned positionally.
+    // A span whose marker never appeared comes back empty rather than shifted into a
+    // neighbour's place: the caller holds each brief to the same contract either way, so an
+    // empty one is a complaint about that span alone and the rest still land.
+    if (batch) {
+      return {
+        briefs: splitBatchedBriefs(brief, batch.length),
+        ...attribution,
+      };
+    }
+    return { brief, ...attribution };
   };
 }

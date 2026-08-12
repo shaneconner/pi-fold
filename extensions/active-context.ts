@@ -24,7 +24,7 @@ import {
   consolidationSourceText,
   descendantIds,
   encodedFoldSource,
-  generatedBrief,
+  generatedBriefs,
   foldCandidatesDetail,
   foldTreeDetail,
   peekFoldSource,
@@ -112,6 +112,7 @@ import {
   servingBudgetTokens,
   ESTIMATED_BYTES_PER_TOKEN,
   entryTypeNamespace,
+  MAX_BRIEF_BATCH_SPANS,
   MAX_BRIEF_UPGRADE_QUEUE,
   MAX_BRIEF_UPGRADES_IN_FLIGHT,
   MAX_FOLD_SPAN_CHARS,
@@ -483,10 +484,18 @@ export function registerActiveContext(pi: any, options: {
    * wire keeps one shape instead of carrying work in progress.
    */
   const upgrades = {
-    /** Folds committed deterministic, holding the exact source their brief will cover. */
-    queue: [] as Array<{ foldId: string; sourceSha256: string; request: Record<string, unknown> }>,
     /**
-     * Generator calls in flight, keyed by the fold each one briefs, bounded by a constant
+     * BATCHES of folds committed deterministic, each holding the exact source its briefs
+     * will cover. One batch is one generator call: a commit folds its spans together, so
+     * they are briefed together, and the spans of one batch orient each other. Sending them
+     * one at a time is what left the 2026-08-11 rep with 14 model briefs across 87 folds.
+     */
+    queue: [] as Array<{
+      members: Array<{ foldId: string; sourceSha256: string }>;
+      request: Record<string, unknown>;
+    }>,
+    /**
+     * Generator calls in flight, keyed by every fold each one briefs, bounded by a constant
      * and cancel-safe on session change or shutdown. Keyed rather than counted because
      * the queue has to know a fold is already being briefed.
      */
@@ -505,6 +514,13 @@ export function registerActiveContext(pi: any, options: {
     deferred: new Set<string>(),
     /** Failures since the last commit record carried them, so none of this is silent. */
     failures: 0,
+    /**
+     * Briefs that took a second ask before they met the contract. Counted because the cure
+     * is the mechanism that lets the brief cap be a real limit rather than a truncation
+     * point, so how often it fires is how we learn whether the cap is set anywhere near
+     * right (Shane 2026-08-11).
+     */
+    cures: 0,
     lastError: null as string | null,
   };
 
@@ -777,16 +793,51 @@ export function registerActiveContext(pi: any, options: {
     ? async (request: Record<string, unknown>, summarizerCtx: unknown): Promise<Record<string, unknown>> => {
       const startedAt = Date.now();
       const queuedAt = typeof request.queuedAtMs === "number" ? request.queuedAtMs : null;
+      const spans = Array.isArray(request.spans)
+        ? request.spans as Array<Record<string, unknown>>
+        : null;
       const sourceText = typeof request.sourceText === "string" ? request.sourceText : "";
+      // A span is a CONSOLIDATION when it is a group of folds, and an automatic fold
+      // otherwise. Both kinds are counted and both kinds' source is measured, because a
+      // call can carry a mix and the honest way to attribute its tokens across kinds is by
+      // the share of source each kind contributed, never by pretending the call was one
+      // kind (Shane 2026-08-11: track cures and tokens by fold type).
+      const groupSpan = (span: Record<string, unknown>): boolean =>
+        Number.isInteger(span.children) && (span.children as number) > 1;
+      const charsOf = (span: Record<string, unknown>): number =>
+        typeof span.sourceText === "string" ? span.sourceText.length : 0;
+      const kindCounts = spans
+        ? {
+          spans: spans.length,
+          group_spans: spans.filter(groupSpan).length,
+          leaf_spans: spans.filter((span) => !groupSpan(span)).length,
+          group_source_chars: spans.filter(groupSpan).reduce((sum, span) => sum + charsOf(span), 0),
+          leaf_source_chars: spans.filter((span) => !groupSpan(span))
+            .reduce((sum, span) => sum + charsOf(span), 0),
+          fold_ids: spans.map((span) => typeof span.candidateId === "string" ? span.candidateId : ""),
+        }
+        : {
+          spans: 1,
+          group_spans: groupSpan(request) ? 1 : 0,
+          leaf_spans: groupSpan(request) ? 0 : 1,
+          group_source_chars: groupSpan(request) ? sourceText.length : 0,
+          leaf_source_chars: groupSpan(request) ? 0 : sourceText.length,
+        };
       const base = {
         fold_id: typeof request.candidateId === "string" ? request.candidateId : "",
-        source_chars: sourceText.length,
+        source_chars: spans ? spans.reduce((sum, span) => sum + charsOf(span), 0) : sourceText.length,
         source_sha256: typeof request.sourceSha256 === "string" ? request.sourceSha256 : sha256Text(sourceText),
+        ...kindCounts,
+        // The second ask, not the first. How often this fires is how we learn whether the
+        // brief cap is anywhere near right, so it is a field rather than an inference.
+        cure: typeof request.cure === "string" && request.cure.length > 0,
         ...(queuedAt === null ? {} : { queued_ms: Math.max(0, startedAt - queuedAt) }),
       };
       try {
         const result = await options.summarizeContextSpan!(request, summarizerCtx);
-        const brief = typeof result?.brief === "string" ? result.brief.trim() : "";
+        const written = Array.isArray(result?.briefs)
+          ? (result.briefs as unknown[]).map((item) => typeof item === "string" ? item.trim() : "")
+          : [typeof result?.brief === "string" ? result.brief.trim() : ""];
         emit("context.brief", {
           ...base,
           outcome: "ok",
@@ -794,8 +845,11 @@ export function registerActiveContext(pi: any, options: {
           provider: typeof result?.provider === "string" ? result.provider : "",
           model: typeof result?.model === "string" ? result.model : "",
           effort: typeof result?.effort === "string" ? result.effort : "",
-          brief_chars: brief.length,
-          brief_sha256: brief ? sha256Text(brief) : "",
+          brief_chars: written.reduce((sum, item) => sum + item.length, 0),
+          // Per span, so a batch where one brief came back empty is visible as that rather
+          // than as a slightly short total.
+          brief_chars_each: written.map((item) => item.length),
+          brief_sha256: written.length === 1 && written[0] ? sha256Text(written[0]) : "",
           // Absent when the provider reported none. Never defaulted: a call whose cost we
           // do not know and a call that cost nothing are different facts.
           usage: result?.usage && typeof result.usage === "object" ? clone(result.usage) : null,
@@ -2395,16 +2449,26 @@ export function registerActiveContext(pi: any, options: {
     foldIds: readonly string[],
   ): void => {
     if (!observedSummarize || !persistence.state) return;
-    const pending = (id: string): boolean => upgrades.running.has(id) ||
-      upgrades.queue.some((entry) => entry.foldId === id) ||
+    const queued = (id: string): boolean =>
+      upgrades.queue.some((entry) => entry.members.some((member) => member.foldId === id));
+    const pending = (id: string): boolean => upgrades.running.has(id) || queued(id) ||
       upgrades.ready.some((entry) => entry.foldId === id) ||
       upgrades.deferred.has(id);
+    // Gathered before any packing, because a batch is a property of the whole commit and
+    // not of the fold that happens to be read first.
+    const gathered: Array<{
+      foldId: string;
+      sourceSha256: string;
+      refs: EvidenceRef[];
+      span: Record<string, unknown>;
+      chars: number;
+      parent: boolean;
+    }> = [];
     // Parents that waited are considered first and at every boundary, so the wait ends as
     // soon as the children settle rather than whenever the ladder happens to build another.
     for (const foldId of [...upgrades.deferred, ...foldIds]) {
       const full = upgrades.queue.length >= MAX_BRIEF_UPGRADE_QUEUE;
-      if (upgrades.failed.has(foldId) || upgrades.running.has(foldId) ||
-          upgrades.queue.some((entry) => entry.foldId === foldId) ||
+      if (upgrades.failed.has(foldId) || upgrades.running.has(foldId) || queued(foldId) ||
           upgrades.ready.some((entry) => entry.foldId === foldId)) continue;
       const fold = persistence.state.folds.find((item) => item.id === foldId);
       // A supplied brief is agent judgment and outranks the generator; a model brief is
@@ -2439,28 +2503,24 @@ export function registerActiveContext(pi: any, options: {
         const sourceText = parent
           ? consolidationSourceText(snapshot, persistence.state, fold.parts)
           : encodedFoldSource(snapshot, stateBeforeCommit, fold.parts, fold.kind);
-        if (bytes(sourceText) > snapshot.policy.maxSourceChars) continue;
-        const orientation = boundedOrientation(snapshot, refs);
-        upgrades.queue.push({
+        const chars = bytes(sourceText);
+        if (chars > snapshot.policy.maxSourceChars) continue;
+        gathered.push({
           foldId,
           sourceSha256: fold.sourceSha256,
-          request: {
+          refs,
+          chars,
+          parent,
+          span: {
             candidateId: fold.id,
             sourceRefs: clone(refs),
             sourceText,
             sourceSha256: sha256Text(sourceText),
-            children: parent ? childFoldIds(fold).length : 0,
-            beforeRefs: clone(orientation.beforeRefs),
-            beforeText: orientation.beforeText,
-            beforeSha256: sha256Text(orientation.beforeText),
-            afterRefs: clone(orientation.afterRefs),
-            afterText: orientation.afterText,
-            afterSha256: sha256Text(orientation.afterText),
-            maxBriefChars: snapshot.policy.maxBriefChars,
-            // Read by the observed wrapper and by nothing else, so a queue that backs up
-            // is visible as waiting rather than as a slow generator. The summarizer
-            // contract is on the RESULT, so an extra request field reaches it harmlessly.
-            queuedAtMs: Date.now(),
+            // What the PAYLOAD holds, which is one entry per part: a consolidation can
+            // carry absorbed raw evidence beside its folded children, and the coverage
+            // rule counts the things the model is actually shown. Counting only the fold
+            // children told it to write fewer clauses than the payload has subjects.
+            children: parent ? fold.parts.length : 0,
           },
         });
       } catch (error) {
@@ -2473,6 +2533,53 @@ export function registerActiveContext(pi: any, options: {
         );
       }
     }
+    // Pack the commit's spans into as few calls as the source budget allows. Order is the
+    // order they were gathered, which is span order within the commit, so the numbered
+    // spans a batch shows the generator run the way the session did and one really is the
+    // orientation for the next.
+    for (let at = 0; at < gathered.length;) {
+      if (upgrades.queue.length >= MAX_BRIEF_UPGRADE_QUEUE) {
+        // No room for another call. A parent goes back to waiting, because its children are
+        // folds and its source will still be there whenever the lane frees up. A leaf
+        // cannot wait: its source is exact active evidence at THIS commit and a placeholder
+        // after it, so it keeps the deterministic brief it committed with.
+        for (const item of gathered.slice(at)) {
+          if (item.parent) upgrades.deferred.add(item.foldId);
+        }
+        break;
+      }
+      const members: typeof gathered = [];
+      let chars = 0;
+      while (at < gathered.length && members.length < MAX_BRIEF_BATCH_SPANS &&
+             (!members.length || chars + gathered[at].chars <= snapshot.policy.maxSourceChars)) {
+        chars += gathered[at].chars;
+        members.push(gathered[at]);
+        at += 1;
+      }
+      // Orientation is the run's, not each span's: where this batch of consecutive spans
+      // sits in the wider conversation. Taken from the ends rather than from the union,
+      // because a commit can fold spans with protected material still raw between them and
+      // the union of those refs is not one contiguous range.
+      const before = boundedOrientation(snapshot, members[0].refs);
+      const after = boundedOrientation(snapshot, members[members.length - 1].refs);
+      upgrades.queue.push({
+        members: members.map((item) => ({ foldId: item.foldId, sourceSha256: item.sourceSha256 })),
+        request: {
+          spans: members.map((item) => item.span),
+          beforeRefs: clone(before.beforeRefs),
+          beforeText: before.beforeText,
+          beforeSha256: sha256Text(before.beforeText),
+          afterRefs: clone(after.afterRefs),
+          afterText: after.afterText,
+          afterSha256: sha256Text(after.afterText),
+          maxBriefChars: snapshot.policy.maxBriefChars,
+          // Read by the observed wrapper and by nothing else, so a queue that backs up is
+          // visible as waiting rather than as a slow generator. The summarizer contract is
+          // on the RESULT, so an extra request field reaches it harmlessly.
+          queuedAtMs: Date.now(),
+        },
+      });
+    }
   };
 
   /**
@@ -2484,12 +2591,18 @@ export function registerActiveContext(pi: any, options: {
    */
   const startBriefUpgrade = (snapshot: ActiveContextSnapshot, ctx: any): boolean => {
     const summarize = observedSummarize;
+    // In CALLS, not folds. `running` is keyed by every fold a call briefs so the queue can
+    // ask whether one is already being written, so its size is a fold count and reading it
+    // as the in-flight bound would stop the lane after a single batch.
+    const inFlight = new Set(upgrades.running.values()).size;
     if (!summarize || lifecycle.shuttingDown || !upgrades.queue.length ||
-        upgrades.running.size >= MAX_BRIEF_UPGRADES_IN_FLIGHT) return false;
+        inFlight >= MAX_BRIEF_UPGRADES_IN_FLIGHT) return false;
     const entry = upgrades.queue.shift()!;
     const controller = new AbortController();
     const slot = { controller, promise: Promise.resolve() };
-    upgrades.running.set(entry.foldId, slot);
+    // Keyed by EVERY fold the call briefs, so the queue's "already being briefed" check and
+    // the in-flight bound both read one call as the one thing it is.
+    for (const member of entry.members) upgrades.running.set(member.foldId, slot);
     const capturedSessionId = snapshot.sessionId;
     const capturedGeneration = lifecycle.generation;
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -2504,9 +2617,10 @@ export function registerActiveContext(pi: any, options: {
       // function: an upgrade with its own copy of the check would drift from the fold
       // path's, and the cure a missed criterion earns belongs to both or to neither.
       const generated = await Promise.race([
-        generatedBrief({
+        generatedBriefs({
           summarize: (request, callCtx) => summarize({ ...request, signal: controller.signal }, callCtx),
           request: entry.request,
+          spans: entry.request.spans as Array<Record<string, unknown>>,
           ctx,
           maxBriefChars: snapshot.policy.maxBriefChars,
           toolName: snapshot.toolName,
@@ -2515,26 +2629,45 @@ export function registerActiveContext(pi: any, options: {
       ]);
       if (controller.signal.aborted ||
           !sessionIdentityStillValid(ctx, capturedSessionId, capturedGeneration)) return;
-      upgrades.ready.push({
-        foldId: entry.foldId,
-        sourceSha256: entry.sourceSha256,
-        brief: generated.brief,
-        provenance: generated.provenance,
+      // Per span, not per call. A batch is one request and many answers, so one span that
+      // could not be cured is one fold keeping its deterministic brief while its neighbours
+      // take theirs; the whole call failing on it would be the coverage problem batching
+      // exists to solve, wearing a different hat.
+      entry.members.forEach((member, at) => {
+        const written = generated.briefs[at];
+        if (!written) {
+          upgrades.failed.add(member.foldId);
+          upgrades.failures += 1;
+          upgrades.lastError = boundReceiptText(
+            `span ${at + 1} of ${entry.members.length}: ${generated.complaints[0] ?? "no brief"}`,
+            240, "brief upgrade",
+          );
+          return;
+        }
+        upgrades.ready.push({
+          foldId: member.foldId,
+          sourceSha256: member.sourceSha256,
+          brief: written.brief,
+          provenance: written.provenance,
+        });
       });
+      upgrades.cures += generated.cured;
     })().catch((error) => {
       if (controller.signal.aborted) return;
-      // LOUD, and once. The fold keeps its deterministic brief, the failure is counted
-      // onto the next commit record, and the same fold is never sent again: a generator
-      // that fails on a span fails on it again, and a retry loop would spend the
-      // session's provider calls proving that.
-      upgrades.failed.add(entry.foldId);
+      // LOUD, and once, for every fold the call carried. They keep their deterministic
+      // briefs, the failure is counted onto the next commit record, and none of them is
+      // ever sent again: a generator that fails on a span fails on it again, and a retry
+      // loop would spend the session's provider calls proving that.
+      for (const member of entry.members) upgrades.failed.add(member.foldId);
       upgrades.failures += 1;
       upgrades.lastError = boundReceiptText(
         error instanceof Error ? error.message : String(error), 240, "brief upgrade",
       );
     }).finally(() => {
       clearTimeout(timeout);
-      if (upgrades.running.get(entry.foldId) === slot) upgrades.running.delete(entry.foldId);
+      for (const member of entry.members) {
+        if (upgrades.running.get(member.foldId) === slot) upgrades.running.delete(member.foldId);
+      }
       // A finished call starts the next one, so the drain rate is the generator's latency
       // rather than however often a ladder pass happens to look. Still between
       // boundaries: nothing here touches the projection, and the generation check is the
@@ -3035,7 +3168,9 @@ export function registerActiveContext(pi: any, options: {
     const upgradedFolds = applyBriefUpgrades();
     const upgradeFailures = upgrades.failures;
     const upgradeError = upgrades.lastError;
+    const upgradeCures = upgrades.cures;
     upgrades.failures = 0;
+    upgrades.cures = 0;
     upgrades.lastError = null;
     const bytesAfter = bytes(projectActiveContext(snapshot, persistence.state));
     const freedBytes = Math.max(0, bytesBefore - bytesAfter);
@@ -3081,11 +3216,22 @@ export function registerActiveContext(pi: any, options: {
       brief_upgrades: upgradedFolds.length,
       brief_upgrade_ids: upgradedFolds.join(","),
       brief_upgrade_failures: upgradeFailures,
+      // Briefs that needed a second ask before they met the contract. Beside the failures
+      // rather than inside them: a cured brief is a brief that landed, and the two together
+      // are how the brief cap gets judged against something other than intuition.
+      brief_upgrade_cures: upgradeCures,
       brief_upgrade_error: upgradeError,
-      // Everything still owed to a fold: queued, in flight, and (always zero once the
+      // Everything still owed to a FOLD: queued, in flight, and (always zero once the
       // wedge above ran) written but uncarried. In flight is counted because the lane
-      // now holds several calls open and work nobody can see is work nobody bounds.
-      brief_upgrades_waiting: upgrades.ready.length + upgrades.queue.length + upgrades.running.size,
+      // holds several calls open and work nobody can see is work nobody bounds. Counted in
+      // folds rather than calls because a call now carries a whole commit's spans, and the
+      // question this answers is how many folds are still reading deterministic.
+      brief_upgrades_waiting: upgrades.ready.length + upgrades.running.size +
+        upgrades.queue.reduce((total, entry) => total + entry.members.length, 0),
+      // The same work in the unit the lane's two constants actually bound: calls, queued
+      // plus in flight. Reported beside the fold count so a backed-up lane cannot read as
+      // a busy one, or the reverse.
+      brief_upgrade_calls: upgrades.queue.length + new Set(upgrades.running.values()).size,
       freed_bytes: freedBytes,
       freed_tokens: estimatedTokens(freedBytes),
       rewrite_tokens: accounting.rewriteTokens,

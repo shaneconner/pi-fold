@@ -2542,7 +2542,10 @@ async function gateSummarizerOption() {
   // or empty is the runtime's business; the labels are always there to be filled.
   const runtimeBriefPrompt = completionRequest.request.messages[0].content;
   for (const clause of [
-    "Write a factual brief of at most 1200 characters covering the SPAN TO BRIEF below",
+    // Read from the policy rather than typed, so the gate pins that the cap REACHES the
+    // model rather than pinning one particular cap.
+    `Write a factual brief of at most ${context.ACTIVE_CONTEXT_POLICY.maxBriefChars} ` +
+      "characters covering the SPAN TO BRIEF below",
     "expanding or peeking this fold later",
     "BEFORE THE SPAN (orientation only, do not brief)",
     "SPAN TO BRIEF:",
@@ -3614,8 +3617,51 @@ async function gateEpochMarkCommit() {
  * fold. Gates that count preparations count them with this, so the upgrade lane adding
  * a caller does not read as a preparation nobody asked for.
  */
+/**
+ * An upgrade-lane call is one whose subject is a fold that already exists; a warm
+ * preparation names a candidate that does not. Both request shapes are recognised because
+ * the lane batches: one call carries many spans, each naming its own committed fold, while
+ * `prepareFold` still asks about one candidate at a time.
+ */
 function isBriefUpgradeRequest(request) {
-  return typeof request?.candidateId === "string" && request.candidateId.startsWith("fold_");
+  const upgrades = (id) => typeof id === "string" && id.startsWith("fold_");
+  if (Array.isArray(request?.spans)) {
+    return request.spans.length > 0 && request.spans.every((span) => upgrades(span?.candidateId));
+  }
+  return upgrades(request?.candidateId);
+}
+
+/** Every fold a request names, whichever shape it arrived in. */
+function requestFoldIds(request) {
+  return Array.isArray(request?.spans)
+    ? request.spans.map((span) => span?.candidateId)
+    : [request?.candidateId];
+}
+
+/**
+ * The spans a request carries. A batch states them; a single-span request IS one, so it is
+ * read as a one-span batch and every caller can ask the same question of both.
+ */
+function requestSpans(request) {
+  return Array.isArray(request?.spans) ? request.spans : [request];
+}
+
+/**
+ * A generator stub that answers either shape with the same words: one brief for a single
+ * span, one brief per span for a batch. `write` is given a fold id and returns its text.
+ */
+function briefAnswer(request, write) {
+  const attribution = {
+    provider: "openai-codex",
+    model: "gpt-5.6-luna",
+    effort: "medium",
+    toolCalls: 0,
+    launchContractDigest: "b".repeat(64),
+  };
+  const ids = requestFoldIds(request);
+  return Array.isArray(request?.spans)
+    ? { briefs: ids.map((id) => write(id)), ...attribution }
+    : { brief: write(ids[0]), ...attribution };
 }
 
 function bytesOf(value) {
@@ -10744,14 +10790,7 @@ async function gateBriefUpgradesRideTheBoundary() {
   const runtime = makeRuntime(built, {
     summarizeContextSpan: async (request) => {
       requests.push(request);
-      return {
-        brief: upgradeText(request.candidateId),
-        provider: "openai-codex",
-        model: "gpt-5.6-luna",
-        effort: "medium",
-        toolCalls: 0,
-        launchContractDigest: "b".repeat(64),
-      };
+      return briefAnswer(request, upgradeText);
     },
   });
   await startRuntime(runtime);
@@ -10779,13 +10818,19 @@ async function gateBriefUpgradesRideTheBoundary() {
   // The generator was handed the request contract, over the fold's own source.
   await settle();
   assert(requests.length, "No brief was requested for a fold committed deterministic");
-  const request = requests.find((item) => item.candidateId === target.id);
+  const request = requests.find((item) => requestFoldIds(item).includes(target.id));
   assert(request, `No brief request named the committed fold ${target.id}`);
-  for (const field of ["sourceText", "sourceSha256", "beforeText", "beforeSha256",
-    "afterText", "afterSha256", "maxBriefChars", "signal"]) {
+  // Orientation, the cap and the signal belong to the CALL; the source belongs to each
+  // span, because one call now briefs the whole commit.
+  for (const field of ["beforeText", "beforeSha256", "afterText", "afterSha256",
+    "maxBriefChars", "signal"]) {
     assert(request[field] !== undefined, `The upgrade request omitted ${field}`);
   }
-  assert.equal(request.sourceSha256, json.sha256Text(request.sourceText));
+  const targetSpan = request.spans.find((span) => span.candidateId === target.id);
+  for (const field of ["sourceText", "sourceSha256", "sourceRefs"]) {
+    assert(targetSpan[field] !== undefined, `The upgraded span omitted ${field}`);
+  }
+  assert.equal(targetSpan.sourceSha256, json.sha256Text(targetSpan.sourceText));
   assert.equal(request.maxBriefChars, context.ACTIVE_CONTEXT_POLICY.maxBriefChars);
 
   // BETWEEN THE BOUNDARIES: the brief is written and waiting, and not one byte moved.
@@ -10811,11 +10856,17 @@ async function gateBriefUpgradesRideTheBoundary() {
   assert(commits.length, "The second boundary never committed");
   const carrier = commits.find((record) => record.brief_upgrades > 0);
   assert(carrier, "No commit record reported the upgrade it carried");
-  // The ceiling on one boundary is the work the lane can have outstanding, a queue's
-  // worth waiting plus the calls in flight, because every finished brief lands.
-  const outstandingBound = context.MAX_BRIEF_UPGRADE_QUEUE + context.MAX_BRIEF_UPGRADES_IN_FLIGHT;
+  // The ceiling on one boundary is the work the lane can have outstanding, a queue's worth
+  // waiting plus the calls in flight, because every finished brief lands. In FOLDS, since
+  // that is what applies: each of those calls carries up to a batch width of spans.
+  const outstandingCalls = context.MAX_BRIEF_UPGRADE_QUEUE + context.MAX_BRIEF_UPGRADES_IN_FLIGHT;
+  const outstandingBound = outstandingCalls * context.MAX_BRIEF_BATCH_SPANS;
   assert(carrier.brief_upgrades <= outstandingBound,
     "A single boundary applied more upgrades than the lane can have outstanding");
+  // The same bound in the unit the constants are written in, so a lane that quietly started
+  // more calls than it may cannot hide inside a generous fold count.
+  assert(carrier.brief_upgrade_calls <= outstandingCalls,
+    "The lane had more calls queued and in flight than its constants allow");
   assert(carrier.brief_upgrade_ids.split(",").includes(target.id),
     "The commit record did not name the fold it upgraded");
   const afterSecond = materialized(runtime);
@@ -10841,7 +10892,7 @@ async function gateBriefUpgradesRideTheBoundary() {
   assert(context.foldBrief(suppliedAfter, afterSecond).startsWith(suppliedBrief),
     "The agent's own words were rewritten");
   assert.equal(context.foldBrief(suppliedAfter, afterSecond).includes(upgradeText(supplied[0].id)), false);
-  assert.equal(requests.some((item) => item.candidateId === supplied[0].id), false,
+  assert.equal(requests.some((item) => requestFoldIds(item).includes(supplied[0].id)), false,
     "A supplied brief was sent to the generator");
 
   // THE FAILURE LEG. The deterministic brief stands, and the stream says why.
@@ -10895,7 +10946,7 @@ async function gateBriefUpgradesRideTheBoundary() {
       open += 1;
       peakOpen = Math.max(peakOpen, open);
       const call = {
-        candidateId: request.candidateId,
+        foldIds: requestFoldIds(request),
         openAtStart: open,
         startedWithoutPass: passesFrozen,
         release: null,
@@ -10904,13 +10955,7 @@ async function gateBriefUpgradesRideTheBoundary() {
       held.push(call);
       await completion;
       open -= 1;
-      return {
-        brief: upgradeText(request.candidateId),
-        provider: "openai-codex",
-        model: "gpt-5.6-luna",
-        effort: "medium",
-        toolCalls: 0,
-      };
+      return briefAnswer(request, upgradeText);
     },
   });
   await startRuntime(slow);
@@ -10973,11 +11018,16 @@ async function gateBriefUpgradesRideTheBoundary() {
   assert.equal(carried.length, drainCarrier.brief_upgrades);
   assert(drainCarrier.brief_upgrades <= outstandingBound,
     "A drained boundary carried more upgrades than the lane can have outstanding");
-  const beyondOneSlot = carried.filter((id) => {
-    const call = held.find((item) => item.candidateId === id);
-    return call && (call.openAtStart > 1 || call.startedWithoutPass);
-  });
-  assert(beyondOneSlot.length >= carried.length - 1,
+  // In CALLS, because one call now carries a whole commit's spans: the claim is that the
+  // boundary's briefs came from more than one call, and that every call past the first was
+  // started by the lane's own concurrency or its own drain rather than by a ladder pass.
+  // Counting folds here would credit a single batch with proving concurrency it never had.
+  const contributingCalls = held.filter((call) => call.foldIds.some((id) => carried.includes(id)));
+  assert(contributingCalls.length > 1,
+    "Every brief the boundary carried came from one call, so concurrency was never exercised");
+  const beyondOneSlot = contributingCalls.filter((call) =>
+    call.openAtStart > 1 || call.startedWithoutPass);
+  assert(beyondOneSlot.length >= contributingCalls.length - 1,
     "The boundary's extra upgrades came from calls a one-slot lane could also have made");
   const drainedState = materialized(slow);
   for (const id of carried) {
@@ -11010,6 +11060,144 @@ async function gateBriefUpgradesRideTheBoundary() {
     projectionStableBetweenBoundaries: true,
     suppliedUntouched: true,
     failureIsLoud: loud.brief_upgrade_failures,
+  };
+}
+
+/**
+ * A COMMIT'S SPANS ARE BRIEFED IN ONE CALL.
+ *
+ * The lane used to ask about one fold per request, two at a time, against a ladder that
+ * makes about a dozen folds per boundary. Rep 2 of sol-20260811 is what that arithmetic
+ * produces over a real run: 87 folds committed, 14 model briefs applied, the other 84
+ * percent keeping the deterministic sentence not because a generator judged them but
+ * because the queue was full. Batching is the fix, and it buys a second thing besides
+ * throughput: the spans of one commit are consecutive, so each is orientation for the next
+ * and a brief can say which earlier span it continues.
+ *
+ * What this gate holds:
+ *   - one commit produces ONE call carrying every span it folded, not one call per fold;
+ *   - each span gets its own brief, matched by POSITION, and a shuffled or partial answer
+ *     never silently attaches a brief to the wrong fold;
+ *   - a cure re-asks only the spans that missed, and one span that cannot be cured leaves
+ *     its neighbours' briefs standing;
+ *   - the batch's source stays inside the same budget one span was always held to.
+ */
+async function gateOneCallPerCommit() {
+  const shape = { turns: 16, resultChars: 10_000, contextWindow: 100_000, toolName: "bash" };
+  const calls = [];
+  const built = makeFixture(shape);
+  const runtime = makeRuntime(built, {
+    summarizeContextSpan: async (request) => {
+      calls.push(request);
+      return briefAnswer(request, (id) => `Batched brief naming ${id} and the bash result it folded.`);
+    },
+  });
+  await startRuntime(runtime);
+  await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  await settle();
+
+  const upgradeCalls = calls.filter(isBriefUpgradeRequest);
+  const briefedSpans = upgradeCalls.flatMap((call) => call.spans);
+  const committed = materialized(runtime).folds
+    .filter((fold) => fold.provenance.kind === "deterministic")
+    .map((fold) => fold.id);
+  // ANTI-VACUITY. The claim is that a commit's folds cost FEWER calls than folds, so the
+  // fixture has to fold several and the old per-fold behavior has to be what fails here:
+  // it would have produced exactly one call per span.
+  assert(briefedSpans.length > 1,
+    "The commit briefed one span, so this fixture cannot demonstrate batching");
+  assert(upgradeCalls.length < briefedSpans.length,
+    `${briefedSpans.length} spans still took ${upgradeCalls.length} calls: they were not batched`);
+  assert.deepEqual([...briefedSpans.map((span) => span.candidateId)].sort(), [...committed].sort(),
+    "The batches did not carry exactly the folds the commit made deterministic");
+  // Packing is TIGHT: every call but the last is closed by a bound, not by indifference, so
+  // a lane that sent one span per call while claiming to batch fails here.
+  assert.equal(upgradeCalls.length, Math.ceil(briefedSpans.length / context.MAX_BRIEF_BATCH_SPANS),
+    "The commit's spans were split across more calls than the batch width requires");
+  for (const call of upgradeCalls) {
+    // The source budget is the CALL's, the same ceiling one span was always held to, so the
+    // queue's memory bound did not move when the unit changed.
+    const chars = call.spans.reduce((sum, span) => sum + span.sourceText.length, 0);
+    assert(chars <= context.ACTIVE_CONTEXT_POLICY.maxSourceChars,
+      `A batch carried ${chars} source chars, past the ${context.ACTIVE_CONTEXT_POLICY.maxSourceChars} budget`);
+    assert(call.spans.length <= context.MAX_BRIEF_BATCH_SPANS,
+      "A batch carried more spans than the batch width allows");
+    // Orientation is the run's and belongs to no brief, so it is stated once per call
+    // rather than repeated per span.
+    assert.equal(call.sourceText, undefined, "A batched request still carried a single span's source");
+    for (const field of ["beforeText", "afterText", "maxBriefChars"]) {
+      assert(call[field] !== undefined, `The batched request omitted the call-level ${field}`);
+    }
+  }
+  const batch = upgradeCalls[0];
+
+  // POSITION, NOT NAME. Every brief landed on the fold whose span sat at its index.
+  const aged = makeFixture({ ...shape, turns: 32, sessionId: built.sessionId });
+  for (const entry of aged.entries.slice(built.entries.length)) runtime.branch.push(entry);
+  runtime.messages.length = 0;
+  runtime.messages.push(...aged.messages);
+  await runtimeCommit(runtime, { tokens: 92_000, contextWindow: 100_000, suffix: "second" });
+  const applied = materialized(runtime);
+  let landed = 0;
+  for (const span of briefedSpans) {
+    const fold = applied.folds.find((item) => item.id === span.candidateId);
+    if (!fold) continue;
+    const provenance = context.foldProvenance(fold, applied);
+    if (provenance.kind !== "model") continue;
+    landed += 1;
+    assert(context.foldBrief(fold, applied).includes(span.candidateId),
+      `The brief on ${span.candidateId} names a different fold, so the split misattributed it`);
+  }
+  assert(landed > 1, "Fewer than two batched briefs landed, so attribution was never tested");
+
+  // THE CURE IS PER SPAN. The first answer leaves span 0 empty and overruns span 1; the
+  // retry must carry exactly those two, and the untouched spans must not be re-asked.
+  const cureCalls = [];
+  // Narrower than the batching leg on purpose: this leg is about WHICH spans a cure
+  // re-asks, so the commit must land in one batch or "cured once" would be counted per
+  // batch and the selectivity claim would be about neither.
+  const cureShape = { ...shape, turns: 10 };
+  const cureBuilt = makeFixture(cureShape);
+  const curing = makeRuntime(cureBuilt, {
+    summarizeContextSpan: async (request) => {
+      cureCalls.push(request);
+      const isCure = typeof request.cure === "string" && request.cure.length > 0;
+      return briefAnswer(request, (id) => {
+        if (isCure) return `Cured brief for ${id}, within the stated limit.`;
+        const at = request.spans.findIndex((span) => span.candidateId === id);
+        if (at === 0) return "";
+        if (at === 1) return `x${"y".repeat(context.ACTIVE_CONTEXT_POLICY.maxBriefChars * 2)}`;
+        return `First-pass brief for ${id}, within the stated limit.`;
+      });
+    },
+  });
+  await startRuntime(curing);
+  await runtimeCommit(curing, { tokens: 88_000, contextWindow: 100_000 });
+  await settle();
+  const cureUpgrades = cureCalls.filter(isBriefUpgradeRequest);
+  assert.equal(cureUpgrades.length, 2,
+    `The cure fixture made ${cureUpgrades.length} calls; it must be one batch and one cure`);
+  const first = cureUpgrades[0];
+  const retry = cureUpgrades[1];
+  assert(first.spans.length > 2, "The cure fixture needs more than two spans to show selectivity");
+  assert.equal(retry.spans.length, 2,
+    `The cure re-asked ${retry.spans.length} spans instead of the two that missed`);
+  assert.deepEqual(
+    retry.spans.map((span) => span.candidateId),
+    first.spans.slice(0, 2).map((span) => span.candidateId),
+    "The cure re-asked the wrong spans");
+  assert(/Brief 1:/.test(retry.cure) && /Brief 2:/.test(retry.cure),
+    "The cure did not name its complaints per span");
+
+  return {
+    callsForOneCommit: upgradeCalls.length,
+    spansBriefed: briefedSpans.length,
+    spansInTheFirstCall: batch.spans.length,
+    batchWidth: context.MAX_BRIEF_BATCH_SPANS,
+    briefsAttributedByPosition: landed,
+    cureCalls: cureUpgrades.length,
+    curedSpans: retry.spans.length,
+    untouchedSpansNotReasked: first.spans.length - retry.spans.length,
   };
 }
 
@@ -11866,8 +12054,15 @@ async function gateGeneratorCallsAreOnTheRecord() {
   const ok = briefed.filter((record) => record.outcome === "ok");
   assert.equal(ok.length, laneCalls, "A successful generator call was not recorded as ok");
   const sample = ok[0];
-  assert(observed.some((request) => request.candidateId === sample.fold_id),
-    "The recorded fold id matches no span the generator was actually given");
+  // A batch names its folds in `fold_ids`; a single-span call names one in `fold_id`. Every
+  // id the record claims must be an id the generator was actually handed, whichever it is.
+  const recordedIds = Array.isArray(sample.fold_ids) && sample.fold_ids.length
+    ? sample.fold_ids
+    : [sample.fold_id];
+  assert(observed.some((request) => {
+    const given = requestFoldIds(request);
+    return recordedIds.every((id) => given.includes(id));
+  }), "The recorded fold ids match no call the generator was actually given");
   assert.equal(sample.provider, "openai-codex");
   assert.equal(sample.model, "gpt-5.6-terra");
   assert.equal(sample.effort, "medium");
@@ -12185,14 +12380,22 @@ async function gateParentBriefCoversEveryChild() {
   // the mechanism, and a lane that never drains it would show up right here.
   await runtimeCommit(laneRuntime, { tokens: 94_000, contextWindow: 100_000 });
   await settle();
-  const groups = laneRequests.filter((request) => Number.isInteger(request.children) && request.children > 0);
+  // Per SPAN, because the lane batches: a group is one span inside a call that may carry
+  // several, so asking the request whether it is a group would miss every batched parent.
+  const groups = laneRequests.flatMap(requestSpans)
+    .filter((span) => Number.isInteger(span.children) && span.children > 0);
   const parents = materialized(laneRuntime).folds.filter((fold) => fold.kind === "consolidation");
   assert(parents.length, "The lane fixture built no parent, so the queueing law is untested here");
   assert(groups.length, "A parent was built and no group was ever sent to the generator");
   const laneGroup = JSON.parse(groups[0].sourceText);
   assert.equal(laneGroup.length, groups[0].children, "The group payload and its stated child count disagree");
-  assert(laneGroup.every((entry) => entry.brief && (entry.contents || entry.collapsed)),
-    "A child reached the generator with neither its brief nor its contents");
+  // Nothing reaches the generator as a bare name. A folded child carries its brief and
+  // either its contents or the note that it was collapsed; absorbed RAW evidence carries
+  // its contents and has no brief to carry, because it is the exact evidence itself.
+  assert(laneGroup.every((entry) => entry.contents || entry.collapsed),
+    "A child reached the generator with neither its contents nor a collapse note");
+  assert(laneGroup.filter((entry) => entry.foldId).every((entry) => entry.brief),
+    "A folded child reached the generator without its brief");
 
   return {
     width,
@@ -12494,6 +12697,7 @@ const gates = [
   [115, "A parent brief covers every child", gateParentBriefCoversEveryChild],
   [116, "No fold goes without a brief", gateNoFoldWithoutABrief],
   [117, "No token ceiling reaches the provider", gateNoTokenCeilingReachesTheProvider],
+  [118, "A commit's spans are briefed in one call", gateOneCallPerCommit],
 ];
 
 const gateFilter = (process.env.GATES ?? "")
