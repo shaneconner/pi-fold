@@ -18,6 +18,8 @@ pi install npm:pi-fold
 
 Node 22 or later, Pi 0.83 or later. Licensed under [MIT](./LICENSE).
 
+pi-fold serves the working tier of a four-tier memory stack. [pi-canon](https://github.com/shaneconner/pi-canon) is a separate, optional package serving the long-term tiers, the journal episodic and the canon semantic; the two compose but neither requires the other.
+
 ## What it is
 
 pi-fold registers one tool, `pi_fold_context`, and gives the session's own agent nine actions over its transcript: `status`, `peek`, `fold`, `expand`, `refold`, `protect`, `unprotect`, `rebrief`, and `reboundary`, plus `unmark` under epoch scheduling. It also registers `/pi-fold-context` and `/fold-context` for the human.
