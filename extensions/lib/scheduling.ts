@@ -79,8 +79,26 @@ import {
  * wall clock and never randomness.
  */
 
-export function pendingMarks(state: Pick<ActiveContextState, "pendingMarks">): PendingMark[] {
-  return state.pendingMarks ? clone(state.pendingMarks) : [];
+/** The empty read, shared and frozen, so a state with no marks allocates nothing. */
+const NO_PENDING_MARKS: readonly PendingMark[] = Object.freeze([]);
+
+/**
+ * The pending marks as a READ VIEW, not a copy.
+ *
+ * Every caller here reads: membership tests, accounting sums, and filters that build
+ * a fresh array anyway. The copy belongs on the WRITE path, and `withPendingMarks`
+ * already takes it, so taking a second one on every read bought nothing and cost a
+ * great deal: `markSpanRefs` calls this once per mark and is itself called once per
+ * mark by the accounting, eligibility, staleness, current-turn and absorption
+ * readings, which made a deep clone of the whole array quadratic in the mark count
+ * per pass. Profiled at 21 percent of a 120-turn session, the single largest cost in
+ * the runtime, ahead of every projection and hash.
+ *
+ * The view is safe because the state is replaced rather than edited: no code path
+ * mutates `state.pendingMarks` in place, and the readonly type is what keeps it so.
+ */
+export function pendingMarks(state: Pick<ActiveContextState, "pendingMarks">): readonly PendingMark[] {
+  return state.pendingMarks ?? NO_PENDING_MARKS;
 }
 
 /**

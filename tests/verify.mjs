@@ -11215,6 +11215,82 @@ async function gateOutputWallForwardLook() {
   };
 }
 
+/**
+ * A reading of the pending marks takes a VIEW; only a write takes a copy.
+ *
+ * `markSpanRefs` resolves one mark's span and consults the pending marks to tell a
+ * span that is merely deferred from one that is gone. Every reading that walks the
+ * marks calls it once per mark: the accounting, the eligibility, the staleness, the
+ * current-turn guard, the claimed keys, the absorption. While the read accessor deep
+ * cloned, that made each pass quadratic in the mark count over an array that grows
+ * with the epoch, and it profiled at 21 percent of a 120-turn session, ahead of every
+ * projection, digest and hash in the runtime.
+ *
+ * The copy was never doing anything: nothing mutates what it hands back. So this pins
+ * both halves rather than a stopwatch, which would only measure the machine. The read
+ * is the state's own array, by IDENTITY, so a copy reintroduced anywhere fails here.
+ * Every reading then runs against a FROZEN array, so a reading that starts mutating
+ * throws instead of quietly relying on the copy that used to absorb it. And the write
+ * path still takes its copy, so the caller's array cannot reach into committed state.
+ */
+async function gateMarkReadsTakeAView() {
+  const built = makeFixture({ turns: 12, resultChars: 10_000, contextWindow: 100_000 });
+  const snapshot = epochSnapshot(built);
+  const empty = context.emptyActiveContextState(built.sessionId);
+  const seeded = context.topUpMarks({ snapshot, state: empty, ordinal: 3, targetShare: 1 }).slice(0, 4);
+  // Anti-vacuity: one mark cannot show a per-mark cost, and a fixture whose marks
+  // resolve to nothing would let every reading below return without doing the work.
+  assert(seeded.length >= 3,
+    `The fixture seeded ${seeded.length} marks, too few to read a per-mark cost`);
+  const state = context.withPendingMarks(empty, seeded);
+
+  // The read is the state's own array, not a copy of it, and stays so across reads.
+  const first = context.pendingMarks(state);
+  assert.equal(first, state.pendingMarks, "A mark reading copied the state's own array");
+  assert.equal(first, context.pendingMarks(state), "Two mark readings returned different arrays");
+  assert.equal(context.pendingMarks(empty).length, 0, "An unmarked state did not read as empty");
+
+  // Every reading now runs against a frozen array. A reading that mutates throws here.
+  Object.freeze(state.pendingMarks);
+  assert(Object.isFrozen(context.pendingMarks(state)),
+    "The reading handed back something other than the frozen array, so the mutation check is vacuous");
+  const accounting = context.markAccounting(snapshot, state);
+  const claimed = context.claimedRefKeys(state);
+  const marked = context.markedFoldIds(state);
+  const duplicate = context.addPendingMark(state, seeded[0]);
+  for (const mark of context.pendingMarks(state)) {
+    assert(context.markEligibility(snapshot, state, mark),
+      `Mark ${mark.id} read no eligibility at all`);
+  }
+  // Anti-vacuity: the accounting must have RESOLVED spans, which is the path that
+  // consults the marks per mark. Zero freed bytes would mean nothing was walked.
+  assert(accounting.freedBytes > 0,
+    "The accounting freed no bytes, so the per-mark span resolution never ran");
+  assert(claimed.size > 0, "The claimed keys resolved nothing, so no span was walked");
+  assert.equal(duplicate.added, false, "A duplicate mark was added rather than refused");
+  assert.equal(context.pendingMarks(state).length, seeded.length,
+    "A reading changed how many marks the state holds");
+
+  // The write path still owns its copy: a caller's array never becomes the state's.
+  const handed = [...seeded.slice(0, 2)];
+  const written = context.withPendingMarks(empty, handed);
+  assert.notEqual(written.pendingMarks, handed, "The write path stored the caller's own array");
+  handed.length = 0;
+  assert.equal(written.pendingMarks.length, 2, "Emptying the caller's array reached committed state");
+  assert.equal(context.pendingMarks(state).length, seeded.length,
+    "The write path disturbed the state it was not given");
+
+  return {
+    marksRead: seeded.length,
+    readIsStateArray: true,
+    frozenDuringReadings: true,
+    accountingFreedBytes: accounting.freedBytes,
+    claimedKeys: claimed.size,
+    markedFoldIds: marked.size,
+    writeCopies: true,
+  };
+}
+
 async function gateOneCallPerCommit() {
   const shape = { turns: 16, resultChars: 10_000, contextWindow: 100_000, toolName: "bash" };
   const calls = [];
@@ -12832,6 +12908,7 @@ const gates = [
   [117, "No token ceiling reaches the provider", gateNoTokenCeilingReachesTheProvider],
   [118, "A commit's spans are briefed in one call", gateOneCallPerCommit],
   [119, "The output wall commits one inflow step early", gateOutputWallForwardLook],
+  [120, "A mark reading takes a view; only a write copies", gateMarkReadsTakeAView],
 ];
 
 const gateFilter = (process.env.GATES ?? "")
