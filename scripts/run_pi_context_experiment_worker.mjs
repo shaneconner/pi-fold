@@ -184,10 +184,20 @@ try {
   assertExperiment(discoveredModel && Number.isSafeInteger(discoveredModel.contextWindow) &&
     discoveredModel.contextWindow > 0,
   `Pinned model ${config.model.provider}/${config.model.id} is unavailable`);
+  // The descriptor's output maximum is now the only one in play, so a descriptor that
+  // declares none is a configuration this run cannot seal honestly rather than one to
+  // paper over with a number of our own.
+  assertExperiment(Number.isSafeInteger(discoveredModel.maxTokens) && discoveredModel.maxTokens > 0,
+    `Pinned model ${config.model.provider}/${config.model.id} declares no output maximum`);
   const modelDescriptorSha256 = sha256Json(discoveredModel);
-  // 4,096 was too small in rep 1: xhigh reasoning plus a deliverable hit stopReason
-  // "length" on the native arm at stage 39 and killed the worker.
-  const model = { ...discoveredModel, maxTokens: 16_384 };
+  // NO output ceiling of our own (Shane 2026-08-11). The descriptor's own maxTokens is
+  // what the model says it can write; anything we put here is a guess that truncates the
+  // answer instead of shortening it. This line used to read 4,096, which ended rep 1 on
+  // stopReason "length", and the response was to raise it to 16,384 rather than to ask why
+  // a ceiling was here at all. Pi still sends a value, because it derives one per request
+  // as contextWindow - estimate - 4,096; that arithmetic is the run's business and is
+  // recorded and latched on, but the descriptor's number is the only one we supply.
+  const model = discoveredModel;
   const systemPrompt = closedBook ? closedBookSystemPrompt() : workloadSystemPrompt();
 
   manager = SessionManager.create(config.repoDir, config.runDir);

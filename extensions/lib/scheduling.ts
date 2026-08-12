@@ -829,10 +829,8 @@ export function absorbWedgeMarks(input: {
   charsPerToken: number;
   /** Evidence absorption may never touch, e.g. the current excursion's own reads. */
   excludeRefKeys?: ReadonlySet<string>;
-  maxTokens?: number;
 }): { state: ActiveContextState; absorbed: AbsorbedWedge[] } {
   const { snapshot } = input;
-  const maxTokens = input.maxTokens ?? MAX_WEDGE_ABSORB_TOKENS;
   const charsPerToken = Number.isFinite(input.charsPerToken) && input.charsPerToken > 0
     ? input.charsPerToken
     : ESTIMATED_BYTES_PER_TOKEN;
@@ -871,7 +869,7 @@ export function absorbWedgeMarks(input: {
       if (absorbed.some((item) => item.intoMarkId === mark.id)) continue;
       const gapTokens = Math.ceil(spanBytes(snapshot, gapStart, gapEnd + 1) / charsPerToken);
       // The whole discriminator, in one line: above this, the gap is the agent's.
-      if (gapTokens > maxTokens) continue;
+      if (gapTokens > MAX_WEDGE_ABSORB_TOKENS) continue;
       const gapRefs = [];
       let usable = true;
       for (let index = gapStart; index <= gapEnd; index += 1) {

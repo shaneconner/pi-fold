@@ -33,10 +33,12 @@ import {
   EXPERIMENT_MARKER_ENTRY,
   EXPERIMENT_PIFOLD_EXTRA_TOOLS,
   EXPERIMENT_TOOL_NAME,
+  PI_OUTPUT_BUDGET,
   assertExperiment,
   estimateTokens,
   isWindowOverflow,
   nativeCompactionDisposition,
+  servedOutputBudget,
   stageCallDisposition,
   toolResultContentSha256,
   toolResultText,
@@ -507,6 +509,22 @@ export function createPiContextExperimentExtension(config) {
           throw new Error("A provider request began before its predecessor produced an assistant response");
         }
         const providerTools = Array.isArray(event.payload?.tools) ? event.payload.tools : [];
+        const payloadChars = allStrings(event.payload).reduce((total, text) => total + text.length, 0);
+        // What Pi will let this request WRITE, which is not a constant and is not ours to
+        // set: see PI_OUTPUT_BUDGET. Recorded on every request so the starved case is
+        // visible in the ledger rather than inferred from an error rate afterwards.
+        // Close but not identical to Pi's own figure: this counts every string in the
+        // payload where Pi estimates over the message list, so the two disagree by the
+        // tool and system-prompt text. Far too small to matter against a 4,096-token latch
+        // whose defect case sat at 16, and erring high is the safe direction for a floor.
+        const outputBudgetTokens = Number.isSafeInteger(ctx.model?.contextWindow) &&
+          Number.isSafeInteger(ctx.model?.maxTokens)
+          ? servedOutputBudget({
+            contextWindow: ctx.model.contextWindow,
+            contextChars: payloadChars,
+            modelMaxTokens: ctx.model.maxTokens,
+          })
+          : null;
         const identity = {
           version: 1,
           runId: config.runId,
@@ -518,7 +536,8 @@ export function createPiContextExperimentExtension(config) {
           model: ctx.model?.id ?? null,
           thinkingLevel: ctx.thinkingLevel ?? null,
           payloadSha256: sha256Json(event.payload),
-          payloadChars: allStrings(event.payload).reduce((total, text) => total + text.length, 0),
+          payloadChars,
+          outputBudgetTokens,
           systemPromptSha256: sha256Text(ctx.getSystemPrompt()),
           providerToolsSha256: sha256Json(providerTools),
           providerToolNames: providerTools.map((tool) =>
@@ -530,6 +549,23 @@ export function createPiContextExperimentExtension(config) {
         const record = { ...identity, recordSha256: sha256Json(identity) };
         appendJsonLineFsync(projectionLog, record);
         priorRequestRecordSha256 = record.recordSha256;
+        // A managed arm that starves its own output budget is misconfigured, and the failure
+        // it produces looks like the provider's fault. The unmanaged arm is exempt because
+        // filling the window until it breaks is precisely that arm's datum, and the native
+        // arm is exempt because Pi's compaction trigger, not our thresholds, decides when it
+        // sits high. Only the arm whose occupancy WE set is held to this.
+        if (config.arm === "pifold") {
+          // A descriptor the budget cannot be read from is not a reason to skip the check:
+          // it is the check going quiet, which is the failure mode this whole lane exists
+          // to end. Loud either way.
+          if (outputBudgetTokens === null) {
+            appendFailure(config, "unreadable-output-budget",
+              `${ctx.model?.provider ?? "?"}/${ctx.model?.id ?? "?"} states no window or maximum`);
+          } else if (outputBudgetTokens < PI_OUTPUT_BUDGET.latchBelowTokens) {
+            appendFailure(config, "starved-output-budget",
+              `${outputBudgetTokens} tokens at ${payloadChars} projected chars`);
+          }
+        }
         inFlightProviderRequest = {
           ordinal: record.ordinal, recordSha256: record.recordSha256, leafId: record.leafId,
         };
@@ -557,6 +593,14 @@ export function createPiContextExperimentExtension(config) {
             provider: event.message.provider ?? null,
             model: event.message.model ?? null,
             stopReason: event.message.stopReason ?? null,
+            // WHAT the provider said, not merely THAT it said no. Rep 2 of sol-20260811
+            // recorded sixteen errors as the bare word "error", so the cause had to be
+            // reconstructed by correlation from a run that was already dead; the text was
+            // in hand the whole time and was only ever written to the failure path. A stop
+            // reason without its message is a symptom with the diagnosis thrown away.
+            errorMessage: typeof event.message.errorMessage === "string"
+              ? event.message.errorMessage.slice(0, 2_048)
+              : null,
             usage: event.message.usage ?? null,
             wallMs: Date.now(),
             monotonicMs: monotonicMs(),

@@ -269,7 +269,10 @@ async function gradeLive(packet, grader, workDir) {
       resourceLoader: loader,
       sessionManager: manager,
       modelRuntime,
-      model: { ...discovered, maxTokens: 8_192 },
+      // No output ceiling of our own (Shane 2026-08-11). A grader that runs out of budget
+      // mid-JSON does not return a shorter verdict, it returns an unparseable one, and this
+      // is the instrument every published score is read off. The descriptor's own value stands.
+      model: discovered,
       settingsManager: settings,
       thinkingLevel: grader.effort,
     });

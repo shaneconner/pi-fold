@@ -77,20 +77,37 @@ export const EXPERIMENT_DEFAULT_GUIDED_CURATION = false;
 // the luna deployment on its own wire: the sealed ledger's largest served request is
 // 361,882 tokens and the provider refused at approximately 377,800 real (375,830
 // estimated, estimator bias 1.0056), so luna's serving ceiling lies in (361,882,
-// 377,800] and a 383,616 budget builds requests the wire will not take. Luna's entry
-// is now 343,616, a 360,000 total less the same 16,384 reservation, the largest round
-// claim the evidence does not contradict; runs sealed against 383,616 stay readable
-// because validation requires only a positive budget, and cross-lane token numbers
-// carry the differing denominators as a stated caveat. Sol keeps 383,616: the
-// counterevidence is luna's alone and no sealed sol run recorded a wire refusal,
-// though the sol lane has never probed its top; correct it the day sol's wire says
-// otherwise.
+// 377,800] and a 383,616 budget builds requests the wire will not take.
+//
+// All of that measured the wrong wall (2026-08-11). What the wire will ACCEPT is not what
+// the session can USE, because Pi meters the answer against the descriptor rather than
+// against the wire: it derives `max_output_tokens` per request as
+// `contextWindow - estimate - 4096` (see PI_OUTPUT_BUDGET). Both deployments declare a
+// 272,000 window, so past roughly 252,000 tokens of occupancy the subtraction starts
+// eating the reply, and past roughly 268,000 it collapses to the API's 16-token floor.
+// Sol-20260811 rep 2 ran against 383,616, did exactly what it was told, and sent 40
+// percent of its requests asking a reasoning model at xhigh effort to answer in sixteen
+// tokens; those failed 23.2 percent of the time against 3.9 percent for the rest. The
+// 342,539-token requests rep 14 recorded were served and billed, and were also, on this
+// arithmetic, requests the model had almost no room to answer.
+//
+// So the binding constraint is the declared window, and it is the same one for both
+// deployments: 272,000 less Pi's 4,096 reserve less a real output budget. The output
+// budget is 16,384 because that is the figure rep 1 established empirically, having died
+// on stopReason "length" at 4,096. That is 251,520, and it sits well under luna's
+// separately measured wire refusal, which no longer binds. The reservation idea was right
+// all along; it was being subtracted from the wire's capacity instead of from the window
+// Pi actually meters against.
+//
+// Runs sealed against 383,616 and 343,616 stay readable, because validation requires only
+// a positive budget; their token numbers carry the differing denominator as a stated
+// caveat, and their high-occupancy requests carry the starved-output caveat besides.
 // Keyed by PROVIDER and model together: capacity is a fact about a deployment, and the
 // same model id behind a different provider is a different deployment with a different
 // wire, so a bare model key would hand it this fact incorrectly.
 export const EXPERIMENT_PROVIDER_INPUT_BUDGETS = Object.freeze({
-  "openai-codex/gpt-5.6-luna": 343_616,
-  "openai-codex/gpt-5.6-sol": 383_616,
+  "openai-codex/gpt-5.6-luna": 251_520,
+  "openai-codex/gpt-5.6-sol": 251_520,
 });
 // The campaign's brief generator. Fold briefs are MODEL-WRITTEN in the shipped package,
 // and the deterministic brief exists only as the automatic fallback when a generator
@@ -136,6 +153,50 @@ export const EXPERIMENT_PROVIDER_RETRY = Object.freeze({
   maxRetries: 8,
   baseDelayMs: 1_000,
 });
+
+// Pi derives the output budget per request rather than sending the model's own maximum:
+// pi-ai `api/simple-options.js` computes `contextWindow - estimateContextTokens - 4096`,
+// floors it at 1, takes the min against the caller's ceiling, and `api/openai-responses.js`
+// then raises the result to the API's own minimum of 16 before sending it as
+// `max_output_tokens`. `utils/estimate.js` does the estimate at four chars per token.
+//
+// The consequence is the defect that ruined rep 2 of sol-20260811. That descriptor declares
+// `contextWindow: 272000`, which is a PRICING tier boundary, not capacity: its own cost
+// table reads `inputTokensAbove: 272000`, and the provider was separately measured
+// accepting 339,689. The run's serving budget was set from the measured capacity, so
+// occupancy ran to 307k and beyond, the subtraction went negative, and 56 of 141 requests,
+// 40 percent, went out asking a reasoning model at xhigh effort to answer in sixteen
+// tokens. Those requests failed 23.2 percent of the time against 3.9 percent for requests
+// that got the whole budget, and the failures were recorded as the bare word "error".
+//
+// So the arithmetic is reproduced here, and a run whose own thresholds drive it into the
+// starved zone says so at the first request rather than at the seal.
+export const PI_OUTPUT_BUDGET = Object.freeze({
+  /** pi-ai `utils/estimate.js` CHARS_PER_TOKEN. */
+  charsPerToken: 4,
+  /** pi-ai `api/simple-options.js` CONTEXT_SAFETY_TOKENS. */
+  safetyTokens: 4_096,
+  /** pi-ai `api/openai-responses.js` OPENAI_RESPONSES_MIN_OUTPUT_TOKENS. */
+  apiFloorTokens: 16,
+  /**
+   * Below this the session cannot write a staged deliverable, so a managed arm that reaches
+   * it is misconfigured rather than unlucky. Rep 2's starved requests sat at the 16-token
+   * floor, three orders of magnitude under this.
+   */
+  latchBelowTokens: 4_096,
+});
+
+/**
+ * The `max_output_tokens` Pi will send for a request carrying `contextChars`, given the
+ * model's declared window and output maximum. Mirrors the vendor arithmetic named above;
+ * harness gate 52 reads Pi's source and fails when that arithmetic moves.
+ */
+export function servedOutputBudget({ contextWindow, contextChars, modelMaxTokens }) {
+  const estimate = Math.ceil(contextChars / PI_OUTPUT_BUDGET.charsPerToken);
+  const available = contextWindow - estimate - PI_OUTPUT_BUDGET.safetyTokens;
+  const clamped = Math.min(modelMaxTokens, Math.max(1, available));
+  return Math.max(clamped, PI_OUTPUT_BUDGET.apiFloorTokens);
+}
 
 // The package's own summarizer contract, revalidated on this side of the wire: the
 // runtime accepts "session" or a provider/model/effort descriptor, and the harness only

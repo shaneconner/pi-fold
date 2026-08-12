@@ -30,6 +30,8 @@ import {
   EXPERIMENT_REPOS,
   EXPERIMENT_SCHEDULING_SOURCE,
   MUTATION_ABSOLUTE_TOLERANCE_TOKENS,
+  PI_OUTPUT_BUDGET,
+  servedOutputBudget,
   TOKEN_ESTIMATOR_ID,
   CODE_WORD_PATTERN,
   CONTEXT_EVENT_SUFFIX,
@@ -1309,13 +1311,44 @@ try {
 {
   // Keyed by provider AND model: capacity is a fact about a deployment, and the same
   // model id behind another provider is another wire. Stated already net, which is the
-  // shape the runtime now takes. The two entries differ because they are two separate
-  // deployment facts: rep 2 of luna-20260810 proved luna's wire refuses below 383,616
-  // (largest served 361,882, refused at approximately 377,800), so luna pins the
-  // corrected 343,616 while sol keeps the 383,616 its own sealed lane measured against
-  // without ever recording a refusal.
-  assert.equal(EXPERIMENT_PROVIDER_INPUT_BUDGETS["openai-codex/gpt-5.6-luna"], 343_616);
-  assert.equal(EXPERIMENT_PROVIDER_INPUT_BUDGETS["openai-codex/gpt-5.6-sol"], 383_616);
+  // shape the runtime now takes.
+  //
+  // Both entries now hold the same number, and the reason is not that the wires turned out
+  // alike. It is that the wire stopped being the binding constraint: Pi meters the ANSWER
+  // against the descriptor's declared window, so a serving budget the wire would happily
+  // accept still leaves the model no room to reply. Both deployments declare 272,000, so
+  // both land on 272,000 less Pi's 4,096 reserve less the 16,384 of output that rep 1
+  // established empirically by dying without it. Luna's separately measured wire refusal at
+  // approximately 377,800 is real and simply no longer binds, which is why it is not the
+  // number here.
+  const OUTPUT_HEADROOM = 16_384;
+  for (const key of ["openai-codex/gpt-5.6-luna", "openai-codex/gpt-5.6-sol"]) {
+    assert.equal(EXPERIMENT_PROVIDER_INPUT_BUDGETS[key], 251_520, `${key} serving budget`);
+    // Derived, not asserted as a magic number: a descriptor change must move this or fail.
+    assert.equal(EXPERIMENT_PROVIDER_INPUT_BUDGETS[key],
+      272_000 - PI_OUTPUT_BUDGET.safetyTokens - OUTPUT_HEADROOM,
+      `${key} budget no longer matches the window arithmetic it is derived from`);
+    // The property the number exists for: a request that fills the whole budget must still
+    // be served a real answer rather than the API floor.
+    assert.equal(
+      servedOutputBudget({
+        contextWindow: 272_000,
+        contextChars: EXPERIMENT_PROVIDER_INPUT_BUDGETS[key] * PI_OUTPUT_BUDGET.charsPerToken,
+        modelMaxTokens: 128_000,
+      }),
+      OUTPUT_HEADROOM,
+      `${key} at full occupancy does not leave the model room to answer`);
+  }
+  // Anti-vacuity: the budget that shipped through sol-20260811 rep 2 fails that property,
+  // which is the defect this correction exists to remove.
+  assert.equal(
+    servedOutputBudget({
+      contextWindow: 272_000,
+      contextChars: 383_616 * PI_OUTPUT_BUDGET.charsPerToken,
+      modelMaxTokens: 128_000,
+    }),
+    PI_OUTPUT_BUDGET.apiFloorTokens,
+    "the superseded 383,616 budget must still demonstrate the starvation it caused");
   assert.equal(EXPERIMENT_PROVIDER_INPUT_BUDGETS["gpt-5.6-sol"], undefined);
   validateExperimentRunConfig({ ...runConfig, providerInputBudget: 383_616 });
   validateExperimentRunConfig(runConfig); // unlisted deployments carry no key: descriptor mode
@@ -2970,7 +3003,12 @@ try {
     }).factory(pi);
     const ctx = {
       sessionManager: { getLeafId: () => "leaf-1", getBranch: () => [] },
-      model: { provider: "openai-codex", id: "gpt-5.6-luna" },
+      // A whole descriptor, because gate 52 latches on one that states no window: this
+      // fixture is exercising provider weather, and a request with healthy output headroom
+      // is the condition under which weather is the only thing left to explain a failure.
+      model: {
+        provider: "openai-codex", id: "gpt-5.6-luna", contextWindow: 272_000, maxTokens: 128_000,
+      },
       thinkingLevel: "xhigh",
       getSystemPrompt: () => "system",
       getEntries: () => [],
@@ -3148,6 +3186,126 @@ try {
     "a retry budget that did not reach the session must be loud, like the transport pin");
 
   checks.recoveredProviderWeatherDoesNotFailTheRun = true;
+}
+
+// GATE 52 - the run supplies no output ceiling of its own, and says what Pi's own ceiling
+// arithmetic left it (Shane 2026-08-11: "Don't ever use maxtokens").
+//
+// A maxTokens value does not ask for a shorter answer, it stops the answer. This harness
+// carried two of them: the worker cut the session to 16,384 and the grader to 8,192, on a
+// descriptor that declares 128,000. Both are deleted here and neither may return.
+//
+// The larger defect is that Pi sends a ceiling whether or not a caller sets one, derived
+// per request as `contextWindow - estimate - 4096`, floored at 1, then raised to the API's
+// own minimum of 16. The pinned descriptor declares `contextWindow: 272000`, which its own
+// cost table shows is a PRICING boundary (`inputTokensAbove: 272000`) while the provider
+// was measured accepting 339,689. Sol-20260811 rep 2 set its serving budget from the
+// measured capacity, ran occupancy past 300k, and sent 56 of 141 requests with
+// `max_output_tokens: 16`. Those failed 23.2 percent of the time against 3.9 percent for
+// requests that got the whole budget, and every failure was recorded as the bare word
+// "error" with the provider's own message dropped on the floor.
+//
+// So three things are pinned: our arithmetic still matches Pi's, a managed arm that starves
+// itself latches at the first request instead of at the seal, and a stop reason travels
+// with what the provider actually said.
+// ---------------------------------------------------------------------------
+{
+  const piOptions = readFileSync(
+    join(PI_INSTALL_ROOT, "node_modules", "@earendil-works", "pi-ai", "dist", "api", "simple-options.js"),
+    "utf8");
+  const piEstimate = readFileSync(
+    join(PI_INSTALL_ROOT, "node_modules", "@earendil-works", "pi-ai", "dist", "utils", "estimate.js"),
+    "utf8");
+  const piResponses = readFileSync(
+    join(PI_INSTALL_ROOT, "node_modules", "@earendil-works", "pi-ai", "dist", "api", "openai-responses.js"),
+    "utf8");
+  // Drift detection, not reimplementation: the numbers below are the vendor's, and a Pi
+  // upgrade that moves any of them must break this gate rather than silently invalidate the
+  // budget the ledger reports.
+  assert(piOptions.includes(`const CONTEXT_SAFETY_TOKENS = ${PI_OUTPUT_BUDGET.safetyTokens}`),
+    "Pi's context safety reserve moved; PI_OUTPUT_BUDGET.safetyTokens no longer describes it");
+  assert(piEstimate.includes(`const CHARS_PER_TOKEN = ${PI_OUTPUT_BUDGET.charsPerToken}`),
+    "Pi's token estimator divisor moved; PI_OUTPUT_BUDGET.charsPerToken no longer describes it");
+  assert(piResponses.includes(`const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = ${PI_OUTPUT_BUDGET.apiFloorTokens}`),
+    "the Responses API output floor moved; PI_OUTPUT_BUDGET.apiFloorTokens no longer describes it");
+  assert(piOptions.includes("model.contextWindow - estimateContextTokens(context).tokens - CONTEXT_SAFETY_TOKENS"),
+    "Pi no longer derives the output budget by subtraction; servedOutputBudget must be re-read against it");
+  assert(piOptions.includes("options?.maxTokens ?? model.maxTokens"),
+    "Pi no longer falls back to the descriptor's own maximum; the no-ceiling posture must be re-examined");
+
+  // The rep-2 geometry, reproduced. A healthy request gets the descriptor's maximum less
+  // what the window has left; a request past the declared window gets the API floor.
+  const WINDOW = 272_000, DECLARED_MAX = 128_000;
+  const roomy = servedOutputBudget(
+    { contextWindow: WINDOW, contextChars: 100_000 * 4, modelMaxTokens: DECLARED_MAX });
+  assert.equal(roomy, DECLARED_MAX,
+    "a request with room to spare must be served the descriptor's own maximum");
+  const squeezed = servedOutputBudget(
+    { contextWindow: WINDOW, contextChars: 200_000 * 4, modelMaxTokens: DECLARED_MAX });
+  assert.equal(squeezed, WINDOW - 200_000 - PI_OUTPUT_BUDGET.safetyTokens,
+    "once the window has less left than the descriptor allows, the remainder is what is served");
+  assert(squeezed < DECLARED_MAX,
+    "the squeezed case must actually be squeezed or it repeats the roomy one");
+  const starved = servedOutputBudget(
+    { contextWindow: WINDOW, contextChars: 320_000 * 4, modelMaxTokens: DECLARED_MAX });
+  assert.equal(starved, PI_OUTPUT_BUDGET.apiFloorTokens,
+    "a request past the declared window must be served the API floor, which is the rep-2 defect");
+  assert(starved < PI_OUTPUT_BUDGET.latchBelowTokens,
+    "the rep-2 defect must be on the latching side of the threshold or the latch is decorative");
+  // The crossover is a property of the arithmetic, so it is asserted rather than assumed:
+  // below this occupancy the budget is whole, above it the window starts eating the answer.
+  const crossover = WINDOW - PI_OUTPUT_BUDGET.safetyTokens - PI_OUTPUT_BUDGET.latchBelowTokens;
+  assert.equal(
+    servedOutputBudget({ contextWindow: WINDOW, contextChars: crossover * 4, modelMaxTokens: DECLARED_MAX }),
+    PI_OUTPUT_BUDGET.latchBelowTokens,
+    "the latch threshold does not sit where the arithmetic puts it");
+
+  const workerSource = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
+  const graderSource = readFileSync(join(PROJECT, "scripts", "grade_pi_context_experiment.mjs"), "utf8");
+  const extensionSource = readFileSync(join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"), "utf8");
+  // Neither provider caller may set a ceiling. Matched on assignment so the word may still
+  // appear in the comments that explain why it is gone, and in the manifest that records
+  // the descriptor's own declared value.
+  // Quoted or bare, camel or wire spelling: the ban is on the value reaching a provider,
+  // not on one way of spelling the key.
+  const assigns = (source) =>
+    /["']?(?:maxTokens|max_tokens|max_output_tokens|max_completion_tokens)["']?\s*:\s*[0-9_]+/
+      .test(source);
+  assert(!assigns(workerSource), "the worker set an output ceiling again");
+  assert(!assigns(graderSource), "the grader set an output ceiling again");
+  assert(!assigns(extensionSource), "the experiment extension set an output ceiling");
+  // Anti-vacuity: the matcher must catch every spelling of the thing it forbids, and must
+  // still pass the shape that is allowed, which is recording the descriptor's own value.
+  for (const defect of [
+    "  const model = { ...discoveredModel, maxTokens: 16_384 };",
+    `      model: { ...discovered, maxTokens: 8_192 },`,
+    `  const params = { "max_output_tokens": 512 };`,
+    `  const params = { max_tokens: 1024 };`,
+  ]) {
+    assert(assigns(defect), `the ceiling matcher does not recognise: ${defect.trim()}`);
+  }
+  assert(!assigns("      maxTokens: model.maxTokens,"),
+    "the ceiling matcher must not forbid recording the descriptor's own declared value");
+  assert(workerSource.includes("const model = discoveredModel;"),
+    "the worker must hand the session the descriptor it discovered, unmodified");
+  assert(workerSource.includes("declares no output maximum"),
+    "a descriptor with no declared maximum must be refused rather than given one of ours");
+
+  // The ledger must carry the budget and the provider's own words.
+  assert(extensionSource.includes("outputBudgetTokens"),
+    "the provider-request record must state the output budget the request was served");
+  assert(/errorMessage:\s*typeof event\.message\.errorMessage/.test(extensionSource),
+    "the provider-response record must carry the provider's message, not just its stop reason");
+  assert(extensionSource.includes(`appendFailure(config, "starved-output-budget"`),
+    "a starved output budget must latch rather than be left to show up as an error rate");
+  assert(/config\.arm === "pifold"/.test(extensionSource),
+    "the starvation latch must be scoped to the arm whose occupancy the run itself sets");
+  // A guard that cannot read its inputs must say so rather than pass. Without this the
+  // whole latch is one descriptor change away from being decorative.
+  assert(extensionSource.includes(`appendFailure(config, "unreadable-output-budget"`),
+    "a descriptor the output budget cannot be read from must latch, not silently skip the check");
+
+  checks.noOutputCeilingAndTheServedBudgetIsRecorded = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
