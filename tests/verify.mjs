@@ -2473,7 +2473,10 @@ async function gateSummarizerOption() {
               if (completionCalls > 1) return { role: "assistant", content: [{ type: "text", text: "A later lane's brief." }] };
               preparationCompletions += 1;
               completionRequest = structuredClone({ model, request, options: {
-                maxTokens: options.maxTokens,
+                // Carried only when the caller set one, so the gate below can assert its
+                // ABSENCE rather than its value: a key that is always present with an
+                // undefined value would make "no ceiling was sent" untestable.
+                ...("maxTokens" in options ? { maxTokens: options.maxTokens } : {}),
                 signalIdentical: options.signal instanceof AbortSignal,
                 reasoning: options.reasoning,
               } });
@@ -2549,7 +2552,12 @@ async function gateSummarizerOption() {
     assert(runtimeBriefPrompt.includes(clause),
       `the runtime-driven brief request lost "${clause}"`);
   }
-  assert.equal(completionRequest.options.maxTokens, 512);
+  // NO token ceiling reaches the provider. maxTokens does not ask a model to be brief,
+  // it cuts it off mid-answer, and a reasoning generator draws its thinking from the same
+  // budget: the 2026-08-11 rep lost 22 percent of its calls to "Summarizer returned no
+  // text" that way. Length is bounded by the stated limit, the cure, and the timeout.
+  assert.equal("maxTokens" in completionRequest.options, false,
+    "a token ceiling reached the provider: it truncates the answer instead of shortening it");
   assert.equal(completionRequest.options.signalIdentical, true);
   assert.equal(completionRequest.options.reasoning, "max");
 
@@ -2684,7 +2692,8 @@ async function gateSummarizerOption() {
   assert.equal(registryCreateCalls, 1);
   assert.equal(registryCompletionOptions.length, 2);
   assert(registryCompletionOptions.every((options) => options.signal === request.signal));
-  assert(registryCompletionOptions.every((options) => options.maxTokens === 512));
+  assert(registryCompletionOptions.every((options) => !("maxTokens" in options)),
+    "a token ceiling reached the provider through the registry path");
   assert(registryCompletionOptions.every((options) => options.reasoning === "low"));
 
   // The request IS the contract, so it is pinned as one. A brief does two jobs at once:
@@ -12293,6 +12302,95 @@ async function gateNoFoldWithoutABrief() {
   };
 }
 
+/**
+ * No token ceiling is ever sent, and a generator that thinks hard still answers.
+ *
+ * `maxTokens` does not ask a model for a shorter brief; it stops the model mid-answer. On
+ * a reasoning generator the reasoning is drawn from the same budget, so the harder a span
+ * is to read the less remains for the brief, until nothing remains and the response
+ * carries no text at all. The 2026-08-11 rep ran with 512 and the ledger shows exactly
+ * that: 6 of 27 calls (22%) failed with "Summarizer returned no text", every one after
+ * 111 to 132 seconds of thinking; brief length correlated NEGATIVELY with call duration
+ * at r = -0.575; calls under 20s averaged 1,028 characters and calls over 80s averaged
+ * 369. The depth-one group payloads suffered worst, because the largest and most
+ * interesting input provokes the most reasoning: two group briefs came back at 96 and 438
+ * characters, which reads as weak summarization and was truncation.
+ *
+ * Three mechanisms bound length instead, and every one of them can explain itself to the
+ * model: the limit stated in the request, the cure that hands an over-long brief back with
+ * the complaint, and the caller's timeout for a genuine runaway. A token cut is the one
+ * mechanism the model cannot see, plan around, or recover from (Shane 2026-08-11).
+ */
+async function gateNoTokenCeilingReachesTheProvider() {
+  const seen = [];
+  // A generator that spends most of a small budget thinking, then writes. Under a 512-token
+  // ceiling the thinking alone would consume it and the text would never be reached; the
+  // fixture reproduces that by refusing to answer when a ceiling is present.
+  const loadHostModule = async () => ({
+    ModelRuntime: {
+      async create() {
+        return {
+          getModel: (provider, id) => ({ provider, id, reasoning: true }),
+          async completeSimple(model, request, options) {
+            seen.push(options);
+            const thinking = "reasoned at length about the span".repeat(40);
+            if ("maxTokens" in options) {
+              // What the provider actually did: the budget went to reasoning and the
+              // response arrived with thinking and no text.
+              return { role: "assistant", content: [{ type: "thinking", thinking }] };
+            }
+            return {
+              role: "assistant",
+              content: [
+                { type: "thinking", thinking },
+                {
+                  type: "text",
+                  text: "Read extensions/lib/folding.ts and confirmed projectActiveContext returns " +
+                    "the bounded projection; expanding recovers the exact call sites and the failing assertion.",
+                },
+              ],
+            };
+          },
+        };
+      },
+    },
+  });
+
+  const summarize = summarizerFactory.createSummarizeContextSpan(
+    { provider: "openai-codex", model: "gpt-5.6-terra", effort: "medium" },
+    loadHostModule,
+  );
+  const result = await summarize({
+    candidateId: "fold_ceiling",
+    sourceText: "the exact bytes of one completed inspection",
+    maxBriefChars: context.ACTIVE_CONTEXT_POLICY.maxBriefChars,
+  });
+  assert(seen.length, "the generator never reached the provider");
+  assert(seen.every((options) => !("maxTokens" in options)),
+    "a token ceiling was sent: it truncates the answer rather than shortening it");
+  assert(context.usefulBrief(result.brief, context.ACTIVE_CONTEXT_POLICY.maxBriefChars, "pi_fold_context"),
+    "a generator that thought at length did not produce a usable brief");
+
+  // ANTI-VACUITY: the fixture genuinely fails when a ceiling IS present, so the assertion
+  // above is about the runtime's behaviour and not about a fixture that always answers.
+  const ceilinged = { ...seen[0], maxTokens: 512 };
+  const runtime = await (await loadHostModule()).ModelRuntime.create();
+  const starved = await runtime.completeSimple({}, {}, ceilinged);
+  assert(!starved.content.some((part) => part.type === "text"),
+    "the fixture answers even under a ceiling, so this gate would pass without the fix");
+
+  // Reasoning still reaches the provider: deleting the ceiling must not delete the effort.
+  assert(seen.every((options) => options.reasoning === "medium"),
+    "the configured effort stopped reaching the provider");
+
+  return {
+    calls: seen.length,
+    ceilingSent: false,
+    reasoningStillSent: true,
+    briefUsableAfterLongThinking: true,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -12395,6 +12493,7 @@ const gates = [
   [114, "Every generator call is on the record", gateGeneratorCallsAreOnTheRecord],
   [115, "A parent brief covers every child", gateParentBriefCoversEveryChild],
   [116, "No fold goes without a brief", gateNoFoldWithoutABrief],
+  [117, "No token ceiling reaches the provider", gateNoTokenCeilingReachesTheProvider],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

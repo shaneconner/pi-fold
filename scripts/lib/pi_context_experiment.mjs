@@ -117,14 +117,24 @@ export const EXPERIMENT_BRIEF_GENERATOR = Object.freeze({
 // trial measures. The budget therefore buys survival and nothing else, and Pi's default
 // of 3 is too thin for a marathon: rep 4 of luna-20260810 spent all three on a single
 // Codex overload sequence and lived with no margin left. Eight is the pin because the
-// backoff doubles uncapped from the base, so a fully spent budget costs about eight and
-// a half minutes inside a run bounded at just over five hours.
+// budget buys survival and eight attempts survived every weather this campaign has seen.
+//
+// The BASE is 1,000 rather than 2,000 because Pi computes the wait as
+// `baseDelayMs * 2 ** (attempt - 1)` (agent-session.js) with no cap, so the base sets the
+// whole schedule and the deep end grows fast either way. Rep 2 of sol-20260811 measured
+// what the old base cost: 16 errored responses, each recovering after about 100 seconds,
+// which is five retries of pure sleep (62s) plus a ~35s successful answer. That is 16.5
+// minutes of a 303-minute run spent waiting rather than working, in a run that ended two
+// stages short on its own deadline. Halving the base halves the sleep on the common case
+// (31s for five attempts) while keeping all eight attempts and still reaching 64s deep in
+// the schedule for a provider that is genuinely down; a fully spent budget now costs about
+// four and a quarter minutes rather than eight and a half.
 // Pinned rather than left ambient: retry settings otherwise come from whatever the
 // machine's settings files happen to say, which is not a property a sealed run can state.
 export const EXPERIMENT_PROVIDER_RETRY = Object.freeze({
   enabled: true,
   maxRetries: 8,
-  baseDelayMs: 2_000,
+  baseDelayMs: 1_000,
 });
 
 // The package's own summarizer contract, revalidated on this side of the wire: the

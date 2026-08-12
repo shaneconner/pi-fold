@@ -3129,8 +3129,18 @@ try {
   // The budget is pinned rather than ambient: retry settings otherwise come from whatever
   // the machine's settings files say, which is not a property a sealed run can state. Eight
   // because Pi's default of 3 was fully spent by one rep-4 sequence with no margin left.
+  // The base is 1,000 because Pi's wait is `baseDelayMs * 2 ** (attempt - 1)` uncapped, so
+  // the base sets the whole schedule: sol-20260811 rep 2 spent 16.5 minutes of 303 asleep
+  // in backoff across 16 errored responses, in a run that ended two stages short.
   assert.deepEqual({ ...EXPERIMENT_PROVIDER_RETRY },
-    { enabled: true, maxRetries: 8, baseDelayMs: 2_000 });
+    { enabled: true, maxRetries: 8, baseDelayMs: 1_000 });
+  // A fully spent budget must stay inside a few minutes of a run bounded at hours: the
+  // schedule is the base doubling, so this is the property the base is chosen for.
+  const spentMs = Array.from({ length: EXPERIMENT_PROVIDER_RETRY.maxRetries },
+    (_unused, attempt) => EXPERIMENT_PROVIDER_RETRY.baseDelayMs * 2 ** attempt)
+    .reduce((sum, value) => sum + value, 0);
+  assert(spentMs <= 300_000,
+    `a fully spent retry budget sleeps ${spentMs}ms, which is a wall-clock cost the run cannot absorb`);
   const worker = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
   assert(worker.includes("retry: { ...EXPERIMENT_PROVIDER_RETRY }"),
     "the worker must hand the pinned retry budget to the session it builds");

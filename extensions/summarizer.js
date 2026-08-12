@@ -138,7 +138,18 @@ export function createSummarizeContextSpan(summarizer = "session", loadHostModul
         ? ctx.thinkingLevel
         : "none";
     const prompt = briefRequestPrompt(request);
-    const completionOptions = { maxTokens: 512, signal: request.signal };
+    // NO TOKEN CEILING, deliberately (Shane 2026-08-11). A maxTokens value does not tell a
+    // model to be brief, it cuts the model off mid-answer, and on a reasoning model the
+    // reasoning is drawn from the same budget: the harder the span is to read, the less
+    // remains for the brief, until nothing remains and the response carries no text at all.
+    // The 2026-08-11 rep ran with 512 and paid for it: 22 percent of calls failed with
+    // "Summarizer returned no text", every one of them after two minutes of thinking, and
+    // brief length correlated NEGATIVELY with call duration at r = -0.575. The group
+    // payloads suffered worst, because the most interesting input provokes the most
+    // reasoning. Length is bounded by three things that can explain themselves to the
+    // model instead: the limit stated in the request, the cure that hands back an
+    // over-long brief with the complaint, and the caller's timeout for a runaway.
+    const completionOptions = { signal: request.signal };
     if (model.reasoning && effort !== "none" && effort !== "off") {
       completionOptions.reasoning = effort;
     }
