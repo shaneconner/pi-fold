@@ -243,6 +243,10 @@ function makeRuntime(built, {
   loadHostModule,
   packageRegistration = false,
   sessionFile = join(tmpdir(), "pi-fold-test-session.jsonl"),
+  // One injection point for a durable write that FAILS. Persistence is the only place
+  // this runtime can lose a commit it has already computed, and a gate that cannot make
+  // that write fail can only pin the source line rather than the behaviour.
+  beforeAppend,
 } = {}) {
   const handlers = new Map();
   const tools = new Map();
@@ -270,6 +274,7 @@ function makeRuntime(built, {
     registerTool(tool) { tools.set(tool.name, tool); },
     registerCommand(name, command) { commands.set(name, command); },
     async appendEntry(customType, data) {
+      beforeAppend?.(customType, data);
       const entry = customEntry(
         customType,
         data,
@@ -11578,6 +11583,106 @@ async function gateVanishedCommitAnnouncesItself() {
 }
 
 /**
+ * SUSPENDING AUTOMATIC FOLDING IS AN EVENT.
+ *
+ * Gate 122 made a commit that vanishes at persistence RAISE. This is the other half: what
+ * happens to the raise. It routes to `suspendAutomatic`, which latched the failure, wrote
+ * a pending note, and called `ctx.ui.notify`. A headless host has no `ui`, so `safeNotify`
+ * swallowed the only report, and the canonical event stream, the thing an adjudicator
+ * actually reads, carried nothing at all.
+ *
+ * That is how sol-20260812 reps 3 and 4 died. In both, the LAST applied commit emitted its
+ * `context.commit` and eleven `context.fold` records and persisted none of them: rep 3
+ * committed at revision 143 with durable state stopped at 134, rep 4 at revision 153 with
+ * durable state stopped at 143, neither wrote a single fold record for those eleven folds,
+ * and both were one receipt short. The next projection in each read the rolled-back
+ * revision and classified itself "append" while naming the commit as its cause. Nothing
+ * folded again in either session; occupancy climbed unopposed and the run died at the
+ * context wall. Rep 2, same plan and same seed, ran ten applied commits with every fold
+ * landing, so the failure is rare rather than systemic, which is exactly why it has to be
+ * on the record the first time it happens.
+ *
+ * The gate makes a durable write fail for real and reads the stream back.
+ */
+async function gateSuspensionAnnouncesItself() {
+  const shape = { turns: 10, resultChars: 12_000, contextWindow: 100_000 };
+
+  // 1. ANTI-VACUITY. The same fixture, unsabotaged, must commit folds and stay quiet. If it
+  //    folded nothing there would be no durable write to fail, and if it announced a
+  //    suspension anyway the assertions below would pass on an unrelated event.
+  const clean = makeRuntime(makeFixture({ ...shape, sessionId: "suspend-clean" }));
+  await startRuntime(clean);
+  const cleanState = await measureAndCommit(clean, 80_000, 100_000);
+  assert(cleanState.folds.length > 0, "The fixture folded nothing, so no durable write could fail");
+  assert.equal(contextEvents(clean).filter((event) => event.kind === "context.suspend").length, 0,
+    "A healthy commit announced a suspension");
+
+  // 2. THE FAILURE, FOR REAL. A fold record is the first durable write a commit makes, so
+  //    failing it reproduces the shape both dead runs left behind: folds computed, folds
+  //    emitted, no record, state rolled back.
+  let fault = "durable fold record refused by the fixture";
+  let armed = true;
+  const runtime = makeRuntime(makeFixture({ ...shape, sessionId: "suspend-loud" }), {
+    beforeAppend(customType) {
+      if (armed && customType === context.ACTIVE_CONTEXT_FOLD_RECORD_ENTRY) throw new Error(fault);
+    },
+  });
+  await startRuntime(runtime);
+  await measureAndCommit(runtime, 80_000, 100_000);
+
+  const suspensions = () => contextEvents(runtime).filter((event) => event.kind === "context.suspend");
+  assert.equal(suspensions().length, 1,
+    `Automatic folding was suspended without one announcement (got ${suspensions().length})`);
+  const [suspend] = suspensions();
+
+  // 3. IT NAMES THE CAUSE. A record that says only "something failed" would have left both
+  //    dead runs exactly as unexplained as they were.
+  assert(String(suspend.error).includes(fault),
+    `The suspension does not carry the failure that caused it: ${suspend.error}`);
+  assert(typeof suspend.phase === "string" && suspend.phase.length > 0,
+    "The suspension does not say which lifecycle phase failed");
+  assert.equal(suspend.repeat, false, "The first suspension reported itself as a repeat");
+  assert(["none", "record-only", "state-committed"].includes(suspend.disposition),
+    `The suspension does not classify what it left durable: ${suspend.disposition}`);
+
+  // 4. IT CARRIES THE TWO REVISIONS WHOSE DISAGREEMENT IS THE SYMPTOM. In both dead runs the
+  //    only visible trace was a projection reading a revision the commit had already passed.
+  assert(Number.isSafeInteger(suspend.state_revision) && Number.isSafeInteger(suspend.durable_revision),
+    "The suspension does not carry the in-memory and durable revisions");
+  assert(Number.isSafeInteger(suspend.folds_durable) && Number.isSafeInteger(suspend.fold_records_durable),
+    "The suspension does not say what durable state was left holding");
+
+  // 5. AND FOLDING REALLY DID STOP, which is what makes the announcement worth having: a
+  //    suspended session cannot reclaim anything, so every later measurement is inflow with
+  //    no relief. Driving more pressure must produce no further applied commit.
+  const before = contextEvents(runtime).filter(
+    (event) => event.kind === "context.commit" && event.deferred === false).length;
+  await measureAndCommit(runtime, 95_000, 100_000, "post-suspend");
+  const after = contextEvents(runtime).filter(
+    (event) => event.kind === "context.commit" && event.deferred === false).length;
+  assert.equal(after, before, "Automatic folding kept committing after it reported itself suspended");
+
+  // 6. REPEATS ARE BOUNDED BY DISTINCT CAUSES, NOT BY PASSES. The same message again adds
+  //    nothing; a different message is new information and is reported once.
+  assert.equal(suspensions().length, 1,
+    "A suspended runtime re-announced the same failure on a later pass");
+  fault = "a different durable refusal";
+  armed = false;
+  await measureAndCommit(runtime, 96_000, 100_000, "post-suspend-2");
+  assert.equal(suspensions().length, 1,
+    "A pass that failed nothing new still announced a suspension");
+
+  return {
+    announced: suspensions().length,
+    phase: suspend.phase,
+    disposition: suspend.disposition,
+    stateRevision: suspend.state_revision,
+    durableRevision: suspend.durable_revision,
+    foldsStopped: after === before,
+  };
+}
+
+/**
  * A FOLDED HEAD NEVER LIMITS REACH.
  *
  * The rep-3 shape at fixture scale: a head of tool results the ladder has ALREADY folded,
@@ -13078,6 +13183,7 @@ const gates = [
   [120, "A mark reading takes a view; only a write copies", gateMarkReadsTakeAView],
   [121, "An evidence digest is derived once per message object", gateEvidenceDigestDerivedOncePerObject],
   [122, "A commit that vanishes at persistence announces itself", gateVanishedCommitAnnouncesItself],
+  [123, "Suspending automatic folding announces itself", gateSuspensionAnnouncesItself],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

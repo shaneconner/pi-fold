@@ -173,6 +173,15 @@ export type ContextEventKind =
   | "context.split"
   /** One overflow rollback and the recovery that followed it. */
   | "context.recovery"
+  /**
+   * Automatic folding suspended: the failure that stopped it, and what it left behind.
+   *
+   * This transition ends folding for the session, so it decides everything that follows,
+   * and it used to reach a UI notification and nothing else. A headless host has no UI,
+   * which is how sol-20260812 reps 3 and 4 both lost their last commit, suspended, and
+   * ran to the context wall with the stream showing a commit that simply had no effect.
+   */
+  | "context.suspend"
   /** One tree rollback: what left the branch, and whether the request replayed. */
   | "context.rollback"
   /** One projection built, classified against the one before it. */

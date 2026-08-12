@@ -3379,6 +3379,69 @@ try {
   checks.noOutputCeilingAndTheServedBudgetIsRecorded = true;
 }
 
+// GATE 53 - a run whose folding SUSPENDED fails by that name, and fails on it before the
+// symptom it eventually dies of.
+//
+// sol-20260812 reps 3 and 4 both ended on "Request was aborted" and both reported exactly
+// that. Neither report was wrong and neither was useful. What happened in both was the
+// same: the last applied commit of the run emitted its `context.commit` and eleven
+// `context.fold` records, persisted none of them, rolled the state back (rep 3 from
+// revision 143 to 134, rep 4 from 153 to 143), and suspended automatic folding. Suspension
+// is permanent for the session, so occupancy then climbed with nothing able to reclaim it,
+// and the request that finally died was twenty minutes downstream of the decision that
+// killed it. Rep 2, same plan and same seed, ran ten applied commits with every fold
+// landing, which is why this is worth a named latch rather than a tolerance.
+//
+// The runtime half of the fix is that suspension is now an event rather than a UI
+// notification a headless host discards; this gate is the adjudication half. Scoped to the
+// arm that folds, because a run with no folding runtime can never announce one.
+// ---------------------------------------------------------------------------
+{
+  const worker = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
+  const suspendCheck = worker.slice(
+    worker.indexOf("const suspensions = armRuntime.activeContextEnabled"),
+    worker.indexOf("Experiment worker did not end at one terminal provider stop"),
+  );
+  assert(suspendCheck.length > 0,
+    "the worker does not check the session for an announced folding suspension");
+  assert(suspendCheck.includes(`entry.data?.kind === "context.suspend"`),
+    "the suspension check does not read the runtime's own suspension event");
+  assert(/assertExperiment\(suspensions\.length === 0/.test(suspendCheck),
+    "an announced suspension does not fail the run");
+  // Ordering is the point: the cause is asserted before the symptom, or the report names
+  // the aborted request again and the suspension stays buried.
+  assert(worker.indexOf("const suspensions = armRuntime.activeContextEnabled") <
+    worker.indexOf("Experiment worker did not end at one terminal provider stop"),
+  "the suspension check runs after the terminal-stop check, so the report names the symptom");
+  // Actionable, not merely red: the phase, the revision and the error itself travel.
+  assert(/phase \$\{suspensions\[0\]\?\.phase\}/.test(suspendCheck) &&
+    /revision \$\{suspensions\[0\]\?\.state_revision\}/.test(suspendCheck) &&
+    /suspensions\[0\]\?\.error/.test(suspendCheck),
+  "the suspension failure does not name the phase, the revision and the error");
+  // Scoped to the arm that folds. Without this the unmanaged and native arms would be
+  // judged against an event their runtime cannot emit.
+  assert(suspendCheck.includes("armRuntime.activeContextEnabled"),
+    "the suspension check is not scoped to the arm whose runtime can fold");
+
+  // And the runtime really does announce it, which is what makes the check above more than
+  // a source pin: the event kind is declared, and the suspension path emits it.
+  const runtimeSource = readFileSync(join(PROJECT, "extensions", "active-context.ts"), "utf8");
+  const suspendFn = runtimeSource.slice(
+    runtimeSource.indexOf("const suspendAutomatic = ("),
+    runtimeSource.indexOf("ladder.pendingContextNote = `Automatic context management suspended"),
+  );
+  assert(suspendFn.length > 0, "the suspension path was not found where it is pinned");
+  assert(/emit\("context\.suspend"/.test(suspendFn),
+    "suspending automatic folding still reports only through the host UI");
+  assert(/state_revision/.test(suspendFn) && /durable_revision/.test(suspendFn),
+    "the suspension event omits the two revisions whose disagreement is the symptom");
+  const kinds = readFileSync(join(PROJECT, "extensions", "lib", "instrumentation.ts"), "utf8");
+  assert(kinds.includes(`| "context.suspend"`),
+    "context.suspend is not a declared kind of the canonical event stream");
+
+  checks.suspendedFoldingFailsTheRunByName = true;
+}
+
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
 assert.deepEqual([...EXPERIMENT_MODES], ["smoke", "full"]);
 assert(plan, "stage plan fixture did not survive gate 4");

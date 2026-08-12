@@ -52,6 +52,7 @@ import {
   latestProviderContextMeasurement,
   orderedRoots,
   parseNativeCompactionCompletion,
+  exactMapped,
   parseNativeCompactionDecision,
   parseProviderContextMeasurementReceipt,
   persistenceProjection,
@@ -1163,8 +1164,14 @@ export function registerActiveContext(pi: any, options: {
       const persistedFoldIds = new Set(persistence.persisted.folds.map((fold) => fold.id));
       const arrivingFoldIds = next.folds.filter((fold) => !persistedFoldIds.has(fold.id)).map((fold) => fold.id);
       const foldsInMemory = next.folds.length;
+      // Kept so a discarded commit can say WHICH check discarded it. The projection drops
+      // a fold whose refs no longer resolve, and telling "the refs stopped resolving" apart
+      // from "the projection was fine and something later refused" is the whole difference
+      // between fixing this and guessing at it again.
+      let projectionSnapshot: ActiveContextSnapshot | null = null;
       if (ctx && lifecycle.latestSnapshot?.sessionId === next.sessionId) {
-        next = persistenceProjection(next, authoritativeSnapshotFor(ctx));
+        projectionSnapshot = authoritativeSnapshotFor(ctx);
+        next = persistenceProjection(next, projectionSnapshot);
       }
       next.folds = normalizeFoldsForPersistedRecords(next.folds, persistence.persistedFoldRecords);
       if (sameStateProjection(next, persistence.persisted)) {
@@ -1191,11 +1198,22 @@ export function registerActiveContext(pi: any, options: {
         // Suspending is the safe direction: continuing to compute folds that are thrown
         // away is what turned one dropped commit into a dead session.
         if (arrivingFoldIds.length) {
+          // Which ref of the first lost fold stopped resolving, and how far the branch had
+          // moved by the time this queued write ran. The projection reads a snapshot built
+          // at PERSIST time, not the one the commit was computed against, so a branch that
+          // grew in between is the first thing to rule in or out.
+          const lost = clone(persistence.state).folds.find((fold) => fold.id === arrivingFoldIds[0]);
+          const lostRefs = lost ? flattenFoldRefs(lost, persistence.state) : [];
+          const unresolved = projectionSnapshot
+            ? lostRefs.filter((ref) => !exactMapped(projectionSnapshot!, ref)).length
+            : null;
           throw new Error(
             `Active-context commit discarded at persistence: ${arrivingFoldIds.length} arriving fold(s) ` +
             `did not survive the persistence projection (${foldsInMemory} in memory, ` +
             `${next.folds.length} durable) at revision ${persistence.state.revision}; ` +
-            `first ${arrivingFoldIds[0]}`,
+            `first ${arrivingFoldIds[0]} with ${unresolved ?? "unknown"} of ${lostRefs.length} refs ` +
+            `unmapped against a ${projectionSnapshot?.mapped.length ?? 0}-message, ` +
+            `${projectionSnapshot?.branchObjects.length ?? 0}-object projection snapshot`,
           );
         }
         persistence.state = clone(persistence.persisted);
@@ -1558,6 +1576,41 @@ export function registerActiveContext(pi: any, options: {
     ladder.boundaryFailure = message;
     cancelPreparation();
     if (persistence.state?.prepared) persistence.state = clearPrepared(persistence.state);
+    // SUSPENSION IS AN EVENT.
+    //
+    // Ending automatic folding decides everything that happens afterwards, and until now
+    // it reached `ctx.ui.notify` and nothing else. A headless host has no `ui`, so
+    // `safeNotify` swallowed it: in sol-20260812 reps 3 and 4 the last commit of each run
+    // emitted its `context.commit` and eleven `context.fold` records, persisted none of
+    // them, rolled back, suspended, and the stream showed only a commit whose folds never
+    // reached the next projection. Both sessions then climbed to the context wall with
+    // nothing left that could fold, and the cause had to be inferred from a revision
+    // going backwards.
+    //
+    // Emitted on the first failure and again whenever the message CHANGES, because a
+    // different error is new information and an identical one repeated by suppressed
+    // callbacks is not. That bounds the volume by distinct causes rather than by passes.
+    const firstFailure = !ladder.automaticFailure;
+    if (firstFailure || ladder.automaticFailure!.message !== message) {
+      emit("context.suspend", {
+        phase,
+        error: message,
+        error_name: error instanceof Error ? error.name : typeof error,
+        // What the failed transaction left durable, which is the difference between a
+        // clean rollback and a half-written commit.
+        disposition: firstFailure ? persistenceDisposition : ladder.automaticFailure!.persistenceDisposition,
+        repeat: !firstFailure,
+        suppressed_callbacks: ladder.automaticFailure?.suppressedCallbacks ?? 0,
+        // The two revisions whose disagreement IS the symptom.
+        state_revision: persistence.state?.revision ?? null,
+        durable_revision: persistence.persisted?.revision ?? null,
+        folds_in_memory: persistence.state?.folds.length ?? null,
+        folds_durable: persistence.persisted?.folds.length ?? null,
+        fold_records_durable: persistence.persistedFoldRecords.size,
+        pending_marks: persistence.state?.pendingMarks?.length ?? 0,
+        key: firstFailure ? key : ladder.automaticFailure!.key,
+      });
+    }
     if (ladder.automaticFailure) {
       ladder.automaticFailure.suppressedCallbacks = Math.min(
         Number.MAX_SAFE_INTEGER,

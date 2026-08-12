@@ -24,6 +24,7 @@ import {
   EXPERIMENT_RUNNER_MODE,
   EXPERIMENT_TERMINAL_STABILIZATION_MS,
   EXPERIMENT_TOOL_NAME,
+  CONTEXT_EVENT_SUFFIX,
   armRuntimeConfiguration,
   assertExperiment,
   corpusManifestSha256,
@@ -347,6 +348,24 @@ try {
     };
   }
   assertExperiment(!deadlineFired, "Experiment worker hit its watchdog deadline");
+  // A SUSPENDED RUNTIME IS A DEAD RUN, whatever it dies of afterwards.
+  //
+  // Checked BEFORE the terminal-stop assertion so the report names the cause instead of
+  // the symptom. sol-20260812 reps 3 and 4 both ended on an aborted request and both said
+  // so; what actually happened in each is that a commit twenty minutes earlier failed to
+  // persist, folding switched off for the rest of the session, and occupancy then climbed
+  // to the wall with nothing left that could reclaim it. The abort was the last event, not
+  // the first. Only meaningful where folding runs at all.
+  const suspensions = armRuntime.activeContextEnabled
+    ? entries
+      .filter((entry) => typeof entry?.customType === "string" &&
+        entry.customType.endsWith(CONTEXT_EVENT_SUFFIX) && entry.data?.kind === "context.suspend")
+      .map((entry) => entry.data)
+    : [];
+  assertExperiment(suspensions.length === 0,
+    `Active-context folding was suspended during the run (${suspensions.length} announcement(s)); ` +
+    `first at ordinal ${suspensions[0]?.ordinal} revision ${suspensions[0]?.state_revision} ` +
+    `in phase ${suspensions[0]?.phase}: ${suspensions[0]?.error}`);
   assertExperiment(overflow || (terminalMessage?.role === "assistant" &&
     terminalMessage.stopReason === "stop"),
   "Experiment worker did not end at one terminal provider stop");
