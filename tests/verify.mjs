@@ -11364,6 +11364,71 @@ async function gateEvidenceDigestDerivedOncePerObject() {
   };
 }
 
+/**
+ * A BATCHED BRIEF NAMES THE BYTES IT WAS MADE FROM.
+ *
+ * `context.brief` carries a `source_sha256` that is supposed to say which source a brief
+ * was generated from. A batched request holds its source on the spans and carries no
+ * `sourceText` of its own, so the record hashed the empty string: every batched brief in
+ * every session ever recorded reported the digest of "" beside a `source_chars` in the
+ * hundred thousands. Since gate 118 made batching the normal path, that was the only value
+ * the field ever took. A constant that looks like a measurement is worse than an absent one.
+ *
+ * Attribution was never lost, and this gate does not pretend otherwise: `fold_ids` names
+ * every fold in the batch and is what a provenance join reads. What was lost is the ability
+ * to say WHICH BYTES produced a brief, which is exactly the question worth asking when a
+ * brief looks wrong.
+ */
+async function gateBatchedBriefNamesItsSource() {
+  const shape = { turns: 16, resultChars: 10_000, contextWindow: 100_000, toolName: "bash" };
+  const calls = [];
+  const runtime = makeRuntime(makeFixture(shape), {
+    summarizeContextSpan: async (request) => {
+      calls.push(request);
+      return briefAnswer(request, (id) => `Batched brief naming ${id} and the bash result it folded.`);
+    },
+  });
+  await startRuntime(runtime);
+  await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  await settle();
+
+  const briefs = contextEvents(runtime).filter((event) => event.kind === "context.brief");
+  const batched = briefs.filter((event) => event.spans > 1);
+  // ANTI-VACUITY: without a real batch carrying real bytes there is nothing to digest.
+  assert(batched.length > 0, "No batched brief was recorded, so this fixture proves nothing");
+  const EMPTY_SHA256 = createHash("sha256").update("").digest("hex");
+  for (const event of batched) {
+    assert(event.source_chars > 0,
+      "A batched brief reported no source chars, so its digest claim is untestable");
+    assert.notEqual(event.source_sha256, EMPTY_SHA256,
+      `A batched brief over ${event.source_chars} chars digested the EMPTY STRING`);
+    assert(/^[a-f0-9]{64}$/.test(event.source_sha256),
+      `A batched brief carried a malformed source digest: ${event.source_sha256}`);
+    // Attribution is unchanged and still the join key.
+    assert(Array.isArray(event.fold_ids) && event.fold_ids.length === event.spans,
+      "A batched brief did not name one fold per span");
+  }
+  // The digest is of the SPANS, boundaries included: two batches carrying identical bytes
+  // split differently must not collide, or the field cannot identify a call.
+  const digestOf = (texts) => createHash("sha256").update(JSON.stringify(texts)).digest("hex");
+  assert.notEqual(digestOf(["ab", "c"]), digestOf(["a", "bc"]),
+    "Span boundaries are not part of the digest, so differently split batches collide");
+  // And a batch's digest is reproducible from what the call actually carried.
+  const upgrades = calls.filter(isBriefUpgradeRequest).filter((call) => call.spans.length > 1);
+  assert(upgrades.length > 0, "No multi-span upgrade call was observed");
+  const expected = digestOf(upgrades[0].spans.map((span) => span.sourceText));
+  assert(batched.some((event) => event.source_sha256 === expected),
+    "No recorded batched brief digest matched the spans the call carried");
+
+  return {
+    batchedBriefs: batched.length,
+    spansInTheFirst: batched[0].spans,
+    sourceCharsInTheFirst: batched[0].source_chars,
+    digestsTheSpansNotTheEmptyString: true,
+    boundariesIncluded: true,
+  };
+}
+
 async function gateOneCallPerCommit() {
   const shape = { turns: 16, resultChars: 10_000, contextWindow: 100_000, toolName: "bash" };
   const calls = [];
@@ -13078,6 +13143,7 @@ const gates = [
   [120, "A mark reading takes a view; only a write copies", gateMarkReadsTakeAView],
   [121, "An evidence digest is derived once per message object", gateEvidenceDigestDerivedOncePerObject],
   [122, "A commit that vanishes at persistence announces itself", gateVanishedCommitAnnouncesItself],
+  [123, "A batched brief names the bytes it was made from", gateBatchedBriefNamesItsSource],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

@@ -827,10 +827,32 @@ export function registerActiveContext(pi: any, options: {
           group_source_chars: groupSpan(request) ? sourceText.length : 0,
           leaf_source_chars: groupSpan(request) ? 0 : sourceText.length,
         };
+      // The digest of what this call ACTUALLY CARRIED.
+      //
+      // A batched request holds its source on the spans and carries no `sourceText` of its
+      // own, so hashing `sourceText` hashed the empty string: every batched brief in every
+      // session ever recorded reported source_sha256
+      // e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855, the digest of "",
+      // beside a source_chars in the hundred thousands. A constant that looks like a
+      // measurement is worse than an absent one, and since gate 118 made batching the normal
+      // path it was the only value the field ever took.
+      //
+      // Attribution itself was never lost: `fold_ids` names every fold in the batch and is
+      // what a provenance join reads. What was lost is the ability to say WHICH BYTES a
+      // brief was made from, which is exactly what you want when a brief looks wrong.
+      //
+      // The span texts are digested as a JSON ARRAY rather than concatenated, so the
+      // boundaries between spans are part of what is hashed: two batches carrying the same
+      // bytes split differently are different calls and must not share a digest.
+      const batchSourceSha256 = (): string => sha256Text(JSON.stringify(
+        (spans ?? []).map((span) => typeof span.sourceText === "string" ? span.sourceText : ""),
+      ));
       const base = {
         fold_id: typeof request.candidateId === "string" ? request.candidateId : "",
         source_chars: spans ? spans.reduce((sum, span) => sum + charsOf(span), 0) : sourceText.length,
-        source_sha256: typeof request.sourceSha256 === "string" ? request.sourceSha256 : sha256Text(sourceText),
+        source_sha256: typeof request.sourceSha256 === "string"
+          ? request.sourceSha256
+          : spans ? batchSourceSha256() : sha256Text(sourceText),
         ...kindCounts,
         // The second ask, not the first. How often this fires is how we learn whether the
         // brief cap is anywhere near right, so it is a field rather than an inference.
