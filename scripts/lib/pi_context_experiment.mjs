@@ -256,7 +256,14 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
   full: Object.freeze({
     stageCount: 64,
     stageIntervalMs: 15_000,
-    watchdogMs: 300 * 60 * 1_000,
+    // Six hours, raised from five (2026-08-11). The watchdog is a liveness bound on a hung
+    // run, not a budget a healthy one should be racing: rep 2 of sol-20260811 ran 303
+    // minutes and was cut two stages short of its 64, having spent about 31 minutes
+    // recovering from errors and 16.5 more asleep in retry backoff. Both of those causes
+    // are fixed in this build, but the margin they consumed was never really there. A
+    // healthy run finishing an hour early costs nothing; one cut short at stage 62 costs
+    // the whole repetition.
+    watchdogMs: 360 * 60 * 1_000,
     heartbeatMs: 30_000,
     payloadTargetChars: 48_000,
     payloadFloorChars: 24_000,
@@ -2680,6 +2687,68 @@ export const FOLD_RECORD_SUFFIX = "-fold-record";
  * names it, and its fold id is in the tool-result payload rather than the event stream.
  * Neither sealed run in the campaign contains one.
  */
+/**
+ * What the brief generator was asked to do, and what it cost, from its own call records
+ * (Shane 2026-08-11: how often did agents have to cure, on which kind of fold, and what
+ * did the summarizer spend).
+ *
+ * Split by KIND because the two are different jobs: a consolidation reads a group of folds
+ * opened one level down, an automatic fold reads raw evidence. A call can carry both, and
+ * a mixed call's tokens are reported apart rather than divided by a rule nobody can check.
+ * Usage is summed only where the provider reported it, and calls that reported none are
+ * counted, because a call whose cost is unknown and a call that cost nothing are different
+ * facts.
+ */
+function generatorCallRollup(custom) {
+  const calls = custom
+    .filter((entry) => entry.customType.endsWith(CONTEXT_EVENT_SUFFIX) && entry.data &&
+      typeof entry.data === "object" && entry.data.kind === "context.brief")
+    .map((entry) => entry.data);
+  const bucket = () => ({
+    calls: 0, spans: 0, sourceChars: 0, briefChars: 0, cures: 0, usage: {}, callsWithoutUsage: 0,
+  });
+  const buckets = { consolidation: bucket(), automatic: bucket(), mixed: bucket() };
+  const outcomes = {};
+  let spans = 0;
+  let cures = 0;
+  let curedSpans = 0;
+  for (const call of calls) {
+    outcomes[call.outcome ?? "unknown"] = (outcomes[call.outcome ?? "unknown"] ?? 0) + 1;
+    const group = Number(call.group_spans) || 0;
+    const leaf = Number(call.leaf_spans) || 0;
+    const total = group + leaf;
+    spans += total;
+    if (call.cure === true) { cures += 1; curedSpans += total; }
+    const into = group && leaf ? buckets.mixed : group ? buckets.consolidation : buckets.automatic;
+    into.calls += 1;
+    into.spans += total;
+    into.sourceChars += Number(call.source_chars) || 0;
+    into.briefChars += Number(call.brief_chars) || 0;
+    if (call.cure === true) into.cures += 1;
+    if (call.usage && typeof call.usage === "object") {
+      for (const [field, value] of Object.entries(call.usage)) {
+        if (Number.isFinite(value)) into.usage[field] = (into.usage[field] ?? 0) + value;
+      }
+    } else into.callsWithoutUsage += 1;
+  }
+  return {
+    calls: calls.length,
+    spans,
+    // The whole point of batching, in one number: spans per call. A run that reads 1.0 here
+    // is one where the lane never batched, whatever the code says.
+    spansPerCall: calls.length ? Number((spans / calls.length).toFixed(2)) : null,
+    outcomes,
+    cures,
+    curedSpans,
+    cureRate: calls.length ? Number((cures / calls.length).toFixed(4)) : null,
+    byKind: buckets,
+    definition: "one record per generator call. `byKind` splits calls by whether every span " +
+      "was a consolidation, every span an automatic fold, or the call carried both; a mixed " +
+      "call's tokens are never divided between the two. `cures` counts second asks, which " +
+      "is how often a brief missed the stated contract and was handed back with the complaint",
+  };
+}
+
 export function endOfRunBriefProvenance(entries) {
   assertExperiment(Array.isArray(entries), "Brief provenance requires session entries");
   const custom = entries.filter((entry) => entry?.type === "custom" &&
@@ -2734,6 +2803,7 @@ export function endOfRunBriefProvenance(entries) {
 
   return {
     ...counts,
+    generator: generatorCallRollup(custom),
     join: {
       joinKey: "fold_id",
       upgradedFolds: upgraded.size,

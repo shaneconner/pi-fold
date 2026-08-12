@@ -2864,9 +2864,61 @@ try {
     commitEntry({ freed_tokens: 1_200 }),
   ];
   const preLane = endOfRunBriefProvenance(preLaneRun);
-  const { join: preLaneJoin, ...preLaneKinds } = preLane;
+  const { join: preLaneJoin, generator: preLaneGenerator, ...preLaneKinds } = preLane;
   assert.deepEqual(preLaneKinds, creationTimeCount(preLaneRun));
   assert.deepEqual(preLaneKinds, { model: 0, deterministic: 2 });
+  // A run that predates the generator-call record reports an empty rollup rather than a
+  // missing one, so "no calls" and "not instrumented" read the same way they always did:
+  // as zero, with the rates null rather than a fabricated 0.
+  assert.equal(preLaneGenerator.calls, 0);
+  assert.equal(preLaneGenerator.spansPerCall, null);
+  assert.equal(preLaneGenerator.cureRate, null);
+
+  // THE GENERATOR ROLLUP (Shane 2026-08-11: how often did agents cure, on which kind of
+  // fold, and what did the summarizer spend). Four calls: a batch of automatic folds, its
+  // cure, a consolidation on its own, and one call carrying both kinds.
+  const briefEntry = (fields) => ({
+    type: "custom",
+    customType: `pi-fold-${CONTEXT_EVENT_SUFFIX}`,
+    data: { kind: "context.brief", outcome: "ok", ...fields },
+  });
+  const rollup = endOfRunBriefProvenance([
+    briefEntry({ group_spans: 0, leaf_spans: 6, source_chars: 60_000, brief_chars: 4_800,
+      cure: false, usage: { input: 61_000, output: 900 } }),
+    briefEntry({ group_spans: 0, leaf_spans: 2, source_chars: 20_000, brief_chars: 1_600,
+      cure: true, usage: { input: 21_000, output: 300 } }),
+    briefEntry({ group_spans: 1, leaf_spans: 0, source_chars: 180_000, brief_chars: 1_900,
+      cure: false, usage: { input: 181_000, output: 400 } }),
+    briefEntry({ group_spans: 1, leaf_spans: 3, source_chars: 90_000, brief_chars: 3_100,
+      cure: false }),
+    briefEntry({ outcome: "timeout", group_spans: 0, leaf_spans: 1, source_chars: 9_000 }),
+  ]).generator;
+  assert.equal(rollup.calls, 5);
+  assert.equal(rollup.spans, 14);
+  assert.equal(rollup.spansPerCall, 2.8, "the batching headline must be spans per call");
+  assert.equal(rollup.cures, 1);
+  assert.equal(rollup.curedSpans, 2);
+  assert.equal(rollup.cureRate, 0.2);
+  assert.deepEqual(rollup.outcomes, { ok: 4, timeout: 1 });
+  // A pure-kind call lands in its own bucket; a call carrying both lands in neither, so no
+  // token is ever attributed to a kind that did not spend it.
+  assert.equal(rollup.byKind.automatic.calls, 3);
+  assert.equal(rollup.byKind.automatic.spans, 9);
+  assert.equal(rollup.byKind.automatic.usage.input, 82_000);
+  assert.equal(rollup.byKind.consolidation.calls, 1);
+  assert.equal(rollup.byKind.consolidation.usage.input, 181_000);
+  assert.equal(rollup.byKind.mixed.calls, 1);
+  assert.equal(rollup.byKind.mixed.spans, 4);
+  assert.deepEqual(rollup.byKind.mixed.usage, {},
+    "a mixed call reported no usage, so its bucket must state none rather than zero");
+  // Usage that was never reported is counted as unknown, never as zero.
+  assert.equal(rollup.byKind.mixed.callsWithoutUsage, 1);
+  assert.equal(rollup.byKind.automatic.callsWithoutUsage, 1);
+  // ANTI-VACUITY: the mixed call's tokens are absent from both pure buckets, which is the
+  // whole reason the third bucket exists.
+  assert.equal(
+    rollup.byKind.automatic.usage.input + rollup.byKind.consolidation.usage.input, 263_000,
+    "a mixed call's tokens leaked into a pure-kind bucket");
   assert.equal(preLaneJoin.upgradedFolds, 0);
   assert.equal(preLaneJoin.upgradeFailures, 0);
   assert.equal(preLaneJoin.upgradesWaitingAtLastCommit, null);
