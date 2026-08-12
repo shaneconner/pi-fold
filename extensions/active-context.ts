@@ -1159,11 +1159,45 @@ export function registerActiveContext(pi: any, options: {
     const operation = persistence.persistenceQueue.then(async () => {
       if (!persistence.state || !persistence.persisted) return;
       let next = clone(persistence.state);
+      // Which folds this write is TRYING to add, read before the projection can drop them.
+      const persistedFoldIds = new Set(persistence.persisted.folds.map((fold) => fold.id));
+      const arrivingFoldIds = next.folds.filter((fold) => !persistedFoldIds.has(fold.id)).map((fold) => fold.id);
+      const foldsInMemory = next.folds.length;
       if (ctx && lifecycle.latestSnapshot?.sessionId === next.sessionId) {
         next = persistenceProjection(next, authoritativeSnapshotFor(ctx));
       }
       next.folds = normalizeFoldsForPersistedRecords(next.folds, persistence.persistedFoldRecords);
       if (sameStateProjection(next, persistence.persisted)) {
+        // A COMMIT THAT VANISHES IS NOT A NO-OP.
+        //
+        // `persistenceProjection` keeps only folds whose refs still resolve against the
+        // snapshot, which is correct when evidence has genuinely left the branch. But when
+        // a write ARRIVES with new folds and projects down to something byte-equal to what
+        // is already durable, every one of those folds was dropped, and returning quietly
+        // here also resets `persistence.state` BACKWARDS to the persisted revision. The
+        // marks that produced them go back to pending, the same commit is attempted again
+        // on the next boundary, and it vanishes again.
+        //
+        // Measured, sol-20260812 rep 3: a band-top commit ran at revision 143 and folded
+        // 579,489 source chars into 85,463 of placeholder. Durable state never passed 134.
+        // None of its 11 folds reached a record, no receipt was written, occupancy climbed
+        // 237,682 -> 253,423 against a 251,520 budget unopposed, and the next request was
+        // refused. Nothing was reported, because a silent return is not a failure. Rep 2
+        // ran 15 commits on the same plan with no gap at all, so this is rare rather than
+        // systemic, which is exactly why it has to announce itself the first time.
+        //
+        // Raising it routes through the automatic-failure path, which restores the state
+        // this call was about to discard, suspends automatic folding and tells the user.
+        // Suspending is the safe direction: continuing to compute folds that are thrown
+        // away is what turned one dropped commit into a dead session.
+        if (arrivingFoldIds.length) {
+          throw new Error(
+            `Active-context commit discarded at persistence: ${arrivingFoldIds.length} arriving fold(s) ` +
+            `did not survive the persistence projection (${foldsInMemory} in memory, ` +
+            `${next.folds.length} durable) at revision ${persistence.state.revision}; ` +
+            `first ${arrivingFoldIds[0]}`,
+          );
+        }
         persistence.state = clone(persistence.persisted);
         return;
       }

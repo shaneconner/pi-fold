@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -11484,6 +11484,100 @@ async function gateOneCallPerCommit() {
 }
 
 /**
+ * A COMMIT THAT VANISHES AT PERSISTENCE ANNOUNCES ITSELF.
+ *
+ * `persistenceProjection` keeps only folds whose refs still resolve against the snapshot,
+ * which is right when evidence has genuinely left the branch. But a write that ARRIVES
+ * with new folds and projects down to something byte-equal to what is already durable has
+ * had every one of them dropped, and the quiet return also resets in-memory state BACKWARDS
+ * to the persisted revision. The marks go back to pending, the same commit is retried on the
+ * next boundary, and it vanishes again, forever, with nothing reported.
+ *
+ * That is not hypothetical. sol-20260812 rep 3 ran a band-top commit at revision 143 that
+ * folded 579,489 source chars into 85,463 of placeholder; durable state never passed 134,
+ * none of its 11 folds reached a record, occupancy climbed unopposed past its budget and the
+ * next request was refused. Nothing in the run said so, because a silent return is not a
+ * failure. The same plan on the previous build committed 15 times with no gap at all.
+ *
+ * The sabotage here is the honest one: the summarizer empties the branch mid-commit, so the
+ * folds the epoch is about to persist can no longer resolve. That is exactly the shape of
+ * the live failure and it needs no access to internals.
+ */
+async function gateVanishedCommitAnnouncesItself() {
+  const shape = { turns: 10, resultChars: 12_000, contextWindow: 100_000 };
+
+  // 1. REACHABILITY, PROVEN RATHER THAN ASSUMED. Fold a real commit's worth of state, then
+  //    project it against a snapshot whose branch no longer carries the evidence. If the
+  //    arriving folds survive that, the silent branch below is unreachable and this whole
+  //    gate would be theatre, so it is asserted first.
+  const runtime = makeRuntime(makeFixture({ ...shape, sessionId: "vanish-reach" }));
+  await startRuntime(runtime);
+  await measureAndCommit(runtime, 80_000, 100_000);
+  const committed = materialized(runtime);
+  assert(committed.folds.length > 0, "The fixture folded nothing, so nothing could vanish");
+
+  const stranded = context.persistenceProjection(committed, context.mapActiveContext({
+    sessionId: runtime.built.sessionId,
+    eventMessages: [],
+    contextEntries: [],
+    contextWindow: runtime.built.contextWindow,
+    readOnlyContextActions: context.PEEK_READ_ONLY_CONTEXT_ACTIONS,
+  }));
+  assert.equal(stranded.folds.length, 0,
+    "A fold whose evidence left the branch survived the persistence projection");
+
+  // 2. AND STRIPPED OF ITS FOLDS IT IS INDISTINGUISHABLE FROM THE STATE THAT PRECEDED IT.
+  //    This is the trap: a write arrives carrying folds, the projection removes every one,
+  //    and what is left compares byte-equal to what is already durable, so persist() reads
+  //    it as "nothing changed". `sameStateProjection` normalizes the revision away, which is
+  //    precisely why the comparison cannot tell a real no-op from a commit that evaporated.
+  //    Only the fold sets are compared here; the surrounding bookkeeping a commit also moves
+  //    (briefs, ledgers) is not what makes the two states look alike in the live failure.
+  assert.equal(
+    context.sameStateProjection(
+      { ...stranded, folds: [], expanded: [] },
+      { ...committed, folds: [], expanded: [] },
+    ),
+    true,
+    "Stripping the folds did not make the stranded write look like its predecessor",
+  );
+  assert(committed.folds.length > 0 && stranded.folds.length === 0,
+    "The fixture did not actually strand any fold, so this proves nothing");
+
+  // 3. SO THE SILENT RETURN MUST BE GUARDED. The condition is reachable and it is silent by
+  //    construction, which is what killed sol-20260812 rep 3: a band-top commit at revision
+  //    143 folded 579,489 source chars, durable state never passed 134, none of its 11 folds
+  //    reached a record, and occupancy ran past its budget with nothing reported.
+  const source = readFileSync(new URL("../extensions/active-context.ts", import.meta.url), "utf8");
+  const guard = source.slice(
+    source.indexOf("if (sameStateProjection(next, persistence.persisted))"),
+    source.indexOf("persistence.state = clone(persistence.persisted);"),
+  );
+  assert(guard.length > 0, "The persistence no-op branch was not found where it is pinned");
+  assert(/arrivingFoldIds\.length/.test(guard) && /throw new Error/.test(guard),
+    "persist() still returns quietly when an arriving commit projects down to the durable baseline");
+  assert(/Active-context commit discarded at persistence/.test(guard),
+    "The raised failure does not name itself as a discarded commit");
+  // Actionable, not merely present: it names how many folds were lost and the revision.
+  assert(/arriving fold\(s\)/.test(guard) && /at revision \$\{/.test(guard),
+    "The raised failure does not name the lost folds and the revision they were lost at");
+  // The count is read BEFORE the projection, or it would always report zero.
+  const preamble = source.slice(
+    source.indexOf("let next = clone(persistence.state);"),
+    source.indexOf("if (ctx && lifecycle.latestSnapshot?.sessionId === next.sessionId)"),
+  );
+  assert(/arrivingFoldIds/.test(preamble),
+    "The arriving folds are counted after the projection that drops them, so the count is always zero");
+
+  return {
+    committedFolds: committed.folds.length,
+    strandedFolds: stranded.folds.length,
+    strandedLooksLikeNoOp: true,
+    guarded: true,
+  };
+}
+
+/**
  * A FOLDED HEAD NEVER LIMITS REACH.
  *
  * The rep-3 shape at fixture scale: a head of tool results the ladder has ALREADY folded,
@@ -12983,6 +13077,7 @@ const gates = [
   [119, "The output wall commits one inflow step early", gateOutputWallForwardLook],
   [120, "A mark reading takes a view; only a write copies", gateMarkReadsTakeAView],
   [121, "An evidence digest is derived once per message object", gateEvidenceDigestDerivedOncePerObject],
+  [122, "A commit that vanishes at persistence announces itself", gateVanishedCommitAnnouncesItself],
 ];
 
 const gateFilter = (process.env.GATES ?? "")
