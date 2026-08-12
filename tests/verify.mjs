@@ -11291,6 +11291,79 @@ async function gateMarkReadsTakeAView() {
   };
 }
 
+/**
+ * An evidence digest is derived once per message OBJECT.
+ *
+ * A digest canonicalizes and hashes the whole message, and these messages are transcript
+ * entries in the tens of kilobytes. `exactMapped` recomputed one on every lookup to
+ * confirm a ref that had itself been computed from that same object at mapping time, and
+ * the selection, surfacing, ordering and accounting passes call `exactMapped` once per
+ * ref, per fold, several times a turn. Replayed against the sealed sol-20260812 rep-2
+ * session at its 85 percent point, that recomputation alone was 76 percent of all CPU:
+ * 30 real messages took 48.1 seconds before and 9.3 after.
+ *
+ * The rule is gate 113's, applied one layer down. The session is append-only, entries are
+ * never edited in place, so the derivation is kept against the OBJECT and a replaced
+ * object misses rather than serving a stale answer.
+ *
+ * Two properties have to hold together and the gate pins both, because either alone can
+ * be satisfied by a cache that is wrong. Content addressing must survive: two separate
+ * objects carrying identical content still digest the same, so nothing keyed on identity
+ * leaks into what a digest MEANS. And the keying must be real: a message whose content
+ * differs digests differently even though it was built from the first one. The stated
+ * cost of the memo is asserted rather than hidden, so it can never be mistaken for a bug
+ * found later: a message mutated IN PLACE keeps its first digest.
+ */
+async function gateEvidenceDigestDerivedOncePerObject() {
+  const body = "t".repeat(64_000);
+  const make = () => ({
+    role: "toolResult",
+    toolCallId: "call-digest",
+    toolName: "read",
+    content: [{ type: "text", text: body }],
+    isError: false,
+  });
+  const first = make();
+  const digest = json.evidenceSha256(first);
+  assert.equal(typeof digest, "string");
+  assert.equal(digest.length, 64, "An evidence digest is not a sha256");
+  // Anti-vacuity: a message small enough to hash for free would prove nothing about a
+  // memo, and an empty body would make the mutation below unobservable either way.
+  assert(JSON.stringify(first).length > 50_000,
+    "The fixture message is too small for a recomputation to be worth avoiding");
+
+  // Content addressing survives: a DIFFERENT object with identical content digests the
+  // same, so the memo did not turn a content digest into an identity digest.
+  assert.equal(json.evidenceSha256(make()), digest,
+    "Two distinct objects with identical content digested differently");
+  // The keying is real: content that differs digests differently.
+  const changed = { ...make(), content: [{ type: "text", text: `${body}!` }] };
+  assert.notEqual(json.evidenceSha256(changed), digest,
+    "A message with different content reused another message's digest");
+  // A replaced object misses rather than serving stale: same content, rebuilt, still
+  // agrees with a digest computed on a path that never saw the original.
+  assert.equal(json.evidenceSha256(structuredClone(first)), digest,
+    "A rebuilt copy of the message did not digest to the same value");
+
+  // The stated cost, asserted: an in-place edit keeps the first digest. This is the
+  // behaviour the memo buys and it is pinned here so it stays a decision on the record.
+  first.content[0].text = `${body} edited in place`;
+  assert.equal(json.evidenceSha256(first), digest,
+    "The digest is not kept against the object, so the memo is not in effect");
+  // And the edited CONTENT still digests to something else when carried by a new object,
+  // which is what keeps the mutation invisible only to the object that was already seen.
+  assert.notEqual(json.evidenceSha256({ ...first, content: structuredClone(first.content) }), digest,
+    "The edited content digests the same through a fresh object, so content is not being read at all");
+
+  return {
+    digestChars: digest.length,
+    fixtureBytes: JSON.stringify(make()).length,
+    contentAddressedAcrossObjects: true,
+    distinctContentDistinctDigest: true,
+    keptAgainstTheObject: true,
+  };
+}
+
 async function gateOneCallPerCommit() {
   const shape = { turns: 16, resultChars: 10_000, contextWindow: 100_000, toolName: "bash" };
   const calls = [];
@@ -12909,6 +12982,7 @@ const gates = [
   [118, "A commit's spans are briefed in one call", gateOneCallPerCommit],
   [119, "The output wall commits one inflow step early", gateOutputWallForwardLook],
   [120, "A mark reading takes a view; only a write copies", gateMarkReadsTakeAView],
+  [121, "An evidence digest is derived once per message object", gateEvidenceDigestDerivedOncePerObject],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

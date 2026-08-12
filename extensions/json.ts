@@ -216,8 +216,40 @@ export function evidenceValue(message: unknown): unknown {
   };
 }
 
+/**
+ * Evidence digests, kept against the message OBJECT.
+ *
+ * A message is canonicalized and hashed whole to produce its digest, and the messages
+ * this runs on are transcript entries: tool results in the tens of kilobytes. Nothing
+ * cached the result, so every reading that wanted to confirm a ref rehashed the entire
+ * message from scratch. `exactMapped` does exactly that on every lookup, and the
+ * selection, surfacing, ordering and accounting passes call it once per ref, per fold,
+ * several times a turn. Replayed against the sealed sol-20260812 rep-2 session at its
+ * 85 percent point, that single recomputation was 76 percent of all CPU, and it grows
+ * with the transcript because the transcript is what it rehashes.
+ *
+ * A WeakMap on the object is the same shape `MAPPED_BY_KEY` and `BRANCH_POSITIONS`
+ * already use one line over, and the same rule gate 113 settled for entry evidence: the
+ * session is append-only, so keep the derivation against the object and let a REPLACED
+ * object miss rather than serve a stale answer. Entries are never edited in place; they
+ * are appended, and a changed message is a different object, which misses and rehashes.
+ *
+ * What this no longer detects, stated plainly: a message mutated IN PLACE after it was
+ * first hashed now keeps its original digest. That case was already half invisible,
+ * because the ref a snapshot carries was itself computed from that same object at
+ * mapping time, so a mutation that beat the digest would have to be caught by this
+ * recomputation alone. No path in this package edits a persisted message, and the
+ * runtime clones before it stores.
+ */
+const EVIDENCE_DIGESTS = new WeakMap<object, string>();
+
 export function evidenceSha256(message: unknown): string {
-  return sha256Value(evidenceValue(message));
+  if (!message || typeof message !== "object") return sha256Value(evidenceValue(message));
+  const cached = EVIDENCE_DIGESTS.get(message);
+  if (cached !== undefined) return cached;
+  const digest = sha256Value(evidenceValue(message));
+  EVIDENCE_DIGESTS.set(message, digest);
+  return digest;
 }
 
 export function evidenceRef(sessionId: string, entryId: string, message: unknown): EvidenceRef {
