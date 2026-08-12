@@ -44,10 +44,7 @@ export function contextBrand(brandNoun: string): string {
 const DEFAULT_ENTRY_NAMESPACE = entryTypeNamespace(DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX);
 export const ACTIVE_CONTEXT_STATE_ENTRY = `${DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX}-state`;
 export const ACTIVE_CONTEXT_FOLD_RECORD_ENTRY = `${DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX}-fold-record`;
-export const NATIVE_COMPACTION_RECEIPT_ENTRY = `${DEFAULT_ENTRY_NAMESPACE}-native-compaction-receipt`;
-export const NATIVE_COMPACTION_DECISION_ENTRY = `${DEFAULT_ENTRY_NAMESPACE}-native-compaction-decision`;
 export const PROVIDER_CONTEXT_MEASUREMENT_ENTRY = `${DEFAULT_ENTRY_NAMESPACE}-provider-context-measurement`;
-export const ACTIVE_CONTEXT_STATUS_KEY = DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX;
 /**
  * The action surface, whole. There was a second, narrower list while immediate
  * scheduling existed; epoch is the only scheduler now, so marks always exist and
@@ -114,10 +111,6 @@ export const SURFACING_INTENT_ARGUMENT_KEYS: readonly string[] = Object.freeze([
 export const SURFACING_MAX_CONTENT_CHARS = 20_000;
 export const SURFACING_MAX_LEDGER_RECORDS = 256;
 export const SURFACING_HOOK_CHARS = 160;
-
-// Conservative LOWER bound on UTF-8 bytes per provider token, used only to cap
-// the protected byte tail as a share of a small window; never to estimate usage.
-export const BYTES_PER_TOKEN_FLOOR = 2;
 
 // Two-phase fold scheduling, and the only scheduler. A provider prefix cache is
 // positional: any mid-window edit invalidates every byte after it, so the cost of
