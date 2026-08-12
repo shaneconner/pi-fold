@@ -569,6 +569,8 @@ export function registerActiveContext(pi: any, options: {
     estimatorErrors: [] as number[],
     /** Growth in measured tokens between consecutive requests. */
     inflowSteps: [] as number[],
+    /** Growth steps the OUTPUT WALL reads. Separate from `inflowSteps` on purpose: see noteWallInflow. */
+    wallInflowSteps: [] as number[],
     providerMeasurementQueue: Promise.resolve<void>(undefined),
     providerMeasurementReceipts: new Set<string>(),
     providerMeasurementRevisionByMessageSha: new Map<string, number>(),
@@ -652,6 +654,8 @@ export function registerActiveContext(pi: any, options: {
      * runtime rewrites the projection, which is the whole cost model.
      */
     reopenBaselineShare: null as number | null,
+    /** Whether the output wall's crossing has already spent its one forced commit. */
+    wallEpisodeOpen: false,
     /**
      * Where the armed last-call actually LANDED: the exposure it rendered and the
      * ordinal of the pass that rendered it. In-memory on purpose: after a reload the
@@ -1037,6 +1041,7 @@ export function registerActiveContext(pi: any, options: {
     lifecycle.latestSnapshotError = null;
     measurements.latestRatio = null;
     measurements.lastProviderMeasurement = null;
+    measurements.wallInflowSteps.length = 0;
     measurements.projectionAnchor = null;
     measurements.lastProjectedEstimateBasis = "unmeasured";
     ladder.pendingManual = false;
@@ -1808,6 +1813,38 @@ export function registerActiveContext(pi: any, options: {
   /** The largest recent growth step, which is what one more turn can add. */
   const expectedInflowTokens = (): number => measurements.inflowSteps.length
     ? Math.max(...measurements.inflowSteps)
+    : 0;
+
+  /**
+   * THE OUTPUT WALL'S OWN FORWARD LOOK, AND WHY IT IS NOT THE ONE ABOVE.
+   *
+   * `inflowSteps` is filled by `noteProjectionCalibration`, which runs on the context pass.
+   * By then the message-end path has already advanced `lastProviderMeasurement` to the
+   * count being calibrated, so the difference is a measurement against itself and the step
+   * is zero. That window has therefore been empty in every session ever run, which means
+   * the transmission fence margin and the commit depth floor, both of which read it, have
+   * been running on their floor shares alone. Reviving it moves both, and both are
+   * calibrated against reps recorded while it was empty, so that is its own build with its
+   * own gates rather than a rider on this one.
+   *
+   * This window is filled where the previous count is still readable, and nothing but the
+   * wall reads it. When a count reaches only the context pass the window stays empty and
+   * the wall degrades to the condition it replaced, which is the safe direction.
+   */
+  const WALL_INFLOW_WINDOW = 8;
+  const noteWallInflow = (measurement: ProviderContextMeasurement): void => {
+    const previous = measurements.lastProviderMeasurement;
+    if (!previous || !Number.isFinite(measurement.tokens) || !Number.isFinite(previous.tokens)) return;
+    const step = measurement.tokens - previous.tokens;
+    // Only GROWTH. A commit shrinks the window; that is what the wall has to survive, not
+    // a size the next request can be predicted from.
+    if (step <= 0) return;
+    measurements.wallInflowSteps.push(step);
+    if (measurements.wallInflowSteps.length > WALL_INFLOW_WINDOW) measurements.wallInflowSteps.shift();
+  };
+
+  const expectedWallInflowTokens = (): number => measurements.wallInflowSteps.length
+    ? Math.max(...measurements.wallInflowSteps)
     : 0;
 
   /**
@@ -2854,6 +2891,43 @@ export function registerActiveContext(pi: any, options: {
   };
 
   /**
+   * THE OUTPUT WALL.
+   *
+   * A declared serving budget has already netted out the reservation the answer needs,
+   * so the runtime treats the whole budget as spendable and fences only when it is
+   * spent. That fence is the input one, and the input is not what fails first. The host
+   * derives the answer's ceiling per request as its DESCRIPTOR window less its own
+   * estimate of the projection less a fixed safety margin, so filling the declared
+   * budget to the brim leaves the answer exactly the reservation and nothing else.
+   *
+   * Which is a fence that fires after the wire, the same defect the transmission fence
+   * was given a forward look to fix in rep 13. The commit trigger never got one.
+   * Measured 2026-08-12 (sol-20260812 rep 1): occupancy walked 218,713 -> 236,595 over
+   * twelve ordinals against a 251,520 budget with no commit, and the request built after
+   * the last measurement was served 16 output tokens and aborted. Every number was known
+   * to the runtime; nothing was weighing the request that had not been built yet.
+   *
+   * So the trigger carries what the transmission fence already carries: one worst recent
+   * inflow step. With no measured inflow this is exactly the old `used > budget`
+   * condition, which is the state it degrades to on a session's first turns.
+   */
+  const outputWallDue = (snapshot: ActiveContextSnapshot): boolean => {
+    const capacity = servingCapacity(snapshot.contextWindow);
+    if (capacity.usedTokens === null || !(capacity.budgetTokens > 0)) return false;
+    // THE EARLY ZONE ONLY, so this is strictly additive.
+    //
+    // Past the budget the pre-existing overflow paths already own the emergency: the
+    // commit-path exemption, the last-call gate and the fence all read `used > budget`
+    // and have since before this existed. A second trigger in that territory changes the
+    // cadence of sessions that were already being handled, and gate 107 measured what
+    // that costs: a fixture parked at 88,000 against an 83,616 budget put four generator
+    // calls in flight against a bound of two. So the wall speaks only where nothing spoke
+    // before, in the band one inflow step wide below the budget.
+    if (capacity.usedTokens > capacity.budgetTokens) return false;
+    return capacity.usedTokens + expectedWallInflowTokens() > capacity.budgetTokens;
+  };
+
+  /**
    * What the gated round did, measured against the arming snapshot. Pins and unpins
    * are read from the stream itself (context.protect records after the exposure); the
    * call and mark deltas are clamped at zero because contextCalls is process-local and
@@ -2967,6 +3041,10 @@ export function registerActiveContext(pi: any, options: {
     // two states outrank the economy: the overflow recovery lane, which runs because a
     // request already did not fit, and an occupancy genuinely past the serving budget,
     // where the next request aborts unless something moves. Everything else defers.
+    // The output wall deliberately does NOT join this list. It decides WHEN the one
+    // structural mutation of a handoff fires, not how many fire: exempting it here let a
+    // window parked one inflow step under the budget rebuild its prefix on every pass,
+    // which is the cost the mutation budget exists to refuse and what gate 58 caught.
     const overflowExempt = userRequested || curation.recoveryAttempts > 0 ||
       (usedTokens !== null && budgetTokens > 0 && usedTokens > budgetTokens);
     // ONE STRUCTURAL MUTATION PER HANDOFF.
@@ -3192,6 +3270,12 @@ export function registerActiveContext(pi: any, options: {
       shortfall_share: Math.max(0, freeingTarget - accounting.eligibleFreedBudgetShare),
       occupancy_tokens_before: usedTokens,
       budget_tokens: budgetTokens,
+      // The forward look, on the record beside the occupancy it was added to. A commit
+      // that fired because one more turn would have spent the answer's reservation reads
+      // differently from one that fired at the band top, and the difference is only
+      // legible with the allowance printed.
+      expected_inflow_tokens: expectedWallInflowTokens(),
+      output_wall: outputWallDue(snapshot),
       requests_since_previous: instrumentation.requests - instrumentation.lastMutationRequest,
       inflow_tokens_since_previous: usedTokens === null || instrumentation.lastMutationTokens === null
         ? null
@@ -3431,8 +3515,28 @@ export function registerActiveContext(pi: any, options: {
    */
   const commitTriggerDue = (snapshot: ActiveContextSnapshot, ratio: number | null): boolean => {
     if (!persistence.state) return false;
-    if (!epochCommitDue(snapshot, ratio)) return false;
+    // The output wall outranks the quiet-runtime line rather than sitting under it. A
+    // window one inflow step from spending the answer's whole reservation is past
+    // economising, and the band top is not the thing it is about to cross.
+    //
+    // ONE COMMIT PER CROSSING, NOT ONE PER PASS. The wall is a level, and a window that
+    // sits on it sits there for many passes: releasing the reopen latch on each of them
+    // fires a commit per pass, which is the prefix-rewrite churn the latch exists to
+    // prevent and which the quiet cadence is built around. Measured on gate 52's fixture:
+    // the first wall commit applied 44 marks and correctly retained all ten of the open
+    // turn, and the two that followed it applied nothing, rewrote the prefix anyway, and
+    // dragged the guard's starvation waiver in on a session that had just made progress.
+    // So the crossing is the event. While the wall stays due the ordinary hysteresis
+    // decides, which is what makes a second commit wait for genuinely new foldable mass.
+    const wall = outputWallDue(snapshot);
+    if (!wall) curation.wallEpisodeOpen = false;
+    if (!wall && !epochCommitDue(snapshot, ratio)) return false;
     measuredCurationSignals(snapshot);
+    if (wall && !curation.wallEpisodeOpen) {
+      curation.wallEpisodeOpen = true;
+      curation.reopenBaselineShare = null;
+      return true;
+    }
     // The latch is an ECONOMY rule, and the fence is not latched: a request whose
     // projection exceeds the provider input budget is rejected outright, so recovery
     // must produce a window that fits.
@@ -3445,7 +3549,33 @@ export function registerActiveContext(pi: any, options: {
     }
     if (curation.reopenBaselineShare !== null) {
       const eligibleShare = markAccounting(snapshot, persistence.state).eligibleFreedBudgetShare;
-      if (eligibleShare - curation.reopenBaselineShare < COMMIT_RECLAIM_FLOOR_SHARE) return false;
+      if (eligibleShare - curation.reopenBaselineShare < COMMIT_RECLAIM_FLOOR_SHARE) {
+        // A HOLD THAT SAYS SO.
+        //
+        // This was a bare `return false`, and it is the last silent deferral on the
+        // commit path: every other one names itself and reports its numbers. In
+        // sol-20260812 rep 1 the trigger was due for twelve straight ordinals while
+        // occupancy climbed to 94 percent of budget, and the stream carries no record of
+        // what held it, so the stall can be proven but not explained. Emitted on every
+        // held pass rather than once per episode: under-reporting is the defect being
+        // fixed, the record is a stream record that never reaches the projection, and
+        // the volume is bounded by passes above the band top.
+        const capacity = servingCapacity(snapshot.contextWindow);
+        emit("context.commit", {
+          trigger: "band-top",
+          deferred: true,
+          reason: "reopen-latch",
+          applied_marks: 0,
+          eligible_freed_share: eligibleShare,
+          reopen_baseline_share: curation.reopenBaselineShare,
+          reclaim_floor_share: COMMIT_RECLAIM_FLOOR_SHARE,
+          occupancy_tokens: capacity.usedTokens,
+          expected_inflow_tokens: expectedWallInflowTokens(),
+          budget_tokens: capacity.budgetTokens,
+          window_tokens: snapshot.contextWindow,
+        });
+        return false;
+      }
       curation.reopenBaselineShare = null;
     }
     return true;
@@ -3667,6 +3797,11 @@ export function registerActiveContext(pi: any, options: {
     const capacity = servingCapacity(snapshot.contextWindow);
     const fenceLevel = typeof pressure === "number" && Number.isFinite(pressure) &&
       pressure >= hardFenceRatio(snapshot);
+    // The output wall deliberately does NOT proceed here. It buys the crossing one inflow
+    // step of lead, and the gated round is what that lead is for: the agent still gets its
+    // one bounded turn to curate before a rewrite, which is a contract the wall has no
+    // business cancelling. If the round overruns and occupancy passes the budget outright,
+    // the condition below is what proceeds, on the pass that builds the next request.
     const overBudget = capacity.usedTokens !== null && capacity.budgetTokens > 0 &&
       capacity.usedTokens > capacity.budgetTokens;
     if (fenceLevel || overBudget || curation.recoveryAttempts > 0 || curation.pendingRejection) {
@@ -4192,6 +4327,7 @@ export function registerActiveContext(pi: any, options: {
     if (persistence.state?.prepared) persistence.state = clearPrepared(persistence.state);
     measurements.latestRatio = null;
     measurements.lastProviderMeasurement = null;
+    measurements.wallInflowSteps.length = 0;
     // A different model or thinking level is a different tokenizer, so counts taken
     // under the old one describe nothing here. The generation the anchor carries would
     // already refuse it; dropping it releases the projection text it held as well.
@@ -4384,6 +4520,7 @@ export function registerActiveContext(pi: any, options: {
     // inflow that is now behind us, and the cap resets for the next one.
     curation.recoveryAttempts = 0;
     curation.pendingRejection = null;
+    noteWallInflow(measurement);
     measurements.lastProviderMeasurement = measurement;
     measurements.latestRatio = measuredRatio;
     let snapshot: ActiveContextSnapshot;

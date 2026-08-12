@@ -11082,6 +11082,139 @@ async function gateBriefUpgradesRideTheBoundary() {
  *     its neighbours' briefs standing;
  *   - the batch's source stays inside the same budget one span was always held to.
  */
+/**
+ * THE OUTPUT WALL, AND THE LAST SILENT DEFERRAL.
+ *
+ * A declared serving budget has already netted out the reservation the answer needs, so
+ * the runtime reads the whole budget as spendable and its only forced commit was
+ * `used > budget`: the state where that reservation is, by construction, already gone.
+ * The host derives the answer's ceiling per request from its DESCRIPTOR window, so the
+ * request that dies is the one built AFTER the last measurement, and it is never the one
+ * being weighed. sol-20260812 rep 1 walked 218,713 -> 236,595 tokens over twelve ordinals
+ * against a 251,520 budget with no commit, was served 16 output tokens and aborted.
+ *
+ * What this gate holds:
+ *   - a commit fires one worst-recent-inflow step BEFORE the budget, at an occupancy the
+ *     old `used > budget` condition would not have exempted;
+ *   - with no inflow yet measured the forward look is zero, so the wall degrades to
+ *     exactly the old condition rather than firing early;
+ *   - the reopen latch, the one deferral that used to return silently, names itself and
+ *     reports the numbers it decided on.
+ */
+async function gateOutputWallForwardLook() {
+  const budget = 100_000;
+
+  // (a) AND (c) RUN ON A FIXTURE WITH MASS LEFT AFTER ITS FIRST COMMIT, because the wall
+  // decides WHEN the handoff's one mutation fires and not whether the reclaim floor is
+  // met: a second commit with nothing worth folding defers on economy, correctly, and
+  // would hide the thing this gate is about.
+  const roomy = makeRuntime(
+    makeFixture({ turns: 44, resultChars: 8_000, contextWindow: 200_000 }),
+    { providerInputBudget: budget },
+  );
+  await startRuntime(roomy);
+  const roomyCommits = () => contextEvents(roomy).filter((event) => event.kind === "context.commit");
+
+  // (a) THE DEGRADATION. No pairing has been measured, so there is no inflow step and the
+  // forward look is zero: this commit fires at the band top on the old condition alone.
+  await measureAndCommit(roomy, 85_000, 200_000, "band-top");
+  const applied = roomyCommits().filter((event) => !event.deferred && event.applied_marks > 0);
+  assert(applied.length, "the band-top commit never applied a mark, so the fixture proves nothing");
+  const first = applied[0];
+  assert.equal(first.expected_inflow_tokens, 0,
+    "an inflow step was measured before any pairing existed, so the degradation case is not being exercised");
+  assert.equal(first.output_wall, false,
+    "the wall fired with no measured inflow, which is the old condition firing early rather than the new one firing at all");
+  assert(first.occupancy_tokens_before < first.budget_tokens,
+    "the fixture committed at or past the budget, so it never entered the territory this gate is about");
+
+  // (c) THE FORWARD LOOK FIRES. One measured growth step of 10,000 tokens, then an
+  // occupancy that is still UNDER the budget. The old condition is false here; the wall
+  // is true, and the commit that lands proves which one is deciding.
+  const before = roomy.appended.length;
+  await measure(roomy, 95_000, 200_000, "inflow-step");
+  await project(roomy);
+  await settle();
+  // THE WALL ARMS THE ROUND, IT DOES NOT CANCEL IT. The lead the forward look buys is
+  // what pays for the agent's one bounded turn to curate before a rewrite, so the
+  // crossing must expose the last call exactly as any other crossing does. A wall that
+  // proceeded straight to the commit would land here with no exposure, which is what the
+  // first shape of this build did and what gates 3 and 37 refused.
+  assert(materialized(roomy).lastCall,
+    "the wall crossing did not arm the last call, so it cancelled the agent's round instead of buying time for it");
+  // Re-measured at the SAME occupancy: a flat step is not growth, so the forward look
+  // stays at the 10,000 established above and the arithmetic asserted below is unmoved.
+  await measure(roomy, 95_000, 200_000, "inflow-step-round");
+  await project(roomy);
+  await settle();
+  const after = contextEvents(roomy, before).filter((event) => event.kind === "context.commit");
+  const walled = after.filter((event) => event.output_wall === true && !event.deferred);
+  assert(walled.length,
+    `occupancy came within one inflow step of the budget and no commit fired; commits seen: ${
+      JSON.stringify(after.map((event) => ({
+        deferred: event.deferred,
+        reason: event.reason,
+        wall: event.output_wall,
+        used: event.occupancy_tokens_before ?? event.occupancy_tokens,
+        inflow: event.expected_inflow_tokens,
+        applied: event.applied_marks,
+      })))
+    }`);
+  const wall = walled[0];
+  assert(wall.occupancy_tokens_before <= wall.budget_tokens,
+    `the wall fired at ${wall.occupancy_tokens_before} against a ${wall.budget_tokens} budget, which the OLD condition already covered, so this case proves nothing new`);
+  assert(wall.occupancy_tokens_before + wall.expected_inflow_tokens > wall.budget_tokens,
+    "the record does not show the forward look crossing the budget, so something other than the wall fired this commit");
+  assert(wall.expected_inflow_tokens > 0,
+    "the wall fired on a zero forward look, which is the old condition wearing the new name");
+
+  // (b) THE LATCH NAMES ITSELF, on its own small runtime. Parking a window is what empties
+  // it, so the hold cannot share a fixture with the case above without starving it, and a
+  // fixture big enough for both spends minutes proving one emit. Sized so 85,000 declared
+  // tokens is a rate the anchor accepts: a pairing implying fewer than two characters per
+  // token is refused as not describing these bytes, and a refused pairing leaves occupancy
+  // unknown, which is a fixture that measures nothing. Occupancy never grows, so no step
+  // is ever recorded and the wall is provably not what is deciding these passes.
+  const spent = makeRuntime(
+    makeFixture({ turns: 12, resultChars: 16_000, contextWindow: 200_000 }),
+    { providerInputBudget: budget },
+  );
+  await startRuntime(spent);
+  const beforeHold = spent.appended.length;
+  for (let round = 0; round < 4; round += 1) {
+    await measure(spent, 85_000, 200_000, `parked-${round}`);
+    await project(spent);
+    await settle();
+  }
+  const holdWindow = contextEvents(spent, beforeHold).filter((event) => event.kind === "context.commit");
+  const held = holdWindow.filter((event) => event.reason === "reopen-latch");
+  assert(held.length,
+    `the reopen latch held a pass and recorded nothing, which is the defect this rider fixes; commits in window: ${
+      JSON.stringify(holdWindow.map((event) => ({ deferred: event.deferred, reason: event.reason, applied: event.applied_marks })))
+    }`);
+  const hold = held[0];
+  assert.equal(hold.deferred, true);
+  assert.equal(hold.applied_marks, 0);
+  assert(hold.occupancy_tokens_before === undefined,
+    "the hold record borrowed a field from the applied-commit record rather than reporting its own state");
+  assert(hold.eligible_freed_share - hold.reopen_baseline_share < hold.reclaim_floor_share,
+    "the latch reported numbers that do not explain the hold it just performed");
+  assert(hold.occupancy_tokens + hold.expected_inflow_tokens <= hold.budget_tokens,
+    "the latch held a pass where the output wall was already due, so the wall is not outranking it");
+
+  return {
+    degradedInflowTokens: first.expected_inflow_tokens,
+    degradedWall: first.output_wall,
+    wallOccupancyTokens: wall.occupancy_tokens_before,
+    wallInflowTokens: wall.expected_inflow_tokens,
+    wallBudgetTokens: wall.budget_tokens,
+    oldConditionWouldHaveFired: wall.occupancy_tokens_before > wall.budget_tokens,
+    latchHolds: held.length,
+    latchEligibleShare: hold.eligible_freed_share,
+    latchBaselineShare: hold.reopen_baseline_share,
+  };
+}
+
 async function gateOneCallPerCommit() {
   const shape = { turns: 16, resultChars: 10_000, contextWindow: 100_000, toolName: "bash" };
   const calls = [];
@@ -12698,6 +12831,7 @@ const gates = [
   [116, "No fold goes without a brief", gateNoFoldWithoutABrief],
   [117, "No token ceiling reaches the provider", gateNoTokenCeilingReachesTheProvider],
   [118, "A commit's spans are briefed in one call", gateOneCallPerCommit],
+  [119, "The output wall commits one inflow step early", gateOutputWallForwardLook],
 ];
 
 const gateFilter = (process.env.GATES ?? "")
