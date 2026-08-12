@@ -709,7 +709,31 @@ export const ACTIVE_CONTEXT_POLICY = Object.freeze({
    * cure so the next run says how often it binds at all.
    */
   maxBriefChars: 2_000,
-  briefTimeoutMs: 120_000,
+  /**
+   * How long one generator call may take before it is abandoned.
+   *
+   * Sized against what the call is actually given rather than against a round number.
+   * `maxSourceChars` above bounds a request at 200,000 characters, and sol-20260812 rep 6
+   * shows that bound is not theoretical: its 46 calls read a MEDIAN of 165,676 characters
+   * and a maximum of 199,226, which is the cap. Reading a near-full window and writing a
+   * brief is not a fast operation, and the same run took 8.7 seconds at the low end,
+   * 73.7 at the ninetieth percentile and 95.0 at the worst, the last of those on a source
+   * smaller than several that ran quicker. At the old two minutes that worst case sat
+   * inside a fifth of the ceiling, so a near-cap source on a slower provider day would
+   * have crossed it, and nothing in the run was pathological.
+   *
+   * The asymmetry decides the number. A timeout is caught and the fold falls back to its
+   * deterministic brief, so the cost of waiting too long is a delay and the cost of not
+   * waiting long enough is a permanently worse brief on a fold nobody can read back. The
+   * lane is asynchronous and bounded at two in flight, so a slow call spends a slot rather
+   * than a turn. The one place it is felt is the hard fence, where `turn_end` waits on an
+   * in-flight preparation: that delays the NEXT turn, above the fence ratio only, and
+   * never the answer being written.
+   *
+   * Five minutes is a little over three times the worst call observed, which leaves room
+   * for a cap-sized source without leaving a stalled generator holding a slot all session.
+   */
+  briefTimeoutMs: 300_000,
   orientationMessages: 2,
   maxOrientationChars: 12_000,
 });
