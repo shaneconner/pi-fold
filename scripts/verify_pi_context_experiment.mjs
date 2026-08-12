@@ -3399,7 +3399,7 @@ try {
 {
   const worker = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
   const suspendCheck = worker.slice(
-    worker.indexOf("const suspensions = armRuntime.activeContextEnabled"),
+    worker.indexOf("const foldFailures = armRuntime.activeContextEnabled"),
     worker.indexOf("Experiment worker did not end at one terminal provider stop"),
   );
   assert(suspendCheck.length > 0,
@@ -3408,9 +3408,16 @@ try {
     "the suspension check does not read the runtime's own suspension event");
   assert(/assertExperiment\(suspensions\.length === 0/.test(suspendCheck),
     "an announced suspension does not fail the run");
+  // A retry is a different outcome of the same record and must not fail the run: the
+  // transaction rolled back clean, the next boundary re-attempted it, and nothing the trial
+  // measures moved. It is reported instead, beside the fold summary.
+  assert(/outcome === "retrying"/.test(suspendCheck),
+    "the check does not tell a retried clean rollback apart from a suspension");
+  assert(worker.includes("cleanRollbackRetries: retries.map("),
+    "retried commits are not reported, so a run that stumbled reads as one that did not");
   // Ordering is the point: the cause is asserted before the symptom, or the report names
   // the aborted request again and the suspension stays buried.
-  assert(worker.indexOf("const suspensions = armRuntime.activeContextEnabled") <
+  assert(worker.indexOf("const foldFailures = armRuntime.activeContextEnabled") <
     worker.indexOf("Experiment worker did not end at one terminal provider stop"),
   "the suspension check runs after the terminal-stop check, so the report names the symptom");
   // Actionable, not merely red: the phase, the revision and the error itself travel.
@@ -3435,6 +3442,14 @@ try {
     "suspending automatic folding still reports only through the host UI");
   assert(/state_revision/.test(suspendFn) && /durable_revision/.test(suspendFn),
     "the suspension event omits the two revisions whose disagreement is the symptom");
+  assert(/outcome: "suspended"/.test(suspendFn),
+    "the suspension record does not declare its outcome, so a retry cannot be told from a stop");
+  const transaction = runtimeSource.slice(
+    runtimeSource.indexOf("const runAutomaticRungTransaction = async ("),
+    runtimeSource.indexOf("const attemptAutomaticRung = ("),
+  );
+  assert(/outcome: "retrying"/.test(transaction) && /MAX_CLEAN_ROLLBACK_RETRIES/.test(transaction),
+    "a clean rollback no longer earns a bounded retry before folding suspends");
   const kinds = readFileSync(join(PROJECT, "extensions", "lib", "instrumentation.ts"), "utf8");
   assert(kinds.includes(`| "context.suspend"`),
     "context.suspend is not a declared kind of the canonical event stream");

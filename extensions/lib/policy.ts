@@ -628,6 +628,24 @@ export const PEEK_HEAD_SHARE = 0.6;
 export const OVERFLOW_RECOVERY_MAX_ATTEMPTS = 2;
 
 /**
+ * Automatic transactions a session may lose to a CLEAN rollback before folding suspends.
+ *
+ * A clean rollback wrote no fold record and no state entry and put back the state it
+ * entered with, so it cost one commit and left the marks pending: the next boundary can
+ * attempt the same work against a freshly built snapshot. Suspending on the first one is
+ * what killed sol-20260812 reps 3 and 4, which each lost exactly one commit and then folded
+ * nothing at all while inflow ran to the wall, because only a manual fold clears the latch
+ * and a headless session never gets one.
+ *
+ * Three, as a session TOTAL rather than a consecutive run. The observed rate is one lost
+ * commit per run of four to five, so three covers a transiently unlucky session with margin,
+ * while a deterministic failure spends the allowance on three wasted commits and then says
+ * so. Consecutive would be no bound at all: small tool-batch folds land on nearly every
+ * pass, and any reset-on-success rule is reset by them before the count can grow.
+ */
+export const MAX_CLEAN_ROLLBACK_RETRIES = 3;
+
+/**
  * Active-context tool actions that read without mutating, so their results may fold.
  *
  * A peek copies a fold's own stored source back into the window, so leaving it raw is a

@@ -356,12 +356,17 @@ try {
   // persist, folding switched off for the rest of the session, and occupancy then climbed
   // to the wall with nothing left that could reclaim it. The abort was the last event, not
   // the first. Only meaningful where folding runs at all.
-  const suspensions = armRuntime.activeContextEnabled
+  const foldFailures = armRuntime.activeContextEnabled
     ? entries
       .filter((entry) => typeof entry?.customType === "string" &&
         entry.customType.endsWith(CONTEXT_EVENT_SUFFIX) && entry.data?.kind === "context.suspend")
       .map((entry) => entry.data)
     : [];
+  // A retry is reported, not fatal: the transaction rolled back clean, the next boundary
+  // re-attempted it, and the run's measurements are intact. A suspension is fatal, because
+  // from that point the session folds nothing at all.
+  const retries = foldFailures.filter((event) => event.outcome === "retrying");
+  const suspensions = foldFailures.filter((event) => event.outcome !== "retrying");
   assertExperiment(suspensions.length === 0,
     `Active-context folding was suspended during the run (${suspensions.length} announcement(s)); ` +
     `first at ordinal ${suspensions[0]?.ordinal} revision ${suspensions[0]?.state_revision} ` +
@@ -383,6 +388,17 @@ try {
       pendingMarks: (activeState.pendingMarks ?? []).length,
       pendingAgentMarks: (activeState.pendingMarks ?? [])
         .filter((mark) => mark?.origin === "agent").length,
+      // Commits this run LOST and re-attempted. Not a failure, and not nothing either: a
+      // run that stumbled here is a different quality of datum from one that did not, and
+      // both reading as clean is the dishonesty the suspension record exists to prevent.
+      cleanRollbackRetries: retries.map((event) => ({
+        ordinal: event.ordinal ?? null,
+        phase: event.phase ?? null,
+        revision: event.state_revision ?? null,
+        durableRevision: event.durable_revision ?? null,
+        count: event.clean_rollbacks ?? null,
+        error: typeof event.error === "string" ? event.error.slice(0, 512) : null,
+      })),
       advisory: activeState.advisory ?? { highWater: 0, delivered: {} },
       foldRecoveries: activeState.folds.map((fold) => ({
         foldId: fold.id,
