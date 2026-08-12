@@ -718,7 +718,7 @@ export async function prepareFold(input: {
       // By kind, not by assumption: a group that loses its generator falls back to the
       // index of its children, and only a chapter falls back to a chapter's brief.
       brief = candidate.kind === "consolidation"
-        ? deterministicConsolidationBrief(candidate, state)
+        ? deterministicConsolidationBrief(candidate, state, snapshot.toolName)
         : deterministicChapterCandidateBrief(snapshot, candidate);
       provenance = { kind: "deterministic" };
     }

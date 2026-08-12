@@ -356,15 +356,25 @@ function boundedSubject(text: string, budget: number): string {
  * the property being defended: this is the brief a group carries when no generator wrote
  * it one, and a group that cannot say what a member holds cannot be navigated back into.
  */
-export function deterministicConsolidationBrief(candidate: FoldCandidate, state: ActiveContextState): string {
+export function deterministicConsolidationBrief(
+  candidate: FoldCandidate,
+  state: ActiveContextState,
+  toolName = DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
+): string {
   const byId = foldMap(state);
+  const escapedToolName = toolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const subjects = candidate.parts.flatMap((part) => {
     if (part.kind !== "fold") return [];
     const child = byId.get(part.foldId);
     // Through the override map, never off the record: a child upgraded since it committed
     // presents the model's brief, and reading the record here would index the sentence
-    // that brief replaced.
-    return child ? [foldBrief(child, state).replace(/\s+/g, " ").trim()] : [];
+    // that brief replaced. The model may validly name the active-context tool on one line
+    // and carry facts on another. A parent flattens those lines, so keep the facts while
+    // removing the structural tool name that would make the whole parent line unusable.
+    return child ? [foldBrief(child, state)
+      .replace(new RegExp(escapedToolName, "gi"), "active-context service")
+      .replace(/\s+/g, " ")
+      .trim()] : [];
   });
   if (!subjects.length) return "Grouped completed context covering no readable folds.";
   const separator = " | ";

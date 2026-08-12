@@ -13010,6 +13010,76 @@ async function gateParentBriefCoversEveryChild() {
 }
 
 /**
+ * A parent brief cannot inherit a structural tool name from a child.
+ *
+ * A model brief may validly name the active-context tool on one line and carry its facts
+ * on later lines. The parent index turns every child brief into one line. Before this
+ * gate, that made the tool name structural poison for the whole parent: `usefulBrief`
+ * discarded the flattened line, `prepareFold` threw, and an inline consolidation rolled
+ * back the epoch that had just committed.
+ */
+async function gateParentBriefCannotInheritToolName() {
+  const toolName = "pi_fold_context";
+  const forest = await chapterForest(context.DEFAULT_THRESHOLDS.consolidateAfter);
+  const [candidate] = context.selectAutomaticConsolidations(forest.snapshot, forest.state);
+  assert(candidate, "The fixture owed no parent, so no child brief can poison it");
+  const childId = candidate.parts.find((part) => part.kind === "fold")?.foldId;
+  assert(childId, "The consolidation candidate carried no child fold");
+
+  const statusBrief =
+    "`pi_fold_context` status reported revision 153 with 49 folds and no suspension.\n" +
+    "Durable revision 142 held 38 fold records before the pending epoch.";
+  assert(context.usefulBrief(statusBrief, context.ACTIVE_CONTEXT_POLICY.maxBriefChars, toolName),
+    "The child fixture itself is not a valid multi-line brief");
+  const upgraded = {
+    ...forest.state,
+    briefs: {
+      [childId]: {
+        brief: statusBrief,
+        provenance: {
+          kind: "model",
+          provider: "openai-codex",
+          model: "gpt-5.6-luna",
+          effort: "medium",
+        },
+      },
+    },
+  };
+
+  // ANTI-VACUITY: flattening the valid child without sanitizing it really does poison
+  // the parent line. This is the exact transformation that preceded the live throw.
+  const poisoned = `Grouped completed context covering one fold: ${statusBrief.replace(/\s+/g, " ")}`;
+  assert(!context.usefulBrief(poisoned, context.ACTIVE_CONTEXT_POLICY.maxBriefChars, toolName),
+    "The child tool name did not poison the unsanitized parent fixture");
+
+  const parentBrief = context.deterministicConsolidationBrief(candidate, upgraded, toolName);
+  assert(!parentBrief.toLowerCase().includes(toolName.toLowerCase()),
+    "The parent retained the structural tool name from its child");
+  assert(parentBrief.includes("active-context service") && parentBrief.includes("Durable revision 142"),
+    "Sanitizing the tool name also discarded the child's factual subject");
+  assert(context.usefulBrief(parentBrief, context.ACTIVE_CONTEXT_POLICY.maxBriefChars, toolName),
+    "The sanitized parent brief is still structurally unusable");
+
+  const committed = await commitCandidate(upgraded, forest.snapshot, candidate, {
+    brief: parentBrief,
+    now: 154,
+  });
+  assert.equal(committed.state.folds.length, upgraded.folds.length + 1,
+    "The parent did not survive prepare and commit");
+  assert.equal(context.sameStateProjection(committed.state, upgraded), false,
+    "A state with the new parent compared equal to its predecessor");
+
+  return {
+    childBriefValidBeforeFlattening: true,
+    unsanitizedParentRejected: true,
+    sanitizedParentAccepted: true,
+    factualSubjectKept: true,
+    committedParent: committed.prepared.id,
+    changedStateIsNotANoOp: true,
+  };
+}
+
+/**
  * No fold goes without a brief, and the agent is asked for it first.
  *
  * A mark is a decision about a span, and the agent making it knows why the span mattered
@@ -13303,6 +13373,7 @@ const gates = [
   [122, "A commit that vanishes at persistence announces itself", gateVanishedCommitAnnouncesItself],
   [123, "Suspending automatic folding announces itself", gateSuspensionAnnouncesItself],
   [124, "A clean rollback earns another attempt", gateCleanRollbackEarnsARetry],
+  [125, "A parent brief cannot inherit a structural tool name", gateParentBriefCannotInheritToolName],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

@@ -4200,7 +4200,7 @@ export function registerActiveContext(pi: any, options: {
       const id = await commitDeterministicCandidate(
         snapshot,
         consolidation,
-        deterministicConsolidationBrief(consolidation, persistence.state),
+        deterministicConsolidationBrief(consolidation, persistence.state, snapshot.toolName),
       );
       action = {
         kind: "consolidation",
