@@ -365,8 +365,6 @@ export function servingBudgetTokens(window: number): number {
 }
 
 export const MAX_PENDING_MARKS = 256;
-/** Enough batches to actually reach the floor on a wide window before the loop exits. */
-export const EPOCH_MAX_TOPUP_MARKS = 64;
 /**
  * How many times one commit re-reads its own eligible-root count.
  *

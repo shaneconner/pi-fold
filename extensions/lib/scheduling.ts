@@ -35,7 +35,6 @@ import {
 } from "./persistence.ts";
 import { currentTurnRefKeys } from "./transcript.ts";
 import {
-  EPOCH_MAX_TOPUP_MARKS,
   ESTIMATED_BYTES_PER_TOKEN,
   MAX_WEDGE_ABSORB_TOKENS,
   ESTIMATED_PLACEHOLDER_OVERHEAD_BYTES,
@@ -791,7 +790,13 @@ export function topUpMarks(input: {
     return input.eligibleOnly ? accounting.eligibleFreedBudgetShare : accounting.freedBudgetShare;
   };
   let share = progress(state);
-  for (let attempt = 0; attempt < EPOCH_MAX_TOPUP_MARKS && share < target; attempt += 1) {
+  // The loop's own exits are the real ones: nothing left to select, or `addPendingMark`
+  // refusing. It refuses at MAX_PENDING_MARKS, so the walk is already bounded and the
+  // separate attempt counter that used to sit here could not reach its limit first. What
+  // it could do is stop the top-up short of its target at 64 while 256 marks were still
+  // allowed, silently, since falling out of the loop and reaching the target look the same
+  // from outside. A bound that cannot fire and would lie if it did is not worth keeping.
+  while (share < target) {
     const candidate = selectAutomaticSpan(snapshot, state, claimed);
     if (!candidate) break;
     const mark = foldMarkFor({
@@ -866,8 +871,11 @@ export function absorbWedgeMarks(input: {
     return indices.length ? { start: Math.min(...indices), end: Math.max(...indices) } : null;
   };
   // One pass, oldest first. Each absorption rewrites exactly one mark, and a mark that
-  // has already grown is not a candidate to grow again in the same commit.
-  for (let guard = 0; guard < MAX_PENDING_MARKS; guard += 1) {
+  // has already grown is not a candidate to grow again in the same commit, so the walk is
+  // bounded by the mark count and ends at the `if (!applied) break` below. A counted bound
+  // used to wrap this as well, set to the same MAX_PENDING_MARKS that already caps how many
+  // marks can exist: it could never be reached before the natural exit, and it is gone.
+  for (;;) {
     const marks = pendingMarks(state);
     const occupied = [
       ...orderedRoots(state, snapshot).map((root) => ({ start: root.start, end: root.end })),

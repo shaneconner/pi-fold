@@ -3717,7 +3717,7 @@ async function gateEpochQuotaTopUp() {
   assert.equal(epoch.appliedMarks, epoch.applied.length);
   assert.equal(epoch.refusedMarks, 0);
   assert.equal(epoch.pendingMarks, epoch.agentMarks + epoch.ladderMarks);
-  assert(epoch.topUpMarks >= 1 && epoch.topUpMarks < context.EPOCH_MAX_TOPUP_MARKS);
+  assert(epoch.topUpMarks >= 1 && epoch.topUpMarks < context.MAX_PENDING_MARKS);
   // This fixture runs the candidate pool dry before the floor, which is the other
   // legitimate exit; what must never happen silently is the mark CAP binding.
   assert(epoch.freedBudgetShare > 0);
@@ -3751,7 +3751,7 @@ async function gateEpochQuotaTopUp() {
     [],
   );
   const hungry = context.topUpMarks({ snapshot, state: empty, ordinal: 1, targetShare: 1 });
-  assert(hungry.length >= 2 && hungry.length <= context.EPOCH_MAX_TOPUP_MARKS);
+  assert(hungry.length >= 2 && hungry.length <= context.MAX_PENDING_MARKS);
   assert(hungry.every((mark) => mark.origin === "ladder"));
   assert.equal(new Set(hungry.map((mark) => mark.id)).size, hungry.length);
   return {
