@@ -30,7 +30,6 @@ import {
   foldTreeDetail,
   peekFoldSource,
   prepareFold,
-  preparedFoldError,
   projectActiveContext,
   projectionSlateCandidates,
   protectEvidence,
@@ -178,10 +177,7 @@ import {
   withPendingMarks,
 } from "./lib/scheduling.ts";
 import {
-  automaticToolBrief,
   candidateSpanChars,
-  deterministicChapterCandidateBrief,
-  deterministicConsolidationBrief,
   manualFoldCandidate,
   peekedSourceFoldIds,
   selectAutomaticToolBatch,
@@ -2122,30 +2118,6 @@ export function registerActiveContext(pi: any, options: {
     return applied;
   };
 
-  const commitDeterministicCandidate = async (
-    snapshot: ActiveContextSnapshot,
-    candidate: FoldCandidate,
-    brief: string,
-  ): Promise<string> => {
-    const stateBeforeCommit = persistence.state!;
-    const preparedFold = await prepareFold({
-      candidate,
-      snapshot,
-      state: stateBeforeCommit,
-      generation: lifecycle.generation,
-      brief,
-      briefProvenance: "deterministic",
-    });
-    persistence.state = commitPreparedFold({
-      prepared: preparedFold,
-      snapshot,
-      state: stateBeforeCommit,
-      generation: lifecycle.generation,
-    });
-    queueBriefUpgrades(snapshot, stateBeforeCommit, [preparedFold.id]);
-    return preparedFold.id;
-  };
-
   const prepareAndCommitExplicit = async (input: {
     snapshot: ActiveContextSnapshot;
     candidate: FoldCandidate;
@@ -2526,7 +2498,7 @@ export function registerActiveContext(pi: any, options: {
         threshold_tokens: MAX_WEDGE_ABSORB_TOKENS,
       });
     }
-    return {
+    const epoch = {
       trigger,
       applied: result.applied,
       refused: result.refused,
@@ -2569,6 +2541,16 @@ export function registerActiveContext(pi: any, options: {
       requestsSincePreviousCommit: instrumentation.requests - instrumentation.lastMutationRequest,
       instrumentation: ledgerSummary(instrumentation.ledger),
     };
+    // The receipt is the LAST statement of the commit, and stays that way: harness gate
+    // 54 reads a commit that reported applied marks and delivered no receipt as one that
+    // threw partway and left its folds in the stream and nowhere else. The rung used to
+    // write it because the rung used to own the epoch; the boundary owns it now.
+    ladder.lastAutomaticAction = { kind: "epoch-commit", foldIds: [], sourceIds: [], epoch };
+    ladder.pendingContextNote =
+      `A commit epoch applied ${result.applied.length} pending mark(s) in one rewrite; ` +
+      "exact evidence remains expandable.";
+    noteAutomaticReceipt(snapshot, ladder.lastAutomaticAction, epoch);
+    return epoch;
   };
 
   const clearCommitLatchBelowTrigger = (): void => {
@@ -2736,137 +2718,11 @@ export function registerActiveContext(pi: any, options: {
       };
       return ladder.lastAutomaticAction;
     };
-    const epoch: Record<string, unknown> | null = null;
-    let inlineRungs = true;
-    const noticesChanged = false;
-    const lastCallChanged = false;
-    inlineRungs = Boolean(epoch) && Number(epoch?.appliedMarks ?? 0) > 0;
-    if (!inlineRungs) {
-      const marked = markLadderSelection();
-      if (marked) {
-        if (epoch) ladder.lastAutomaticAction = { ...marked, epoch };
-        return ladder.lastAutomaticAction;
-      }
-      if (!epoch && (lastCallChanged || noticesChanged)) {
-        ladder.lastAutomaticAction = { kind: "carrier", foldIds: [], sourceIds: [], sourceBytesSaved: 0 };
-        return ladder.lastAutomaticAction;
-      }
-    }
-    const selection = inlineRungs
-      ? selectAutomaticRung(snapshot, persistence.state, ratio, {
-        ...rungSelectionOptions,
-        claimed: new Set([
-          ...claimedRefKeys(persistence.state),
-          ...currentTurnRefKeys(snapshot),
-        ]),
-        claimedFoldIds: markedFoldIds(persistence.state),
-      })
-      : null;
-    const applicable = selection;
-    if (!applicable || applicable.kind === "chapter-prepare") {
-      if (!epoch || !persistence.state) return null;
-      ladder.pendingContextNote =
-        `A commit epoch applied ${(epoch.applied as unknown[]).length} pending mark(s) in one rewrite; ` +
-        "exact evidence remains expandable.";
-      ladder.lastAutomaticAction = { kind: "epoch-commit", foldIds: [], sourceIds: [], epoch };
-      noteAutomaticReceipt(snapshot, ladder.lastAutomaticAction, epoch);
-      return ladder.lastAutomaticAction;
-    }
-    const projectedBytesBefore = bytes(projectActiveContext(snapshot, persistence.state));
-    let action: Record<string, unknown> | null = null;
-    if (applicable.kind === "prepared-chapter" && persistence.state.prepared) {
-      const error = preparedFoldError({
-        prepared: persistence.state.prepared,
-        snapshot,
-        state: persistence.state,
-        generation: lifecycle.generation,
-        ratio,
-      });
-      if (error) {
-        persistence.state = clearPrepared(persistence.state);
-      } else {
-        const id = persistence.state.prepared.id;
-        const sourceIds = persistence.state.prepared.sourceRefs.map((ref) => ref.entryId);
-        persistence.state = commitPreparedFold({
-          prepared: persistence.state.prepared,
-          snapshot,
-          state: persistence.state,
-          generation: lifecycle.generation,
-        });
-        action = { kind: "chapter-fold", foldIds: [id], sourceIds };
-        ladder.pendingContextNote = `A coherent stale chapter was folded under ${id}; exact evidence remains expandable.`;
-      }
-    } else if (applicable.kind === "tool") {
-      cancelPreparation();
-      const tool = applicable.candidate;
-      const id = await commitDeterministicCandidate(snapshot, tool, automaticToolBrief(snapshot, tool));
-      action = {
-        kind: "tool-fold",
-        foldIds: [id],
-        sourceIds: tool.sourceRefs.map((ref) => ref.entryId),
-      };
-      ladder.pendingContextNote = `${tool.sourceRefs.length} stale completed read-only tool result(s) were folded.`;
-    } else if (applicable.kind === "refold") {
-      cancelPreparation();
-      persistence.state = setFoldProjectionState(persistence.state, applicable.foldId, "folded");
-      action = { kind: "refold", foldIds: [applicable.foldId] };
-      ladder.pendingContextNote = `Stale expanded fold ${applicable.foldId} returned to its identical placeholder.`;
-    } else if (applicable.kind === "consolidation") {
-      cancelPreparation();
-      const consolidation = applicable.candidate;
-      const id = await commitDeterministicCandidate(
-        snapshot,
-        consolidation,
-        deterministicConsolidationBrief(consolidation, persistence.state, snapshot.toolName),
-      );
-      action = {
-        kind: "consolidation",
-        foldIds: [id],
-        sourceIds: consolidation.sourceRefs.map((ref) => ref.entryId),
-      };
-      ladder.pendingContextNote =
-        `Stale folded chapters were consolidated under ${id}; every child remains expandable.`;
-    } else if (applicable.kind === "chapter") {
-      const chapter = applicable.candidate;
-      const spanChars = candidateSpanChars(snapshot, persistence.state, chapter);
-      const parts = splitCandidateBySize(snapshot, persistence.state, chapter);
-      const foldIds: string[] = [];
-      for (const part of parts) {
-        foldIds.push(await commitDeterministicCandidate(
-          snapshot,
-          part,
-          deterministicChapterCandidateBrief(snapshot, part),
-        ));
-      }
-      action = {
-        kind: "chapter-fold",
-        foldIds,
-        sourceIds: chapter.sourceRefs.map((ref) => ref.entryId),
-        ...(parts.length > 1 ? { splitFolds: parts.length, splitFromChars: spanChars } : {}),
-      };
-      if (parts.length > 1) {
-        emit("context.split", {
-          source: "ladder",
-          span_chars: spanChars,
-          parts: parts.length,
-          cap_chars: MAX_FOLD_SPAN_CHARS,
-          fold_ids: foldIds.join(","),
-        });
-      }
-      ladder.pendingContextNote = parts.length > 1
-        ? `A ${spanChars}-char stale chapter was folded as ${parts.length} bite-sized folds ` +
-          `(${foldIds.join(", ")}); exact evidence remains expandable.`
-        : `A coherent stale chapter was folded under ${foldIds[0]}; exact evidence remains expandable.`;
-    }
-    if ((!action && !epoch) || !persistence.state) return null;
-    const projectedBytesAfter = bytes(projectActiveContext(snapshot, persistence.state));
-    ladder.lastAutomaticAction = {
-      ...(action ?? { kind: "epoch-commit", foldIds: [], sourceIds: [] }),
-      ...(epoch ? { epoch } : {}),
-      sourceBytesSaved: Math.max(0, projectedBytesBefore - projectedBytesAfter),
-    };
-    noteAutomaticReceipt(snapshot, ladder.lastAutomaticAction, epoch);
-    return ladder.lastAutomaticAction;
+    // MARKING ONLY. Every mutation the rung used to perform inline -- a prepared chapter,
+    // a tool fold, a refold, a consolidation, a chapter split -- now travels as a pending
+    // mark and lands at the boundary, which is the one point the projection changes.
+    // WHAT the rung decides is unchanged; WHEN it takes effect is.
+    return markLadderSelection();
   };
   const runAutomaticRungTransaction = async (
     snapshot: ActiveContextSnapshot,
