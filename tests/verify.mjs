@@ -11235,7 +11235,27 @@ async function gateOutputWallForwardLook() {
  * Every reading then runs against a FROZEN array, so a reading that starts mutating
  * throws instead of quietly relying on the copy that used to absorb it. And the write
  * path still takes its copy, so the caller's array cannot reach into committed state.
+ *
+ * The freeze is DEEP, and it has to be. A shallow freeze catches a reading that pushes,
+ * splices or sorts the array, and misses the whole class the accessor change actually
+ * opened: a write to `mark.brief`, to `mark.parts`, or to a part's own `ref`. While the
+ * accessor cloned, that write landed on a throwaway and was invisible; against a view it
+ * lands in committed state. Freezing the marks, their parts and the refs inside them is
+ * what makes this gate's claim, that a reading which starts mutating throws, true of the
+ * objects and not only of the array holding them.
  */
+function deepFreezeMarks(marks) {
+  let frozen = 0;
+  const walk = (value) => {
+    if (!value || typeof value !== "object" || Object.isFrozen(value)) return;
+    Object.freeze(value);
+    frozen += 1;
+    for (const inner of Array.isArray(value) ? value : Object.values(value)) walk(inner);
+  };
+  walk(marks);
+  return frozen;
+}
+
 async function gateMarkReadsTakeAView() {
   const built = makeFixture({ turns: 12, resultChars: 10_000, contextWindow: 100_000 });
   const snapshot = epochSnapshot(built);
@@ -11253,10 +11273,22 @@ async function gateMarkReadsTakeAView() {
   assert.equal(first, context.pendingMarks(state), "Two mark readings returned different arrays");
   assert.equal(context.pendingMarks(empty).length, 0, "An unmarked state did not read as empty");
 
-  // Every reading now runs against a frozen array. A reading that mutates throws here.
-  Object.freeze(state.pendingMarks);
+  // Every reading now runs against a frozen array AND frozen marks. A reading that
+  // mutates either the array or a mark's own fields throws here.
+  const frozenObjects = deepFreezeMarks(state.pendingMarks);
   assert(Object.isFrozen(context.pendingMarks(state)),
     "The reading handed back something other than the frozen array, so the mutation check is vacuous");
+  // Anti-vacuity: the deep freeze must have reached inside the marks, not just the array.
+  // A mark carries parts, and a raw part carries a ref, so the count is well past one per
+  // mark; a fixture whose marks were bare would make the deep half of this check empty.
+  assert(frozenObjects > seeded.length * 2,
+    `The deep freeze reached ${frozenObjects} objects for ${seeded.length} marks, so it never got inside them`);
+  for (const mark of state.pendingMarks) {
+    assert(Object.isFrozen(mark), `Mark ${mark.id} was not frozen, so a write to its fields would pass`);
+    for (const part of mark.parts ?? []) {
+      assert(Object.isFrozen(part), `A part of mark ${mark.id} was not frozen`);
+    }
+  }
   const accounting = context.markAccounting(snapshot, state);
   const claimed = context.claimedRefKeys(state);
   const marked = context.markedFoldIds(state);
@@ -11287,6 +11319,7 @@ async function gateMarkReadsTakeAView() {
     marksRead: seeded.length,
     readIsStateArray: true,
     frozenDuringReadings: true,
+    frozenObjects,
     accountingFreedBytes: accounting.freedBytes,
     claimedKeys: claimed.size,
     markedFoldIds: marked.size,
