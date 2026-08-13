@@ -426,7 +426,11 @@ export interface ActiveContextDeltaV2 {
   leases?: Record<string, number>;
   surfacing?: SurfacingRecord[];
   pendingMarks?: PendingMark[];
+  // `briefs` on a delta is the WHOLE map: what every delta written before 2026-08-13
+  // carries, and what sealed sessions replay. New deltas carry the change instead.
   briefs?: Record<string, BriefOverride>;
+  addBriefs?: Record<string, BriefOverride>;
+  removeBriefIds?: string[];
   advisory?: NonNullable<ActiveContextState["advisory"]>;
   rider?: NonNullable<ActiveContextState["rider"]>;
   lastCall?: NonNullable<ActiveContextState["lastCall"]>;
