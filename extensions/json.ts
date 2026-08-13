@@ -201,8 +201,25 @@ export function objectRefKey(ref: EvidenceRef): string {
   return stableStringify({ sessionId: ref.sessionId, entryId: ref.entryId, role: ref.role });
 }
 
+/**
+ * Identity, compared field by field rather than through two serializations.
+ *
+ * This is exactly `objectRefKey(left) === objectRefKey(right)`: `objectRefKey` is a stable
+ * stringify of these same three string fields in this same order, so the serializations are
+ * equal precisely when the fields are. What changes is the cost. `exactMapped` runs
+ * `objectRefKey` three times per lookup, once directly to index and twice more inside this
+ * comparison, and the selection, surfacing, ordering and accounting passes each call
+ * `exactMapped` once per ref per fold several times a turn.
+ *
+ * Deliberately NOT a memo. A cache keyed on the ref object would buy a little more and
+ * would add another way for a derived value to go stale behind a mutated object, which is
+ * a failure mode this codebase has already paid for once. Removing work is safe in a way
+ * that remembering work is not.
+ */
 export function sameObjectIdentity(left: EvidenceRef, right: EvidenceRef): boolean {
-  return objectRefKey(left) === objectRefKey(right);
+  return left.sessionId === right.sessionId &&
+    left.entryId === right.entryId &&
+    left.role === right.role;
 }
 
 export function evidenceValue(message: unknown): unknown {
