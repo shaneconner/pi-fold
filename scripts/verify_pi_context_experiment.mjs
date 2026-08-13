@@ -9,7 +9,7 @@
 
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -3703,6 +3703,78 @@ try {
     "the report does not carry what was delivered and what had to be nudged");
 
   checks.anEarlyModelStopIsResumedAndAShortRunFails = true;
+}
+
+// GATE 57 - a supervisor killed from outside still writes the run's candidate report, and
+// does not wait forever for a worker that cannot answer.
+//
+// Gate 55 gave the WORKER a signal handler so a killed run stays readable. sol-20260812
+// rep 9 is the case that handler cannot cover: signal handlers run on the event loop, and
+// that worker held 98% of a core in synchronous JS for 118 minutes, so `systemctl stop`
+// logged "Killing process 1004322 (node-MainThread) with signal SIGKILL" and the run left
+// no worker report and no candidate report at all. Everything the six-hour arm measured
+// had to be recovered by reading the session, pace and provider ledgers by hand.
+//
+// The supervisor is the process that CAN answer: it spends the run idle between IPC polls.
+// It routes the signal into the same failure path a blown deadline takes, which latches,
+// ends the worker and falls through to the finalization that writes the report. And it
+// ends the worker on a bound, because a worker that cannot run its own handler cannot
+// exit on request either, and waiting on one that never will is how the supervisor came to
+// be killed beside it.
+// ---------------------------------------------------------------------------
+{
+  const supervisor = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment.mjs"), "utf8");
+  assert(/for \(const signal of \["SIGTERM", "SIGINT"\]\) \{\s*process\.on\(signal, \(\) => \{ terminationSignal \?\?= signal; \}\);/
+    .test(supervisor),
+  "the supervisor installs no handler for both signals, so a stop still discards its report");
+  // FIRST in the wait loop. The deadline and the lost-worker checks both throw their own
+  // message, and a run ended from outside reported under either of those names is the
+  // "Request was aborted" problem again: true, and useless.
+  const loop = supervisor.slice(supervisor.indexOf("async function supervisedWait("));
+  assert(loop.indexOf("if (terminationSignal) throw") > 0 &&
+    loop.indexOf("if (terminationSignal) throw") < loop.indexOf("exceeded its monotonic deadline"),
+  "the wait loop does not read the signal, or reads it after the deadline it would be reported as");
+  assert(/terminatedBySignal: terminationSignal,/.test(supervisor),
+    "the candidate report does not name the signal that ended the run");
+
+  // AND THE BOUND IS DRIVEN FOR REAL, against a child that ignores SIGTERM exactly as a
+  // CPU-bound worker does. Extracted and evaluated rather than read, so this proves the
+  // supervisor escapes rather than that the source contains a kill.
+  const source = supervisor.slice(
+    supervisor.indexOf("async function endWorker("),
+    supervisor.indexOf("async function supervisedWait("),
+  );
+  assert(source.length > 0, "the worker termination helper was not found where it is pinned");
+  const endWorker = new Function("WORKER_TERMINATION_GRACE_MS", `${source}\nreturn endWorker;`)(300);
+  const stubborn = spawn(process.execPath, [
+    "-e", "process.on('SIGTERM', () => {}); process.on('SIGINT', () => {}); " +
+      "setInterval(() => {}, 1000); console.log('ready');",
+  ], { stdio: ["ignore", "pipe", "ignore"] });
+  const completion = new Promise((resolve) => {
+    stubborn.on("exit", (code, signal) => resolve({ code, signal }));
+  });
+  // Its handlers must be installed before the first signal, or this would measure Node's
+  // default handler and pass for the wrong reason.
+  await new Promise((resolve) => stubborn.stdout.once("data", resolve));
+  const startedMs = Date.now();
+  const exit = await endWorker(stubborn, completion);
+  const elapsedMs = Date.now() - startedMs;
+  assert.equal(exit.signal, "SIGKILL",
+    `a worker that ignored SIGTERM exited as ${JSON.stringify(exit)} rather than being ended`);
+  assert(elapsedMs < 5_000,
+    `the supervisor waited ${elapsedMs}ms on a worker that was never going to exit`);
+
+  // ANTI-VACUITY: the same helper leaves a cooperative worker alone to exit on its own, so
+  // the SIGKILL above is the stubborn case and not what every teardown does.
+  const willing = spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 50);"], { stdio: "ignore" });
+  const willingCompletion = new Promise((resolve) => {
+    willing.on("exit", (code, signal) => resolve({ code, signal }));
+  });
+  const willingExit = await endWorker(willing, willingCompletion);
+  assert.equal(willingExit.signal, "SIGTERM",
+    `a cooperative worker exited as ${JSON.stringify(willingExit)} rather than on the first signal`);
+
+  checks.aKilledSupervisorStillWritesTheCandidateReport = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
