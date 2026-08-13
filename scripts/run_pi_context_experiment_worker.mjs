@@ -139,6 +139,14 @@ function workloadPrompt(firstChallenge) {
   ].join(" ");
 }
 
+function resumePrompt(stage, stageCount) {
+  return [
+    `The assignment is not finished: stage ${stage} of ${stageCount} has not been delivered.`,
+    `Recover the NEXT_KEY issued by the most recent completed stage and call`,
+    `${EXPERIMENT_TOOL_NAME} with it. Do not write the closing synthesis until a stage returns END.`,
+  ].join(" ");
+}
+
 function lastConversationalMessage(entries) {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     if (entries[index]?.type === "message") return entries[index];
@@ -178,6 +186,20 @@ let session;
 let report;
 let deadlineFired = false;
 let overflow = null;
+const stageNudges = [];
+const stagesDelivered = () => {
+  let delivered = 0;
+  while (existsSync(join(config.runDir, "ipc", "responses",
+    `stage-${String(delivered + 1).padStart(2, "0")}.json`))) delivered += 1;
+  return delivered;
+};
+const latchedFailures = () => (existsSync(failurePath)
+  ? readFileSync(failurePath, "utf8").split("\n").filter((line) => line.trim().length > 0).length
+  : 0);
+// A model that chose to end its turn is resumable. A harness that broke is not, and the
+// difference is the whole reason this is a condition rather than an unconditional retry.
+const modelEndedItsTurn = (state) => state?.terminalMessage?.stopReason === "stop" &&
+  latchedFailures() === 0;
 
 // A KILLED WORKER STILL WRITES ITS REPORT.
 //
@@ -366,6 +388,15 @@ try {
     try {
       await session.prompt(prompt, { expandPromptTemplates: false });
       terminalState = await waitForDurableTerminalQuiescence(manager, session);
+      while (!closedBook && !deadlineFired && stagesDelivered() < plan.stageCount &&
+        modelEndedItsTurn(terminalState)) {
+        stageNudges.push({
+          afterStage: stagesDelivered(), wallMs: Date.now(), monotonicMs: monotonicMs(),
+        });
+        await session.prompt(resumePrompt(stagesDelivered() + 1, plan.stageCount),
+          { expandPromptTemplates: false });
+        terminalState = await waitForDurableTerminalQuiescence(manager, session);
+      }
     } catch (error) {
       const text = error instanceof Error ? `${error.message}` : String(error);
       // The unmanaged arm is expected to end at the wall. That is its measurement, not a
@@ -395,6 +426,10 @@ try {
     };
   }
   assertExperiment(!deadlineFired, "Experiment worker hit its watchdog deadline");
+  assertExperiment(closedBook || stagesDelivered() === plan.stageCount,
+    `Experiment worker ended with ${stagesDelivered()} of ${plan.stageCount} stages delivered ` +
+    `after ${stageNudges.length} resume prompt(s); last stop reason ` +
+    `${terminalMessage?.stopReason ?? "none"} with ${latchedFailures()} latched failure(s)`);
   // A SUSPENDED RUNTIME IS A DEAD RUN, whatever it dies of afterwards.
   //
   // Checked BEFORE the terminal-stop assertion so the report names the cause instead of
@@ -606,6 +641,8 @@ try {
       messageSha256: terminalMessage ? sha256Json(terminalMessage) : null,
     } : null,
     deadlineFired,
+    stagesDelivered: closedBook ? null : stagesDelivered(),
+    stageNudges,
   };
 } catch (error) {
   report = {
@@ -624,6 +661,7 @@ try {
     sessionFile: manager?.getSessionFile?.() ?? null,
     overflow,
     deadlineFired,
+    stageNudges,
     error: error instanceof Error ? { message: error.message, stack: error.stack } : String(error),
   };
   process.exitCode = 1;

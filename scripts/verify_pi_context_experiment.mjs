@@ -3629,6 +3629,82 @@ try {
   checks.aKilledWorkerStillWritesItsReport = true;
 }
 
+// GATE 56 - a model that ends its turn early is resumed; a harness that broke never is.
+//
+// The workload is pull-based: one prompt, and the agent fetches all 64 stages itself by
+// following NEXT_KEY. Nothing made it keep pulling. sol-20260812 rep 8 lost BOTH arms to
+// that in the same window: each answered stage 32's recall probe, ended its turn without
+// calling the stage tool again, and the worker read a normal terminal stop and wrote
+// `ok: true` over a run that had covered half the workload. Only the supervisor's
+// stagesReleased 32 of 64 caught it. Rep 4 stopped at 32 too, rep 3 at 27, rep 1 at 18.
+//
+// The resume is deliberately narrow, because a nudge that fires on a broken harness would
+// paper over exactly the failures this suite exists to surface (Shane 2026-08-13). It fires
+// only when the model chose to end its turn: a clean "stop" with nothing in the failure
+// latch. A stage tool erroring, a supervisor that stopped answering, an aborted or truncated
+// response: none of those are resumable, and each still fails the run by name.
+//
+// The prompt withholds the key. A run whose agent has LOST the key is measuring recovery,
+// which is what rep 1 recorded when the pifold arm lost it at stage 57, peeked the fold and
+// finished all 64 stages. Handing the key back would delete that measurement.
+// ---------------------------------------------------------------------------
+{
+  const worker = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
+
+  const counterSource = worker.slice(
+    worker.indexOf("const stagesDelivered = () => {"),
+    worker.indexOf("const latchedFailures = () =>"),
+  );
+  assert(counterSource.length > 0, "the delivered-stage counter was not found where it is pinned");
+  const scratch = mkdtempSync(join(tmpdir(), "pi-fold-gate56-"));
+  try {
+    mkdirSync(join(scratch, "ipc", "responses"), { recursive: true });
+    const countStages = new Function("existsSync", "join", "config",
+      `${counterSource}; return stagesDelivered;`)(existsSync, join, { runDir: scratch });
+    assert.equal(countStages(), 0, "the counter claims delivered stages before any response exists");
+    for (const stage of [1, 2, 3]) {
+      writeFileSync(join(scratch, "ipc", "responses", `stage-0${stage}.json`), "{}\n");
+    }
+    assert.equal(countStages(), 3, "the counter miscounts the responses actually on disk");
+    // Counts the run of stages actually delivered, not whatever files happen to be there:
+    // a gap means the next stage never landed, which is the state a resume must act on.
+    writeFileSync(join(scratch, "ipc", "responses", "stage-05.json"), "{}\n");
+    assert.equal(countStages(), 3, "the counter reads past a gap and reports a run as further along");
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+
+  const guardSource = worker.slice(
+    worker.indexOf("const modelEndedItsTurn = "),
+    worker.indexOf("\n\n// A KILLED WORKER STILL WRITES ITS REPORT."),
+  );
+  assert(guardSource.length > 0, "the resume guard was not found where it is pinned");
+  const guardWith = (latched) => new Function("latchedFailures",
+    `${guardSource}; return modelEndedItsTurn;`)(() => latched);
+  assert.equal(guardWith(0)({ terminalMessage: { stopReason: "stop" } }), true,
+    "a clean model stop with a quiet latch is not resumable, so nothing would ever be nudged");
+  for (const stopReason of ["error", "length", "aborted", null, undefined]) {
+    assert.equal(guardWith(0)({ terminalMessage: { stopReason } }), false,
+      `a run that ended on ${stopReason} is treated as a model ending its turn`);
+  }
+  assert.equal(guardWith(1)({ terminalMessage: { stopReason: "stop" } }), false,
+    "a latched harness failure still resumes, so a broken harness is nudged past instead of reported");
+  assert.equal(guardWith(0)(null), false, "a missing terminal state is treated as resumable");
+
+  assert(/while \(!closedBook && !deadlineFired && stagesDelivered\(\) < plan\.stageCount &&\s*modelEndedItsTurn\(terminalState\)\)/.test(worker),
+    "the resume loop is not bounded by the deadline, the plan count and the resume guard together");
+  const resume = worker.slice(worker.indexOf("function resumePrompt("), worker.indexOf("function lastConversationalMessage("));
+  assert(resume.length > 0, "the resume prompt was not found where it is pinned");
+  assert(/Recover the NEXT_KEY/.test(resume) && !/challenge/i.test(resume),
+    "the resume prompt hands the agent a key instead of making it recover one");
+  assert(/stagesDelivered\(\) === plan\.stageCount/.test(worker),
+    "a run that ends with stages undelivered does not fail by that name");
+  assert(/stageNudges,/.test(worker) && /stagesDelivered: closedBook \? null : stagesDelivered\(\)/.test(worker),
+    "the report does not carry what was delivered and what had to be nudged");
+
+  checks.anEarlyModelStopIsResumedAndAShortRunFails = true;
+}
+
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
 assert.deepEqual([...EXPERIMENT_MODES], ["smoke", "full"]);
 assert(plan, "stage plan fixture did not survive gate 4");
