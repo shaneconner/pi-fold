@@ -11056,6 +11056,13 @@ async function gateBriefUpgradesRideTheBoundary() {
     record.brief_upgrades_abandoned_ids.split(",").filter(Boolean).length ===
     record.brief_upgrades_abandoned),
   "A commit reported a shed count its named ids do not account for");
+  // The bucket holds two causes. Everything shed HERE is shed for the jam, and a reason
+  // list that does not line up with the id list names the wrong fold either way.
+  assert(shed.every((record) =>
+    record.brief_upgrades_abandoned_reasons.split(",").filter(Boolean).length ===
+    record.brief_upgrades_abandoned &&
+    record.brief_upgrades_abandoned_reasons.split(",").every((reason) => reason === "queue-full")),
+  "A leaf shed by the jam was reported under another cause, or without one");
   // The shed leaves are real folds of this session, not a counter running on its own.
   const shedIds = new Set(shed.flatMap((record) =>
     record.brief_upgrades_abandoned_ids.split(",").filter(Boolean)));
@@ -13537,6 +13544,86 @@ async function gateDeltaCarriesOnlyBriefChanges() {
   };
 }
 
+/**
+ * THE USER'S OWN COMMIT ANNOUNCES A PERSISTENCE FAILURE TOO.
+ *
+ * `/context commit` ran the epoch, called persist inside a bare `try {} catch {}`, and then
+ * told the user how many marks it had committed. Every automatic path routes that same
+ * failure through the suspension: gate 122 raises it, gate 123 announces it, and gate 124
+ * was retired so nothing swallows the first few quietly. This one path threw the error
+ * away and reported success, which is gate 122's dead session with the user holding the
+ * pen: folds in the event stream, nothing durable, a session that keeps computing folds it
+ * will discard, and a message saying the opposite.
+ */
+async function gateUserCommitAnnouncesPersistenceFailure() {
+  const shape = { turns: 12, resultChars: 16_000, contextWindow: 100_000 };
+  const bank = async (runtime) => {
+    await startRuntime(runtime);
+    // 60,000 against the 90,000-token budget is below the band top, so the ladder marks
+    // and waits: the command is what commits, which is the path under test.
+    await measure(runtime, 60_000, 100_000);
+    assert((materialized(runtime).pendingMarks ?? []).length >= 1,
+      "The quiet band accumulated no mark, so the command had nothing to commit");
+  };
+
+  // ANTI-VACUITY. Unsabotaged, the same command commits, persists and says so. Without
+  // this the assertions below would pass on a command that never did anything.
+  const clean = makeRuntime(makeFixture({ ...shape, sessionId: "user-commit-clean" }));
+  await bank(clean);
+  await clean.commands.get("fold-context").handler("commit", clean.ctx);
+  await settle();
+  assert(materialized(clean).folds.length > 0, "The clean command persisted no fold");
+  assert.equal(contextEvents(clean).filter((event) => event.kind === "context.suspend").length, 0,
+    "A healthy user commit announced a suspension");
+  assert(clean.notifications.some((notice) => /Committed \d+ mark/.test(notice.message)),
+    "The clean command did not report what it committed");
+
+  // THE FAILURE, FOR REAL, through the same injection point gate 123 uses.
+  const fault = "durable state entry refused by the fixture";
+  let armed = false;
+  const runtime = makeRuntime(makeFixture({ ...shape, sessionId: "user-commit-loud" }), {
+    beforeAppend(customType) {
+      if (armed && customType === context.ACTIVE_CONTEXT_STATE_ENTRY) throw new Error(fault);
+    },
+  });
+  await bank(runtime);
+  armed = true;
+  await runtime.commands.get("fold-context").handler("commit", runtime.ctx);
+  await settle();
+
+  const suspensions = contextEvents(runtime).filter((event) =>
+    event.kind === "context.suspend" && event.outcome === "suspended");
+  assert.equal(suspensions.length, 1,
+    `The user command lost its persistence and announced it ${suspensions.length} time(s)`);
+  assert(String(suspensions[0].error).includes(fault),
+    `The suspension does not carry the failure that caused it: ${suspensions[0].error}`);
+  assert.equal(suspensions[0].phase, "user-command",
+    `The suspension names ${suspensions[0].phase} rather than the path that failed`);
+
+  // AND IT DOES NOT CLAIM A COMMIT. The user is told the command failed, by name, and is
+  // never handed a count of marks that no durable state holds.
+  assert(!runtime.notifications.some((notice) => /Committed \d+ mark/.test(notice.message)),
+    "The command reported marks committed after its persistence failed");
+  assert(runtime.notifications.some((notice) => notice.message.includes(fault)),
+    "The user was never told the command failed");
+
+  // AND FOLDING REALLY STOPPED. A suspended session cannot reclaim anything, so continuing
+  // to compute folds is the part that turned one dropped commit into a dead session.
+  const applied = () => contextEvents(runtime).filter((event) =>
+    event.kind === "context.commit" && event.deferred === false).length;
+  const before = applied();
+  await measureAndCommit(runtime, 95_000, 100_000, "post-suspend");
+  assert.equal(applied(), before, "Folding kept committing after the user command suspended it");
+
+  return {
+    announced: suspensions.length,
+    phase: suspensions[0].phase,
+    committedClaimedAfterFailure: false,
+    foldsStopped: true,
+    cleanCommandFolds: materialized(clean).folds.length,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -13651,6 +13738,7 @@ const gates = [
   // shipped, and reusing its number would make the history unreadable.
   [126, "A batched brief names the bytes it was made from", gateBatchedBriefNamesItsSource],
   [127, "A delta carries only what changed", gateDeltaCarriesOnlyBriefChanges],
+  [128, "The user's commit announces a persistence failure", gateUserCommitAnnouncesPersistenceFailure],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

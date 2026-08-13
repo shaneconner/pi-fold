@@ -418,7 +418,7 @@ export function registerActiveContext(pi: any, options: {
     deferred: new Set<string>(),
     failures: 0,
     cures: 0,
-    abandoned: [] as string[],
+    abandoned: [] as Array<{ foldId: string; reason: string }>,
     lastError: null as string | null,
   };
 
@@ -1939,7 +1939,7 @@ export function registerActiveContext(pi: any, options: {
         upgrades.deferred.add(foldId);
         continue;
       }
-      if (full) { upgrades.abandoned.push(foldId); continue; }
+      if (full) { upgrades.abandoned.push({ foldId, reason: "queue-full" }); continue; }
       upgrades.deferred.delete(foldId);
       const refs = parent
         ? flattenFoldRefs(fold, persistence.state)
@@ -1952,7 +1952,6 @@ export function registerActiveContext(pi: any, options: {
           ? consolidationSourceText(snapshot, persistence.state, fold.parts)
           : encodedFoldSource(snapshot, stateBeforeCommit, fold.parts, fold.kind);
         const chars = bytes(sourceText);
-        if (chars > snapshot.policy.maxSourceChars) continue;
         gathered.push({
           foldId,
           sourceSha256: fold.sourceSha256,
@@ -1979,12 +1978,20 @@ export function registerActiveContext(pi: any, options: {
       if (upgrades.queue.length >= MAX_BRIEF_UPGRADE_QUEUE) {
         for (const item of gathered.slice(at)) {
           if (item.parent) upgrades.deferred.add(item.foldId);
-          else upgrades.abandoned.push(item.foldId);
+          else upgrades.abandoned.push({ foldId: item.foldId, reason: "queue-full" });
         }
         break;
       }
       const members: typeof gathered = [];
       let chars = 0;
+      // `!members.length ||` states the rule: a batch may not exceed the source bound, and
+      // one span may be any size because there is nothing to split it into. The gather
+      // above used to drop an oversized span before it got here, silently, which said the
+      // opposite and was unreachable besides: the chapter rung absorbs the tool batch that
+      // would carry an oversized raw span, and a chapter's source is its children's
+      // deterministic briefs. The two bounds that DO bite are elsewhere and both speak:
+      // `prepareFold` refuses an oversized agent span by name, and a parent's source
+      // collapses its widest child until it fits.
       while (at < gathered.length && members.length < MAX_BRIEF_BATCH_SPANS &&
              (!members.length || chars + gathered[at].chars <= snapshot.policy.maxSourceChars)) {
         chars += gathered[at].chars;
@@ -2424,7 +2431,8 @@ export function registerActiveContext(pi: any, options: {
       brief_upgrade_cures: upgradeCures,
       brief_upgrade_error: upgradeError,
       brief_upgrades_abandoned: upgradeAbandoned.length,
-      brief_upgrades_abandoned_ids: upgradeAbandoned.join(","),
+      brief_upgrades_abandoned_ids: upgradeAbandoned.map((entry) => entry.foldId).join(","),
+      brief_upgrades_abandoned_reasons: upgradeAbandoned.map((entry) => entry.reason).join(","),
       brief_upgrades_waiting: upgrades.ready.length + upgrades.running.size +
         upgrades.queue.reduce((total, entry) => total + entry.members.length, 0),
       brief_upgrade_calls: upgrades.queue.length + new Set(upgrades.running.values()).size,
@@ -4446,7 +4454,16 @@ export function registerActiveContext(pi: any, options: {
           : null;
         const topUp = occupancy !== null && occupancy >= thresholds.maxTarget;
         const committed = await runCommitEpoch(snapshot, "user-command", topUp, measurements.latestRatio, true);
-        try { await persist(ctx); } catch { }
+        // Until this lands the epoch's folds are in the event stream and nowhere else.
+        // Swallowing the failure here announced a commit that does not exist and left the
+        // session computing folds it would keep throwing away, which is the dead session
+        // gate 122 was built for, reached through the user's own command instead.
+        try { await persist(ctx); }
+        catch (error) {
+          suspendAutomatic(error, "user-command", ctx);
+          updateStatus(ctx);
+          throw error;
+        }
         updateStatus(ctx);
         safeNotify(
           ctx,
@@ -4505,7 +4522,7 @@ export function registerActiveContext(pi: any, options: {
     ladder.actionQueue = operation.catch(() => undefined);
     try { await operation; }
     catch (error) {
-      safeNotify(ctx, `Context rescue failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+      safeNotify(ctx, `Context command failed: ${error instanceof Error ? error.message : String(error)}`, "error");
     }
   };
 
