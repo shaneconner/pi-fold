@@ -1131,32 +1131,26 @@ async function gateAutonomousLadder() {
   await measure(toolRuntime, 50_000, 100_000);
   const milestoneState = materialized(toolRuntime);
   assert.equal(milestoneState.folds.length, 0);
-  // ONE TRIGGER: 80,000 tokens of a 100,000-token window is 0.889 of the 90,000-token
-  // serving budget, which is the band top crossed, so THIS pass commits. The invariant
-  // is unchanged and still counted at full strength: one structural mutation, however
-  // many marks it carries, and every fold it created is a tool-result fold. What moved
-  // is which pass pays for it, because the trigger no longer waits for a projection.
+  // ONE MUTATION PER BOUNDARY. The invariant is unchanged and still counted at full
+  // strength: one structural mutation, however many marks it carries, and every fold it
+  // created is a tool-result fold. What moved is which pass pays for it, because the
+  // crossing is the boundary Pi fires rather than an occupancy threshold we watch.
   const beforeCrossing = toolRuntime.appended.length;
   const measurement = await measure(toolRuntime, 80_000, 100_000);
-  // The crossing EXPOSES the one-round last-call; the commit is the context pass
-  // after the agent's round. Still one structural mutation, one round later.
-  assert(materialized(toolRuntime).lastCall, "The crossing must arm the last-call");
   await project(toolRuntime);
   await settle();
-  await measure(toolRuntime, 80_500, 100_000, "last-call-round");
-  await project(toolRuntime);
-  await settle();
+  await compactBoundary(toolRuntime);
   const crossingCommits = contextEvents(toolRuntime, beforeCrossing)
     .filter((record) => record.kind === "context.commit" && record.deferred === false);
   const toolCommit = await runtimeCommit(toolRuntime, { measured: false });
   const toolState = materialized(toolRuntime);
   assert.equal(crossingCommits.length, 1,
-    "The band-top crossing performed more than one structural action");
-  assert.equal(crossingCommits[0].trigger, "band-top");
+    "The boundary crossing performed more than one structural action");
+  assert.equal(crossingCommits[0].trigger, "compaction-boundary");
   assert.equal(
     toolCommit.commits.filter((record) => record.deferred === false).length,
     0,
-    "A window still parked on the band top committed a second time",
+    "A second boundary with nothing left to fold committed anyway",
   );
   assert(toolState.folds.some((fold) => fold.kind === "tool-result"),
     `The commit epoch folded no completed tool batch: ${JSON.stringify(
@@ -1189,7 +1183,11 @@ async function gateAutonomousLadder() {
   )];
   const refoldRuntime = makeRuntime(refoldBuilt, { initialEntries: refoldBranch });
   await startRuntime(refoldRuntime);
-  await measureAndCommit(refoldRuntime, 85_000, 100_000, "refold-commit");
+  // Two crossings: the refold decision lands as a MARK on the first pass and applies at
+  // the boundary that follows it, which is the same batching contract every other rung
+  // now keeps.
+  await measureAndCommit(refoldRuntime, 85_000, 100_000, "refold-mark");
+  await measureAndCommit(refoldRuntime, 85_100, 100_000, "refold-commit");
   const refoldState = materialized(refoldRuntime);
   assert.deepEqual(refoldState.expanded, []);
 
@@ -3985,31 +3983,21 @@ async function gatePeekReclaimWithIdentity() {
     "A re-peek after the reclaim did not return the original bytes");
   assert.equal(after.sourceSha256, before.sourceSha256);
 
-  // THE EXPOSURE MARKS IT. The band-top crossing arms the last-call, and the reclaim it
-  // is about to perform is stated there, while a pin can still veto it.
+  // THE RECLAIM RIDES THE COMMIT. Measuring proposes marks and moves no bytes, and the
+  // peek copy that is about to be reclaimed is still verbatim in the projection, which
+  // is what leaves room for a pin to veto it.
   const runtime = await epochToolRuntime({
     turns: 12, resultChars: 16_000, peekTurns: [1], peekTargetId: "fold_probe",
   });
   const peekEntryId = runtime.built.turnEntries[1][2];
   const rawCopy = runtime.built.messages.find((message) => message?.toolCallId === "call-1");
   await measure(runtime, 80_000, 100_000);
-  const armed = materialized(runtime).lastCall;
-  assert(armed, "The band-top crossing must arm the last-call");
-  const exposure = contextEvents(runtime).filter((record) => record.kind === "context.lastcall").at(-1);
-  assert.equal(exposure.peek_marks, 1, "The exposure did not mark the completed peek read");
-  assert(armed.text.includes("Peek copies reclaimed by this commit: 1"),
-    "The exposure does not state the reclaim it is about to perform");
-  assert(/pin/i.test(armed.text), "The exposure does not name the veto");
-  const pendingReclaim = (materialized(runtime).pendingMarks ?? [])
-    .filter((mark) => typeof mark.brief === "string" && mark.brief.includes("fold_probe"));
-  assert.equal(pendingReclaim.length, 1, "The reclaim decision is not pending after the exposure");
-  assert.equal(pendingReclaim[0].origin, "agent");
-  assert.equal(materialized(runtime).folds.length, 0, "The exposure pass moved bytes");
+  assert.equal(materialized(runtime).folds.length, 0, "The marking pass moved bytes");
   assert.deepEqual((await project(runtime)).messages.find((message) => message?.toolCallId === "call-1")?.content,
-    rawCopy.content, "The marked peek copy moved before the commit");
+    rawCopy.content, "The peek copy moved before any commit");
 
-  // THE PIN IS THE VETO. It is made inside the round the exposure opened, and the
-  // commit that follows reclaims everything else while the pinned copy stays raw.
+  // THE PIN IS THE VETO. It is made before the commit, and the commit reclaims
+  // everything else while the pinned copy stays raw.
   await toolCall(runtime, { action: "protect", ids: [peekEntryId] });
   const vetoed = await runtimeCommit(runtime, { tokens: 80_500, contextWindow: 100_000 });
   assert.equal(vetoed.fired, true, "The commit must still fire; a pin vetoes a fold, not the epoch");
@@ -4062,7 +4050,6 @@ async function gatePeekReclaimWithIdentity() {
   return {
     reclaimPointsAt: foldId,
     bytesIdenticalAfterReclaim: true,
-    exposurePeekMarks: exposure.peek_marks,
     pinnedCopySurvived: true,
     releasedCopyReclaimed: owner.id,
     freshTailExempt: true,
@@ -9889,27 +9876,21 @@ async function gateOpenTurnCommits() {
   assert(!members.some((batch) => batch.indices.includes(newestIndex)),
     "The newest batch is a member, so the fresh tail bounds nothing");
 
-  // (c) DRIVE PAST THE BAND TOP WITH ZERO AGENT MARKS. Every measurement stops on
-  // toolUse, so the turn stays open through the whole climb.
+  // (c) CLIMB WITH ZERO AGENT MARKS. Every measurement stops on toolUse, so the turn
+  // stays open through the whole climb and the agent never marks anything itself.
   const bandTop = context.DEFAULT_THRESHOLDS.maxTarget * providerInputBudget;
   await measure(runtime, 60_000, window, undefined, "toolUse");
   await project(runtime);
   await settle();
-  const climbFrom = runtime.appended.length;
   await measure(runtime, Math.ceil(bandTop) + 2_000, window, undefined, "toolUse");
   await project(runtime);
   await settle();
-  const lastCall = contextEvents(runtime, climbFrom).find((record) => record.kind === "context.lastcall");
-  assert(lastCall, "The band top passed without a last call in a session that never closed a turn");
-  assert(lastCall.occupancy >= context.DEFAULT_THRESHOLDS.maxTarget,
-    `The last call fired at ${lastCall.occupancy}, below the band top`);
-  assert.equal(lastCall.pending_agent_marks, 0, "The fixture made an agent mark");
 
-  // (d) THE CONSISTENCY INVARIANT, checked at the exposure the last call describes.
+  // (d) THE CONSISTENCY INVARIANT, checked at the state the boundary will find.
   //
-  // A last call that announces unmarked stale mass while holding no marks is a promise
-  // that the commit answering it has something to do. In rep 2 that promise was empty
-  // 19 spans and 274,173 tokens over, which is the contradiction this asserts away.
+  // Unmarked stale mass the selector cannot propose is a window that will starve no
+  // matter how often the boundary fires. In rep 2 that was 19 spans and 274,173 tokens,
+  // which is the contradiction this asserts away.
   const exposureSnapshot = context.mapActiveContext({
     sessionId,
     eventMessages: runtime.messages,
@@ -9919,10 +9900,9 @@ async function gateOpenTurnCommits() {
   });
   const exposureState = materialized(runtime, sessionId);
   const remainder = context.unmarkedRemainder(exposureSnapshot, exposureState, 4);
-  assert(lastCall.unmarked_stale_tokens > 0 && remainder.spans > 0,
-    "The last call announced nothing, so there is no promise to keep");
+  assert(remainder.spans > 0, "There is no unmarked stale mass here, so there is nothing to starve on");
   assert(context.selectAutomaticSpan(exposureSnapshot, exposureState) !== null,
-    `The last call announced ${remainder.spans} unmarked stale spans the selector cannot propose`);
+    `${remainder.spans} unmarked stale spans stand that the selector cannot propose`);
   // AND THE SHAPE OF THE DEFECT, pinned so it cannot come back by another route. The
   // open turn is the WHOLE window here, so excluding it at proposal time leaves the
   // selector nothing; that is why the guard is adjudicated at the commit, where it has a
@@ -9934,21 +9914,18 @@ async function gateOpenTurnCommits() {
     "Excluding the open turn at proposal time left something proposable, so this fixture " +
       "no longer demonstrates why the exclusion had to move to the commit");
 
-  // The commit lands on the pass after the round the last call opened. It lands at the
-  // pressure backstop rather than at the band top, and that is the ladder working as
-  // written: every mark on this shape belongs to the open turn, so applying any of them
-  // needs the guard waiver, and the waiver only releases a STARVED commit once occupancy
-  // has reached `refoldRatio` of the serving budget. Between the band top and the
-  // backstop this session marks and holds, which is the deferral the guard is for.
+  // THE COMMIT, AT THE BOUNDARY, ON A SESSION THAT NEVER CLOSES A TURN. Every mark on
+  // this shape belongs to the open turn, so applying any of them needs the guard waiver,
+  // and the waiver only releases a STARVED commit once occupancy has reached
+  // `refoldRatio` of the serving budget. Below that the boundary marks and holds, which
+  // is the deferral the guard is for.
   const backstop = context.ACTIVE_CONTEXT_POLICY.refoldRatio * providerInputBudget;
   assert(backstop > bandTop, "The backstop is not above the band top on this deployment");
   const commitFrom = runtime.appended.length;
-  await measure(runtime, Math.ceil(backstop) + 3_000, window, undefined, "toolUse");
-  await project(runtime);
-  await settle();
+  await measureAndCommit(runtime, Math.ceil(backstop) + 3_000, window, undefined, "toolUse");
   const commit = contextEvents(runtime, commitFrom)
     .find((record) => record.kind === "context.commit" && record.deferred === false);
-  assert(commit, "The pass after the last call committed nothing in a session that never closed a turn");
+  assert(commit, "The boundary committed nothing in a session that never closed a turn");
   assert(commit.applied_marks > 0, `The commit applied ${commit.applied_marks} marks`);
   assert(commit.freed_tokens > 0, `The commit freed ${commit.freed_tokens} tokens`);
   assert(commit.waived_marks > 0,
@@ -9985,8 +9962,7 @@ async function gateOpenTurnCommits() {
     freshBoundary: snapshot.freshBoundary,
     memberBatches: members.length,
     messages: snapshot.messages.length,
-    lastCallOccupancy: lastCall.occupancy,
-    lastCallUnmarkedTokens: lastCall.unmarked_stale_tokens,
+    unmarkedStaleSpans: remainder.spans,
     guardedRefKeys: guarded.size,
     proposableWithoutTheExclusion: true,
     proposableWithTheExclusion: false,
@@ -13226,7 +13202,7 @@ const gates = [
   [105, "Every completed tool batch folds unmarked", gateEveryToolBatchFoldsUnmarked],
   [103, "Guidance is two booleans, default on", gateGuidanceOption],
   [104, "The slate rides the commit boundary", gateSurfacingDeliveryRidesTheBoundary],
-  [106, "The band top commits with no turn ever closed", gateOpenTurnCommits],
+  [106, "The boundary commits with no turn ever closed", gateOpenTurnCommits],
   [107, "Model briefs upgrade on the commit boundary", gateBriefUpgradesRideTheBoundary],
   [108, "A folded head never limits reach", gateProjectedStaleBasis],
   [109, "A mark naming a fold that is gone or held is answered", gateDanglingChildMarks],
