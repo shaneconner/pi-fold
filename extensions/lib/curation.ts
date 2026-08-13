@@ -1,9 +1,4 @@
-import { objectRefKey } from "../json.ts";
-import {
-  boundedUtf8,
-  bytes,
-  messageRole,
-} from "./canonical.ts";
+import { boundedUtf8 } from "./canonical.ts";
 import { boundReceiptText } from "./measurement.ts";
 import {
   contextBrand,
@@ -11,84 +6,8 @@ import {
   CONTEXT_RECEIPT_BLOCK_BYTES,
   DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
   MAX_CONTEXT_RECEIPTS,
-  MAX_LAST_CALL_TEXT_BYTES,
   MAX_SURFACING_LINE_BYTES,
-  MAX_THRESHOLD_NOTICE_TEXT_BYTES,
 } from "./policy.ts";
-import type {
-  ActiveContextSnapshot,
-  ActiveContextState,
-} from "./policy.ts";
-
-export interface StaleToolMass {
-  bytes: number;
-  results: number;
-}
-
-export function staleToolMass(
-  snapshot: ActiveContextSnapshot,
-  state: ActiveContextState,
-): StaleToolMass {
-  const owned = new Set(state.folds.flatMap((fold) =>
-    fold.parts.flatMap((part) => part.kind === "raw" ? [objectRefKey(part.ref)] : [])));
-  let total = 0;
-  let results = 0;
-  for (const item of snapshot.mapped) {
-    if (!item.ref || messageRole(item.message) !== "toolResult") continue;
-    if (snapshot.toolProtectedIndices.has(item.index)) continue;
-    if (owned.has(objectRefKey(item.ref))) continue;
-    total += bytes(item.message);
-    results += 1;
-  }
-  return { bytes: total, results };
-}
-
-export interface CurationSignals {
-  occupancy: number | null;
-  maxTarget: number;
-  occupancyTokens: number | null;
-  budgetTokens: number;
-  window: number;
-  staleToolShare: number;
-  staleToolTokens: number;
-  staleToolResults: number;
-  eligibleFolds: number;
-}
-
-export function curationSignals(input: {
-  snapshot: ActiveContextSnapshot;
-  state: ActiveContextState;
-  usedTokens: number | null;
-  budgetTokens: number;
-  window: number;
-  charsPerToken: number;
-  eligibleFolds: number;
-}): CurationSignals {
-  const mass = staleToolMass(input.snapshot, input.state);
-  const charsPerToken = Number.isFinite(input.charsPerToken) && input.charsPerToken > 0
-    ? input.charsPerToken
-    : 4;
-  const staleToolTokens = Math.ceil(mass.bytes / charsPerToken);
-  return {
-    maxTarget: input.snapshot.thresholds.maxTarget,
-    occupancy: input.usedTokens === null || input.budgetTokens <= 0
-      ? null
-      : input.usedTokens / input.budgetTokens,
-    occupancyTokens: input.usedTokens,
-    budgetTokens: input.budgetTokens,
-    window: input.window,
-    staleToolShare: input.budgetTokens > 0 ? staleToolTokens / input.budgetTokens : 0,
-    staleToolTokens,
-    staleToolResults: mass.results,
-    eligibleFolds: input.eligibleFolds,
-  };
-}
-
-export function curationTriggerFires(signals: CurationSignals): boolean {
-  return signals.occupancy !== null &&
-    Number.isFinite(signals.occupancy) &&
-    signals.occupancy >= signals.maxTarget;
-}
 
 export function markAwarenessText(input: {
   held: ReadonlyArray<{ id: string; kind: string; tokens: number }>;
@@ -155,63 +74,6 @@ export function contextRiderText(input: {
 export function joinSurfacing(text: string, suggestion?: string | null): string {
   if (!suggestion) return text;
   return `${text}\n${boundedUtf8(suggestion, MAX_SURFACING_LINE_BYTES)}`;
-}
-
-export const LAST_CALL_WORDING =
-  "Fold commit triggered, please add or edit marks, pin or unpin context based on foreseeable relevance.";
-
-export function lastCallText(input: {
-  signals: CurationSignals;
-  unmarked: { spans: number; tokens: number };
-  pendingMarks: number;
-  peekReclaims?: number;
-  suggestion?: string | null;
-  toolName: string;
-  brandNoun?: string;
-}): string {
-  const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
-  const { signals } = input;
-  const occupancy = signals.occupancy === null ? "unmeasured" : `${Math.round(signals.occupancy * 100)}%`;
-  const peekReclaims = input.peekReclaims ?? 0;
-  return joinSurfacing(boundReceiptText([
-    `[${brand} last call] ${LAST_CALL_WORDING}`,
-    `Occupancy is ${occupancy} of the ${signals.budgetTokens}-token serving budget, at or past the ` +
-      `${Math.round(signals.maxTarget * 100)}% commit line. Unmarked foldable mass: ` +
-      `${input.unmarked.spans} span(s), about ${input.unmarked.tokens} tokens. ` +
-      `Pending marks: ${input.pendingMarks}.`,
-    peekReclaims > 0
-      ? `Peek copies reclaimed by this commit: ${peekReclaims}. Each duplicates a fold you can peek ` +
-        "again at any time, and its placeholder names that fold, so nothing becomes unreachable. " +
-        "Pin one to keep the copy raw."
-      : "",
-    `Marks: ${input.toolName} ` +
-      "{\"action\":\"fold\",\"marks\":[{\"ids\":[\"<start>\",\"<end>\"],\"brief\":\"<factual brief>\"}]} " +
-      "adds or widens several in one call. Pins: {\"action\":\"protect\",\"ids\":[\"<entry-id>\"]} holds " +
-      "entries raw through every fold, and {\"action\":\"unprotect\"} releases them.",
-    "This is one round: the commit proceeds on the pass after your next response with whatever marks " +
-      "exist. Continuing the task is the default; nothing here needs a reply.",
-  ].filter(Boolean).join("\n"), MAX_LAST_CALL_TEXT_BYTES,
-  `[${brand} last call] ${LAST_CALL_WORDING}`), input.suggestion);
-}
-
-export function thresholdNoticeText(input: {
-  share: number;
-  occupancyTokens: number;
-  budgetTokens: number;
-  maxTarget: number;
-  toolName: string;
-  brandNoun?: string;
-}): string {
-  const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
-  return boundReceiptText(
-    `[${brand} notice] Context occupancy crossed ${Math.round(input.share * 100)}% of the ` +
-      `${input.budgetTokens}-token serving budget (${input.occupancyTokens} tokens). Nothing folds before ` +
-      `the fold commit at ${Math.round(input.maxTarget * 100)}%; marks and pins made now shape it: ` +
-      `${input.toolName} {"action":"fold","marks":[{"ids":["<start>","<end>"],"brief":"<factual brief>"}]} ` +
-      'or {"action":"protect","ids":["<entry-id>"]}.',
-    MAX_THRESHOLD_NOTICE_TEXT_BYTES,
-    `[${brand} notice] Context occupancy crossed ${Math.round(input.share * 100)}% of the serving budget.`,
-  );
 }
 
 export interface ContextReceipt {

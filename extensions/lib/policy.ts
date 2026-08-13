@@ -179,8 +179,6 @@ export const PEEK_MIN_SLICE_BYTES = 1_024;
 
 export const STATUS_DIET_SUGGESTIONS = 5;
 
-export const THRESHOLD_NOTICE_SHARES: readonly number[] = Object.freeze([0.25, 0.50, 0.75]);
-export const MAX_THRESHOLD_NOTICES = 9;
 export interface ActiveContextGuidance {
   actionResponses: boolean;
 }
@@ -213,8 +211,6 @@ export function resolveGuidance(value: unknown): ActiveContextGuidance {
   }
   return Object.freeze(resolved);
 }
-export const MAX_LAST_CALL_TEXT_BYTES = 2_048;
-export const MAX_THRESHOLD_NOTICE_TEXT_BYTES = 512;
 export const MAX_SURFACING_LINE_BYTES = 384;
 
 export const MAX_CONTEXT_RECEIPTS = 3;
@@ -370,8 +366,6 @@ export interface ActiveContextState {
     armed?: { milestone: AdvisoryMilestone; threshold: number; scheduleKey: string };
   };
   rider?: { epoch: number; text: string };
-  lastCall?: { exposure: number; ordinal: number; contextCalls: number; agentMarks: number; text: string };
-  notices?: { fired: number[]; ring: Array<{ share: number; ordinal: number; text: string }> };
 }
 
 export interface FoldRecordRef {

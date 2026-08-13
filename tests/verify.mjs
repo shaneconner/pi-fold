@@ -3152,23 +3152,18 @@ async function gateSurfacingSlateBounds() {
   assert(Buffer.byteLength(huge, "utf8") <= context.MAX_SURFACING_LINE_BYTES);
   assert.equal(context.surfacingSlateText({ slate: [], queryTerms: wide.queryTerms }), null);
 
-  // The carrier bound and the line bound compose; neither eats the other.
-  const carriers = {
-    rider: context.contextRiderText({
-      toolName: "pi_fold_context", brandNoun: "Acme", pendingAgentMarks: 2, eligibleMarks: 1,
-      freedTokens: 900, eligibleFreedTokens: 400, anchors: ["a", "b", "c"],
-      pinnedShare: 0.1, maxPinnedShare: 0.25, suggestion: line,
-    }),
-    lastCall: context.lastCallText({
-      signals: { occupancy: 0.82, maxTarget: 0.8, budgetTokens: 90_000 },
-      unmarked: { spans: 4, tokens: 2_000 }, pendingMarks: 2, toolName: "pi_fold_context",
-      brandNoun: "Acme", suggestion: line,
-    }),
-  };
-  assert(carriers.rider.endsWith(line) && carriers.lastCall.endsWith(line),
-    "The slate line did not survive the carrier's own bound");
-  assert(Buffer.byteLength(carriers.lastCall, "utf8") <=
-    context.MAX_LAST_CALL_TEXT_BYTES + context.MAX_SURFACING_LINE_BYTES + 1);
+  // The carrier bound and the line bound compose; neither eats the other. The rider is
+  // the only carrier left: the last call retired with the thermostat that armed it.
+  const rider = context.contextRiderText({
+    toolName: "pi_fold_context", brandNoun: "Acme", pendingAgentMarks: 2, eligibleMarks: 1,
+    freedTokens: 900, eligibleFreedTokens: 400, anchors: ["a", "b", "c"],
+    pinnedShare: 0.1, maxPinnedShare: 0.25, suggestion: line,
+  });
+  assert(rider.endsWith(line), "The slate line did not survive the carrier's own bound");
+  assert.equal(context.lastCallText, undefined, "The last-call carrier survived its thermostat");
+  assert.equal(context.thresholdNoticeText, undefined, "The threshold notice survived its thermostat");
+  assert.equal(context.MAX_LAST_CALL_TEXT_BYTES, undefined,
+    "The last call's byte bound outlived the carrier it bounded");
   assert.equal(context.contextRiderText({
     toolName: "pi_fold_context", brandNoun: "Acme", pendingAgentMarks: 0, eligibleMarks: 0,
     freedTokens: 0, eligibleFreedTokens: 0, anchors: [], pinnedShare: 0, maxPinnedShare: 0.25,
@@ -3181,7 +3176,7 @@ async function gateSurfacingSlateBounds() {
     divergentCandidates: wide.divergent,
     lineBytes: Buffer.byteLength(line, "utf8"),
     lineBound: context.MAX_SURFACING_LINE_BYTES,
-    carrierBytes: { rider: carriers.rider.length, lastCall: carriers.lastCall.length },
+    carrierBytes: { rider: rider.length },
     silentPassCostsNothing: true,
     perRequestCarrier: "deleted",
   };
@@ -7836,28 +7831,17 @@ async function gateNoAgentCommitVerb() {
   assert.equal(/\bcommit action\b/.test(json.stableStringify(marked.details)), false,
     "A fold reply still points the agent at a commit action");
 
-  // The live commit-boundary carriers offer the verbs that exist and nothing that does
-  // not. The pre-B1 curation notice that used to stand here is deleted with its gate.
-  const lastCall = context.lastCallText({
-    signals: {
-      occupancy: 0.86, maxTarget: 0.80, occupancyTokens: 86_000, budgetTokens: 100_000,
-      window: 100_000, staleToolShare: 0.3, staleToolTokens: 30_000, staleToolResults: 6,
-      eligibleFolds: 4,
-    },
-    unmarked: { spans: 6, tokens: 30_000 }, pendingMarks: 4, toolName: "pi_fold_context",
-  });
+  // The live commit-boundary carrier offers the verbs that exist and nothing that does
+  // not. The pre-B1 curation notice that used to stand here is deleted with its gate, and
+  // the last call that replaced it is deleted with the thermostat that armed it.
   const receiptBlock = context.receiptBlockText({
     receipts: [context.contextReceipt({
       kind: "commit", ordinal: 4, foldsCommitted: 2, foldsCreated: 2, freedTokens: 9_000,
     })],
     toolName: "pi_fold_context",
   });
-  for (const [surface, text] of [["last call", lastCall], ["receipt block", receiptBlock]]) {
-    assert.equal(/"action":"commit"/.test(text), false,
-      `The ${surface} still offers a commit verb`);
-  }
-  assert(lastCall.includes('"action":"fold"') && lastCall.includes('"action":"protect"'),
-    "The last call lost the verbs that do exist");
+  assert.equal(/"action":"commit"/.test(receiptBlock), false,
+    "The receipt block still offers a commit verb");
   assert(receiptBlock.includes('"action":"rebrief"') && receiptBlock.includes('"action":"reboundary"'),
     "The receipt block lost the correction verbs");
 
@@ -8215,28 +8199,9 @@ async function gateBatchedMarkCopy() {
   const marks = [...runtime.tools.values()][0].parameters.properties.marks;
   assert.match(marks.description, /which is the shape to prefer/);
 
-  const signals = {
-    occupancy: 0.5, maxTarget: 0.80, occupancyTokens: 50_000, budgetTokens: 100_000,
-    window: 100_000, staleToolShare: 0.3, staleToolTokens: 30_000, staleToolResults: 6,
-    eligibleFolds: 4,
-  };
-  // The sub-commit waypoint. It replaced the two sparse curation reminders, and it
-  // inherits their rule: one line, informatory, and the marking it names is the BATCH.
-  const notice = context.thresholdNoticeText({
-    share: 0.5, occupancyTokens: 50_000, budgetTokens: 100_000, maxTarget: 0.80,
-    toolName: "pi_fold_context",
-  });
-  assert.match(notice, /"action":"fold","marks":\[\{"ids"/);
-  // The tool surface's own vocabulary rule: nothing here invites a chat-style answer.
-  assert.equal(/\bthe reply\b/.test(notice), false, "The notice says \"the reply\"");
-  assert.equal(notice.includes("\n"), false, "The notice stopped being one line");
-
-  const lastCall = context.lastCallText({
-    signals, unmarked: { spans: 6, tokens: 30_000 }, pendingMarks: 4, toolName: "pi_fold_context",
-  });
-  assert.match(lastCall, /adds or widens several in one call/);
-  assert.match(lastCall, /"action":"fold","marks":\[\{"ids"/);
-
+  // The sub-commit waypoint and the last call both retired with the thermostat that
+  // scheduled them. What carried their copy rule is the ACTION RESPONSE, which is the one
+  // surface left that answers a mark, so the rule is asserted where it still applies.
   const reply = await toolCall(runtime, {
     action: "fold",
     ids: [runtime.built.turnEntries[0][2]],
@@ -8245,7 +8210,9 @@ async function gateBatchedMarkCopy() {
   assert.match(String(reply.details.activation), /Mark several spans in one call/);
   assert.match(String(reply.details.activation), /nothing else in your\s+context changed/);
 
-  return { description: true, notice: true, lastCall: true, activation: true };
+  assert.equal(/\bthe reply\b/.test(String(reply.details.activation)), false,
+    "The action response says \"the reply\"");
+  return { description: true, activation: true };
 }
 
 /**
@@ -12816,6 +12783,93 @@ async function gateNoTokenCeilingReachesTheProvider() {
  * is that the wire carries the difference from its base and nothing else, so an addition,
  * a rewrite and a removal all travel and an unchanged map travels nowhere.
  */
+/**
+ * A RETIRED STATE FIELD IS REFUSED BY NAME, NOT TOLERATED AND DROPPED.
+ *
+ * `lastCall` and `notices` were the occupancy thermostat's two announcements, and they
+ * left the state schema with it. A durable state that still carries one was written by a
+ * build that had them, and the honest answer is a refusal that says which field and why:
+ * tolerating it and dropping it makes a version boundary look like a successful load, and
+ * the state that comes back is not the state that was written.
+ *
+ * Gate 17 states the wire's policy from the older side, that an exact-record reader
+ * rejects fields it does not know and a bump is explicit. This is the same policy read
+ * from the newer side, and it is asserted on BOTH readers, because the v1 and v2 parsers
+ * each build their own key list and a fix applied to one would leave the other silent.
+ */
+async function gateRetiredStateFieldsAreRefusedByName() {
+  const built = makeFixture({ turns: 6, resultChars: 4_000, contextWindow: 100_000 });
+  const empty = context.emptyActiveContextState(built.sessionId);
+  // Neither field can be produced any more: the schema does not declare them, so the
+  // fixture states them as a build that HAD them would have written them.
+  const retired = {
+    lastCall: { exposure: 4, ordinal: 2, contextCalls: 0, agentMarks: 0, text: "[pi-fold last call] ..." },
+    notices: { fired: [0.25], ring: [{ share: 0.25, ordinal: 1, text: "[pi-fold notice] ..." }] },
+  };
+  const refusals = {};
+  for (const [field, payload] of Object.entries(retired)) {
+    // The v1 whole-state reader.
+    assert.throws(
+      () => context.materializeActiveContextState(
+        [...built.entries, stateEntry(built.sessionId, { ...empty, [field]: payload })],
+        built.sessionId,
+      ),
+      new RegExp(`retired field\\(s\\) ${field}`),
+      `The v1 reader did not refuse ${field} by name`,
+    );
+    // And the v2 checkpoint reader, whose key list is built separately.
+    const runtime = makeRuntime(built);
+    await startRuntime(runtime);
+    await measureAndCommit(runtime, 88_000, 100_000);
+    const checkpoint = runtime.branch
+      .filter((entry) => entry.customType === context.ACTIVE_CONTEXT_STATE_ENTRY).at(-1);
+    assert(checkpoint, "The fixture wrote no v2 state entry to corrupt");
+    const corrupted = structuredClone(checkpoint);
+    corrupted.data = { ...corrupted.data, [field]: payload };
+    assert.throws(
+      () => context.materializeActiveContextState(
+        [...runtime.branch.filter((entry) => entry !== checkpoint), corrupted],
+        built.sessionId,
+      ),
+      new RegExp(`retired field\\(s\\) ${field}`),
+      `The v2 reader did not refuse ${field} by name`,
+    );
+    refusals[field] = true;
+  }
+  // Both at once are named together rather than one at a time, so a state carrying two
+  // does not need two loads to learn what is wrong with it.
+  assert.throws(
+    () => context.materializeActiveContextState(
+      [...built.entries, stateEntry(built.sessionId, { ...empty, ...retired })],
+      built.sessionId,
+    ),
+    /retired field\(s\) lastCall, notices/,
+    "A state carrying both retired fields named only one of them",
+  );
+  // And the refusal is not a blanket rejection of unknown keys wearing a friendlier
+  // message: a field that was never in the schema still fails the plain key check.
+  assert.throws(
+    () => context.materializeActiveContextState(
+      [...built.entries, stateEntry(built.sessionId, { ...empty, neverExisted: 1 })],
+      built.sessionId,
+    ),
+    /Invalid active-context state keys/,
+    "An unknown key was reported as a retired field",
+  );
+  // The carriers and their bounds are gone with the fields, so nothing can write one back.
+  for (const name of ["lastCallText", "thresholdNoticeText", "MAX_LAST_CALL_TEXT_BYTES",
+    "MAX_THRESHOLD_NOTICE_TEXT_BYTES", "THRESHOLD_NOTICE_SHARES", "MAX_THRESHOLD_NOTICES",
+    "curationSignals", "curationTriggerFires", "staleToolMass"]) {
+    assert.equal(context[name], undefined, `${name} outlived the state it served`);
+  }
+  return {
+    refusedOnBothReaders: refusals,
+    bothNamedTogether: true,
+    unknownKeysStillPlain: true,
+    retiredSurfaceRemoved: 9,
+  };
+}
+
 async function gateDeltaCarriesOnlyBriefChanges() {
   const runtime = await epochToolRuntime({ turns: 16, resultChars: 6_000 });
   const built = runtime.built;
@@ -13256,6 +13310,7 @@ const gates = [
   // advance. Their numbers stay spent for the same reason 124's does.
   [126, "A batched brief names the bytes it was made from", gateBatchedBriefNamesItsSource],
   [127, "A delta carries only what changed", gateDeltaCarriesOnlyBriefChanges],
+  [129, "A retired state field is refused by name", gateRetiredStateFieldsAreRefusedByName],
   [128, "The user's commit announces a persistence failure", gateUserCommitAnnouncesPersistenceFailure],
 ];
 

@@ -21,10 +21,7 @@ import {
   ACTIVE_CONTEXT_STATE_ENTRY,
   EXPAND_LEASE_GENERATIONS,
   MAX_EXPAND_LEASES,
-  MAX_LAST_CALL_TEXT_BYTES,
   MAX_PENDING_MARKS,
-  MAX_THRESHOLD_NOTICE_TEXT_BYTES,
-  MAX_THRESHOLD_NOTICES,
   SURFACING_MAX_LEDGER_RECORDS,
 } from "./policy.ts";
 import type {
@@ -354,8 +351,7 @@ export function parseActiveContextState(
   const hasPinnedPeeks = recordLike && Object.prototype.hasOwnProperty.call(value, "pinnedPeeks");
   const hasBriefs = recordLike && Object.prototype.hasOwnProperty.call(value, "briefs");
   const hasRider = recordLike && Object.prototype.hasOwnProperty.call(value, "rider");
-  const hasLastCall = recordLike && Object.prototype.hasOwnProperty.call(value, "lastCall");
-  const hasNotices = recordLike && Object.prototype.hasOwnProperty.call(value, "notices");
+  refuseRetiredStateFields(value);
   const extraKeys = [
     ...(hasPrepared ? ["prepared"] : []),
     ...(hasAdvisory ? ["advisory"] : []),
@@ -366,8 +362,6 @@ export function parseActiveContextState(
     ...(hasPinnedPeeks ? ["pinnedPeeks"] : []),
     ...(hasBriefs ? ["briefs"] : []),
     ...(hasRider ? ["rider"] : []),
-    ...(hasLastCall ? ["lastCall"] : []),
-    ...(hasNotices ? ["notices"] : []),
   ];
   if (!exactRecord(value, [...ACTIVE_STATE_KEYS, ...extraKeys])) throw new Error("Invalid active-context state keys");
   const folds = denseOwnArrayValues(ownValue(value, "folds"));
@@ -391,12 +385,6 @@ export function parseActiveContextState(
   }
   if (hasRider && !validRiderState(ownValue(value, "rider"))) {
     throw new Error("Invalid active-context rider state");
-  }
-  if (hasLastCall && !validLastCallState(ownValue(value, "lastCall"))) {
-    throw new Error("Invalid active-context last-call state");
-  }
-  if (hasNotices && !validNoticesState(ownValue(value, "notices"))) {
-    throw new Error("Invalid active-context notices state");
   }
   if (hasTokensSinceToolFold && !validTokensSinceToolFold(ownValue(value, "tokensSinceToolFold"))) {
     throw new Error("Invalid active-context tool-fold cadence");
@@ -427,8 +415,6 @@ export function parseActiveContextState(
       ? { advisory: clone(source.advisory!) }
       : defaultAdvisory ? { advisory: { highWater: 0, delivered: {} } } : {}),
     ...(hasRider ? { rider: clone(source.rider!) } : {}),
-    ...(hasLastCall ? { lastCall: clone(source.lastCall!) } : {}),
-    ...(hasNotices ? { notices: clone(source.notices!) } : {}),
     ...(hasPrepared ? { prepared: clone(source.prepared!) } : {}),
   };
 }
@@ -548,16 +534,12 @@ export function validateV2ProjectionFields(
   pendingMarksValue?: unknown,
   briefsValue?: unknown,
   riderValue?: unknown,
-  lastCallValue?: unknown,
-  noticesValue?: unknown,
 ): {
   expanded: string[];
   protected: EvidenceRef[];
   prepared?: PreparedFold;
   advisory?: NonNullable<ActiveContextState["advisory"]>;
   rider?: NonNullable<ActiveContextState["rider"]>;
-  lastCall?: NonNullable<ActiveContextState["lastCall"]>;
-  notices?: NonNullable<ActiveContextState["notices"]>;
   tokensSinceToolFold: number;
   leases: Record<string, number>;
   surfacing: SurfacingRecord[];
@@ -579,12 +561,6 @@ export function validateV2ProjectionFields(
   if (riderValue !== undefined && !validRiderState(riderValue)) {
     throw new Error("Invalid active-context v2 rider state");
   }
-  if (lastCallValue !== undefined && !validLastCallState(lastCallValue)) {
-    throw new Error("Invalid active-context v2 last-call state");
-  }
-  if (noticesValue !== undefined && !validNoticesState(noticesValue)) {
-    throw new Error("Invalid active-context v2 notices state");
-  }
   if (tokensSinceToolFoldValue !== undefined && !validTokensSinceToolFold(tokensSinceToolFoldValue)) {
     throw new Error("Invalid active-context v2 tool-fold cadence");
   }
@@ -601,12 +577,6 @@ export function validateV2ProjectionFields(
     }),
     ...(riderValue === undefined ? {} : {
       rider: clone(riderValue) as NonNullable<ActiveContextState["rider"]>,
-    }),
-    ...(lastCallValue === undefined ? {} : {
-      lastCall: clone(lastCallValue) as NonNullable<ActiveContextState["lastCall"]>,
-    }),
-    ...(noticesValue === undefined ? {} : {
-      notices: clone(noticesValue) as NonNullable<ActiveContextState["notices"]>,
     }),
     tokensSinceToolFold: tokensSinceToolFoldValue === undefined ? 0 : Number(tokensSinceToolFoldValue),
     leases,
@@ -642,10 +612,7 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     Object.prototype.hasOwnProperty.call(value, "removeBriefIds"));
   const hasRider = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "rider"));
-  const hasLastCall = Boolean(value && typeof value === "object" &&
-    Object.prototype.hasOwnProperty.call(value, "lastCall"));
-  const hasNotices = Boolean(value && typeof value === "object" &&
-    Object.prototype.hasOwnProperty.call(value, "notices"));
+  refuseRetiredStateFields(value);
   const optionalKeys = [
     ...(hasAdvisory ? ["advisory"] : []),
     ...(hasTokensSinceToolFold ? ["tokensSinceToolFold"] : []),
@@ -659,8 +626,6 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     ...(hasAddBriefs ? ["addBriefs"] : []),
     ...(hasRemoveBriefIds ? ["removeBriefIds"] : []),
     ...(hasRider ? ["rider"] : []),
-    ...(hasLastCall ? ["lastCall"] : []),
-    ...(hasNotices ? ["notices"] : []),
   ];
   const checkpoint = kind === "checkpoint" &&
     exactRecord(value, [...STATE_CHECKPOINT_V2_KEYS, ...optionalKeys]);
@@ -676,7 +641,7 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     ownValue(value, "expanded"), ownValue(value, "protected"), ownValue(value, "prepared"),
     ownValue(value, "advisory"), ownValue(value, "tokensSinceToolFold"), ownValue(value, "leases"),
     ownValue(value, "surfacing"), ownValue(value, "pendingMarks"), ownValue(value, "briefs"),
-    ownValue(value, "rider"), ownValue(value, "lastCall"), ownValue(value, "notices"),
+    ownValue(value, "rider"),
   );
   if (checkpoint) {
     const refs = denseOwnArrayValues(ownValue(value, "foldRefs"));
@@ -771,8 +736,7 @@ export function stateFromFoldRefs(
   wire: Pick<
     ActiveContextCheckpointV2,
     "sessionId" | "revision" | "expanded" | "protected" | "prepared" | "advisory" |
-      "tokensSinceToolFold" | "leases" | "surfacing" | "pendingMarks" | "briefs" | "rider" |
-      "lastCall" | "notices"
+      "tokensSinceToolFold" | "leases" | "surfacing" | "pendingMarks" | "briefs" | "rider"
   >,
   refs: FoldRecordRef[],
   records: Map<string, FoldRecordEntry>,
@@ -797,8 +761,6 @@ export function stateFromFoldRefs(
     ...(wire.briefs && Object.keys(wire.briefs).length ? { briefs: clone(wire.briefs) } : {}),
     ...(wire.advisory === undefined ? {} : { advisory: clone(wire.advisory) }),
     ...(wire.rider === undefined ? {} : { rider: clone(wire.rider) }),
-    ...(wire.lastCall === undefined ? {} : { lastCall: clone(wire.lastCall) }),
-    ...(wire.notices === undefined ? {} : { notices: clone(wire.notices) }),
     ...(wire.prepared === null || wire.prepared === undefined ? {} : { prepared: clone(wire.prepared) }),
   };
   return parseActiveContextState(state, wire.sessionId, false);
@@ -1001,8 +963,6 @@ export function makeStateCheckpoint(state: ActiveContextState): ActiveContextChe
     ...(state.briefs && Object.keys(state.briefs).length ? { briefs: clone(state.briefs) } : {}),
     ...(state.advisory ? { advisory: clone(state.advisory) } : {}),
     ...(state.rider ? { rider: clone(state.rider) } : {}),
-    ...(state.lastCall ? { lastCall: clone(state.lastCall) } : {}),
-    ...(state.notices ? { notices: clone(state.notices) } : {}),
     stateSha256: semanticStateSha256(state),
   }, state.sessionId) as ActiveContextCheckpointV2;
 }
@@ -1077,8 +1037,6 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
     ...(removeBriefIds.length ? { removeBriefIds } : {}),
     ...(next.advisory ? { advisory: clone(next.advisory) } : {}),
     ...(next.rider ? { rider: clone(next.rider) } : {}),
-    ...(next.lastCall ? { lastCall: clone(next.lastCall) } : {}),
-    ...(next.notices ? { notices: clone(next.notices) } : {}),
     stateSha256: semanticStateSha256(next),
   }, next.sessionId) as ActiveContextDeltaV2;
 }
@@ -1097,35 +1055,40 @@ export const ADVISORY_MILESTONES = Object.freeze(
 
 export const MAX_RIDER_TEXT_BYTES = 4_096;
 
+/**
+ * THE RETIRED STATE FIELDS, REFUSED BY NAME.
+ *
+ * `lastCall` and `notices` were the occupancy thermostat's two announcements. Nothing
+ * writes them any more and nothing reads them, so a durable state that still carries one
+ * was written by a build that had them, and the exact-record readers would reject it with
+ * "Invalid active-context state keys" -- true, and useless to whoever has to act on it.
+ *
+ * Refusing by name is the whole behaviour. Tolerating the field and dropping it is the
+ * silent path: it makes a version boundary look like a successful load, and the state
+ * that comes back is not the state that was written. Gate 17 already states the wire's
+ * policy in the other direction -- an older exact-record reader rejects newer fields, and
+ * a bump is explicit -- and this is that same policy read from the newer side.
+ */
+const RETIRED_STATE_FIELDS: readonly string[] = Object.freeze(["lastCall", "notices"]);
+
+export function refuseRetiredStateFields(value: unknown): void {
+  if (!value || typeof value !== "object") return;
+  const carried = RETIRED_STATE_FIELDS.filter((field) =>
+    Object.prototype.hasOwnProperty.call(value, field));
+  if (!carried.length) return;
+  throw new Error(
+    `Active-context state carries the retired field(s) ${carried.join(", ")}: it was written ` +
+    "by a build whose occupancy thermostat announced a pending commit. Nothing writes or " +
+    "reads them now, and this build will not load a state it cannot reproduce.",
+  );
+}
+
 export function validRiderState(value: unknown): value is NonNullable<ActiveContextState["rider"]> {
   if (!exactRecord(value, ["epoch", "text"])) return false;
   const epoch = ownValue(value, "epoch");
   const text = ownValue(value, "text");
   return Number.isSafeInteger(epoch) && Number(epoch) >= 0 &&
     typeof text === "string" && text.length > 0 && text.length <= MAX_RIDER_TEXT_BYTES;
-}
-
-export function validLastCallState(value: unknown): value is NonNullable<ActiveContextState["lastCall"]> {
-  if (!exactRecord(value, ["exposure", "ordinal", "contextCalls", "agentMarks", "text"])) return false;
-  const text = ownValue(value, "text");
-  return ["exposure", "ordinal", "contextCalls", "agentMarks"].every((field) =>
-    Number.isSafeInteger(ownValue(value, field)) && Number(ownValue(value, field)) >= 0) &&
-    typeof text === "string" && text.length > 0 && text.length <= MAX_LAST_CALL_TEXT_BYTES;
-}
-
-export function validNoticesState(value: unknown): value is NonNullable<ActiveContextState["notices"]> {
-  if (!exactRecord(value, ["fired", "ring"])) return false;
-  const fired = denseOwnArrayValues(ownValue(value, "fired"));
-  const ring = denseOwnArrayValues(ownValue(value, "ring"));
-  if (!fired || !ring || ring.length > MAX_THRESHOLD_NOTICES) return false;
-  if (fired.some((share) => typeof share !== "number" || !Number.isFinite(share) || share <= 0 || share >= 1) ||
-      new Set(fired).size !== fired.length) return false;
-  return ring.every((notice) => exactRecord(notice, ["share", "ordinal", "text"]) &&
-    typeof ownValue(notice, "share") === "number" && Number.isFinite(ownValue(notice, "share")) &&
-    Number(ownValue(notice, "share")) > 0 && Number(ownValue(notice, "share")) < 1 &&
-    Number.isSafeInteger(ownValue(notice, "ordinal")) && Number(ownValue(notice, "ordinal")) >= 0 &&
-    typeof ownValue(notice, "text") === "string" && String(ownValue(notice, "text")).length > 0 &&
-    String(ownValue(notice, "text")).length <= MAX_THRESHOLD_NOTICE_TEXT_BYTES);
 }
 
 export function validAdvisoryState(value: unknown): value is NonNullable<ActiveContextState["advisory"]> {
