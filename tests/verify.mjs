@@ -4701,12 +4701,11 @@ async function gateMarkAccumulation() {
  * which is the batching contract gate 55 pins.
  */
 async function gateEpochInlineRungs() {
-  const wide = await epochToolRuntime({ turns: 40 });
-  await measureAndCommit(wide, 86_500, 100_000, "inline-round");
-  const first = (await toolStatus(wide)).details.automatic.lastAutomaticAction;
-  assert.equal(first.kind, "tool-fold", "The inline rung did not run inside the epoch's rewrite turn");
-  assert.equal(typeof first.epoch, "object", "The inline rung replaced the epoch commit instead of riding it");
-
+  // Every rung reaches its effect through a MARK now, which is why this gate is about
+  // reachability rather than about a rung firing inline. Restricting the inline
+  // selection to prepared chapters used to strand the refold rung outright: a session
+  // whose reducible bytes sat in expanded folds re-committed forever without ever
+  // re-collapsing one. The route changed and the property did not.
   const runtime = await epochToolRuntime({ turns: 12 });
   await measureAndCommit(runtime, 86_100, 100_000);
   // A ROOT. Under the counting rule a commit may nest what it folds, and a child is
@@ -4728,9 +4727,8 @@ async function gateEpochInlineRungs() {
   assert(["refold", "epoch-commit"].includes(kinds.at(-1)),
     `The fold re-collapsed outside the refold rung: ${kinds.join(",")}`);
   // The decision itself is read off the canonical stream: the refold lands as a MARK
-  // on a measured pass, the exposure carrier overwrites that pass's action reading in
-  // the same cycle, and the commit that closes the round applies it. What proves the
-  // decision was taken is the applying commit plus the placeholder flip above.
+  // on a measured pass and the boundary applies it. What proves the decision was taken
+  // is the applying commit plus the placeholder flip above.
   assert(contextEvents(runtime).some((record) =>
     record.kind === "context.commit" && record.deferred === false && record.applied_marks >= 1),
   `The refold decision was never applied by a commit: ${kinds.join(",")}`);
@@ -4749,7 +4747,6 @@ async function gateEpochInlineRungs() {
   ));
   assert.equal(claimedFolds.has(target), true);
   return {
-    inlineRungInsideEpoch: first.kind,
     stepsToRefold: kinds.length,
     refoldRungReached: true,
     refoldMarkMapped: true,
@@ -7444,7 +7441,9 @@ async function gateQuietRuntimeStormReplay() {
   const afterGate = commits().length;
   assert.equal(afterGate, 1, `The crossing produced ${afterGate} commit events instead of one`);
   const commit = commits()[0];
-  assert.equal(commit.trigger, "band-top");
+  // The FENCE commits this one: the fixture's declared occupancy puts the projection at
+  // the margin, and the fence owns a request already there.
+  assert.equal(commit.trigger, "projection-budget");
   assert(commit.applied_marks >= 5,
     `The commit applied ${commit.applied_marks} marks; it was not the ONE deep event`);
 
@@ -8775,7 +8774,7 @@ async function gateRep19ShapeResolves() {
   await startRuntime(runtime);
   const committed = await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
   assert(committed.fired, "The window-pressure commit never fired");
-  assert.equal(committed.commit.trigger, "band-top");
+  assert.equal(committed.commit.trigger, "projection-budget");
 
   // The eligible share is an order of magnitude over the reclaim floor: the status
   // mass is ladder food now, not immortal weight.
@@ -10323,8 +10322,8 @@ async function gateGuidanceOption() {
 async function gateSurfacingDeliveryRidesTheBoundary() {
   const source = await readFile(join(projectRoot, "extensions", "active-context.ts"), "utf8");
   const carriers = [...source.matchAll(/deliverSurfacing\(snapshot, "([a-z]+)"\)/g)].map((match) => match[1]);
-  assert.deepEqual(carriers.sort(), ["lastcall", "rider"],
-    "The slate is delivered somewhere other than the two commit-boundary carriers");
+  assert.deepEqual(carriers.sort(), ["rider"],
+    "The slate is delivered somewhere other than the commit-boundary carrier");
   assert.equal(/customType: surfacingProjectionType/.test(source), false,
     "A surfacing carrier of its own reappeared in the projection");
 
@@ -13148,7 +13147,7 @@ const gates = [
   [36, "Ephemeral peek auto-mark", gateEphemeralPeekMark],
   [38, "Scheduling wire round-trip", gateSchedulingWireRoundTrip],
   [39, "Epoch mark accumulation", gateMarkAccumulation],
-  [40, "Epoch inline rung reachability", gateEpochInlineRungs],
+  [40, "The refold rung is reachable through a mark", gateEpochInlineRungs],
   [41, "Surfacing key-order digest stability", gateSurfacingKeyOrder],
   [45, "Truthful capacity & admission control", gateTruthfulCapacityAdmission],
   [46, "Retained pending marks", gateRetainedPendingMarks],
@@ -13201,7 +13200,7 @@ const gates = [
   [102, "The public option surface", gatePublicOptionSurface],
   [105, "Every completed tool batch folds unmarked", gateEveryToolBatchFoldsUnmarked],
   [103, "Guidance is two booleans, default on", gateGuidanceOption],
-  [104, "The slate rides the commit boundary", gateSurfacingDeliveryRidesTheBoundary],
+  [104, "The slate rides the rider, and nothing else", gateSurfacingDeliveryRidesTheBoundary],
   [106, "The boundary commits with no turn ever closed", gateOpenTurnCommits],
   [107, "Model briefs upgrade on the commit boundary", gateBriefUpgradesRideTheBoundary],
   [108, "A folded head never limits reach", gateProjectedStaleBasis],

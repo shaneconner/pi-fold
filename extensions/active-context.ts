@@ -1556,19 +1556,18 @@ export function registerActiveContext(pi: any, options: {
     let reducedAtLeastOnce = false;
     while (measured.crowded || measured.over || rejected) {
       attempts += 1;
-      curation.recoveryAttempts += 1;
+      // THE EMERGENCY IS THE REQUEST THAT WILL NOT FIT, and only that. A projection at
+      // the margin is ordinary work: the fence commits it because it is the pass holding
+      // the request, but it is not a recovery, it does not waive the current-turn guard,
+      // and it does not buy an exemption from the reclaim floor. Waiving at the margin
+      // spends the open turn's own evidence on headroom the boundary was about to buy.
+      const emergency = measured.over || rejected;
+      if (emergency) curation.recoveryAttempts += 1;
       let action: Record<string, unknown> | null = null;
       try {
         // The fence COMMITS. A mark moves no bytes, and the request it is holding is the
         // one that will not fit, so marking here would spin the loop against an unchanged
         // projection until it ran out of things to mark.
-        //
-        // THE WAIVER IS FOR THE REQUEST THAT WILL NOT FIT, and only for it. Waiving at
-        // the margin releases the open turn's own evidence to buy headroom the boundary
-        // was about to buy anyway, which is the guard paying for the estimator's caution.
-        // Crowded commits at the measured ratio and holds the turn; over-budget and a
-        // provider rejection waive.
-        const emergency = measured.over || rejected;
         action = await attemptAutomaticCommit(
           snapshot, ctx, "projection-budget", emergency ? 1 : measurements.latestRatio,
         );
