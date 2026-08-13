@@ -7505,6 +7505,18 @@ async function gateLeverCollapse() {
   // run keeps materializing. Its per-milestone CEILING does not stay: sixteen bounded a
   // counter no code path increments, so it could only ever have refused a state this
   // runtime cannot write. The shape checks around it are what actually validate the field.
+  //
+  // Reopened and closed again 2026-08-13. The field is genuinely inert: nothing writes it,
+  // `highWater` stays 0, `delivered` stays empty and `armed` is never set on any path. The
+  // obvious repair is to delete it and have the digest keep digesting the constant, and
+  // that does not work, because `stableStringify` walks a record in its OWN key order
+  // rather than sorting. Re-adding the constant with a spread puts it LAST, which happens
+  // to match a state that carries nothing after it and stops matching the moment one
+  // carries `notices`: sol-20260812 rep 9 replays to revision 451 today and dies at
+  // revision 6 that way. Preserving the digest therefore means reproducing a historical key
+  // LAYOUT inside the digest function, which is more mechanism, and more fragile mechanism,
+  // than the thirty bytes per state entry it would remove. The field stays until a digest
+  // version bump is happening for another reason.
   assert.deepEqual([...context.ADVISORY_MILESTONES],
     ["orientation", "notice", "tools", "chapters", "urgent"]);
   assert.equal(context.MAX_ADVISORY_DELIVERIES_PER_MILESTONE, undefined,
