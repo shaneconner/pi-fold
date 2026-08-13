@@ -478,17 +478,19 @@ async function compactBoundary(runtime, reason = "threshold") {
 
 /**
  * Drive one epoch to its commit. A measurement runs the ladder, which MARKS; the
- * context pass that follows it is where the epoch commits and folds apply. Gates whose
- * invariant is about a committed fold drive both halves through this, which is the same
- * pressure drive gates 88 through 93 use, named once.
+ * boundary is where the epoch commits and folds apply. Gates whose invariant is about a
+ * committed fold drive both halves through this, which is the same pressure drive gates
+ * 88 through 93 use, named once.
+ *
+ * It stops AT the commit and does not project afterwards, because a projection runs the
+ * ladder again and the mark it lands overwrites the epoch record the caller came for.
+ * A gate that wants the post-commit view calls project() itself.
  */
 async function measureAndCommit(runtime, tokens, contextWindow = runtime.usage.contextWindow, suffix) {
   await measure(runtime, tokens, contextWindow, suffix);
   await project(runtime);
   await settle();
   await compactBoundary(runtime);
-  await project(runtime);
-  await settle();
   return materialized(runtime);
 }
 
@@ -871,17 +873,11 @@ async function gateRegistration() {
   assert.deepEqual([...custom.tools.keys()], ["ctx_tool"]);
   assert.deepEqual([...custom.commands.keys()].sort(), ["sandbox-context", "sandbox-fold-context"]);
   await startRuntime(custom);
-  // The measurement marks; the context pass that follows delivers the last-call, the
-  // second measured pass is the gated round, and the context pass after it is where
-  // the epoch commits and the fold record is written. All of it has to run before the
-  // deployment's entry types can all be observed. Driven by hand because materialized()
-  // reads the DEFAULT entry types and this runtime persists under the custom prefix.
-  await measure(custom, 80_000, 100_000);
-  await project(custom);
-  await settle();
-  await measure(custom, 80_500, 100_000);
-  await project(custom);
-  await settle();
+  // The measurement marks; the boundary is where the epoch commits and the fold record
+  // is written. Both have to run before the deployment's entry types can all be observed.
+  // Driven by hand because materialized() reads the DEFAULT entry types and this runtime
+  // persists under the custom prefix.
+  await measureAndCommit(custom, 80_500, 100_000);
   const types = custom.appended.map((entry) => entry.customType);
   assert(types.includes("custom-context-provider-context-measurement"));
   assert(types.includes("custom-context-fold-record"));
@@ -2248,11 +2244,7 @@ async function gateWireForwardBackwardNote() {
   await startRuntime(runtime);
   await measure(runtime, 50_000, 100_000);
   await measure(runtime, 80_000, 100_000);
-  await project(runtime);
-  await settle();
-  await measure(runtime, 88_000, 100_000);
-  await project(runtime);
-  await settle();
+  await measureAndCommit(runtime, 88_000, 100_000);
   const canonicalDeltaEntry = runtime.branch.filter((entry) =>
     entry.customType === context.ACTIVE_CONTEXT_STATE_ENTRY).at(-1);
   assert.equal(canonicalDeltaEntry.data.kind, "delta");
@@ -3712,12 +3704,7 @@ async function gateEpochQuotaTopUp() {
   assert.equal(materialized(runtime).pendingMarks[0].origin, "agent");
   assert.equal(materialized(runtime).pendingMarks[0].briefProvenance.kind, "supplied");
 
-  await measure(runtime, 88_000, 100_000);
-  await project(runtime);
-  await settle();
-  await measure(runtime, 88_500, 100_000, "quota-round");
-  await project(runtime);
-  await settle();
+  await measureAndCommit(runtime, 88_500, 100_000, "quota-round");
   const status = await toolStatus(runtime);
   // Inside the rewrite the commit already paid for, one further rung may follow it, so
   // the ACTION reported last is not always the commit. The epoch record is, and that is
@@ -4813,12 +4800,7 @@ async function gateMarkAccumulation() {
   );
 
   // At the commit the accumulated marks, not the top-up floor, do most of the freeing.
-  await measure(runtime, 86_000, 100_000);
-  await project(runtime);
-  await settle();
-  await measure(runtime, 86_500, 100_000, "accumulation-round");
-  await project(runtime);
-  await settle();
+  await measureAndCommit(runtime, 86_500, 100_000, "accumulation-round");
   const status = await toolStatus(runtime);
   const epoch = status.details.automatic.lastAutomaticAction.epoch;
   assert.equal(epoch.refusedMarks, 0);
@@ -4853,23 +4835,13 @@ async function gateMarkAccumulation() {
  */
 async function gateEpochInlineRungs() {
   const wide = await epochToolRuntime({ turns: 40 });
-  await measure(wide, 86_000, 100_000);
-  await project(wide);
-  await settle();
-  await measure(wide, 86_500, 100_000, "inline-round");
-  await project(wide);
-  await settle();
+  await measureAndCommit(wide, 86_500, 100_000, "inline-round");
   const first = (await toolStatus(wide)).details.automatic.lastAutomaticAction;
   assert.equal(first.kind, "tool-fold", "The inline rung did not run inside the epoch's rewrite turn");
   assert.equal(typeof first.epoch, "object", "The inline rung replaced the epoch commit instead of riding it");
 
   const runtime = await epochToolRuntime({ turns: 12 });
-  await measure(runtime, 86_000, 100_000);
-  await project(runtime);
-  await settle();
-  await measure(runtime, 86_100, 100_000);
-  await project(runtime);
-  await settle();
+  await measureAndCommit(runtime, 86_100, 100_000);
   // A ROOT. Under the counting rule a commit may nest what it folds, and a child is
   // not expandable while its parent is still a placeholder.
   const target = materialized(runtime).folds.find((fold) => fold.parentId === null).id;
@@ -4878,10 +4850,8 @@ async function gateEpochInlineRungs() {
   let kinds = [];
   for (let step = 0; step < 12; step += 1) {
     // Full request cycles: the refold decision lands as a mark on any pass, and the
-    // commit that applies it needs the context pass that closes the last-call round.
-    await measure(runtime, 86_200 + step * 100, 100_000);
-    await project(runtime);
-    await settle();
+    // commit that applies it runs at the boundary.
+    await measureAndCommit(runtime, 86_200 + step * 100, 100_000);
     const action = (await toolStatus(runtime)).details.automatic.lastAutomaticAction;
     kinds.push(action.kind);
     if (!materialized(runtime).expanded.includes(target)) break;
