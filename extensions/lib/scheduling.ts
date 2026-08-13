@@ -221,12 +221,33 @@ export function guardWaiverCount(input: {
   ratio: number | null;
   guardedMarks: number;
   otherApplicableMarks: number;
+  /**
+   * THE BOUNDARY IS ITS OWN SIGNAL, and a better one than the occupancy anchor.
+   *
+   * The anchor exists to answer "is this session in enough trouble to spend the open
+   * turn's own evidence": a proxy, because nothing else was asking. At a compaction
+   * boundary Pi has already answered it. Cancelling the compaction and then applying
+   * nothing hands Pi's own threshold a byte-identical projection, which is worse than
+   * letting it compact, because compaction would at least have shed something.
+   *
+   * Measured on the sol-20260813 smoke: the boundary fired, cancelled the compaction and
+   * retained all seven marks at 0.20 occupancy, freeing nothing. The full run reaches the
+   * anchor 12,576 tokens past its own trigger, so it self-corrects there and this is
+   * about what happens in between; a smoke, or any session whose budget it never
+   * approaches, never corrects at all.
+   *
+   * Everything else about the waiver is unchanged, and deliberately: the newest marks
+   * still stay raw, a small guarded set still holds whole, and other applicable work
+   * still takes precedence over spending the open turn.
+   */
+  boundary?: boolean;
 }): number {
-  const { snapshot, ratio, guardedMarks, otherApplicableMarks } = input;
+  const { snapshot, ratio, guardedMarks, otherApplicableMarks, boundary } = input;
   if (guardedMarks <= 0 || typeof ratio !== "number" || !Number.isFinite(ratio)) return 0;
   if (ratio >= hardFenceRatio(snapshot)) return guardedMarks;
   const occupancy = budgetOccupancy(snapshot, ratio);
-  if (occupancy === null || occupancy < snapshot.policy.refoldRatio || otherApplicableMarks > 0) return 0;
+  if (occupancy === null || otherApplicableMarks > 0) return 0;
+  if (occupancy < snapshot.policy.refoldRatio && !boundary) return 0;
   if (guardedMarks < GUARD_WAIVER_MINIMUM_MARKS) return 0;
   return Math.max(1, guardedMarks - GUARD_WAIVER_PROTECTED_MARKS);
 }

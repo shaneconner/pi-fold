@@ -2231,6 +2231,7 @@ export function registerActiveContext(pi: any, options: {
     const guardWaiver = guardWaiverCount({
       snapshot,
       ratio: waiverRatio,
+      boundary: trigger === "compaction-boundary",
       guardedMarks: pendingMarks(state).filter((mark) =>
         markTouchesCurrentTurn(state, mark, guarded)).length,
       otherApplicableMarks: pendingMarks(state).filter((mark) =>

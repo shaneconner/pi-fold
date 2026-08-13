@@ -12797,6 +12797,174 @@ async function gateNoTokenCeilingReachesTheProvider() {
  * from the newer side, and it is asserted on BOTH readers, because the v1 and v2 parsers
  * each build their own key list and a fix applied to one would leave the other silent.
  */
+/**
+ * A BOUNDARY THAT CANCELS PI'S COMPACTION MUST NOT THEN APPLY NOTHING.
+ *
+ * The current-turn guard retains marks that touch the still-open turn, and its waiver
+ * asked for occupancy at or past `refoldRatio` before releasing them. That anchor was a
+ * proxy for "this session is in enough trouble to spend the open turn's own evidence",
+ * and at a compaction boundary Pi has already answered the question the proxy was asking.
+ *
+ * Measured on the sol-20260813 smoke, which is why this gate exists: the boundary fired,
+ * cancelled the native compaction, retained all seven of its marks at 0.20 occupancy and
+ * freed nothing, so the runtime told Pi not to compact and then handed back a
+ * byte-identical projection. The full run reaches the anchor 12,576 tokens past its own
+ * trigger and self-corrects there; a session whose budget it never approaches does not.
+ *
+ * What must NOT change is the rest of the waiver, so this drives the same fixture at the
+ * same occupancy through the projection fence, where the boundary is not the trigger, and
+ * requires the guard to hold.
+ */
+async function gateBoundaryWaivesTheGuardRatherThanNoOp() {
+  // THE FIXTURE IS THE SHAPE, the same one gate 106 uses: one user message and nothing
+  // after it but tool-calling assistants and their results, so no turn ever closes, the
+  // guard holds every mark, and there is no unguarded mark for the waiver to prefer.
+  const sessionId = "boundary-waiver-test";
+  const window = 100_000;
+  const providerInputBudget = 90_000;
+  const build = () => {
+    const entries = [];
+    const messages = [];
+    let parentId = null;
+    let sequence = 0;
+    const add = (message) => {
+      const id = `${sessionId}-entry-${String(++sequence).padStart(3, "0")}`;
+      entries.push({ type: "message", id, parentId, message });
+      messages.push(message);
+      parentId = id;
+      return id;
+    };
+    add({
+      role: "user",
+      content: [{ type: "text", text: "One marathon task: read the repository and keep going." }],
+      timestamp: 1,
+    });
+    const resultEntryIds = [];
+    for (let step = 0; step < 24; step += 1) {
+      add({
+        role: "assistant",
+        content: [{
+          type: "toolCall", id: `bw-${step}`, name: "read", arguments: { path: `bw-${step}.txt` },
+        }],
+        stopReason: "toolUse",
+        timestamp: 10 + step,
+      });
+      resultEntryIds.push(add({
+        role: "toolResult",
+        toolCallId: `bw-${step}`,
+        toolName: "read",
+        content: [{ type: "text", text: `Batch ${step}: ${"b".repeat(12_000)}` }],
+        isError: false,
+        timestamp: 10 + step,
+      }));
+    }
+    return {
+      sessionId,
+      entries,
+      messages,
+      contextWindow: window,
+      turnEntries: [resultEntryIds],
+      snapshot: context.mapActiveContext({
+        sessionId, eventMessages: messages, contextEntries: entries, contextWindow: window,
+      }),
+    };
+  };
+
+  // Well under refoldRatio, which is 0.85 of the 90,000-token serving budget: the
+  // occupancy anchor alone refuses the waiver at every one of these.
+  const climb = [55_000, 57_000, 59_000, 61_000, 62_000, 62_500];
+  const boundaryRun = makeRuntime(build(), { providerInputBudget });
+  await startRuntime(boundaryRun);
+  for (const tokens of climb) {
+    await measure(boundaryRun, tokens, window, undefined, "toolUse");
+    await project(boundaryRun);
+    await settle();
+  }
+  const state = materialized(boundaryRun);
+  const snapshot = context.mapActiveContext({
+    sessionId,
+    eventMessages: boundaryRun.messages,
+    contextEntries: boundaryRun.branch,
+    contextWindow: providerInputBudget,
+    netBudget: true,
+  });
+  assert.equal(context.currentTurnBoundary(snapshot), -1,
+    "A turn closed in the fixture, so the guard does not hold every mark");
+  const turnKeys = context.currentTurnRefKeys(snapshot);
+  const marks = context.pendingMarks(state);
+  const guarded = marks.filter((mark) =>
+    context.markTouchesCurrentTurn(state, mark, turnKeys));
+  assert.equal(guarded.length, marks.length,
+    `${marks.length - guarded.length} of ${marks.length} marks sit outside the open turn, so ` +
+    "the commit has unguarded work to do and never reaches the waiver at all");
+  assert(guarded.length >= context.GUARD_WAIVER_MINIMUM_MARKS,
+    `The fixture accumulated ${guarded.length} marks, under the waiver's own minimum`);
+
+  const from = boundaryRun.appended.length;
+  await compactBoundary(boundaryRun);
+  const commit = contextEvents(boundaryRun, from)
+    .find((record) => record.kind === "context.commit" && record.deferred === false);
+  assert(commit, "The boundary did not commit at all");
+  assert.equal(commit.trigger, "compaction-boundary");
+  const occupancy = commit.occupancy_tokens_before / commit.budget_tokens;
+  assert(occupancy < context.ACTIVE_CONTEXT_POLICY.refoldRatio,
+    `The fixture sat at ${occupancy} occupancy, at or past the anchor, so the waiver did ` +
+    "not need the boundary and this gate proves nothing");
+  assert(commit.waived_marks > 0,
+    "The boundary cancelled Pi's compaction and waived nothing");
+  assert(commit.applied_marks > 0,
+    "The boundary cancelled Pi's compaction and applied nothing, which hands Pi's own " +
+    "threshold a projection byte-identical to the one that just crossed it");
+  assert(commit.freed_tokens > 0, "The boundary commit freed nothing");
+  // THE NEWEST MATERIAL STILL STAYS RAW. The waiver releases the oldest and holds back
+  // GUARD_WAIVER_PROTECTED_MARKS, so a boundary is not a licence to fold the open turn
+  // down to nothing.
+  assert.equal(commit.waived_marks,
+    commit.pending_marks - context.GUARD_WAIVER_PROTECTED_MARKS,
+    `The boundary waived ${commit.waived_marks} of ${commit.pending_marks} marks, which is ` +
+    "not the bounded release the waiver has always performed");
+
+  // AND THE ANCHOR STILL GOVERNS EVERY OTHER PATH. The same state at the same occupancy
+  // keeps the guard when the trigger is not a boundary: the projection fence is our own
+  // thermostat reading its own gauge, not Pi saying this window must shrink, so it has
+  // no better signal than the proxy and does not get to spend the open turn.
+  const ratio = 62_500 / window;
+  const waiverAt = (extra) => context.guardWaiverCount({
+    snapshot, ratio, guardedMarks: guarded.length, otherApplicableMarks: 0, ...extra,
+  });
+  assert.equal(waiverAt({}), 0,
+    "The occupancy anchor stopped governing a waiver that is not at a boundary");
+  assert(waiverAt({ boundary: true }) > 0,
+    "The boundary flag did not release the same guard the anchor refused");
+  // The boundary is not a bypass of the rest of the rule. Other applicable marks still
+  // take precedence, and a guarded set under the minimum still holds whole.
+  assert.equal(
+    context.guardWaiverCount({
+      snapshot, ratio, guardedMarks: guarded.length, otherApplicableMarks: 1, boundary: true,
+    }),
+    0,
+    "A boundary waived the open turn while unguarded work was available instead");
+  assert.equal(
+    context.guardWaiverCount({
+      snapshot,
+      ratio,
+      guardedMarks: context.GUARD_WAIVER_MINIMUM_MARKS - 1,
+      otherApplicableMarks: 0,
+      boundary: true,
+    }),
+    0,
+    "A boundary waived a guarded set under the waiver's own minimum");
+  return {
+    boundaryOccupancy: Number(occupancy.toFixed(3)),
+    anchor: context.ACTIVE_CONTEXT_POLICY.refoldRatio,
+    guardedMarks: guarded.length,
+    waivedAtBoundary: commit.waived_marks,
+    appliedAtBoundary: commit.applied_marks,
+    freedTokens: commit.freed_tokens,
+    anchorStillGovernsTheFence: true,
+  };
+}
+
 async function gateRetiredStateFieldsAreRefusedByName() {
   const built = makeFixture({ turns: 6, resultChars: 4_000, contextWindow: 100_000 });
   const empty = context.emptyActiveContextState(built.sessionId);
@@ -13311,6 +13479,7 @@ const gates = [
   [126, "A batched brief names the bytes it was made from", gateBatchedBriefNamesItsSource],
   [127, "A delta carries only what changed", gateDeltaCarriesOnlyBriefChanges],
   [129, "A retired state field is refused by name", gateRetiredStateFieldsAreRefusedByName],
+  [130, "A boundary waives the guard rather than no-op", gateBoundaryWaivesTheGuardRatherThanNoOp],
   [128, "The user's commit announces a persistence failure", gateUserCommitAnnouncesPersistenceFailure],
 ];
 
