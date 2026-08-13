@@ -1,21 +1,6 @@
 import { evidenceSha256, sha256Value } from "../json.ts";
 import { ownValue } from "./canonical.ts";
 
-/**
- * Projection instrumentation.
- *
- * The iteration-1 ledger reported 19 "observed mutations", and reconstruction showed
- * only 7 of them were projection rewrites this runtime performed. The other 12 were
- * provider-side cache misses on projections that had only GROWN: message count up by
- * one, no message removed, system prompt and tool digests constant, and the request
- * still re-paid ~200k fresh tokens. One dial counting both makes a scheduling lever
- * look responsible for a cost no scheduling lever can remove.
- *
- * So the two are counted separately, and the append case is made PROVABLE from
- * artifacts: per-message digests of consecutive projections show exactly where, or
- * whether, the prefix diverged.
- */
-
 export type ProjectionChange = "identical" | "append" | "rewrite";
 
 export interface ProjectionComparison {
@@ -23,7 +8,6 @@ export interface ProjectionComparison {
   previousCount: number;
   nextCount: number;
   appendedCount: number;
-  /** First index whose digest differs; null when the prefix is intact. */
   firstDivergentIndex: number | null;
 }
 
@@ -34,11 +18,6 @@ export function messageDigests(messages: readonly unknown[]): string[] {
   });
 }
 
-/**
- * Compare two consecutive projections by per-message digest. A pure append leaves the
- * whole previous prefix intact, which is precisely the condition under which a
- * provider cache SHOULD hit; anything else is a rewrite this runtime caused.
- */
 export function compareProjections(
   previous: readonly string[] | null,
   next: readonly string[],
@@ -80,41 +59,14 @@ export interface ProjectionRecord extends ProjectionComparison {
   prefixSha256: string;
 }
 
-/** One provider response read against the projection that produced it. */
 export interface CacheObservation {
   ordinal: number;
   change: ProjectionChange;
   inputTokens: number;
   cacheReadTokens: number;
-  /** A fresh re-read of a prefix that did not move: nothing here is ours to fix. */
   providerSideMiss: boolean;
 }
 
-/**
- * THE context-management event stream.
- *
- * One stream, one envelope, one naming convention. Every context event this runtime
- * produces -- tool attempts and their refusals, span corrections, gate lifecycle,
- * receipts, commits, absorptions, splits, recoveries, projections and provider usage --
- * lands here as a flat JSONL-style record, and every record is also appended as a
- * durable session entry so an analyst can reconstruct the whole timeline from session
- * artifacts alone.
- *
- * The envelope is fixed and self-describing:
- *   v            schema version of the envelope
- *   seq          monotonic per session, from 1, so records order without a clock
- *   kind         "context.<noun>", the only field a reader must know to dispatch
- *   session_id   the session these events belong to
- *   ordinal      transcript position, the deterministic clock this runtime reasons in
- *   at           wall-clock milliseconds, the join key against provider-side telemetry
- *   revision     durable state revision at emit time
- *
- * Everything after the envelope is a FLAT snake_case payload. Records are not shaped
- * around any metric we compute today: a reader that wants a number we never thought of
- * should be able to get it with a query rather than a code change. Nothing nests, and
- * anything one-to-many (a correction, an absorbed wedge, a created fold) is its own
- * record referencing the record it belongs to by `seq`.
- */
 export const CONTEXT_EVENT_SCHEMA_VERSION = 1;
 
 export interface ContextEvent {
@@ -129,72 +81,29 @@ export interface ContextEvent {
 }
 
 export type ContextEventKind =
-  /** One context-management tool call, accepted or refused. */
   | "context.attempt"
-  /** One auto-snap applied to a requested span, referencing its attempt. */
   | "context.correction"
-  /** One protect or unprotect: durable pin bookkeeping; no window bytes move. */
   | "context.protect"
-  /** The resolved serving budget, stated once at startup so a live run can prove it. */
   | "context.capacity"
-  /** One receipt delivered into the window. */
   | "context.receipt"
-  /** One post-commit rider composed and persisted: at most one per fold epoch. */
   | "context.rider"
-  /** One pre-commit last-call exposure: the band-top prompt, with its telemetry. */
   | "context.lastcall"
-  /** One gated round's outcome, attributed to the exposure it answers. */
   | "context.response"
-  /** One surfacing suggestion issued: both channel scores, the divergence, the carrier. */
   | "context.suggestion"
-  /** One surfacing suggestion graded: the acted/used/ignored join and its transition. */
   | "context.outcome"
-  /** One append-once occupancy threshold notice delivered into the window. */
   | "context.notice"
-  /** One commit epoch: the single mutation an epoch pays for. */
   | "context.commit"
-  /** One fold created, by the ladder or by the agent. */
   | "context.fold"
-  /**
-   * One generator call for a brief: what it read, what it wrote, and what it cost.
-   *
-   * The generator runs outside the session, so its spend appears in no provider ledger
-   * and its latency appears in no turn. Without this record a deployment cannot say what
-   * briefing costs it, which is the question the async lane exists to answer.
-   */
   | "context.brief"
-  /** One boundary sliver absorbed into its later neighbour. */
   | "context.absorb"
-  /** One oversized span split into sequential bite-sized folds. */
   | "context.split"
-  /** One overflow rollback and the recovery that followed it. */
   | "context.recovery"
-  /**
-   * Automatic folding suspended: the failure that stopped it, and what it left behind.
-   *
-   * This transition ends folding for the session, so it decides everything that follows,
-   * and it used to reach a UI notification and nothing else. A headless host has no UI,
-   * which is how sol-20260812 reps 3 and 4 both lost their last commit, suspended, and
-   * ran to the context wall with the stream showing a commit that simply had no effect.
-   */
   | "context.suspend"
-  /** One tree rollback: what left the branch, and whether the request replayed. */
   | "context.rollback"
-  /** One projection built, classified against the one before it. */
   | "context.projection"
-  /** One provider response, which is where this stream joins provider usage. */
   | "context.usage"
-  /** One handoff, compared byte-for-byte against the previous transmitted projection. */
   | "context.prefix";
 
-/**
- * Where the prefix first differs from the previous TRANSMITTED projection, in chars.
- *
- * A positional cache is keyed on a byte prefix, so the message-level classification is
- * not enough to attribute a miss: the analyst needs the position, and only the runtime
- * knows why a byte at that position moved. This is the cheap half -- both projections
- * are in hand at handoff -- and it is emission only. No analysis of it belongs here.
- */
 export function prefixDivergence(
   previous: string | null,
   next: string,
@@ -213,18 +122,14 @@ export function prefixDivergence(
 
 export interface InstrumentationLedger {
   projections: number;
-  /** Projections this runtime actually rewrote. The scheduling dial. */
   rewrites: number;
   appends: number;
   identical: number;
-  /** Responses that re-read an unchanged prefix from scratch. The provider's dial. */
   providerSideMisses: number;
   observedMisses: number;
   records: ProjectionRecord[];
   observations: CacheObservation[];
-  /** The stream itself, oldest first. Bounded in memory; durable in full. */
   events: ContextEvent[];
-  /** The monotonic sequence every record carries. */
   sequence: number;
   countsByKind: Record<string, number>;
 }
@@ -245,10 +150,6 @@ export function emptyLedger(): InstrumentationLedger {
   };
 }
 
-/**
- * Stamp the envelope and append. The in-memory ring is the status view and is bounded;
- * the durable session entry is the audit copy and is not.
- */
 export function recordContextEvent(
   ledger: InstrumentationLedger,
   kind: ContextEventKind,
@@ -267,22 +168,6 @@ export function recordContextEvent(
     ...payload,
   };
   ledger.countsByKind[kind] = (ledger.countsByKind[kind] ?? 0) + 1;
-  // The ledger keeps every event, and every projection record and cache observation
-  // below does the same.
-  //
-  // Each of these used to drop its oldest entries at a constant, which was a second
-  // bound on material that is already bounded where it is READ. `boundStatusPayload`
-  // trims exactly these three listings to fit the status page, at whole-record
-  // boundaries, newest kept, naming in the payload how many it dropped and where to
-  // page from. Trimming here first meant the page could never page back past the
-  // constant however the caller asked, and it silently shortened the one other reader:
-  // `lastCallAttribution` counts `context.protect` records since a round opened, and a
-  // dropped event is a pin the round is not credited with.
-  //
-  // Nothing else reads them and none of them reaches durable state, so the whole cost of
-  // keeping them is process memory for the session's own event records, which the session
-  // file already holds on disk. The longest run in the sol-20260812 campaign emitted 841
-  // events; at the old constant of 128 the drop ran on nearly every one of them.
   ledger.events.push(record);
   return record;
 }
@@ -299,26 +184,10 @@ export function recordProjection(
   ledger.records.push({
     ...comparison,
     ordinal: ledger.projections,
-    // The prefix digest, not the whole projection: it is what a positional cache keys
-    // on, so two equal values are the claim that a cache hit was available.
     prefixSha256: sha256Value(digests.slice(0, comparison.previousCount || digests.length)),
   });
 }
 
-/**
- * Read one provider response against the projection that produced it. A miss on a
- * projection that only grew is provider-side by construction: no byte we control
- * moved, so no scheduling change could have prevented the re-read.
- *
- * A rewrite used to be charged to us unconditionally, and that hid the whole rep 21
- * finding: a rewrite that preserved 99.86% of the prompt still read back as ours, so
- * our own metrics reported a negligible divergence and a total cache loss and never
- * put the two side by side. Attribution now asks how much of the previous prompt the
- * rewrite actually kept. If we preserved nearly all of it and the provider still
- * served nothing, our divergence cannot account for the loss and the miss is theirs.
- * That is a claim about ATTRIBUTION, not about cost: a preserved-share miss is still
- * a full rebuild, and it is still worth not causing.
- */
 export const PROVIDER_SIDE_MISS_PRESERVED_SHARE = 0.99;
 
 export function observeCacheUsage(
@@ -349,7 +218,6 @@ export function observeCacheUsage(
   return observation;
 }
 
-/** The compact ledger the evidence envelope carries; the record rings stay for audit. */
 export function ledgerSummary(ledger: InstrumentationLedger): Record<string, unknown> {
   return {
     projections: ledger.projections,

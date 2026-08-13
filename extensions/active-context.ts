@@ -234,17 +234,8 @@ import {
   unansweredToolCalls,
 } from "./lib/rollback.ts";
 
-/**
- * How a projection's token reading was reached.
- *
- * "anchored": the provider's own count for the projection this one extends, plus a rate
- * estimate of the bytes appended after it. "rewritten": the current projection does not
- * begin with the measured one, so there is nothing to add a delta to and the whole
- * projection is estimated. "unmeasured": no accepted provider count yet.
- */
 export type ProjectionReadingBasis = "anchored" | "rewritten" | "unmeasured";
 
-// Test seam only; the package API is registerPiFold because package.json exports block deep imports.
 export * from "./lib/canonical.ts";
 export * from "./lib/curation.ts";
 export * from "./lib/folding.ts";
@@ -258,10 +249,6 @@ export * from "./lib/selection.ts";
 export * from "./lib/surfacing.ts";
 export * from "./lib/transcript.ts";
 
-/**
- * The batched fold request: several {span, brief} pairs in one call, with the single
- * `ids` form still accepted because it is the shape a status action hands back.
- */
 export interface BatchedMarkRequest {
   ids: string[];
   brief?: string;
@@ -295,37 +282,15 @@ export function batchedMarkRequests(params: Record<string, unknown>): BatchedMar
 }
 
 export function registerActiveContext(pi: any, options: {
-  /**
-   * INTERNAL brief-generator seam, not a public option: `registerPiFold` refuses the
-   * name and builds the generator from `summarizer`. It stays a parameter because it
-   * is the runtime's only brief-generator interface.
-   */
   summarizeContextSpan?: (request: Record<string, unknown>, ctx: unknown) => Promise<Record<string, unknown>>;
-  /**
-   * INTERNAL deployment-identity seam, not public options: the package entry refuses all
-   * five by name and the shipped identity is the one in `policy.ts`. They survive here
-   * because the neutrality gate has to register a synthetic brand to prove none of it
-   * reaches the defaults, and the experiment harness registers the pi-fold identity
-   * explicitly so its sealed runs keep their entry types.
-   */
   toolName?: string;
   toolLabel?: string;
   brandNoun?: string;
   entryTypePrefix?: string;
   commandNames?: { status?: string; fold?: string };
-  /**
-   * The auto-fold EXCEPTION list, empty by default: every completed tool batch folds
-   * unmarked, and this names the tools whose results must stay raw.
-   */
   blacklistAutoFoldTools?: ReadonlySet<string>;
-  /** The serving budget itself, ALREADY NET of the deployment's output reservation. */
   providerInputBudget?: number;
-  /**
-   * The thermostat, set whole or not at all. USER policy: no agent action reads it back
-   * as a mutable surface, and status reports the values without offering to change them.
-   */
   thresholds?: ActiveContextThresholds;
-  /** Both guidance surfaces, set together, defaulting on. */
   guidance?: Partial<ActiveContextGuidance>;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
@@ -335,11 +300,6 @@ export function registerActiveContext(pi: any, options: {
   const brandNoun = options.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN;
   const entryTypePrefix = options.entryTypePrefix ?? DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX;
   const blacklistAutoFoldTools = options.blacklistAutoFoldTools ?? AUTO_FOLD_BLACKLIST_DEFAULT;
-  // Deleted options are REFUSED by name, never ignored. A deployment still passing one
-  // believes it asked for something, and silence would hand it the opposite behavior:
-  // `foldScheduling` chose between epoch and the deleted immediate scheduler,
-  // `foldPeekResults` opted peek results out of the foldable classification, and
-  // `toolActions` narrowed the action surface. All three are unconditional now.
   for (const removed of ["foldScheduling", "foldPeekResults", "toolActions"]) {
     if (Object.hasOwn(options, removed)) {
       throw new Error(`${removed} is no longer an option: epoch scheduling, peek foldability ` +
@@ -350,24 +310,12 @@ export function registerActiveContext(pi: any, options: {
     throw new Error("blockingTools is no longer an option: a tool call never causes a rewrite of " +
       "its own, and the commit epoch is the only path that mutates the projection");
   }
-  // The per-request surfacing channel. `setProjectionProvider` was a second delivery
-  // path for the value this call already returns, and `setSuggestionSourceRegistrar`
-  // handed out registration into a carrier that no longer exists: the slate rode a
-  // per-request ephemeral tail, which moved the prefix on every single pass. The
-  // selector survives and returns at the commit boundary; the channel does not.
   for (const removed of ["setProjectionProvider", "setSuggestionSourceRegistrar"]) {
     if (Object.hasOwn(options, removed)) {
       throw new Error(`${removed} is no longer an option: projection candidates are returned by ` +
         "registration, and external suggestion sources have no carrier to render into");
     }
   }
-  // The renamed options are refused by their OLD names, each pointing at the new one.
-  // `readOnlyTools` and then `autoFoldableTools` were both ALLOW-lists, and the list runs
-  // the other way now, so neither may be forwarded silently: an allow-list read as a
-  // blacklist bars exactly the tools it meant to permit. `commandPrefix` derived two
-  // command names from a stem the full-name override then overrode anyway;
-  // `providerTotalWindow` was a gross window the runtime netted down with a GUESSED
-  // reservation, and the guess is what the reshape deleted.
   for (const inverted of ["readOnlyTools", "autoFoldableTools"]) {
     if (Object.hasOwn(options, inverted)) {
       throw new Error(`${inverted} is now blacklistAutoFoldTools, and the sense is INVERTED: ` +
@@ -388,9 +336,6 @@ export function registerActiveContext(pi: any, options: {
       (!Number.isSafeInteger(options.providerInputBudget) || options.providerInputBudget <= 0)) {
     throw new Error("providerInputBudget must be a positive integer");
   }
-  // The deployment's own fact, and the only capacity knob: declaring it makes every
-  // ratio, fence and budget truthful, and leaving it out falls back to the provider
-  // descriptor and SAYS "descriptor" in the capacity accounting.
   const providerInputBudget = options.providerInputBudget ?? null;
   const readOnlyContextActions = PEEK_READ_ONLY_CONTEXT_ACTIONS;
   if (!toolName || !toolLabel || !brandNoun || !entryTypePrefix ||
@@ -406,8 +351,6 @@ export function registerActiveContext(pi: any, options: {
       commandNames.status === commandNames.fold) {
     throw new Error("Active-context command names must be distinct kebab-case strings");
   }
-  // The thermostat, validated atomically before anything else reads a threshold, and
-  // then checked against the budget this deployment can actually serve.
   const thresholds = resolveThresholds(options.thresholds);
   assertThresholdsServable(thresholds, providerInputBudget ?? servingBudgetTokens(DEFAULT_CONTEXT_WINDOW));
   const guidance = resolveGuidance(options.guidance);
@@ -439,8 +382,6 @@ export function registerActiveContext(pi: any, options: {
     persistenceDisposition: "none" | "record-only" | "state-committed";
   };
 
-  // Owns in-memory/durable state and wire/record bookkeeping; persistenceQueue serializes it.
-  // Once the state event succeeds, replay owns this exact state; RAM may not roll behind it.
   const persistence = {
     state: null as ActiveContextState | null,
     persisted: null as ActiveContextState | null,
@@ -450,7 +391,6 @@ export function registerActiveContext(pi: any, options: {
     persistenceQueue: Promise.resolve<void>(undefined),
   };
 
-  // Owns preparation/ladder rollback, selection, and suspension; actionQueue serializes it.
   const ladder = {
     pendingManual: false,
     preparing: null as { id: string; controller: AbortController; promise: Promise<void> } | null,
@@ -461,128 +401,37 @@ export function registerActiveContext(pi: any, options: {
     lastSelectionSourceIds: [] as string[],
     pendingContextNote: null as string | null,
     lastAutomaticAction: null as Record<string, unknown> | null,
-    /** What the last over-budget projection cost and whether the reduction saved it. */
     overBudgetReduction: null as Record<string, unknown> | null,
     automaticFailure: null as AutomaticFailureState | null,
-    /**
-     * Automatic transactions this session has lost to a CLEAN rollback, never reset.
-     *
-     * A transaction that wrote nothing durable and restored the state it entered with has
-     * cost the session one commit and nothing else, and the marks that produced it are
-     * still pending. Suspending on the first of those is what killed sol-20260812 reps 3
-     * and 4: one lost commit each, then no folding at all while inflow continued, then the
-     * wall. Retrying forever is the failure mode on the other side, and it is what the
-     * pre-guard build did, silently.
-     *
-     * A SESSION total rather than a consecutive run, because small tool-batch folds land
-     * constantly between commits and any "reset on success" rule is reset by them on every
-     * pass, which is the unbounded case wearing a bound.
-     */
     failedPreparations: new Set<string>(),
     actionQueue: Promise.resolve<unknown>(undefined),
   };
 
-  /**
-   * THE BRIEF UPGRADE LANE.
-   *
-   * A fold brief is model-written from this campaign forward; the deterministic brief is
-   * what a failure leaves behind. The automatic ladder cannot wait for a generator: the
-   * commit path is synchronous with a measured projection and a fold deferred until a
-   * provider answers is a fold that does not happen. So the ladder commits deterministic,
-   * a generator runs between boundaries, and the brief it writes lands as an UPGRADE
-   * riding the next commit: the same law wedge absorption and the surfacing slate follow,
-   * mutations only inside a rewrite the session already paid for.
-   *
-   * Everything here is process-local. An upgrade lost to a reload is a brief that stays
-   * deterministic, which is exactly the failure the fallback exists for, and the state
-   * wire keeps one shape instead of carrying work in progress.
-   */
   const upgrades = {
-    /**
-     * BATCHES of folds committed deterministic, each holding the exact source its briefs
-     * will cover. One batch is one generator call: a commit folds its spans together, so
-     * they are briefed together, and the spans of one batch orient each other. Sending them
-     * one at a time is what left the 2026-08-11 rep with 14 model briefs across 87 folds.
-     */
     queue: [] as Array<{
       members: Array<{ foldId: string; sourceSha256: string }>;
       request: Record<string, unknown>;
     }>,
-    /**
-     * Generator calls in flight, keyed by every fold each one briefs, bounded by a constant
-     * and cancel-safe on session change or shutdown. Keyed rather than counted because
-     * the queue has to know a fold is already being briefed.
-     */
     running: new Map<string, { controller: AbortController; promise: Promise<void> }>(),
-    /** Written briefs waiting for a boundary. They never apply anywhere else. */
     ready: [] as Array<{ foldId: string; sourceSha256: string; brief: string; provenance: BriefProvenance }>,
-    /** A generator that failed a fold does not get it back: one attempt, then deterministic stands. */
     failed: new Set<string>(),
-    /**
-     * Parents whose turn has not come: a group is read at depth one, so a child still
-     * waiting on its own brief would be read through the sentence that brief is about to
-     * replace. They are retried at every boundary and never dropped, because the wait ends
-     * the moment the lane drains and a parent that was skipped once is a parent no
-     * generator ever writes.
-     */
     deferred: new Set<string>(),
-    /** Failures since the last commit record carried them, so none of this is silent. */
     failures: 0,
-    /**
-     * Briefs that took a second ask before they met the contract. Counted because the cure
-     * is the mechanism that lets the brief cap be a real limit rather than a truncation
-     * point, so how often it fires is how we learn whether the cap is set anywhere near
-     * right (Shane 2026-08-11).
-     */
     cures: 0,
-    /**
-     * LEAVES SHED FOR A FULL QUEUE since the last commit record carried them.
-     *
-     * A parent that loses its turn waits, and a leaf that loses its turn is finished: its
-     * source is exact active evidence at this commit and a placeholder after it, so no
-     * later boundary can brief it and it reads deterministic for the rest of the session.
-     * That is the only permanent outcome in this lane, and it used to happen without a
-     * word: `brief_upgrades_waiting` counts what is still in the lane, and a shed leaf is
-     * precisely what is not. A deployment whose generator is slow enough to hold the queue
-     * full would have watched brief quality fall with nothing in the stream naming why.
-     */
     abandoned: [] as string[],
     lastError: null as string | null,
   };
 
-  // Owns provider receipts, anchors, and usage; providerMeasurementQueue serializes receipt writes.
   const measurements = {
     latestRatio: null as number | null,
     lastProviderMeasurement: null as ProviderContextMeasurement | null,
-    /** What the host/model descriptor last claimed, kept so the gap stays auditable. */
     descriptorWindow: null as number | null,
-    /** Serialized size of the projection this process last handed the host. */
     lastProjectedChars: null as number | null,
-    /**
-     * Ground truth for the transmission fence: recent pairings of a projection's size
-     * with the token count the provider reported for it. A fixed bytes-per-token
-     * constant is a guess about a tokenizer, and it is wrong by different amounts in
-     * different sessions -- measured 2026-08-06, 4.7 chars/token in rep11 and 7.0 in
-     * rep12 for the SAME workload. It also DRIFTS within one session: rep13 moved
-     * between 5.34 and 6.01 over its last twenty requests. Only the recent window
-     * counts, and the fence reads it pessimistically.
-     */
     projectionCalibrations: [] as Array<{ chars: number; tokens: number }>,
-    /** What the fence estimated for the projection it last handed the host. */
     lastProjectedEstimate: null as number | null,
-    /** Whether that estimate used a measured ratio rather than the bootstrap constant. */
     lastProjectedEstimateCalibrated: false,
-    /** How that reading was reached, so an audit can tell an anchor from a fallback. */
     lastProjectedEstimateBasis: "unmeasured" as ProjectionReadingBasis,
-    /** That projection's own size at one rate, the baseline a reduction is measured from. */
     lastProjectedSizeTokens: null as number | null,
-    /**
-     * The provider's own count for the last projection this process TRANSMITTED, held
-     * with that projection's serialized text so a later projection can be tested against
-     * it by construction. `head` is the serialization minus its closing bracket, which is
-     * what makes "the same projection with more appended after it" a byte-exact prefix
-     * test rather than a size comparison.
-     */
     projectionAnchor: null as {
       tokens: number;
       chars: number;
@@ -591,11 +440,8 @@ export function registerActiveContext(pi: any, options: {
       sessionId: string;
       generation: number;
     } | null,
-    /** Signed estimator error against recent measurements, as a share of measured tokens. */
     estimatorErrors: [] as number[],
-    /** Growth in measured tokens between consecutive requests. */
     inflowSteps: [] as number[],
-    /** Growth steps the OUTPUT WALL reads. Separate from `inflowSteps` on purpose: see noteWallInflow. */
     wallInflowSteps: [] as number[],
     providerMeasurementQueue: Promise.resolve<void>(undefined),
     providerMeasurementReceipts: new Set<string>(),
@@ -604,142 +450,66 @@ export function registerActiveContext(pi: any, options: {
     providerMeasurementAnchorByMessageSha: new Map<string, ProviderMeasurementAnchor>(),
   };
 
-  // Owns the projection/cache ledger. Nothing here is durable: it is telemetry about
-  // this process's own projections, rebuilt from scratch on every load.
   const instrumentation = {
     ledger: emptyLedger(),
     previousDigests: null as string[] | null,
-    /** The previous TRANSMITTED projection, for the byte-level prefix comparison. */
     previousText: null as string | null,
     lastChange: "append" as ProjectionChange,
-    /** Share of the PREVIOUS prompt the last projection kept, for miss attribution. */
     lastPreservedShare: null as number | null,
-    /** Events emitted since the last handoff, which is the attribution candidate set. */
     sinceHandoff: [] as Array<{ seq: number; kind: string }>,
-    /** Structural mutations emitted since the last handoff. The per-generation budget. */
     mutationsSinceHandoff: 0,
-    /** Provider responses this session, so event SPACING is readable from the stream. */
     requests: 0,
     lastMutationRequest: 0,
     lastMutationTokens: null as number | null,
   };
-  /**
-   * MECHANISM 1. The frozen surface.
-   *
-   * Between fold events the projection is byte-frozen: the only change a context action
-   * may cause is the append of its own tool result at the tail. Rep 17 measured every
-   * single context attempt landing as a projection REWRITE -- status 0.60-0.90 prefix
-   * identity, peek 0.96, the held gate down to 0.013 -- because the surface answered
-   * each one by re-rendering blocks the agent had already paid to cache. Provider prefix
-   * caches are positional, so each of those refreshes was a full or partial cache kill.
-   *
-   * `body` is the last rebuilt fold projection and `projection` is that body plus the
-   * carriers appended to it. While the rebuilt body still starts with `body` verbatim,
-   * nothing structural moved, so the previous projection is reused WHOLE and only the
-   * newly arrived raw messages are appended after it. A carrier whose key is already in
-   * the window is never re-rendered; a fold event, a reveal or an overflow recovery
-   * diverges the body and takes the sanctioned rewrite.
-   */
   const freeze = {
     body: null as unknown[] | null,
     bodyText: null as string | null,
     projection: null as unknown[] | null,
     keys: new Set<string>(),
-    /** True only while assembling a pass that reused the frozen projection. */
     active: false,
   };
-  /**
-   * A carrier may be built exactly once per freeze window. This is checked BEFORE the
-   * builder runs, because building a milestone spends its delivery budget and building
-   * a reminder advances the reminder cursor: a carrier that cannot land must not pay.
-   */
   const carrierAdmitted = (key: string): boolean => {
     if (freeze.active && freeze.keys.has(key)) return false;
     freeze.keys.add(key);
     return true;
   };
 
-  // Owns the guided-curation gate, the receipt ring, the context-event stream, and the
-  // overflow recovery lane. Nothing here is durable session STATE: it describes what
-  // this process did to the live window, and the durable copy is the appended
-  // instrumentation entry, which is what an external adjudicator reads.
   const curation = {
     receipts: [] as ContextReceipt[],
-    /** Every context-management tool call this session. */
     contextCalls: 0,
-    /** The last measurement the commit trigger took, reported by status. */
     lastSignals: null as CurationSignals | null,
-    /**
-     * COMMIT REOPEN HYSTERESIS. The eligible foldable share measured just after the last
-     * triggered commit, or null when the trigger is free to fire. Measured 2026-08-07
-     * (rep 17): occupancy plateaued at 0.85-0.92 of the truthful budget for the final
-     * third of the run, and the trigger fired ten times over a window whose foldable mass
-     * had not changed. A plateau is not an event. The trigger re-arms only once occupancy
-     * falls back under it and crosses again, or once a reclaim floor of eligible mass is
-     * NEW. This outlived the announcement it was built beside: it bounds how often the
-     * runtime rewrites the projection, which is the whole cost model.
-     */
     reopenBaselineShare: null as number | null,
-    /** Whether the output wall's crossing has already spent its one forced commit. */
     wallEpisodeOpen: false,
-    /**
-     * Where the armed last-call actually LANDED: the exposure it rendered and the
-     * ordinal of the pass that rendered it. In-memory on purpose: after a reload the
-     * carrier re-renders on the first projection, this re-arms, and the commit waits
-     * one more round rather than firing on a prompt nobody saw.
-     */
     lastCallDelivery: null as { exposure: number; ordinal: number } | null,
-    /** Recovery attempts spent on the CURRENT inflow; reset by any accepted request. */
     recoveryAttempts: 0,
-    /** A provider rejection observed but not yet recovered from. */
     pendingRejection: null as { status: number; ordinal: number } | null,
     lastRecovery: null as Record<string, unknown> | null,
     instrumentationQueue: Promise.resolve<void>(undefined),
   };
 
-  /**
-   * The tree-rollback lane.
-   *
-   * Armed once per session against the pi surfaces it calls, because every one of them
-   * is an internal the extension contract does not promise. Disarmed, the lane is OFF
-   * and says so on the record: an overflow still emits `context.rollback` with
-   * `armed: false` and the reason, the user is notified, and the session behaves
-   * exactly as it did before this build -- the projection-budget fence aborts an
-   * over-budget request rather than half-performing a recovery.
-   */
   const rollback = {
     probes: null as ReturnType<typeof probeRollbackSurfaces> | null,
     armed: false,
-    /** pi's own overflow classifier, resolved from the host; null when unreachable. */
     classifier: null as ((message: unknown, contextWindow: number) => boolean) | null,
     classifierSource: null as string | null,
-    /** Ordinals of episodes handled, so the one-shot and the ledger agree. */
     attempts: 0,
     last: null as Record<string, unknown> | null,
-    /** An overflow seen at message_end and not yet claimed by the compaction event. */
     pendingOverflow: null as { at: number; entryId: string | null } | null,
   };
 
-  // Owns advisory arming and hard-fence delivery; durable effects use persistenceQueue.
   const advisory = {
     hardFenceNoticeKey: null as string | null,
     hardFenceReleaseSessionId: null as string | null,
     hardFenceReleasedProjectionKeys: new Set<string>(),
   };
 
-  // Owns native-compaction decisions and completion retry state; nativeReceiptQueue serializes it.
   const nativeCompaction = {
     lastThresholdDecision: null as Record<string, unknown> | null,
     pendingNativeReceipt: null as NativeCompactionCompletionReceipt | null,
     nativeReceiptQueue: Promise.resolve<void>(undefined),
   };
 
-  // Owns session generation, snapshots/reloads, and per-turn blocking-tool harvest state.
-  // Pi normally requests context serially, but retries, reloads, and host
-  // integrations can overlap callbacks. Serialize the entire authority →
-  // preparation → commit → projection transaction so a follower cannot
-  // observe a published measurement before the leader's durable receipt or
-  // return raw final-rung context while the leader is preparing a brief.
   const lifecycle = {
     generation: 0,
     shuttingDown: false,
@@ -775,16 +545,6 @@ export function registerActiveContext(pi: any, options: {
   const currentOrdinal = (): number =>
     lifecycle.latestSnapshot ? markOrdinal(lifecycle.latestSnapshot) : 0;
 
-  /**
-   * Emit one record into THE context event stream, in the ledger AND as a durable
-   * session entry. An in-memory ledger is invisible to an analyst reading session
-   * artifacts, and telemetry may never block or fail the action it describes.
-   */
-  /**
-   * Open a pass's mutation budget. ONE structural mutation per pass is the budget: the
-   * rep-15 defect was a second commit inside the SAME pass, after the first had already
-   * rebuilt the projection, so the counter is armed wherever a pass begins.
-   */
   const beginMutationPass = (): void => { instrumentation.mutationsSinceHandoff = 0; };
 
   const emit = (kind: ContextEventKind, payload: Record<string, unknown> = {}): ContextEvent => {
@@ -797,28 +557,12 @@ export function registerActiveContext(pi: any, options: {
     instrumentation.sinceHandoff.push({ seq: record.seq, kind });
     const operation = curation.instrumentationQueue.then(async () => {
       try { await pi.appendEntry(contextEventEntryType, record); }
-      catch { /* Telemetry is never a lifecycle boundary. */ }
+      catch { }
     });
     curation.instrumentationQueue = operation.then(() => undefined, () => undefined);
     return record;
   };
 
-  /**
-   * The generator, wrapped once so every brief it writes is on the record.
-   *
-   * Wrapping HERE rather than instrumenting the two call sites is deliberate. The inline
-   * path in `prepareFold` and the async upgrade lane both receive this function, so one
-   * wrapper covers both, no signature changes and no way to add a third caller that
-   * quietly escapes the ledger. It also covers a deployment's OWN summarizer, which is
-   * the case a call-site patch would have missed.
-   *
-   * A generator call is invisible everywhere else: it runs outside the session, so it
-   * lands in no provider ledger, and it runs off the turn, so it lands in no turn timing.
-   * Duration, queue wait and usage are therefore recorded here or nowhere.
-   *
-   * A failure is emitted and rethrown unchanged. This observes; it decides nothing, and
-   * the fallback to the deterministic brief stays exactly where it was.
-   */
   const observedSummarize = options.summarizeContextSpan
     ? async (request: Record<string, unknown>, summarizerCtx: unknown): Promise<Record<string, unknown>> => {
       const startedAt = Date.now();
@@ -827,11 +571,6 @@ export function registerActiveContext(pi: any, options: {
         ? request.spans as Array<Record<string, unknown>>
         : null;
       const sourceText = typeof request.sourceText === "string" ? request.sourceText : "";
-      // A span is a CONSOLIDATION when it is a group of folds, and an automatic fold
-      // otherwise. Both kinds are counted and both kinds' source is measured, because a
-      // call can carry a mix and the honest way to attribute its tokens across kinds is by
-      // the share of source each kind contributed, never by pretending the call was one
-      // kind (Shane 2026-08-11: track cures and tokens by fold type).
       const groupSpan = (span: Record<string, unknown>): boolean =>
         Number.isInteger(span.children) && (span.children as number) > 1;
       const charsOf = (span: Record<string, unknown>): number =>
@@ -853,23 +592,6 @@ export function registerActiveContext(pi: any, options: {
           group_source_chars: groupSpan(request) ? sourceText.length : 0,
           leaf_source_chars: groupSpan(request) ? 0 : sourceText.length,
         };
-      // The digest of what this call ACTUALLY CARRIED.
-      //
-      // A batched request holds its source on the spans and carries no `sourceText` of its
-      // own, so hashing `sourceText` hashed the empty string: every batched brief in every
-      // session ever recorded reported source_sha256
-      // e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855, the digest of "",
-      // beside a source_chars in the hundred thousands. A constant that looks like a
-      // measurement is worse than an absent one, and since gate 118 made batching the normal
-      // path it was the only value the field ever took.
-      //
-      // Attribution itself was never lost: `fold_ids` names every fold in the batch and is
-      // what a provenance join reads. What was lost is the ability to say WHICH BYTES a
-      // brief was made from, which is exactly what you want when a brief looks wrong.
-      //
-      // The span texts are digested as a JSON ARRAY rather than concatenated, so the
-      // boundaries between spans are part of what is hashed: two batches carrying the same
-      // bytes split differently are different calls and must not share a digest.
       const batchSourceSha256 = (): string => sha256Text(JSON.stringify(
         (spans ?? []).map((span) => typeof span.sourceText === "string" ? span.sourceText : ""),
       ));
@@ -880,8 +602,6 @@ export function registerActiveContext(pi: any, options: {
           ? request.sourceSha256
           : spans ? batchSourceSha256() : sha256Text(sourceText),
         ...kindCounts,
-        // The second ask, not the first. How often this fires is how we learn whether the
-        // brief cap is anywhere near right, so it is a field rather than an inference.
         cure: typeof request.cure === "string" && request.cure.length > 0,
         ...(queuedAt === null ? {} : { queued_ms: Math.max(0, startedAt - queuedAt) }),
       };
@@ -898,12 +618,8 @@ export function registerActiveContext(pi: any, options: {
           model: typeof result?.model === "string" ? result.model : "",
           effort: typeof result?.effort === "string" ? result.effort : "",
           brief_chars: written.reduce((sum, item) => sum + item.length, 0),
-          // Per span, so a batch where one brief came back empty is visible as that rather
-          // than as a slightly short total.
           brief_chars_each: written.map((item) => item.length),
           brief_sha256: written.length === 1 && written[0] ? sha256Text(written[0]) : "",
-          // Absent when the provider reported none. Never defaulted: a call whose cost we
-          // do not know and a call that cost nothing are different facts.
           usage: result?.usage && typeof result.usage === "object" ? clone(result.usage) : null,
         });
         return result;
@@ -911,8 +627,6 @@ export function registerActiveContext(pi: any, options: {
         const message = error instanceof Error ? error.message : String(error);
         emit("context.brief", {
           ...base,
-          // A timeout is not a refusal and not a provider fault, and telling them apart is
-          // the difference between raising the bound and changing the generator.
           outcome: /exceeded \d+ms/.test(message) ? "timeout" : "error",
           duration_ms: Date.now() - startedAt,
           error: boundReceiptText(message, 240, "brief generator"),
@@ -922,11 +636,6 @@ export function registerActiveContext(pi: any, options: {
     }
     : undefined;
 
-  /**
-   * Actions of ours that move bytes at or before a prefix position. Receipts, gate
-   * notices and suggestions are appended after the whole projection, so they can only
-   * move the tail and are never a prefix cause.
-   */
   const PREFIX_MUTATING_KINDS: ReadonlySet<string> = new Set([
     "context.commit", "context.fold", "context.absorb", "context.split", "context.recovery",
   ]);
@@ -949,7 +658,7 @@ export function registerActiveContext(pi: any, options: {
   };
 
   const safeNotify = (ctx: any, message: string, level: "info" | "warning" | "error"): void => {
-    try { ctx.ui?.notify?.(message, level); } catch { /* Presentation cannot block Pi lifecycle progress. */ }
+    try { ctx.ui?.notify?.(message, level); } catch { }
   };
 
   const contextSessionMatches = (ctx: any, sessionId: string): boolean => {
@@ -970,34 +679,14 @@ export function registerActiveContext(pi: any, options: {
         : " · provider usage unmeasured";
       const suspended = ladder.automaticFailure ? " · automatic suspended" : "";
       ctx.ui?.setStatus?.(entryTypePrefix, `${toolName} folds: ${roots}${prepared}${usage}${suspended}`);
-    } catch { /* Status presentation is request-ephemeral and never a lifecycle boundary. */ }
+    } catch { }
   };
 
-  /**
-   * The number every ratio, fence and budget is computed against. Declared, it is the
-   * deployment's own serving budget, already net of whatever output reservation it holds
-   * back; undeclared, it is the per-request max-input descriptor, which bakes in a full
-   * output reservation the deployment never asked for and so aborts requests inside real
-   * headroom. The descriptor is still read, and still reported, so the gap stays
-   * auditable rather than assumed.
-   */
   const budgetWindowFor = (ctx: any): number | null => {
-    // Remembered so the ctx-free callers (trigger, gate, reminders, advisory) report the
-    // same descriptor gap the fence does instead of re-reading a second source.
     measurements.descriptorWindow = contextWindowFor(ctx);
     return providerInputBudget ?? measurements.descriptorWindow;
   };
 
-  /**
-   * THE serving budget. One resolution, one formula, one value.
-   *
-   * Every consumer -- the curation trigger, the last-call gate, the sparse reminders,
-   * the transmission fence, the projection estimator and every instrumentation record --
-   * reads this. Measured 2026-08-06 (rep 15): the trigger and gate ran a whole run
-   * against a 272,000-token per-request DESCRIPTOR (budget 255,616) while the fence used
-   * the truthful 383,616, because the same arithmetic lived in three places. A second
-   * copy of this formula is the defect; there is now only one.
-   */
   const servingCapacity = (window: number | null): ReturnType<typeof capacityAccounting> =>
     capacityAccounting({
       window: window ?? lifecycle.latestSnapshot?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
@@ -1207,14 +896,9 @@ export function registerActiveContext(pi: any, options: {
     const operation = persistence.persistenceQueue.then(async () => {
       if (!persistence.state || !persistence.persisted) return;
       let next = clone(persistence.state);
-      // Which folds this write is TRYING to add, read before the projection can drop them.
       const persistedFoldIds = new Set(persistence.persisted.folds.map((fold) => fold.id));
       const arrivingFoldIds = next.folds.filter((fold) => !persistedFoldIds.has(fold.id)).map((fold) => fold.id);
       const foldsInMemory = next.folds.length;
-      // Kept so a discarded commit can say WHICH check discarded it. The projection drops
-      // a fold whose refs no longer resolve, and telling "the refs stopped resolving" apart
-      // from "the projection was fine and something later refused" is the whole difference
-      // between fixing this and guessing at it again.
       let projectionSnapshot: ActiveContextSnapshot | null = null;
       if (ctx && lifecycle.latestSnapshot?.sessionId === next.sessionId) {
         projectionSnapshot = authoritativeSnapshotFor(ctx);
@@ -1222,33 +906,7 @@ export function registerActiveContext(pi: any, options: {
       }
       next.folds = normalizeFoldsForPersistedRecords(next.folds, persistence.persistedFoldRecords);
       if (sameStateProjection(next, persistence.persisted)) {
-        // A COMMIT THAT VANISHES IS NOT A NO-OP.
-        //
-        // `persistenceProjection` keeps only folds whose refs still resolve against the
-        // snapshot, which is correct when evidence has genuinely left the branch. But when
-        // a write ARRIVES with new folds and projects down to something byte-equal to what
-        // is already durable, every one of those folds was dropped, and returning quietly
-        // here also resets `persistence.state` BACKWARDS to the persisted revision. The
-        // marks that produced them go back to pending, the same commit is attempted again
-        // on the next boundary, and it vanishes again.
-        //
-        // Measured, sol-20260812 rep 3: a band-top commit ran at revision 143 and folded
-        // 579,489 source chars into 85,463 of placeholder. Durable state never passed 134.
-        // None of its 11 folds reached a record, no receipt was written, occupancy climbed
-        // 237,682 -> 253,423 against a 251,520 budget unopposed, and the next request was
-        // refused. Nothing was reported, because a silent return is not a failure. Rep 2
-        // ran 15 commits on the same plan with no gap at all, so this is rare rather than
-        // systemic, which is exactly why it has to announce itself the first time.
-        //
-        // Raising it routes through the automatic-failure path, which restores the state
-        // this call was about to discard, suspends automatic folding and tells the user.
-        // Suspending is the safe direction: continuing to compute folds that are thrown
-        // away is what turned one dropped commit into a dead session.
         if (arrivingFoldIds.length) {
-          // Which ref of the first lost fold stopped resolving, and how far the branch had
-          // moved by the time this queued write ran. The projection reads a snapshot built
-          // at PERSIST time, not the one the commit was computed against, so a branch that
-          // grew in between is the first thing to rule in or out.
           const lost = clone(persistence.state).folds.find((fold) => fold.id === arrivingFoldIds[0]);
           const lostRefs = lost ? flattenFoldRefs(lost, persistence.state) : [];
           const unresolved = projectionSnapshot
@@ -1360,7 +1018,6 @@ export function registerActiveContext(pi: any, options: {
         occurredAt: Date.now(),
       }, sessionId);
       await pi.appendEntry(providerMeasurementEntryType, receipt);
-      // The append is authoritative even if lifecycle attribution changes immediately after it.
       measurements.providerMeasurementReceipts.add(receiptKey);
       measurements.providerMeasurementRevisionByMessageSha.set(measurement.messageSha256, revision);
       measurements.providerMeasurementByMessageSha.set(measurement.messageSha256, receipt);
@@ -1623,36 +1280,16 @@ export function registerActiveContext(pi: any, options: {
     ladder.boundaryFailure = message;
     cancelPreparation();
     if (persistence.state?.prepared) persistence.state = clearPrepared(persistence.state);
-    // SUSPENSION IS AN EVENT.
-    //
-    // Ending automatic folding decides everything that happens afterwards, and until now
-    // it reached `ctx.ui.notify` and nothing else. A headless host has no `ui`, so
-    // `safeNotify` swallowed it: in sol-20260812 reps 3 and 4 the last commit of each run
-    // emitted its `context.commit` and eleven `context.fold` records, persisted none of
-    // them, rolled back, suspended, and the stream showed only a commit whose folds never
-    // reached the next projection. Both sessions then climbed to the context wall with
-    // nothing left that could fold, and the cause had to be inferred from a revision
-    // going backwards.
-    //
-    // Emitted on the first failure and again whenever the message CHANGES, because a
-    // different error is new information and an identical one repeated by suppressed
-    // callbacks is not. That bounds the volume by distinct causes rather than by passes.
     const firstFailure = !ladder.automaticFailure;
     if (firstFailure || ladder.automaticFailure!.message !== message) {
       emit("context.suspend", {
         phase,
         error: message,
         error_name: error instanceof Error ? error.name : typeof error,
-        // What the failed transaction left durable, which is the difference between a
-        // clean rollback and a half-written commit.
         disposition: firstFailure ? persistenceDisposition : ladder.automaticFailure!.persistenceDisposition,
-        // The two outcomes of one event. A retry costs the session a commit; a suspension
-        // costs it every commit it would have made afterwards, and only a manual fold
-        // clears the latch, which a headless session never gets.
         outcome: "suspended",
         repeat: !firstFailure,
         suppressed_callbacks: ladder.automaticFailure?.suppressedCallbacks ?? 0,
-        // The two revisions whose disagreement IS the symptom.
         state_revision: persistence.state?.revision ?? null,
         durable_revision: persistence.persisted?.revision ?? null,
         folds_in_memory: persistence.state?.folds.length ?? null,
@@ -1691,12 +1328,6 @@ export function registerActiveContext(pi: any, options: {
     const measuredRevision = measurements.lastProviderMeasurement
       ? measurements.providerMeasurementRevisionByMessageSha.get(measurements.lastProviderMeasurement.messageSha256)
       : undefined;
-    // A durable projection topology after the measured response gets exactly
-    // one provider attempt so its fold can be measured. Concurrent
-    // callbacks, retries, and same-session reloads may not repeatedly release
-    // that unmeasured projection. Non-structural state persistence does not
-    // spend this release. A failed automatic transaction never gets this
-    // escape, even if a record/state append preceded its projection failure.
     if (allowUnmeasuredRevisionRelease && !ladder.automaticFailure &&
         measuredRevision !== undefined && measurements.lastProviderMeasurement &&
         !durableProviderMeasurementMatches(measurements.lastProviderMeasurement)) {
@@ -1729,10 +1360,6 @@ export function registerActiveContext(pi: any, options: {
         "error",
       );
     }
-    // Stock Pi exposes abort() in every extension event context. Calling it
-    // here aborts the signal passed to the provider stream after this context
-    // transform returns, so exact raw Pi messages remain canonical but are not
-    // transmitted as an overflowing request.
     if (typeof ctx.abort !== "function") {
       throw new Error(`Pi hard-fence abort capability is unavailable at ratio ${measurements.latestRatio}`);
     }
@@ -1740,40 +1367,18 @@ export function registerActiveContext(pi: any, options: {
     return true;
   };
 
-  /**
-   * Bytes per token, measured rather than assumed.
-   *
-   * `ESTIMATED_BYTES_PER_TOKEN` is a constant over RAW text, and the fence weighs a
-   * SERIALIZED projection: roles, ids, custom types and JSON escaping all count toward
-   * the bytes and none of them reach the provider's tokenizer the same way. Measured
-   * 2026-08-06 on one workload: rep11 ran at 4.7 serialized chars per measured token
-   * and rep12 at 7.0. Against the fixed 4 that is a 76% over-estimate in rep12, which
-   * is exactly how a session whose real window was 49% full (187,805 tokens of a
-   * 400,000 window, ratio 0.47) had its request judged over a 383,616-token budget,
-   * reduced, judged over again, and finally ABORTED at stage 37 of 64.
-   *
-   * So the ratio is calibrated per session against ground truth: the size of a
-   * projection this process handed the host, paired with the token count the provider
-   * reported for it. Tiny early requests are ignored -- a 466-char first projection
-   * measured against a system prompt gives a meaningless 0.46 -- and the result is
-   * bounded, so a pathological pairing can neither disable the fence nor trip it.
-   */
   const PROJECTION_CALIBRATION_MIN_CHARS = 20_000;
   const PROJECTION_CALIBRATION_MIN_TOKENS = 5_000;
   const PROJECTION_CHARS_PER_TOKEN_FLOOR = 2;
   const PROJECTION_CHARS_PER_TOKEN_CEILING = 12;
-  /** How many recent pairings the ratio, the error window and the inflow window keep. */
   const PROJECTION_CALIBRATION_WINDOW = 6;
   const PROJECTION_ERROR_WINDOW = 8;
-  /** Margin floor, as a share of the window, before any error or inflow is measured. */
   const PROJECTION_MARGIN_FLOOR_SHARE = 0.05;
 
   const noteProjectionCalibration = (measurement: ProviderContextMeasurement): void => {
     const previous = measurements.lastProviderMeasurement;
     if (Number.isFinite(measurement.tokens) && previous && Number.isFinite(previous.tokens)) {
       const step = measurement.tokens - previous.tokens;
-      // Only GROWTH is an inflow step. A commit shrinks the window; that is the thing
-      // the margin has to survive, not a size the next request can be predicted from.
       if (step > 0) {
         measurements.inflowSteps.push(step);
         if (measurements.inflowSteps.length > PROJECTION_ERROR_WINDOW) measurements.inflowSteps.shift();
@@ -1782,11 +1387,6 @@ export function registerActiveContext(pi: any, options: {
     const chars = measurements.lastProjectedChars;
     if (chars === null || chars < PROJECTION_CALIBRATION_MIN_CHARS) return;
     if (!Number.isFinite(measurement.tokens) || measurement.tokens < PROJECTION_CALIBRATION_MIN_TOKENS) return;
-    // The signed error of the estimate we made for the projection this measurement
-    // describes. This is the only direct measure of how wrong the fence can be.
-    // Only a CALIBRATED estimate's error belongs in the window. The bootstrap constant
-    // is wrong by design -- 76% high in rep12 -- and letting that one reading set the
-    // margin would keep every later request permanently inside it.
     if (measurements.lastProjectedEstimate !== null && measurements.lastProjectedEstimateCalibrated &&
         measurement.tokens > 0) {
       measurements.estimatorErrors.push(
@@ -1800,17 +1400,6 @@ export function registerActiveContext(pi: any, options: {
     }
   };
 
-  /**
-   * Recent, and pessimistic.
-   *
-   * A single latest pairing tracks drift but carries its noise; an average lags it.
-   * Near the top of the window neither is acceptable, because the error that matters is
-   * one-sided: a ratio that is too HIGH under-counts tokens and transmits a request the
-   * provider will reject. So the fence takes the smallest ratio in the recent window,
-   * which converges instantly in the dangerous direction and within a window in the
-   * cheap one. Measured 2026-08-06 (rep13): the ratio moved 5.34 to 6.01 and back
-   * across twenty requests while the window sat above 90% full.
-   */
   const projectionCharsPerToken = (): number => {
     const usable = measurements.projectionCalibrations.filter((entry) =>
       entry.tokens > 0 && Number.isFinite(entry.chars / entry.tokens) && entry.chars / entry.tokens > 0);
@@ -1822,40 +1411,14 @@ export function registerActiveContext(pi: any, options: {
     );
   };
 
-  /**
-   * Bind the provider's count to the projection it counted.
-   *
-   * The anchor is the number the provider reported for a request this process actually
-   * TRANSMITTED, held with that projection's serialized bytes. Identity is carried three
-   * ways so a stale anchor cannot pass for a fresh one: the session it belongs to, the
-   * attribution generation (a model or thinking-level change is a different tokenizer, so
-   * its counts describe nothing here), and the projection text itself, which the reading
-   * re-checks byte for byte before adding anything to it.
-   */
   const noteProviderProjectionAnchor = (measurement: ProviderContextMeasurement): void => {
-    // ONE ANCHOR PER MEASURED RESPONSE. A pass that re-observes the same assistant
-    // message -- the retry after a provider rejection, or any pass the host runs without
-    // a new response -- would otherwise re-bind that count to a newer projection the
-    // provider never counted, and the count would silently describe the wrong bytes.
     if (measurements.projectionAnchor?.messageSha256 === measurement.messageSha256) return;
     const text = instrumentation.previousText;
-    // Only a TRANSMITTED projection can be anchored: an aborted pass built a projection
-    // the provider never saw, so no reported count describes it.
     if (!text || text.length < 2 || !text.endsWith("]") || !persistence.state) {
       measurements.projectionAnchor = null;
       return;
     }
     const chars = bytes(text);
-    // AND THE COUNT HAS TO FIT THE BYTES IT IS BOUND TO.
-    //
-    // An anchor is exact for the bytes it covers only if it actually describes them. A
-    // pairing that implies fewer serialized chars per token than any tokenizer produces
-    // is not describing this projection, and taken at face value it would put the fence
-    // under permanent pressure a projection of that size cannot explain. The calibration
-    // window already refuses such a ratio through the same floor; the anchor refuses it
-    // outright and falls back to the estimate. Only the FLOOR applies: a rate ABOVE the
-    // calibration ceiling is the signature-heavy composition this mechanism exists to
-    // read, and clamping it would throw away the measurement that motivated the build.
     if (!(measurement.tokens > 0) || chars / measurement.tokens < PROJECTION_CHARS_PER_TOKEN_FLOOR) {
       measurements.projectionAnchor = null;
       return;
@@ -1870,45 +1433,6 @@ export function registerActiveContext(pi: any, options: {
     };
   };
 
-  /**
-   * THE OCCUPANCY READING: what the provider counted, plus only what arrived after it.
-   *
-   * A whole-projection estimate divides every byte in the window by one rate, and one
-   * rate does not fit the window's contents. Measured 2026-08-10 on the sealed rep-23
-   * run, byte exact against that run's own projection records: the estimate is unbiased
-   * at the pre-commit PEAKS (provider over estimate, mean 1.004 across six) and over-reads
-   * the post-fold TROUGHS by 22 to 35 percent (mean ratio 0.784 across six). It is a phase
-   * effect, not drift: encrypted reasoning-signature blobs on assistant messages grew from
-   * 14.6 to 51.3 percent of projection bytes over that run and price at a fitted 24.8 chars
-   * per token against 3.957 for ordinary content, so a projection's rate depends on what it
-   * is made of. The runtime therefore believed its floor climbed 0.298 to 0.490 of budget
-   * while the provider read 0.276 to 0.382: roughly 45 percent of the apparent floor rise
-   * was measurement error, five of six true troughs sat at or below the 0.35 minTarget, and
-   * the ladder was folding past its own floor without seeing it.
-   *
-   * So the rate is applied to the DELTA only. The provider's count for the projection this
-   * one extends is exact for every byte it covers, whatever those bytes are made of, and
-   * only the material appended since is estimated. Measured on the same run: mean absolute
-   * occupancy error across all requests falls from 8.38 to 3.08 percent, and inside every
-   * post-fold refill window it drops from the +9 to +27 percent band to under 4 percent from
-   * the second request onward.
-   *
-   * Two things this deliberately does NOT do. It does not move the commit trigger: at all
-   * twelve commit points of that run the delta since the last provider count was exactly
-   * zero, because the commit hook runs after the response and its usage record have landed.
-   * And it does not fix the one pass per cycle where the projection is REWRITTEN rather than
-   * appended, right after a commit: the anchor describes a projection this one does not
-   * begin with, so there is nothing to add a delta to and the whole-projection estimate
-   * stands, error and all (+27 to +35 percent, measured). That case is detected by
-   * construction, not by the sign of the delta: the current serialization must begin with
-   * the anchored one verbatim, up to the array separator.
-   *
-   * The anchor is the provider's TOTAL for that request, which includes the output tokens
-   * of the response the next projection appends and then prices again as bytes. That is one
-   * response's worth of double count, it runs HIGH rather than low, and it keeps a single
-   * definition of "the provider's number" across occupancy, the ratio and the calibration
-   * instead of a second one that only this reading would use.
-   */
   const projectedTokenReading = (projected: unknown[]): {
     tokens: number;
     basis: ProjectionReadingBasis;
@@ -1925,10 +1449,6 @@ export function registerActiveContext(pi: any, options: {
         anchor.sessionId !== persistence.state?.sessionId) {
       return { tokens: estimate, basis: "unmeasured", chars, anchorTokens: null, deltaChars: null };
     }
-    // By construction: the anchored serialization minus its closing bracket must be a
-    // byte-exact prefix, and the byte after it must be the array separator or the close.
-    // A message that merely GREW in place fails this, because the anchored head ends with
-    // that message's own closing brace.
     const separator = text.length > anchor.head.length ? text[anchor.head.length] : "";
     if (!text.startsWith(anchor.head) || (separator !== "," && separator !== "]")) {
       return { tokens: estimate, basis: "rewritten", chars, anchorTokens: anchor.tokens, deltaChars: null };
@@ -1943,39 +1463,19 @@ export function registerActiveContext(pi: any, options: {
     };
   };
 
-  /** The largest recent estimator error, as a share. Unmeasured sessions assume none. */
   const estimatorErrorShare = (): number => measurements.estimatorErrors.length
     ? Math.max(...measurements.estimatorErrors.map((error) => Math.abs(error)))
     : 0;
 
-  /** The largest recent growth step, which is what one more turn can add. */
   const expectedInflowTokens = (): number => measurements.inflowSteps.length
     ? Math.max(...measurements.inflowSteps)
     : 0;
 
-  /**
-   * THE OUTPUT WALL'S OWN FORWARD LOOK, AND WHY IT IS NOT THE ONE ABOVE.
-   *
-   * `inflowSteps` is filled by `noteProjectionCalibration`, which runs on the context pass.
-   * By then the message-end path has already advanced `lastProviderMeasurement` to the
-   * count being calibrated, so the difference is a measurement against itself and the step
-   * is zero. That window has therefore been empty in every session ever run, which means
-   * the transmission fence margin and the commit depth floor, both of which read it, have
-   * been running on their floor shares alone. Reviving it moves both, and both are
-   * calibrated against reps recorded while it was empty, so that is its own build with its
-   * own gates rather than a rider on this one.
-   *
-   * This window is filled where the previous count is still readable, and nothing but the
-   * wall reads it. When a count reaches only the context pass the window stays empty and
-   * the wall degrades to the condition it replaced, which is the safe direction.
-   */
   const WALL_INFLOW_WINDOW = 8;
   const noteWallInflow = (measurement: ProviderContextMeasurement): void => {
     const previous = measurements.lastProviderMeasurement;
     if (!previous || !Number.isFinite(measurement.tokens) || !Number.isFinite(previous.tokens)) return;
     const step = measurement.tokens - previous.tokens;
-    // Only GROWTH. A commit shrinks the window; that is what the wall has to survive, not
-    // a size the next request can be predicted from.
     if (step <= 0) return;
     measurements.wallInflowSteps.push(step);
     if (measurements.wallInflowSteps.length > WALL_INFLOW_WINDOW) measurements.wallInflowSteps.shift();
@@ -1985,64 +1485,18 @@ export function registerActiveContext(pi: any, options: {
     ? Math.max(...measurements.wallInflowSteps)
     : 0;
 
-  /**
-   * The safety margin.
-   *
-   * A fence that fires AT the budget is a fence that fires after the wire: the request
-   * that kills the session is the one built after the last measurement, and it is never
-   * the one being weighed. Measured 2026-08-06 (rep13): the last measurement read
-   * 370,320 tokens against a 383,616 budget -- 13,296 of headroom against a median
-   * inflow of 13,865 and a maximum of 27,815 -- while the estimate for that request was
-   * 366,934, comfortably "under budget". The next request crossed the real limit and
-   * the provider rejected it. Every number in that sentence was known to the runtime.
-   *
-   * So the reduction threshold carries what the runtime knows it does not know: the
-   * worst recent estimator error applied to this estimate, plus one worst recent inflow
-   * step, never less than a floor share of the window.
-   */
   const projectionMarginTokens = (estimate: number, windowTokens: number): number => Math.ceil(Math.max(
     PROJECTION_MARGIN_FLOOR_SHARE * windowTokens,
     estimatorErrorShare() * estimate + expectedInflowTokens(),
   ));
 
-  /**
-   * The TRANSMISSION fence.
-   *
-   * `abortUnsafeHardContext` gates on `measurements.latestRatio`, which describes the
-   * request the provider ALREADY answered. It is a lagging indicator: between that
-   * response and the next request an excursion can add a hundred thousand tokens of
-   * tool results, and nothing in the fence looks at the projection actually about to
-   * be sent. Measured 2026-08-06 (rep 11): the last measurement read 359,625 tokens of
-   * a 400,000 window, ratio 0.937 against a 0.959 hard fence, so no abort fired -- and
-   * the projection that went out was 1,831,936 chars, about 458k estimated tokens, 1.2x
-   * the whole window. The provider rejected it twice and the run died. rep4 aborted
-   * correctly only because its 272k DESCRIPTOR window put the stale ratio over the
-   * fence by luck of arithmetic, not because anything measured the request.
-   *
-   * So the projection itself is measured here, against the truthful serving budget the
-   * capacity accounting already computes. Over budget, an emergency reduction runs at
-   * fence pressure -- where every guarded mark is waived -- and the rebuilt projection
-   * is measured again. If it still does not fit, the request is aborted BEFORE
-   * transmission, which is the whole point of having a fence.
-   */
   const projectionExceedsBudget = (projected: unknown[], ctx: any): {
-    /** Occupancy: what the provider counted, plus what was appended after it. */
     tokens: number;
-    /**
-     * This projection's OWN size, every byte of it at one rate. Occupancy answers "how
-     * full is the window"; a before-and-after comparison between two projections answers
-     * "did this pass make the request smaller", and those are different questions. A
-     * reduction is measured in size space on both sides, because the projection the pass
-     * rebuilds is a rewrite the anchor does not describe, and subtracting an anchored
-     * reading from an unanchored one reports a change that no folding caused.
-     */
     sizeTokens: number;
     basis: ProjectionReadingBasis;
     budgetTokens: number;
     marginTokens: number;
-    /** Past the wire: this request must not be transmitted at all. */
     over: boolean;
-    /** Inside the margin: still sendable, but the next one may not be. Reduce NOW. */
     crowded: boolean;
   } => {
     const capacity = currentCapacity(ctx);
@@ -2101,17 +1555,6 @@ export function registerActiveContext(pi: any, options: {
     ctx.abort();
   };
 
-  /**
-   * Enforce the budget, and RECOVER rather than die.
-   *
-   * A provider context-overflow rejection mutates nothing durable: the assistant
-   * message never lands and this runtime rebuilds the projection from the branch on
-   * every request. So the terminal path is not an abort, it is a rollback: do not
-   * append the failed exchange, fold at fence pressure until the request fits, rebuild,
-   * and let Pi resend. What bounds it is running out of foldable material, and an inflow
-   * that still will not fit once everything foldable is folded is a genuine impossibility
-   * that fails LOUDLY through `abortOverBudgetProjection`.
-   */
   const enforceProjectionBudget = async (
     snapshot: ActiveContextSnapshot,
     projected: unknown[],
@@ -2119,21 +1562,7 @@ export function registerActiveContext(pi: any, options: {
   ): Promise<{ projected: unknown[]; aborted: boolean }> => {
     let measured = projectionExceedsBudget(projected, ctx);
     const rejected = curation.pendingRejection !== null;
-    // CROWDED, not over, is the trigger for reducing: the request that kills a session
-    // is the one built after this one. A provider rejection outranks our own estimate:
-    // it is ground truth that the last request did not fit, whatever we measured.
     if (!measured.crowded && !rejected) return { projected, aborted: false };
-    // Crowded is a MARGIN PREDICTION, not an overflow. While a last-call round is
-    // genuinely OPEN, exposure rendered this pass or the agent's response still
-    // outstanding, the prediction waits for it: this request still fits and the
-    // round ends on the very next context pass. Once the round has elapsed the
-    // margin lane acts freely, because a stale exposure parked behind the reopen
-    // latch must never muzzle the one reducer that can still act (the 20k-window
-    // probe climbed from crowded to the wire in exactly that state). Genuine
-    // untransmissibility, an over-budget projection or a provider rejection, never
-    // waits: a request whose projection exceeds the provider input budget is rejected
-    // outright, so recovery must produce a window that fits. Economy does not outrank
-    // the one round.
     const lastCall = persistence.state?.lastCall;
     const delivery = curation.lastCallDelivery;
     const roundOpen = Boolean(lastCall) && (!delivery || delivery.exposure !== lastCall.exposure ||
@@ -2141,21 +1570,10 @@ export function registerActiveContext(pi: any, options: {
     if (!measured.over && !rejected && roundOpen) {
       return { projected, aborted: false };
     }
-    // Why this fired, recorded from the measurement that TRIGGERED it rather than the
-    // one taken afterwards, which by then describes a projection that fits.
     const trigger = measured;
     let reduced = projected;
     let attempts = 0;
     let reducedAtLeastOnce = false;
-    // At the fence the only useful action is the fold that keeps the request
-    // transmissible, so every reduction runs with every guarded mark waived.
-    // Ends when the request fits or when there is nothing left to fold, and those are the
-    // only two honest endings. A counted cap used to sit here as well, described as the
-    // thing that made the lane safe. It was the opposite: reaching it stops folding while
-    // foldable material is still standing, and the very next statement aborts the run for
-    // being over budget, so the cap could only ever convert a reducible window into a dead
-    // session. Running out of material is what bounds this, and that ending is already
-    // loud.
     while (measured.crowded || measured.over || rejected) {
       attempts += 1;
       curation.recoveryAttempts += 1;
@@ -2176,7 +1594,6 @@ export function registerActiveContext(pi: any, options: {
     }
     if (reducedAtLeastOnce) {
       ladder.overBudgetReduction = {
-        // Size space on both sides: what this pass CHANGED, not how full the window is.
         estimatedTokensBefore: trigger.sizeTokens,
         estimatedTokensAfter: measured.sizeTokens,
         occupancyTokensAfter: measured.tokens,
@@ -2194,34 +1611,10 @@ export function registerActiveContext(pi: any, options: {
     }
     if (rejected) {
       const overflowBefore = trigger.sizeTokens;
-      // RECOVERY IS A CHANGE, NOT AN OPINION.
-      //
-      // This read `!measured.over`: our own estimator answering the question the
-      // provider had just answered differently. A rejection is ground truth that the
-      // estimate was wrong, so the estimate cannot also be the evidence that the retry
-      // will work. And a rejection mutates nothing durable -- the rolled-back branch
-      // rebuilds the same projection -- so a pass that changed nothing hands the
-      // provider a byte-identical request and calls it a rescue. Measured 2026-08-10
-      // (luna-20260810 pifold rep 2): two rejections at stage 25, not one byte folded
-      // either time, both recorded recovered true, and the run died anyway.
-      //
-      // The baseline is the request that was actually REJECTED, which is the last
-      // projection this process built: it is written at the end of every pass that
-      // builds one, and this lane runs before the current pass overwrites it. Measuring
-      // against the projection handed to this function instead would credit only the
-      // recovery loop's own folds and miss the ordinary commit that already ran earlier
-      // in the same pass, which is the usual way a retried request gets smaller.
-      //
-      // Size space on both sides. Occupancy is anchored to the provider's count for the
-      // projection it measured, and the projection this lane rebuilds is a rewrite that
-      // anchor does not describe, so a rejected-minus-retried subtraction across the two
-      // bases reports a change no folding caused.
       const rejectedTokens = measurements.lastProjectedSizeTokens;
       const freedTokens = typeof rejectedTokens === "number"
         ? Math.max(0, rejectedTokens - measured.sizeTokens)
         : 0;
-      // Smaller than what the provider refused, AND inside the budget. Either half alone
-      // is a claim this runtime has already been wrong about once.
       const recovered = freedTokens > 0 && !measured.over;
       curation.lastRecovery = {
         status: curation.pendingRejection?.status ?? null,
@@ -2240,15 +1633,9 @@ export function registerActiveContext(pi: any, options: {
         budget_tokens: measured.budgetTokens,
         margin_tokens: measured.marginTokens,
         recovered,
-        // What the verdict rests on, so a false claim cannot be read back as a true one:
-        // the size of the request the provider refused, and how much smaller this one is.
         rejected_tokens: typeof rejectedTokens === "number" ? rejectedTokens : null,
         freed_tokens: freedTokens,
-        // Whether the recovery loop itself folded, as distinct from the pass as a whole.
         loop_reduced: reducedAtLeastOnce,
-        // The join. `context.rollback` records what left the branch; this records what
-        // the retried pass folded to make the shorter window fit, and the two are one
-        // episode. Null when a rejection was recorded without a tree rollback.
         rollback_seq: typeof rollback.last?.seq === "number" ? rollback.last.seq : null,
       });
       const unchangedNote = "The provider rejected the last request and this pass made it no smaller, so the " +
@@ -2285,8 +1672,6 @@ export function registerActiveContext(pi: any, options: {
     if (lifecycle.shuttingDown || !persistence.state || ladder.automaticFailure || ratio === null || persistence.state.prepared || ladder.preparing ||
         ratio < snapshot.policy.warmRatio ||
         !measurements.lastProviderMeasurement || !durableProviderMeasurementMatches(measurements.lastProviderMeasurement)) return;
-    // Preparation is asynchronous but never jumps ahead of an immediately
-    // committable deterministic fold on the same measured projection.
     const selection = selectAutomaticRung(snapshot, persistence.state, ratio, {
       summarizerAvailable: Boolean(options.summarizeContextSpan),
       failedPreparationIds: ladder.failedPreparations,
@@ -2296,8 +1681,6 @@ export function registerActiveContext(pi: any, options: {
       ? selection.candidate.sourceRefs.slice(0, 8).map((ref) => ref.entryId)
       : [];
     if (selection?.kind !== "chapter-prepare") return;
-    // Already bite-sized: the chapter selector never proposes a span past the cap, so a
-    // model brief is never spent on a fold nobody can read back cheaply.
     const candidate = selection.candidate;
     const id = automaticPreparationId(candidate, persistence.state);
     const controller = new AbortController();
@@ -2348,18 +1731,6 @@ export function registerActiveContext(pi: any, options: {
       if (ownsSlot && sessionIdentityStillValid(ctx, snapshot.sessionId, capturedGeneration)) updateStatus(ctx);
     });
   };
-  // Appended at the very TAIL, after the stable prefix, so a suggestion never
-  // invalidates a cached prefix and never becomes durable transcript.
-  /**
-   * The receipt block: what the runtime did to this window, as status rather than as
-   * advice. It is the only carrier this runtime builds.
-   *
-   * It is free because it is RETROSPECTIVE. A receipt exists only after a commit has
-   * already rewritten the projection, so it rides a cache break the runtime had to pay
-   * for regardless, and the freeze then closes over it so it is never paid for again.
-   * It is hard-bounded and its ring evicts the oldest entry, because a report about
-   * bloat that becomes bloat has argued against itself.
-   */
   const appendReceipts = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
     const content = receiptBlockText({ receipts: curation.receipts, toolName, brandNoun });
     if (!content) return projected;
@@ -2382,12 +1753,6 @@ export function registerActiveContext(pi: any, options: {
     return projected;
   };
 
-  /**
-   * The rider rides the SAME admission as the receipt block: it renders from the
-   * persisted literal bytes, lands once per freeze cycle, and the freeze closes over
-   * it, so it can never diverge a prefix on its own. It is never regenerated: the
-   * bytes the epoch persisted are the bytes every re-render carries.
-   */
   const appendRider = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
     const rider = persistence.state?.rider;
     if (!rider) return projected;
@@ -2409,13 +1774,6 @@ export function registerActiveContext(pi: any, options: {
     return projected;
   };
 
-  /**
-   * Threshold notices are APPEND-ONCE: each delivered notice is its own carrier with
-   * its own key, so a notice that fires mid-freeze lands at the tail as a pure append,
-   * the freeze closes over it, and it then persists in the window the way a tool
-   * result does. A freeze break re-renders every retained notice from its persisted
-   * literal bytes inside the rewrite that broke the freeze.
-   */
   const appendNotices = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
     const notices = persistence.state?.notices;
     if (!notices?.ring.length) return projected;
@@ -2440,13 +1798,6 @@ export function registerActiveContext(pi: any, options: {
     return projected;
   };
 
-  /**
-   * The pre-commit last-call rides the commit BOUNDARY: it is armed when the band-top
-   * trigger fires, appended at the tail (a pure append) for exactly one gated round,
-   * and the commit that consumes it clears the state, so the carrier's disappearance
-   * rides the rewrite that commit already pays for. Rendering records the delivery,
-   * which is what the one-round clock is measured from.
-   */
   const appendLastCall = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
     const lastCall = persistence.state?.lastCall;
     if (!lastCall) return projected;
@@ -2472,29 +1823,6 @@ export function registerActiveContext(pi: any, options: {
     return projected;
   };
 
-  /**
-   * Whatever this pass ended up sending becomes the frozen surface for the next one, in
-   * full. Nothing rides after the frozen region.
-   *
-   * The earlier build kept a live suggestion slate outside the freeze, reasoning that
-   * advice goes stale and that a re-rendered block "only diverges the prefix when its
-   * own content changes". That reasoning is wrong, and rep 21 measured the cost. A
-   * positional cache compares bytes from the start: this pass sends [frozen][slate] and
-   * the next sends [frozen][new messages][slate], so at the offset where the slate sat
-   * the next pass has new messages instead. The slate diverges the prefix EVERY pass
-   * whatever it says, because appending anything displaces it. There is no stable
-   * position at a moving tail.
-   *
-   * Measured on rep 21: a 1503-character slate against a 1.5M-character prompt, 99.86%
-   * of the projection preserved by our own accounting, and 16 full cache rebuilds
-   * costing 3.71M tokens -- 21.9% of every input token in the run. Prefix caching is a
-   * step function, not a gradient: mutation cost has no relation to mutation size.
-   *
-   * So the rule this build enforces: the runtime adds to the window only at a moment it
-   * is already rewriting the window, which means at a commit. A carrier landed there is
-   * free, because the break is already paid for, and it stays landed forever because
-   * the freeze closes over it.
-   */
   const holdFrozen = (projected: unknown[]): unknown[] => {
     freeze.projection = [...projected];
     freeze.active = false;
@@ -2509,9 +1837,6 @@ export function registerActiveContext(pi: any, options: {
         customType !== riderProjectionType && customType !== curationProjectionType &&
         customType !== lastCallProjectionType && customType !== noticeProjectionType;
     });
-    // The freeze test, stated as bytes rather than as intent: if the rebuilt body still
-    // OPENS with the frozen body verbatim, nothing structural moved and the previous
-    // projection is reused whole, with only what arrived since appended after it.
     const held = freeze.body?.length ?? 0;
     freeze.active = freeze.projection !== null && body.length >= held &&
       stableStringify(body.slice(0, held)) === freeze.bodyText;
@@ -2521,28 +1846,12 @@ export function registerActiveContext(pi: any, options: {
     if (!freeze.active) freeze.keys.clear();
     freeze.body = body;
     freeze.bodyText = stableStringify(body);
-    // The one carrier left, and the only one that can ever be free: a statement of what
-    // the runtime just did. It is built only when a commit produced a receipt, it lands
-    // inside the freeze, and it is never rendered twice.
-    //
-    // Everything that used to stand here was ANTICIPATORY -- pressure milestones, the
-    // live advisory, curation reminders, the last-call notice. Anticipatory guidance has
-    // to arrive BEFORE the event it warns about, so it can never ride a break the
-    // runtime was already paying for; it has to create one. Anticipatory guidance and an
-    // append-only projection are mutually exclusive, and eleven runs say the warning
-    // bought nothing anyway: voluntary fold share was 0.00, and the three runs built
-    // specifically to invite curation produced 0, 1 and 0 voluntary folds.
     appendReceipts(projected, snapshot);
     appendRider(projected, snapshot);
     appendNotices(projected, snapshot);
     appendLastCall(projected, snapshot);
     return holdFrozen(projected);
   };
-  /**
-   * Classify the projection we are about to send against the one before it. A rewrite
-   * is ours; a pure append that the provider still re-reads is not, and conflating the
-   * two is what made a scheduling lever look responsible for 12 misses it never caused.
-   */
   const noteProjection = (projected: unknown[]): void => {
     const digests = messageDigests(projected);
     const comparison = compareProjections(instrumentation.previousDigests, digests);
@@ -2552,17 +1861,12 @@ export function registerActiveContext(pi: any, options: {
     const text = stableStringify(projected);
     const divergence = prefixDivergence(instrumentation.previousText, text);
     const previousChars = instrumentation.previousText?.length ?? 0;
-    // How much of the PREVIOUS prompt this projection still opens with. identicalShare
-    // measures the new projection instead, which grows every pass and would call a
-    // total rewrite "preserved" as soon as enough fresh content landed after it.
     instrumentation.lastPreservedShare = previousChars > 0
       ? divergence.identicalChars / previousChars
       : null;
     const charsPerToken = projectionCharsPerToken();
     const causes = instrumentation.sinceHandoff.filter((event) =>
       PREFIX_MUTATING_KINDS.has(event.kind));
-    // The reading this projection was judged by, with the pieces it was built from, so
-    // the anchored series is readable from the stream instead of reconstructed.
     const reading = projectedTokenReading(projected);
     emit("context.projection", {
       change: comparison.change,
@@ -2577,9 +1881,6 @@ export function registerActiveContext(pi: any, options: {
       delta_chars: reading.deltaChars,
       chars_per_token: charsPerToken,
     });
-    // Emission only. Which of these is a provider-side miss and which is a rewrite we
-    // caused is a join against provider-reported cacheRead, and that join is the
-    // analyst's, not this runtime's.
     emit("context.prefix", {
       change: comparison.change,
       divergent_char: divergence.index,
@@ -2594,8 +1895,6 @@ export function registerActiveContext(pi: any, options: {
         : (causes.length ? causes.map((event) => event.kind).join(",") : "unattributed"),
       cause_event_seqs: causes.map((event) => event.seq).join(","),
       events_since_handoff: instrumentation.sinceHandoff.length,
-      // The request class, which falls straight out of the attribution and makes a run
-      // directly comparable to a production cache table. Not new measurement.
       request_class: divergence.index === null
         ? "steady-state"
         : (causes.some((event) => event.kind === "context.recovery")
@@ -2607,23 +1906,6 @@ export function registerActiveContext(pi: any, options: {
     instrumentation.mutationsSinceHandoff = 0;
   };
 
-  /**
-   * Enqueue the folds this commit created with a deterministic brief.
-   *
-   * The request is built HERE, against the snapshot and the pre-commit state, because
-   * this is the last moment the fold's source is still exact active evidence: after the
-   * commit its span is a placeholder and the orientation either side of it is gone.
-   * These are the bytes `prepareFold` already hashed into the fold's identity, so the
-   * generator briefs the span that was folded and nothing else.
-   *
-   * A PARENT is queued too, and reads its children at depth one rather than through their
-   * briefs: `consolidationSourceText` opens each child and leaves the grandchildren folded,
-   * so the group is briefed from material instead of from a summary of summaries. The one
-   * thing it must not race is a child's own upgrade, so a parent whose children are still
-   * in this lane is deferred to the next boundary instead of reading briefs about to be
-   * replaced. Unlike a leaf, a parent's source keeps: its children are folds, and folds
-   * stay resolvable after the commit that nested them.
-   */
   const queueBriefUpgrades = (
     snapshot: ActiveContextSnapshot,
     stateBeforeCommit: ActiveContextState,
@@ -2635,8 +1917,6 @@ export function registerActiveContext(pi: any, options: {
     const pending = (id: string): boolean => upgrades.running.has(id) || queued(id) ||
       upgrades.ready.some((entry) => entry.foldId === id) ||
       upgrades.deferred.has(id);
-    // Gathered before any packing, because a batch is a property of the whole commit and
-    // not of the fold that happens to be read first.
     const gathered: Array<{
       foldId: string;
       sourceSha256: string;
@@ -2645,28 +1925,16 @@ export function registerActiveContext(pi: any, options: {
       chars: number;
       parent: boolean;
     }> = [];
-    // Parents that waited are considered first and at every boundary, so the wait ends as
-    // soon as the children settle rather than whenever the ladder happens to build another.
     for (const foldId of [...upgrades.deferred, ...foldIds]) {
       const full = upgrades.queue.length >= MAX_BRIEF_UPGRADE_QUEUE;
       if (upgrades.failed.has(foldId) || upgrades.running.has(foldId) || queued(foldId) ||
           upgrades.ready.some((entry) => entry.foldId === foldId)) continue;
       const fold = persistence.state.folds.find((item) => item.id === foldId);
-      // A supplied brief is agent judgment and outranks the generator; a model brief is
-      // already what this lane exists to produce. A fold that is no longer there is no
-      // longer owed anything, so a rolled-back parent leaves the wait rather than sitting
-      // in it.
       if (!fold || foldProvenance(fold, persistence.state).kind !== "deterministic") {
         upgrades.deferred.delete(foldId);
         continue;
       }
       const parent = fold.parts.some((part) => part.kind === "fold");
-      // A parent waits rather than being shed: its children are folds, so its source is
-      // still there whenever the lane has room, and a group that loses its turn at a busy
-      // boundary would otherwise keep the index its children could not write. A leaf is the
-      // other way round. Its source is exact active evidence at this commit and a
-      // placeholder after it, so a full queue sheds it here, permanently, and the next
-      // commit record names it in `brief_upgrades_abandoned`.
       if (parent && (full || childFoldIds(fold).some(pending))) {
         upgrades.deferred.add(foldId);
         continue;
@@ -2680,8 +1948,6 @@ export function registerActiveContext(pi: any, options: {
           : null;
       if (!refs) continue;
       try {
-        // The parent reads the state that holds its children and their upgraded briefs;
-        // a leaf reads the state where its own span was still raw active evidence.
         const sourceText = parent
           ? consolidationSourceText(snapshot, persistence.state, fold.parts)
           : encodedFoldSource(snapshot, stateBeforeCommit, fold.parts, fold.kind);
@@ -2698,16 +1964,10 @@ export function registerActiveContext(pi: any, options: {
             sourceRefs: clone(refs),
             sourceText,
             sourceSha256: sha256Text(sourceText),
-            // What the PAYLOAD holds, which is one entry per part: a consolidation can
-            // carry absorbed raw evidence beside its folded children, and the coverage
-            // rule counts the things the model is actually shown. Counting only the fold
-            // children told it to write fewer clauses than the payload has subjects.
             children: parent ? fold.parts.length : 0,
           },
         });
       } catch (error) {
-        // Evidence drift between the commit and this read leaves the deterministic brief
-        // standing, and the next commit record reports the attempt rather than hiding it.
         upgrades.failed.add(foldId);
         upgrades.failures += 1;
         upgrades.lastError = boundReceiptText(
@@ -2715,23 +1975,8 @@ export function registerActiveContext(pi: any, options: {
         );
       }
     }
-    // Pack the commit's spans into as few calls as the source budget allows. Order is the
-    // order they were gathered, which is span order within the commit, so the numbered
-    // spans a batch shows the generator run the way the session did and one really is the
-    // orientation for the next.
     for (let at = 0; at < gathered.length;) {
       if (upgrades.queue.length >= MAX_BRIEF_UPGRADE_QUEUE) {
-        // No room for another call. A parent goes back to waiting, because its children are
-        // folds and its source will still be there whenever the lane frees up. A leaf
-        // cannot wait: its source is exact active evidence at THIS commit and a placeholder
-        // after it, so it keeps the deterministic brief it committed with.
-        //
-        // That is the one outcome in this lane that is permanent, and it used to happen
-        // without a word. A leaf abandoned here reads deterministic for the rest of the
-        // session and nothing in the stream distinguishes it from a leaf the lane simply
-        // has not reached yet, so a deployment whose generator is slow enough to hold the
-        // queue full would see brief quality fall with nothing naming the cause. Counted
-        // and carried on the commit that abandoned them.
         for (const item of gathered.slice(at)) {
           if (item.parent) upgrades.deferred.add(item.foldId);
           else upgrades.abandoned.push(item.foldId);
@@ -2746,10 +1991,6 @@ export function registerActiveContext(pi: any, options: {
         members.push(gathered[at]);
         at += 1;
       }
-      // Orientation is the run's, not each span's: where this batch of consecutive spans
-      // sits in the wider conversation. Taken from the ends rather than from the union,
-      // because a commit can fold spans with protected material still raw between them and
-      // the union of those refs is not one contiguous range.
       const before = boundedOrientation(snapshot, members[0].refs);
       const after = boundedOrientation(snapshot, members[members.length - 1].refs);
       upgrades.queue.push({
@@ -2763,35 +2004,20 @@ export function registerActiveContext(pi: any, options: {
           afterText: after.afterText,
           afterSha256: sha256Text(after.afterText),
           maxBriefChars: snapshot.policy.maxBriefChars,
-          // Read by the observed wrapper and by nothing else, so a queue that backs up is
-          // visible as waiting rather than as a slow generator. The summarizer contract is
-          // on the RESULT, so an extra request field reaches it harmlessly.
           queuedAtMs: Date.now(),
         },
       });
     }
   };
 
-  /**
-   * One generator call, between boundaries, cancel-safe. It writes nothing durable: a
-   * finished brief waits in `ready` for a commit to carry it, and an aborted or failed
-   * call leaves the fold exactly as it committed.
-   *
-   * Returns whether a call was started, which is what lets the drain below stop.
-   */
   const startBriefUpgrade = (snapshot: ActiveContextSnapshot, ctx: any): boolean => {
     const summarize = observedSummarize;
-    // In CALLS, not folds. `running` is keyed by every fold a call briefs so the queue can
-    // ask whether one is already being written, so its size is a fold count and reading it
-    // as the in-flight bound would stop the lane after a single batch.
     const inFlight = new Set(upgrades.running.values()).size;
     if (!summarize || lifecycle.shuttingDown || !upgrades.queue.length ||
         inFlight >= MAX_BRIEF_UPGRADES_IN_FLIGHT) return false;
     const entry = upgrades.queue.shift()!;
     const controller = new AbortController();
     const slot = { controller, promise: Promise.resolve() };
-    // Keyed by EVERY fold the call briefs, so the queue's "already being briefed" check and
-    // the in-flight bound both read one call as the one thing it is.
     for (const member of entry.members) upgrades.running.set(member.foldId, slot);
     const capturedSessionId = snapshot.sessionId;
     const capturedGeneration = lifecycle.generation;
@@ -2803,9 +2029,6 @@ export function registerActiveContext(pi: any, options: {
           reject(new Error(`Brief upgrade exceeded ${snapshot.policy.briefTimeoutMs}ms`));
         }, snapshot.policy.briefTimeoutMs);
       });
-      // The same contract `prepareFold` holds a generated brief to, through the same
-      // function: an upgrade with its own copy of the check would drift from the fold
-      // path's, and the cure a missed criterion earns belongs to both or to neither.
       const generated = await Promise.race([
         generatedBriefs({
           summarize: (request, callCtx) => summarize({ ...request, signal: controller.signal }, callCtx),
@@ -2819,10 +2042,6 @@ export function registerActiveContext(pi: any, options: {
       ]);
       if (controller.signal.aborted ||
           !sessionIdentityStillValid(ctx, capturedSessionId, capturedGeneration)) return;
-      // Per span, not per call. A batch is one request and many answers, so one span that
-      // could not be cured is one fold keeping its deterministic brief while its neighbours
-      // take theirs; the whole call failing on it would be the coverage problem batching
-      // exists to solve, wearing a different hat.
       entry.members.forEach((member, at) => {
         const written = generated.briefs[at];
         if (!written) {
@@ -2844,10 +2063,6 @@ export function registerActiveContext(pi: any, options: {
       upgrades.cures += generated.cured;
     })().catch((error) => {
       if (controller.signal.aborted) return;
-      // LOUD, and once, for every fold the call carried. They keep their deterministic
-      // briefs, the failure is counted onto the next commit record, and none of them is
-      // ever sent again: a generator that fails on a span fails on it again, and a retry
-      // loop would spend the session's provider calls proving that.
       for (const member of entry.members) upgrades.failed.add(member.foldId);
       upgrades.failures += 1;
       upgrades.lastError = boundReceiptText(
@@ -2858,11 +2073,6 @@ export function registerActiveContext(pi: any, options: {
       for (const member of entry.members) {
         if (upgrades.running.get(member.foldId) === slot) upgrades.running.delete(member.foldId);
       }
-      // A finished call starts the next one, so the drain rate is the generator's latency
-      // rather than however often a ladder pass happens to look. Still between
-      // boundaries: nothing here touches the projection, and the generation check is the
-      // same fence `cancelBriefUpgrades` is called behind, so a session that moved on
-      // cannot be restarted by a call that outlived it.
       if (!lifecycle.shuttingDown && lifecycle.generation === capturedGeneration) {
         resumeBriefUpgrades(snapshot, ctx);
       }
@@ -2870,24 +2080,10 @@ export function registerActiveContext(pi: any, options: {
     return true;
   };
 
-  /**
-   * Fill the in-flight slots from the queue. The bound is a constant, not a pace: the
-   * lane starts everything it is allowed to start the moment there is work, because a
-   * fold whose brief is written late is a fold the session read deterministic in the
-   * meantime.
-   */
   const startBriefUpgrades = (snapshot: ActiveContextSnapshot, ctx: any): void => {
-    while (startBriefUpgrade(snapshot, ctx)) { /* Bounded by the in-flight constant. */ }
+    while (startBriefUpgrade(snapshot, ctx)) continue;
   };
 
-  /**
-   * Take up the waiting parents, then fill the slots.
-   *
-   * A deferred parent was waiting on the lane, so the lane finishing is the news, not the
-   * next commit. Boundaries are where briefs APPLY; hanging the retry on them too would
-   * leave a session that stops folding holding parents whose children were briefed long
-   * ago, and the last group the ladder built is exactly the one a session ends beside.
-   */
   const resumeBriefUpgrades = (snapshot: ActiveContextSnapshot, ctx: any): void => {
     if (upgrades.deferred.size && persistence.state) {
       queueBriefUpgrades(snapshot, persistence.state, []);
@@ -2903,35 +2099,6 @@ export function registerActiveContext(pi: any, options: {
     upgrades.deferred.clear();
   };
 
-  /**
-   * Apply finished upgrades INSIDE the commit's own mutation.
-   *
-   * Called between `commitPendingMarks` and the byte accounting, so an upgraded brief is
-   * part of what this commit is measured to have done rather than a rewrite nobody
-   * charged for. Nothing else may call this: an upgrade that finishes between boundaries
-   * waits, however long the wait is.
-   *
-   * Identity is revalidated the way `preparedFoldError` revalidates a prepared fold. A
-   * fold that was expanded, reclaimed, re-briefed by the agent, or rebuilt over a
-   * different span is a different object than the one the generator read, and its upgrade
-   * is DROPPED rather than deferred.
-   *
-   * It lands in the brief OVERRIDE map, the same channel the agent's own `rebrief` uses,
-   * and carries its generator beside the text. A fold record is content-addressed and
-   * immutable: rewriting one in place reports a conflicting durable fold at the next
-   * persist and suspends automatic management, which is precisely why the override map
-   * exists.
-   *
-   * EVERY finished brief lands, and there is no per-boundary cap. A prefix cache is
-   * invalidated from the FIRST byte that differs, so the commit's mutation point is the
-   * position of the earliest fold it upgrades and every later upgrade in the same commit
-   * sits inside a suffix that break already re-sent: the second and third upgrade on one
-   * boundary cost nothing the first did not already cost. Holding one back does not save
-   * that cost, it defers the same break to a later commit and pays it there on top of
-   * whatever that commit does. What bounds the count is the work that can be outstanding,
-   * MAX_BRIEF_UPGRADE_QUEUE waiting plus MAX_BRIEF_UPGRADES_IN_FLIGHT running, and the
-   * boundary that clears them.
-   */
   const applyBriefUpgrades = (): string[] => {
     if (!upgrades.ready.length || !persistence.state) return [];
     const applied: string[] = [];
@@ -3019,18 +2186,6 @@ export function registerActiveContext(pi: any, options: {
     return { preparedFold, nextState };
   };
 
-  /**
-   * The one mutation of an epoch: every pending mark, plus the automatic additions
-   * a commit is allowed to make, applied through the same machinery as an immediate
-   * fold. Free additions come first (peek reads the agent already discarded), then
-   * the quota top-up that guarantees the commit is worth its rewrite.
-   */
-  /**
-   * One turn of inflow, as a share of the window: the least a commit at high occupancy
-   * has to free to be worth its rewrite. Measured inflow is used when the session has
-   * any -- rep13 ran at a median 13,865 and a maximum 27,815 tokens per request against
-   * a 400,000 window -- and the floor share stands in until then.
-   */
   const commitDepthFloorShare = (snapshot: ActiveContextSnapshot): number => {
     const window = snapshot.contextWindow;
     if (!Number.isFinite(window) || window <= 0) return COMMIT_RECLAIM_FLOOR_SHARE;
@@ -3043,49 +2198,13 @@ export function registerActiveContext(pi: any, options: {
     return occupancy !== null && occupancy >= snapshot.policy.refoldRatio;
   };
 
-  /**
-   * THE OUTPUT WALL.
-   *
-   * A declared serving budget has already netted out the reservation the answer needs,
-   * so the runtime treats the whole budget as spendable and fences only when it is
-   * spent. That fence is the input one, and the input is not what fails first. The host
-   * derives the answer's ceiling per request as its DESCRIPTOR window less its own
-   * estimate of the projection less a fixed safety margin, so filling the declared
-   * budget to the brim leaves the answer exactly the reservation and nothing else.
-   *
-   * Which is a fence that fires after the wire, the same defect the transmission fence
-   * was given a forward look to fix in rep 13. The commit trigger never got one.
-   * Measured 2026-08-12 (sol-20260812 rep 1): occupancy walked 218,713 -> 236,595 over
-   * twelve ordinals against a 251,520 budget with no commit, and the request built after
-   * the last measurement was served 16 output tokens and aborted. Every number was known
-   * to the runtime; nothing was weighing the request that had not been built yet.
-   *
-   * So the trigger carries what the transmission fence already carries: one worst recent
-   * inflow step. With no measured inflow this is exactly the old `used > budget`
-   * condition, which is the state it degrades to on a session's first turns.
-   */
   const outputWallDue = (snapshot: ActiveContextSnapshot): boolean => {
     const capacity = servingCapacity(snapshot.contextWindow);
     if (capacity.usedTokens === null || !(capacity.budgetTokens > 0)) return false;
-    // THE EARLY ZONE ONLY, so this is strictly additive.
-    //
-    // Past the budget the pre-existing overflow paths already own the emergency: the
-    // commit-path exemption, the last-call gate and the fence all read `used > budget`
-    // and have since before this existed. A second trigger in that territory changes the
-    // cadence of sessions that were already being handled, and gate 107 measured what
-    // that costs: a fixture parked at 88,000 against an 83,616 budget put four generator
-    // calls in flight against a bound of two. So the wall speaks only where nothing spoke
-    // before, in the band one inflow step wide below the budget.
     if (capacity.usedTokens > capacity.budgetTokens) return false;
     return capacity.usedTokens + expectedWallInflowTokens() > capacity.budgetTokens;
   };
 
-  /**
-   * What the gated round did, measured against the arming snapshot. Pins and unpins
-   * are read from the stream itself (context.protect records after the exposure); the
-   * call and mark deltas are clamped at zero because contextCalls is process-local and
-   * a reload inside a round must not report a negative response.
-   */
   const lastCallAttribution = (
     lastCall: NonNullable<ActiveContextState["lastCall"]>,
     agentMarksNow: number,
@@ -3115,17 +2234,7 @@ export function registerActiveContext(pi: any, options: {
     snapshot: ActiveContextSnapshot,
     trigger: string,
     topUp: boolean,
-    /**
-     * Pressure the waiver is measured against. Defaults to the measured ratio; the
-     * over-budget reduction forces the fence so nothing survivable is held back.
-     */
     waiverRatio: number | null = measurements.latestRatio,
-    /**
-     * A user asked for this commit. It outranks the two ECONOMIC guards -- the reclaim
-     * floor and the one-mutation-per-handoff budget -- because those exist to spend the
-     * session's rewrites well and the user just said where to spend one. It outranks
-     * nothing else: freshness, pins, exactness and the provider fence are unchanged.
-     */
     userRequested = false,
   ): Promise<Record<string, unknown> | null> => {
     const ordinal = markOrdinal(snapshot);
@@ -3138,79 +2247,16 @@ export function registerActiveContext(pi: any, options: {
       const addition = addPendingMark(state, mark);
       if (addition.added) { state = addition.state; peekAdded += 1; }
     }
-    // THE COUNT LAW RUNS AT EVERY COMMIT EPOCH, BEFORE ANYTHING ELSE PROPOSES.
-    //
-    // The number of parents the eligible-root count owes is arithmetic, not a judgment
-    // about pressure, so it is not the top-up's to make and not the user commit's to
-    // skip: at any point the count allows k groups, k parents form. Running first is
-    // what makes the rest coherent -- the groups claim their children before the top-up
-    // reads the claim set, so nothing proposes a span over a fold a parent is taking.
     for (const mark of consolidationMarks({ snapshot, state, ordinal })) {
       const addition = addPendingMark(state, mark);
       if (addition.added) { state = addition.state; consolidationAdded += 1; }
     }
     const guarded = currentTurnRefKeys(snapshot);
-    // THE GUARD IS ADJUDICATED AT COMMIT, NEVER AT PROPOSAL.
-    //
-    // `guarded` is every tool result since the last terminal assistant message. When no
-    // turn has ever closed, `currentTurnBoundary` is -1 and that set is the WHOLE
-    // window. Handing it to `topUpMarks` as `excludeRefKeys` therefore proposed nothing
-    // at all on that shape, so `guardWaiverCount` below counted zero guarded marks and
-    // the waiver it exists to grant could never fire. Measured 2026-08-10
-    // (luna-20260810 pifold rep 2): 274,173 tokens of unmarked stale spans, zero marks
-    // proposed, zero commits, two provider rejections.
-    //
-    // So the top-up proposes freely and `commitPendingMarks({ guardCurrentTurn: true,
-    // guardWaiver })` decides. That is the only place the guard has ever had a waiver,
-    // and one adjudicator is why the starvation case is reachable at all.
-    //
-    // Wedge absorption keeps the exclusion (below): it grows a mark backward over a
-    // gap without any waiver of its own, so the guard there has no second chance.
-    // THE CLASS LAW IS UNCONDITIONAL.
-    //
-    // There was a fence-only snapshot here: at high occupancy it narrowed the fresh
-    // tail to a quarter and extended the automatic reach over the middle, so a reduction
-    // that had to make a rejected request sendable had mass to reach. That existed
-    // because the runtime had exactly one answer to a provider rejection, folding
-    // harder, and folding harder inside a positional region runs out of legal material.
-    // The rollback lane is the answer now: an overflow rolls the leaf back past the
-    // request that failed and the ordinary commit runs on the shorter window. So the
-    // law holds in EVERY snapshot at every occupancy -- membership decides what folds,
-    // the fresh tail never folds, pins are exempt -- and there is one set of rules to
-    // reason about instead of two.
-    // The thermostat. Firing at the trigger line and folding down to the target line is
-    // what makes event SPACING structural rather than hoped for.
     const capacity = servingCapacity(snapshot.contextWindow);
     const usedTokens = capacity.usedTokens;
     const budgetTokens = capacity.budgetTokens;
-    // THE UNTRANSMISSIBILITY EXEMPTION, NARROWED.
-    //
-    // A request whose projection exceeds the provider input budget is rejected outright,
-    // so recovery must produce a window that fits. The hard fence, though, is a RATIO
-    // prediction. Standing near it is not the same as being unable to send, and treating
-    // the two alike handed the fence path a standing waiver from both economy guards. Measured 2026-08-07 (rep 17): fence-path
-    // window-pressure commits fired at eligible-freed shares as low as 0.018, under the
-    // 0.02 floor the guided path honors, and re-fired inside a single ordinal. So only
-    // two states outrank the economy: the overflow recovery lane, which runs because a
-    // request already did not fit, and an occupancy genuinely past the serving budget,
-    // where the next request aborts unless something moves. Everything else defers.
-    // The output wall deliberately does NOT join this list. It decides WHEN the one
-    // structural mutation of a handoff fires, not how many fire: exempting it here let a
-    // window parked one inflow step under the budget rebuild its prefix on every pass,
-    // which is the cost the mutation budget exists to refuse and what gate 58 caught.
     const overflowExempt = userRequested || curation.recoveryAttempts > 0 ||
       (usedTokens !== null && budgetTokens > 0 && usedTokens > budgetTokens);
-    // ONE STRUCTURAL MUTATION PER HANDOFF.
-    //
-    // Measured 2026-08-06 (rep 15): two context.commit records 50ms apart inside one
-    // ordinal, revisions 14 and 15 -- two REAL mutations, not a duplicated record. The
-    // pass had committed at the announced trigger, rebuilt the projection, found it
-    // still CROWDED (inside the fence margin, but transmissible), and committed again.
-    // The second commit bought margin the next pass would have bought anyway and cost a
-    // whole second prefix rewrite. So a second commit in the same handoff defers unless
-    // the request is genuinely untransmittable: a request whose projection exceeds the
-    // provider input budget is rejected outright, so recovery must produce a window that
-    // fits, and the fence and the recovery lane spend the budget to get one.
     if (instrumentation.mutationsSinceHandoff > 0 && !overflowExempt) {
       emit("context.commit", {
         trigger,
@@ -3222,20 +2268,10 @@ export function registerActiveContext(pi: any, options: {
       });
       return null;
     }
-    // THE HYSTERESIS, AND THE WHOLE FREEING TARGET.
-    //
-    // How deep this event cuts is one subtraction on one denominator: what is used,
-    // less where the thermostat wants to land, over the serving budget. The separate
-    // 0.40 floor is gone -- it was a share of the WINDOW under a share of the BUDGET,
-    // so it never once bound (the hysteresis share at these thresholds bottoms out at
-    // 0.405 of window), and a floor that cannot fire is a number that only drifts.
     const freeingTarget = usedTokens === null || budgetTokens <= 0
       ? 0
       : Math.max(0, (usedTokens - thresholds.minTarget * budgetTokens) / budgetTokens);
     if (topUp) {
-      // Measuring top-up progress against ELIGIBLE mass is what keeps the pressure
-      // backstop working under a peek-heavy agent: pinned and retained marks are mass
-      // no commit can move, and counting them as progress stops the top-up dead.
       for (const mark of topUpMarks({
         snapshot,
         state,
@@ -3246,17 +2282,6 @@ export function registerActiveContext(pi: any, options: {
         const addition = addPendingMark(state, mark);
         if (addition.added) { state = addition.state; topUpAdded += 1; }
       }
-      // DEPTH, inside the zones.
-      //
-      // Near the top of the window a commit that frees less than one turn of inflow
-      // does not reduce anything: it pays a full prefix rewrite, gives back less than
-      // the next stage adds, and the window ratchets UP through commit after commit.
-      // Measured 2026-08-06 (rep13): once the big stale mass was folded, six commits of
-      // two to four folds each carried the window from 340k to 370k and into a provider
-      // rejection, with the backstop firing the whole way. So a commit at or above the
-      // backstop that has not reached one inflow step tops up against everything
-      // ELIGIBLE instead of billing a rewrite for crumbs. Eligible is the operative
-      // word: this reaches harder inside what the class law admits, never outside it.
       const reachedShare = markAccounting(snapshot, state).eligibleFreedBudgetShare;
       const shallow = reachedShare < Math.max(commitDepthFloorShare(snapshot), freeingTarget);
       if (shallow && atOrAboveBackstop(snapshot, waiverRatio)) {
@@ -3272,9 +2297,6 @@ export function registerActiveContext(pi: any, options: {
         }
       }
     }
-    // Boundary slivers ride along in the mutation this commit already pays for; they
-    // are never a mutation of their own, and a gap above the tiny token threshold is
-    // deliberate curation the absorber must not touch.
     const wedges = absorbWedgeMarks({
       snapshot,
       state,
@@ -3283,18 +2305,6 @@ export function registerActiveContext(pi: any, options: {
     });
     state = wedges.state;
     const accounting = markAccounting(snapshot, state);
-    // A COMMIT PASS THAT FINDS NOTHING SAYS SO.
-    //
-    // This was a bare `return null`, and it is how the rep-2 starvation stayed invisible
-    // for 25 stages: the last call announced 274,173 tokens of unmarked stale spans, the
-    // pass that answered it proposed nothing, and the stream carried no record that a
-    // commit had even been attempted. Every other deferral on this path already names
-    // itself; this one is the same shape with the reason that matters, and it reports
-    // the remainder beside the emptiness so the contradiction -- mass on the table, no
-    // proposal -- is readable on one record instead of inferred across two.
-    //
-    // Stream record, not a `context.receipt`: receipts are window carriers, and a pass
-    // that changed nothing must not add bytes to the projection to announce it.
     if (!accounting.pending) {
       const remainder = unmarkedRemainder(snapshot, state, projectionCharsPerToken());
       emit("context.commit", {
@@ -3309,12 +2319,6 @@ export function registerActiveContext(pi: any, options: {
       });
       return null;
     }
-    // The reclaim floor. One structural mutation per model call is the budget, so a
-    // commit that would free crumbs spends the whole budget on nothing: it defers and
-    // the marks accumulate. A request whose projection exceeds the provider input budget
-    // is rejected outright, so recovery must produce a window that fits: genuine overflow
-    // -- the recovery lane, or an occupancy already past the serving budget -- fires
-    // regardless of what it frees. Standing at the fence RATIO does not.
     if (!overflowExempt &&
         accounting.eligibleFreedBudgetShare < COMMIT_RECLAIM_FLOOR_SHARE) {
       persistence.state = state;
@@ -3332,19 +2336,11 @@ export function registerActiveContext(pi: any, options: {
       return null;
     }
     const bytesBefore = bytes(projectActiveContext(snapshot, state));
-    // The guard protects an in-flight excursion, never at the cost of the session's
-    // ability to send a request at all: above the pressure backstop the oldest guarded
-    // marks are released. The guard is a protection with a WAIVER, which is why it
-    // survived the fence-snapshot deletion: one protection, one owner, one waiver.
     const guardWaiver = guardWaiverCount({
       snapshot,
       ratio: waiverRatio,
       guardedMarks: pendingMarks(state).filter((mark) =>
         markTouchesCurrentTurn(state, mark, guarded)).length,
-      // The starvation test asks the same question the commit will, against the same
-      // snapshot the commit adjudicates against: does this epoch have work that does
-      // not touch the open turn? Two snapshots gave two answers, and the one that
-      // decided the commit was not the one being asked. There is one snapshot now.
       otherApplicableMarks: pendingMarks(state).filter((mark) =>
         !markTouchesCurrentTurn(state, mark, guarded) &&
         markEligibility(snapshot, state, mark) === "eligible").length,
@@ -3357,24 +2353,6 @@ export function registerActiveContext(pi: any, options: {
       guardCurrentTurn: true,
       guardWaiver,
     });
-    // THE EPOCH CLOSES ITS OWN COUNT.
-    //
-    // The folds this commit just landed are eligible roots the moment they exist, and
-    // the law is about the count, not about which pass noticed it. Leaving them for the
-    // next epoch is what let the pile stand between commits: measured 2026-08-10 (PT-3),
-    // a commit that landed 26 tool folds left 32 visible roots up until the next band
-    // crossing four cycles later. So the epoch re-reads its own count and parents what
-    // it just made, inside the rewrite it has already paid for. No waiver here: a parent
-    // this round cannot apply is held by the ordinary guard and waits, exactly like any
-    // other fold. It converges because a parent is excluded from the count it came from.
-    //
-    // The loop's own exits are the real ones, and they are the two immediately below: no
-    // new consolidation mark, or nothing applied. Both are the fixpoint gate 13 states.
-    // A counted bound of four used to wrap this as well, which could only ever cut the
-    // fixpoint short, and only in a session with more than ten thousand visible roots,
-    // since each round divides the count by `consolidateAfter`. It is gone for the same
-    // reason the two scheduling counters were: a bound that cannot fire is unread, and a
-    // bound that can fire here would silently break the law the epoch is here to keep.
     for (;;) {
       let closing = result.state;
       for (const mark of consolidationMarks({ snapshot, state: closing, ordinal })) {
@@ -3390,9 +2368,6 @@ export function registerActiveContext(pi: any, options: {
         guardCurrentTurn: true,
       });
       if (!closed.applied.length) break;
-      // A mark the guard RETAINED is still pending, so the closing round sees it again
-      // and reports it again; only the terminal refusals accumulate, and the last round
-      // is the truth about what is still held.
       result = {
         ...closed,
         applied: [...result.applied, ...closed.applied],
@@ -3401,16 +2376,10 @@ export function registerActiveContext(pi: any, options: {
       };
     }
     persistence.state = result.state;
-    // The upgrade wedge: model briefs written since the last boundary replace their
-    // deterministic ones HERE, inside the mutation this commit already pays for, before
-    // anything measures what the commit did.
     const upgradedFolds = applyBriefUpgrades();
     const upgradeFailures = upgrades.failures;
     const upgradeError = upgrades.lastError;
     const upgradeCures = upgrades.cures;
-    // Read on the same boundary as the failures and for the same reason: these were shed
-    // while the previous boundary's batch was still queueing, so this is the first commit
-    // record that can carry them.
     const upgradeAbandoned = upgrades.abandoned;
     upgrades.failures = 0;
     upgrades.cures = 0;
@@ -3418,8 +2387,6 @@ export function registerActiveContext(pi: any, options: {
     upgrades.lastError = null;
     const bytesAfter = bytes(projectActiveContext(snapshot, persistence.state));
     const freedBytes = Math.max(0, bytesBefore - bytesAfter);
-    // The cost of the agent's pins, measured at the moment it matters: mass this
-    // commit could not touch because protect holds it.
     const pinHeld = protectedStaleMass(snapshot, result.state);
     const commitEvent = emit("context.commit", {
       trigger,
@@ -3427,19 +2394,12 @@ export function registerActiveContext(pi: any, options: {
       reason: null,
       eligible_freed_share: accounting.eligibleFreedBudgetShare,
       reclaim_floor_share: COMMIT_RECLAIM_FLOOR_SHARE,
-      // The two first-class dials: how much ONE event reclaims, and how long since the
-      // last one. A trigger that frees too little re-fires immediately, and that shape
-      // is only visible with both numbers on the same record.
       target_freed_share: freeingTarget,
       hysteresis_target_share: freeingTarget,
       target_occupancy_share: thresholds.minTarget,
       shortfall_share: Math.max(0, freeingTarget - accounting.eligibleFreedBudgetShare),
       occupancy_tokens_before: usedTokens,
       budget_tokens: budgetTokens,
-      // The forward look, on the record beside the occupancy it was added to. A commit
-      // that fired because one more turn would have spent the answer's reservation reads
-      // differently from one that fired at the band top, and the difference is only
-      // legible with the allowance printed.
       expected_inflow_tokens: expectedWallInflowTokens(),
       output_wall: outputWallDue(snapshot),
       requests_since_previous: instrumentation.requests - instrumentation.lastMutationRequest,
@@ -3447,8 +2407,6 @@ export function registerActiveContext(pi: any, options: {
         ? null
         : usedTokens - instrumentation.lastMutationTokens,
       applied_marks: result.applied.length,
-      // Refusal is TERMINAL only. A mark whose span was still fresh is deferred, not
-      // refused: it is held and folds at the first commit after the span ages out.
       refused_marks: result.refused.filter((mark) => !mark.retained).length,
       deferred_marks: result.retained.length,
       waived_marks: result.waived.length,
@@ -3460,34 +2418,15 @@ export function registerActiveContext(pi: any, options: {
       consolidation_marks: consolidationAdded,
       closing_consolidation_marks: closingAdded,
       absorbed_wedges: wedges.absorbed.length,
-      // The upgrade is a mutation of a fold whose `context.fold` record was written at
-      // creation, so the stream would otherwise show a brief that silently changed. The
-      // count, the ids, and the failures ride the boundary that carried them.
       brief_upgrades: upgradedFolds.length,
       brief_upgrade_ids: upgradedFolds.join(","),
       brief_upgrade_failures: upgradeFailures,
-      // Briefs that needed a second ask before they met the contract. Beside the failures
-      // rather than inside them: a cured brief is a brief that landed, and the two together
-      // are how the brief cap gets judged against something other than intuition.
       brief_upgrade_cures: upgradeCures,
       brief_upgrade_error: upgradeError,
-      // Leaves the lane will never brief, because the queue was full when they committed
-      // and a leaf's source is gone by the next boundary. The one permanent outcome here,
-      // and the only one `brief_upgrades_waiting` cannot show, since a shed leaf is exactly
-      // what is no longer waiting. A run whose generator is too slow for its ladder reads
-      // as falling brief quality unless this number is beside it.
       brief_upgrades_abandoned: upgradeAbandoned.length,
       brief_upgrades_abandoned_ids: upgradeAbandoned.join(","),
-      // Everything still owed to a FOLD: queued, in flight, and (always zero once the
-      // wedge above ran) written but uncarried. In flight is counted because the lane
-      // holds several calls open and work nobody can see is work nobody bounds. Counted in
-      // folds rather than calls because a call now carries a whole commit's spans, and the
-      // question this answers is how many folds are still reading deterministic.
       brief_upgrades_waiting: upgrades.ready.length + upgrades.running.size +
         upgrades.queue.reduce((total, entry) => total + entry.members.length, 0),
-      // The same work in the unit the lane's two constants actually bound: calls, queued
-      // plus in flight. Reported beside the fold count so a backed-up lane cannot read as
-      // a busy one, or the reverse.
       brief_upgrade_calls: upgrades.queue.length + new Set(upgrades.running.values()).size,
       freed_bytes: freedBytes,
       freed_tokens: estimatedTokens(freedBytes),
@@ -3501,11 +2440,6 @@ export function registerActiveContext(pi: any, options: {
     instrumentation.mutationsSinceHandoff += 1;
     instrumentation.lastMutationRequest = instrumentation.requests;
     instrumentation.lastMutationTokens = usedTokens;
-    // THE RESPONSE ATTRIBUTION. Whatever the gated round did, or that it did nothing,
-    // is linked to the exposure it answered, and the exposure is consumed by the
-    // commit whatever its trigger: a fence or user commit landing mid-round is still
-    // the commit boundary the last-call announced. The carrier's disappearance rides
-    // this commit's own rewrite.
     if (persistence.state.lastCall) {
       const lastCall = persistence.state.lastCall;
       const attribution = lastCallAttribution(lastCall, accounting.agentMarks);
@@ -3518,9 +2452,6 @@ export function registerActiveContext(pi: any, options: {
       });
       clearLastCall();
     }
-    // A commit that drops occupancy back under a waypoint re-arms its notice: the next
-    // upward crossing is a new event and earns a new one. The estimate is the same one
-    // the receipt reports: measured occupancy before, less what this commit freed.
     if (persistence.state.notices && usedTokens !== null && budgetTokens > 0) {
       const postOccupancy = Math.max(0, usedTokens - estimatedTokens(freedBytes)) / budgetTokens;
       const fired = persistence.state.notices.fired.filter((share) => postOccupancy >= share);
@@ -3528,12 +2459,6 @@ export function registerActiveContext(pi: any, options: {
         persistence.state = { ...persistence.state, notices: { ...persistence.state.notices, fired } };
       }
     }
-    // The rider: at most ONE action prompt per fold epoch, composed from post-commit
-    // numbers, persisted as literal bytes, delivered beside the receipt inside the
-    // rewrite this commit already paid for. The epoch key is the commit event's own
-    // stream sequence: strictly monotone, one per applied commit, so refold-only
-    // epochs get their rider too and no two epochs can ever share a key. The next
-    // epoch REPLACES the text; nothing stacks.
     const riderEpoch = commitEvent.seq;
     if (persistence.state.rider?.epoch !== riderEpoch) {
       const postAccounting = markAccounting(snapshot, persistence.state);
@@ -3571,17 +2496,12 @@ export function registerActiveContext(pi: any, options: {
       const fold = persistence.state.folds.find((item) => item.id === applied.foldId);
       if (fold?.kind === "tool-result") foldedToolResults += 1;
       else foldedSpans += 1;
-      // A reclaimed peek copy names what it copied. Derived from the transcript rather
-      // than carried on the mark, so the pointer is the same whichever mechanism claimed
-      // the copy: the exposure's reclaim marking, the commit's, or the doorless ladder.
       const peekedSources = fold?.kind === "tool-result"
         ? peekedSourceFoldIds(snapshot, flattenFoldRefs(fold, persistence.state))
         : null;
       emit("context.fold", {
         commit_seq: commitEvent.seq,
         fold_id: applied.foldId,
-        // The MARK this fold came from. The stream is now the only account of what a
-        // commit applied, so it has to name both ends of that mapping.
         mark_id: applied.id,
         fold_kind: fold?.kind ?? applied.mark,
         origin: applied.origin,
@@ -3591,8 +2511,6 @@ export function registerActiveContext(pi: any, options: {
         brief_provenance: fold ? foldProvenance(fold, persistence.state).kind : null,
       });
     }
-    // Queued AFTER the applications above, so no fold can be committed and upgraded on
-    // one boundary: the generator has not run yet, and the wait is the mechanism.
     queueBriefUpgrades(snapshot, state, result.applied.map((applied) => applied.foldId));
     for (const wedge of wedges.absorbed) {
       emit("context.absorb", {
@@ -3606,8 +2524,6 @@ export function registerActiveContext(pi: any, options: {
         threshold_tokens: MAX_WEDGE_ABSORB_TOKENS,
       });
     }
-    // A bound-out top-up and a silently dropped agent mark are both invisible in an
-    // applied/refused list alone, so the epoch reports its own composition.
     return {
       trigger,
       applied: result.applied,
@@ -3618,13 +2534,9 @@ export function registerActiveContext(pi: any, options: {
       peekMarks: peekAdded,
       topUpMarks: topUpAdded,
       consolidationMarks: consolidationAdded,
-      // Parents formed over the folds THIS commit landed. They were never in
-      // `pendingMarks`, so an epoch's arithmetic is applied = pending + closing.
       closingMarks: closingAdded,
       absorbedWedges: wedges.absorbed.length,
       absorbed: wedges.absorbed,
-      // What the commit actually folded, the way an agent counts it, so the receipt can
-      // report impact instead of an opaque mark total.
       foldedSpans,
       foldedToolResults,
       occupancyTokensBefore: usedTokens,
@@ -3657,7 +2569,6 @@ export function registerActiveContext(pi: any, options: {
     };
   };
 
-  /** The two curation signals, measured against the ONE serving budget. */
   const measuredCurationSignals = (snapshot: ActiveContextSnapshot): CurationSignals => {
     const capacity = servingCapacity(snapshot.contextWindow);
     curation.lastSignals = curationSignals({
@@ -3672,35 +2583,8 @@ export function registerActiveContext(pi: any, options: {
     return curation.lastSignals;
   };
 
-  /**
-   * The silent early commit. The two signals decide, the reclaim floor stops a commit
-   * that would free nothing, and the hysteresis stops a plateau from reading as a
-   * stream of events. What is gone is only the announcement in front of it.
-   */
-  /**
-   * THE trigger, with its one piece of hysteresis.
-   *
-   * Occupancy at or above maxTarget, and then the reopen latch: a window that is still
-   * full because the last commit could not reach the target is the SAME event, not a
-   * new one, so a second commit waits for at least a reclaim floor of genuinely new
-   * eligible mass. Without it a parked window fires a commit per pass and every one of
-   * them rebuilds the prefix for crumbs.
-   */
   const commitTriggerDue = (snapshot: ActiveContextSnapshot, ratio: number | null): boolean => {
     if (!persistence.state) return false;
-    // The output wall outranks the quiet-runtime line rather than sitting under it. A
-    // window one inflow step from spending the answer's whole reservation is past
-    // economising, and the band top is not the thing it is about to cross.
-    //
-    // ONE COMMIT PER CROSSING, NOT ONE PER PASS. The wall is a level, and a window that
-    // sits on it sits there for many passes: releasing the reopen latch on each of them
-    // fires a commit per pass, which is the prefix-rewrite churn the latch exists to
-    // prevent and which the quiet cadence is built around. Measured on gate 52's fixture:
-    // the first wall commit applied 44 marks and correctly retained all ten of the open
-    // turn, and the two that followed it applied nothing, rewrote the prefix anyway, and
-    // dragged the guard's starvation waiver in on a session that had just made progress.
-    // So the crossing is the event. While the wall stays due the ordinary hysteresis
-    // decides, which is what makes a second commit wait for genuinely new foldable mass.
     const wall = outputWallDue(snapshot);
     if (!wall) curation.wallEpisodeOpen = false;
     if (!wall && !epochCommitDue(snapshot, ratio)) return false;
@@ -3710,12 +2594,6 @@ export function registerActiveContext(pi: any, options: {
       curation.reopenBaselineShare = null;
       return true;
     }
-    // The latch is an ECONOMY rule, and the fence is not latched: a request whose
-    // projection exceeds the provider input budget is rejected outright, so recovery
-    // must produce a window that fits.
-    // A request that does not fit gets its commit whether or not the previous one left
-    // new eligible mass behind; holding it back would be spending the session's
-    // transmissibility to save a prefix rewrite.
     if (typeof ratio === "number" && Number.isFinite(ratio) && ratio >= hardFenceRatio(snapshot)) {
       curation.reopenBaselineShare = null;
       return true;
@@ -3723,16 +2601,6 @@ export function registerActiveContext(pi: any, options: {
     if (curation.reopenBaselineShare !== null) {
       const eligibleShare = markAccounting(snapshot, persistence.state).eligibleFreedBudgetShare;
       if (eligibleShare - curation.reopenBaselineShare < COMMIT_RECLAIM_FLOOR_SHARE) {
-        // A HOLD THAT SAYS SO.
-        //
-        // This was a bare `return false`, and it is the last silent deferral on the
-        // commit path: every other one names itself and reports its numbers. In
-        // sol-20260812 rep 1 the trigger was due for twelve straight ordinals while
-        // occupancy climbed to 94 percent of budget, and the stream carries no record of
-        // what held it, so the stall can be proven but not explained. Emitted on every
-        // held pass rather than once per episode: under-reporting is the defect being
-        // fixed, the record is a stream record that never reaches the projection, and
-        // the volume is bounded by passes above the band top.
         const capacity = servingCapacity(snapshot.contextWindow);
         emit("context.commit", {
           trigger: "band-top",
@@ -3754,12 +2622,6 @@ export function registerActiveContext(pi: any, options: {
     return true;
   };
 
-  /**
-   * Condition (a) of the reopen hysteresis, evaluated on EVERY context pass. A window
-   * that fell back under the trigger has ended its cycle, and the next crossing is a
-   * fresh event. This cannot live inside the trigger: the quiet passes that matter are
-   * exactly the ones too far below it to evaluate it.
-   */
   const clearCommitLatchBelowTrigger = (): void => {
     if (curation.reopenBaselineShare === null) return;
     const capacity = servingCapacity(lifecycle.latestSnapshot?.contextWindow ?? null);
@@ -3769,11 +2631,6 @@ export function registerActiveContext(pi: any, options: {
     }
   };
 
-  /**
-   * One receipt per automatic context action, in the window and in the durable stream.
-   * Informatory, never exhortative: it says what happened, what it freed, and which
-   * verbs correct it. A mark that changed nothing is not an event and gets no receipt.
-   */
   const noteAutomaticReceipt = (
     snapshot: ActiveContextSnapshot,
     action: Record<string, unknown>,
@@ -3796,7 +2653,6 @@ export function registerActiveContext(pi: any, options: {
       foldsCommitted: epoch ? Number(epoch.appliedMarks ?? 0) : 0,
       foldsCreated: foldIds || (epoch ? Number(epoch.appliedMarks ?? 0) : 0),
       freedTokens,
-      // The impact, in the same unit the budget is stated in.
       occupancyBefore,
       occupancyAfter: occupancyBefore === null ? null : Math.max(0, occupancyBefore - freedTokens),
       spansFolded: epoch ? Number(epoch.foldedSpans ?? 0) : foldIds,
@@ -3810,13 +2666,6 @@ export function registerActiveContext(pi: any, options: {
     }));
   };
 
-  /**
-   * Threshold notices, evaluated on every pass the ladder runs on. One waypoint fires
-   * once per upward crossing of the measured occupancy; delivery is an append-once
-   * carrier plus its stream record, and re-arming belongs to the commit that drops
-   * occupancy back under the line. Default on; `guidance.thresholdNotices: false`
-   * registers the runtime with the waypoints silent.
-   */
   const deliverThresholdNotices = (snapshot: ActiveContextSnapshot): boolean => {
     if (!guidance.thresholdNotices || !persistence.state) return false;
     const capacity = servingCapacity(snapshot.contextWindow);
@@ -3853,10 +2702,6 @@ export function registerActiveContext(pi: any, options: {
     return changed;
   };
 
-  /**
-   * The same selection, read rather than delivered: what the next carrier WOULD say,
-   * with the ledger that decides whether it says anything at all.
-   */
   const statusSurfacing = (snapshot: ActiveContextSnapshot): Record<string, unknown> => {
     const ledger = persistence.state ? surfacingLedger(persistence.state) : [];
     if (!persistence.state) return { slate: [], line: null, ledger, silenced: [] };
@@ -3889,21 +2734,6 @@ export function registerActiveContext(pi: any, options: {
     };
   };
 
-  /**
-   * THE SURFACING SLATE, delivered.
-   *
-   * The agent cannot peek a fold it does not know to want, so one line names the fold
-   * whose stored content matches the task in hand when its brief does not. Where it
-   * lands is the whole economics: only carriers that ride a rewrite the runtime is
-   * already paying for (the pre-commit last call and the post-commit rider) plus the
-   * on-demand status surface, which the agent asked for. The per-request ephemeral
-   * carrier stays dead; it cost 21.9% of every input token in rep 21 and nothing else
-   * about this build changes that verdict.
-   *
-   * One suggestion per delivery point, and most delivery points get none. Every
-   * delivery first resolves whatever offers have run out of window, so the ignore that
-   * silences a fold is recorded before the next selection reads the ledger.
-   */
   const deliverSurfacing = (snapshot: ActiveContextSnapshot, carrier: string): string | null => {
     if (!persistence.state) return null;
     const ordinal = markOrdinal(snapshot);
@@ -3949,18 +2779,6 @@ export function registerActiveContext(pi: any, options: {
     return text;
   };
 
-  /**
-   * THE PRE-COMMIT LAST-CALL GATE. When the band-top trigger fires, the commit defers
-   * exactly one gated round behind one exposure of the ruled prompt; then it proceeds
-   * with whatever marks exist. A request whose projection exceeds the provider input
-   * budget is rejected outright, so recovery must produce a window that fits: fence
-   * pressure, the recovery lane, or an occupancy already past the serving budget
-   * commit NOW, and the user
-   * command never reaches this gate because explicit intent is its own answer. The
-   * round is measured from DELIVERY: the commit proceeds only on a context pass whose
-   * ordinal is past the pass that rendered the exposure, which is exactly one agent
-   * response between prompt and rewrite.
-   */
   const lastCallVerdict = (
     snapshot: ActiveContextSnapshot,
     pressure: number | null,
@@ -3970,11 +2788,6 @@ export function registerActiveContext(pi: any, options: {
     const capacity = servingCapacity(snapshot.contextWindow);
     const fenceLevel = typeof pressure === "number" && Number.isFinite(pressure) &&
       pressure >= hardFenceRatio(snapshot);
-    // The output wall deliberately does NOT proceed here. It buys the crossing one inflow
-    // step of lead, and the gated round is what that lead is for: the agent still gets its
-    // one bounded turn to curate before a rewrite, which is a contract the wall has no
-    // business cancelling. If the round overruns and occupancy passes the budget outright,
-    // the condition below is what proceeds, on the pass that builds the next request.
     const overBudget = capacity.usedTokens !== null && capacity.budgetTokens > 0 &&
       capacity.usedTokens > capacity.budgetTokens;
     if (fenceLevel || overBudget || curation.recoveryAttempts > 0 || curation.pendingRejection) {
@@ -3989,13 +2802,6 @@ export function registerActiveContext(pi: any, options: {
 
   const exposeLastCall = (snapshot: ActiveContextSnapshot): void => {
     if (!persistence.state) return;
-    // THE PEEK RECLAIM IS MARKED HERE, NOT ONLY AT THE COMMIT.
-    //
-    // A peek copy is reclaimed at the next commit by contract, and a contract the agent
-    // cannot see until after it executes is not one it can veto. The exposure is the one
-    // bounded round before the rewrite, so minting the reclaim marks now puts the pending
-    // disposal in front of the agent while a pin still changes the outcome: a pinned mark
-    // waits instead of applying, and lifting the pin hands the copy to a later commit.
     const exposureOrdinal = markOrdinal(snapshot);
     let peekReclaims = 0;
     for (const mark of ephemeralPeekMarks({ snapshot, state: persistence.state, ordinal: exposureOrdinal })) {
@@ -4053,10 +2859,6 @@ export function registerActiveContext(pi: any, options: {
       summarizerAvailable: Boolean(options.summarizeContextSpan),
       failedPreparationIds: ladder.failedPreparations,
     };
-    // The ladder decides but does not move bytes. Marks already pending are decisions
-    // already made: excluding the evidence they cover makes every eligible turn choose
-    // NEW stale content, so marks accumulate with stale growth instead of re-proposing
-    // one stale batch.
     const markLadderSelection = (): Record<string, unknown> | null => {
       if (!persistence.state) return null;
       const decision = selectAutomaticRung(snapshot, persistence.state, ratio, {
@@ -4089,29 +2891,6 @@ export function registerActiveContext(pi: any, options: {
     };
     let epoch: Record<string, unknown> | null = null;
     let inlineRungs = true;
-    // QUIET RUNTIME, AND THE ONE TRIGGER.
-    //
-    // A commit is an epoch transition: it rewrites the projection, every rewrite risks
-    // the whole prefix cache, so the cadence has to be the fewest commits that still
-    // keep the window inside its budget. Occupancy reaching maxTarget is the whole
-    // automatic condition. Below it the runtime is quiet and marks accumulate free;
-    // at it, one commit folds down toward minTarget, and the gap between the two lines
-    // is what makes the spacing of events structural rather than hoped for.
-    //
-    // Two other arms used to reach this line and both are deleted. The eligible-share
-    // arm fired 164 commits from ordinal 17 in rep 15 on marks that had not earned a
-    // rewrite, and it could fire below maxTarget, which is the quiet law it sat under.
-    // The stale-mass AND-condition guarded an ANNOUNCEMENT that no longer exists: a
-    // commit is never announced, so a commit with nothing eligible now applies nothing
-    // and reports it rather than being suppressed in advance.
-    //
-    // The trigger decides early and says nothing. Nothing warns that a commit is
-    // coming, because a warning has to arrive before the event it warns about and
-    // therefore has to break a prefix nothing else was breaking.
-    // Evaluated on EVERY pass the ladder runs on, which is where the pressure backstop
-    // always sat. Crossing the band top is a property of occupancy, not of which
-    // lifecycle hook happened to notice it, and a trigger that waits for the next
-    // projection pass is a window that keeps climbing while it waits.
     const noticesChanged = deliverThresholdNotices(snapshot);
     let lastCallChanged = false;
     const commitDue = commitTriggerDue(snapshot, ratio);
@@ -4127,20 +2906,12 @@ export function registerActiveContext(pi: any, options: {
           true,
           rungOptions.waiverRatio ?? ratio,
         );
-        // Latch the eligible share this commit left behind, so the next crossing waits
-        // for genuinely new foldable mass rather than for the same window to still be
-        // full. The band top is a LINE, and a window parked on it is one event.
         if (persistence.state) {
           curation.reopenBaselineShare =
             markAccounting(snapshot, persistence.state).eligibleFreedBudgetShare;
         }
       }
-      // "hold": the exposure is out and the round is still the agent's. Marks keep
-      // accumulating below; nothing commits and nothing re-exposes.
     } else if (persistence.state.lastCall) {
-      // The crossing died without its commit (a user rescue or expiry dropped
-      // occupancy back under the trigger), so the exposure lapses: attributed,
-      // cleared, and the next crossing is a fresh event with a fresh exposure.
       const capacity = servingCapacity(snapshot.contextWindow);
       if (capacity.usedTokens !== null && capacity.budgetTokens > 0 &&
           capacity.usedTokens / capacity.budgetTokens < thresholds.maxTarget) {
@@ -4160,14 +2931,6 @@ export function registerActiveContext(pi: any, options: {
         lastCallChanged = true;
       }
     }
-    // An inline rung is free only INSIDE a rewrite the epoch already paid for. Below
-    // the threshold no commit ran, and an epoch that applied NOTHING -- every mark
-    // held back by an open turn or by ineligibility -- paid for no rewrite either,
-    // so folding inline there is a fresh single-fold rewrite of its own. Measured
-    // 2026-08-06 (rep 10): the current-turn guard retained all nine marks every turn
-    // while the inline rung folded one batch per turn anyway, 52 single-fold
-    // rewrites that left the prefix cache share at zero. Below a paid rewrite the
-    // ladder MARKS, so the decisions batch into the first commit that can apply them.
     inlineRungs = Boolean(epoch) && Number(epoch?.appliedMarks ?? 0) > 0;
     if (!inlineRungs) {
       const marked = markLadderSelection();
@@ -4175,26 +2938,11 @@ export function registerActiveContext(pi: any, options: {
         if (epoch) ladder.lastAutomaticAction = { ...marked, epoch };
         return ladder.lastAutomaticAction;
       }
-      // A carrier change is durable state even when no mark and no epoch moved: the
-      // exposure and the notices must survive a reload, so the pass returns an action
-      // for the transaction to persist. Never a receipt: a carrier reports itself.
       if (!epoch && (lastCallChanged || noticesChanged)) {
         ladder.lastAutomaticAction = { kind: "carrier", foldIds: [], sourceIds: [], sourceBytesSaved: 0 };
         return ladder.lastAutomaticAction;
       }
     }
-    // Evidence a pending mark already covers is not the inline rung's to fold: a mark
-    // the commit RETAINED (the open turn's own reads) would otherwise be folded here
-    // by the very pass that just protected it.
-    //
-    // The open turn's keys are excluded DIRECTLY, not just via the marks that claim
-    // them. Claiming is not protection: once a commit applies every pending mark the
-    // claim set is empty, and the inline rung then folds the open turn's oldest read
-    // with nothing left to stop it. That is the rep-8 shape, and byte freshness does
-    // not reach it -- the first read of a long excursion sits outside the fresh tail
-    // while the turn that gathered it is still running. It became reachable when the
-    // quiet cadence started landing a commit on the same context pass, which is what
-    // turns the inline rung on in the first place.
     const selection = inlineRungs
       ? selectAutomaticRung(snapshot, persistence.state, ratio, {
         ...rungSelectionOptions,
@@ -4205,11 +2953,6 @@ export function registerActiveContext(pi: any, options: {
         claimedFoldIds: markedFoldIds(persistence.state),
       })
       : null;
-    // Above the commit threshold we are already inside the epoch's rewrite turn, so
-    // every rung applies inline: the extra rung costs at most one more invalidation
-    // in a turn that has already paid one. Restricting this to prepared chapters made
-    // the refold and consolidation rungs unreachable in epoch mode, which drove a
-    // session whose reducible bytes sit in expanded folds into the hard fence.
     const applicable = selection;
     if (!applicable || applicable.kind === "chapter-prepare") {
       if (!epoch || !persistence.state) return null;
@@ -4276,8 +3019,6 @@ export function registerActiveContext(pi: any, options: {
         `Stale folded chapters were consolidated under ${id}; every child remains expandable.`;
     } else if (applicable.kind === "chapter") {
       const chapter = applicable.candidate;
-      // Bite-sized by construction: an oversized coherent chapter becomes sequential
-      // bounded folds, each with its own brief, split only at closed unit boundaries.
       const spanChars = candidateSpanChars(snapshot, persistence.state, chapter);
       const parts = splitCandidateBySize(snapshot, persistence.state, chapter);
       const foldIds: string[] = [];
@@ -4373,12 +3114,6 @@ export function registerActiveContext(pi: any, options: {
   ): Promise<Record<string, unknown> | null> => {
     const operation = ladder.actionQueue.then(async () => {
       const action = await runAutomaticRungTransaction(snapshot, ratio, ctx, phase, rungOptions);
-      // Where the generator is started from a pass: after the transaction, so the calls
-      // sit BETWEEN boundaries. Folds queued by the commit this pass just made are
-      // briefed now and land on the next commit, which is the whole shape of the lane.
-      // Afterwards each finishing call starts the next, so this is the lane's ignition
-      // rather than its pace. Parents waiting on their children are taken up here too:
-      // a pass is the other place we know the lane may have room.
       resumeBriefUpgrades(snapshot, ctx);
       return action;
     });
@@ -4393,12 +3128,6 @@ export function registerActiveContext(pi: any, options: {
       return [];
     }
   };
-  // A same-session start/tree reload is a projection-generation mutation.
-  // Queue it behind every context authority → preparation → commit →
-  // projection transaction, then serialize the actual load with the action
-  // queue. Appending to actionQueue only after the context queue drains is
-  // deliberate: a running context may itself need actionQueue to commit its
-  // final-rung chapter, so capturing both queues up front would deadlock.
   const enqueueLifecycleLoad = async (ctx: any): Promise<void> => {
     const operation = lifecycle.contextQueue.then(() => {
       const loadOperation = ladder.actionQueue.then(async () => {
@@ -4424,11 +3153,6 @@ export function registerActiveContext(pi: any, options: {
     }
   };
 
-  /**
-   * State the resolved serving budget once, at startup, before anything reads it. A
-   * budget nobody can see in the stream is how rep 15 spent a whole run on a 272,000
-   * descriptor without a single record saying so.
-   */
   const recordResolvedCapacity = (ctx: any): void => {
     const capacity = currentCapacity(ctx);
     emit("context.capacity", {
@@ -4496,9 +3220,6 @@ export function registerActiveContext(pi: any, options: {
     measurements.latestRatio = null;
     measurements.lastProviderMeasurement = null;
     measurements.wallInflowSteps.length = 0;
-    // A different model or thinking level is a different tokenizer, so counts taken
-    // under the old one describe nothing here. The generation the anchor carries would
-    // already refuse it; dropping it releases the projection text it held as well.
     measurements.projectionAnchor = null;
     nativeCompaction.lastThresholdDecision = null;
     updateStatus(ctx);
@@ -4567,12 +3288,7 @@ export function registerActiveContext(pi: any, options: {
         measurements.latestRatio = contextUsageRatio(observedMeasurement);
         if (durableProviderMeasurementMatches(observedMeasurement) && measurements.latestRatio !== null) {
           measurementStateChanged = accountAnchoredMeasurement(observedMeasurement);
-          // Calibrate BEFORE the new measurement becomes the previous one: the inflow
-          // step is the difference between them.
           noteProjectionCalibration(observedMeasurement);
-          // Anchor before this pass builds anything: `previousText` is still the
-          // projection the provider just counted, and the projection built below is the
-          // one that either extends it or does not.
           noteProviderProjectionAnchor(observedMeasurement);
           measurements.lastProviderMeasurement = observedMeasurement;
           startPreparation(snapshot, measurements.latestRatio, ctx);
@@ -4612,27 +3328,14 @@ export function registerActiveContext(pi: any, options: {
         updateStatus(ctx);
         return { messages: event.messages };
       }
-      // A projection larger than the serving budget is never transmitted, whatever the
-      // last measured ratio says about the request before it.
       const budgeted = await enforceProjectionBudget(snapshot, projected, ctx);
       projected = budgeted.projected;
-      // Every projection this process BUILDS is a size reference for the calibration,
-      // including one the fence aborted. Recording only sent projections locks an
-      // already-large session out of calibrating at all: its first projection aborts
-      // under the uncalibrated constant, so nothing is ever sent, so nothing ever
-      // measures the ratio, so it aborts forever.
       const reading = projectedTokenReading(projected);
       measurements.lastProjectedChars = reading.chars;
       measurements.lastProjectedEstimate = reading.tokens;
       measurements.lastProjectedEstimateBasis = reading.basis;
       measurements.lastProjectedSizeTokens = Math.ceil(reading.chars / projectionCharsPerToken());
       measurements.lastProjectedEstimateCalibrated = measurements.projectionCalibrations.length > 0;
-      // An aborted request still returns the PROJECTION. Handing back the raw branch
-      // instead makes the aborted turn the largest message list the session ever
-      // produced -- the corpus, folds and all -- which is the exact inverse of what a
-      // fence is for, and it is what an abort looked like in rep12: 3,952,934 chars
-      // against a 1,322,385-char projection of the same session. It is not noted as a
-      // cache observation, because it was never sent.
       if (budgeted.aborted) {
         updateStatus(ctx);
         return { messages: projected };
@@ -4684,8 +3387,6 @@ export function registerActiveContext(pi: any, options: {
         !durableProviderMeasurementMatches(measurement) ||
         measuredRatio === null) return;
     const measurementStateChanged = accountAnchoredMeasurement(measurement);
-    // The provider accepted a request: whatever the recovery lane spent belongs to an
-    // inflow that is now behind us, and the cap resets for the next one.
     curation.recoveryAttempts = 0;
     curation.pendingRejection = null;
     noteWallInflow(measurement);
@@ -4727,7 +3428,6 @@ export function registerActiveContext(pi: any, options: {
         preservedShare: instrumentation.lastPreservedShare,
       });
       if (observation) {
-        // The join key: this is where the stream meets provider-side telemetry.
         emit("context.usage", {
           provider: ownValue(message, "provider") ?? null,
           model: ownValue(message, "model") ?? null,
@@ -4761,18 +3461,9 @@ export function registerActiveContext(pi: any, options: {
       );
     } catch (error) {
       suspendAutomatic(error, "message-end", ctx);
-      try { updateStatus(ctx); } catch { /* The provider loop must keep running. */ }
+      try { updateStatus(ctx); } catch { }
     }
   });
-  /*
-   * There was an `after_provider_response` handler here that treated `status >= 400` as
-   * the rejection signal. It could never fire on the case it was written for. Every
-   * provider adapter calls `onResponse` exactly once and only AFTER the request promise
-   * resolves, so a 4xx rejects the promise and control never reaches that call at all
-   * (verified across all seven adapters in pi-ai 0.83.0). `pendingRejection` was
-   * therefore never set in production and the recovery branch of the projection budget
-   * never ran. It is set by the rollback lane now, from an event that does fire.
-   */
   pi.on("turn_end", async (_event: unknown, ctx: any) => {
     beginMutationPass();
     if (lifecycle.shuttingDown || !persistence.state || !persistence.persisted) return;
@@ -4796,7 +3487,7 @@ export function registerActiveContext(pi: any, options: {
       }
       suspendAutomatic(error, "turn-end", ctx);
     }
-    try { updateStatus(ctx); } catch { /* turn_end must never stall Pi. */ }
+    try { updateStatus(ctx); } catch { }
   });
   pi.on("session_before_tree", (event: Record<string, unknown>) => {
     const preparation = ownValue(event, "preparation");
@@ -4804,15 +3495,6 @@ export function registerActiveContext(pi: any, options: {
     return ownValue(preparation, "userWantsSummary") === true ? { cancel: true } : undefined;
   });
 
-  /**
-   * pi's own overflow classifier, borrowed rather than re-implemented.
-   *
-   * `isContextOverflow` owns the provider-message patterns AND the silent cases (usage
-   * past the window with a clean stop, the truncating `length` stop). Re-stating that
-   * pattern set here would drift on the first provider that reworded its 400. The
-   * bare specifier is tried first, for a deployment where pi-ai is hoisted; the second
-   * form reaches pi's own nested copy, which is where a default install puts it.
-   */
   const resolveOverflowClassifier = async (): Promise<void> => {
     if (rollback.classifier || rollback.classifierSource === "unresolved") return;
     const host = "@earendil-works/pi-coding-agent";
@@ -4824,7 +3506,7 @@ export function registerActiveContext(pi: any, options: {
       if (at >= 0) {
         specifiers.push(`${entry.slice(0, at + marker.length)}node_modules/@earendil-works/pi-ai/dist/compat.js`);
       }
-    } catch { /* An unresolvable host is the same answer as an unresolvable classifier. */ }
+    } catch { }
     for (const specifier of specifiers) {
       try {
         const module = await import(specifier) as Record<string, unknown>;
@@ -4833,7 +3515,7 @@ export function registerActiveContext(pi: any, options: {
           rollback.classifierSource = specifier;
           return;
         }
-      } catch { /* Try the next form; the last failure is the answer. */ }
+      } catch { }
     }
     rollback.classifierSource = "unresolved";
   };
@@ -4853,10 +3535,6 @@ export function registerActiveContext(pi: any, options: {
     }
   };
 
-  /**
-   * The disarmed answer, and the only one: say so on the record and leave the session
-   * behaving exactly as it did before the lane existed.
-   */
   const refuseRollback = (reason: string, trigger: string, ctx: any): void => {
     emit("context.rollback", {
       trigger,
@@ -4882,22 +3560,6 @@ export function registerActiveContext(pi: any, options: {
     );
   };
 
-  /**
-   * The fallback trigger, and the honest limit of it.
-   *
-   * `session_before_compact` never fires for a deployment that turned auto-compaction
-   * off, so the primary trigger is deaf there. This is the second detector: pi's own
-   * classifier over the assistant message at `message_end`, which is where the error
-   * message first becomes visible. It records the episode and, if no compaction event
-   * claims it, reports it.
-   *
-   * It does NOT roll back, and the reason is mechanical rather than cautious. The
-   * pre-strip this lane depends on happens INSIDE `_checkCompaction`, which is exactly
-   * the code an auto-compaction-disabled deployment never reaches, so on this path
-   * agent state still carries the oversized window plus the error message. A bare
-   * `branch()` there would leave the tree and agent state disagreeing, which is the
-   * failure mode the whole design exists to avoid. Held, and reported as held.
-   */
   const noteOverflowAtMessageEnd = (message: unknown, ctx: any): void => {
     if (!rollback.classifier || !message || typeof message !== "object") return;
     const window = budgetWindowFor(ctx) ?? DEFAULT_CONTEXT_WINDOW;
@@ -4908,10 +3570,6 @@ export function registerActiveContext(pi: any, options: {
     rollback.pendingOverflow = { at: currentOrdinal(), entryId: null };
   };
 
-  /**
-   * An overflow that no compaction event claimed: the auto-compaction-disabled shape.
-   * Loud, terminal, and never silent.
-   */
   const reportUnclaimedOverflow = (ctx: any): void => {
     if (!rollback.pendingOverflow) return;
     rollback.pendingOverflow = null;
@@ -4924,20 +3582,6 @@ export function registerActiveContext(pi: any, options: {
     );
   };
 
-  /**
-   * ROLLBACK, COMMIT, REPLAY.
-   *
-   * pi has already stripped the trailing error message from agent state by the time
-   * this fires, so agent state IS the rolled-back window and all that remains is to
-   * move the session leaf to match. The label goes on FIRST, because a label appends at
-   * the current leaf and advances it, so applied after the branch it would mark the
-   * surviving path instead of the abandoned one.
-   *
-   * The commit deliberately does NOT happen here. The retried request runs its own
-   * `context` pass, and that pass folds and commits before the payload is built. A
-   * commit here would adjudicate a snapshot taken outside a projection pass and then be
-   * evaluated again by the retry, which is two mutations for one episode.
-   */
   const rebuiltMessageCount = (manager: Record<string, any>): number | null => {
     try {
       const rebuilt = manager.buildSessionContext?.();
@@ -4962,9 +3606,6 @@ export function registerActiveContext(pi: any, options: {
       return;
     }
     const branchEntries = ownValue(event, "branchEntries");
-    // Copied, not aliased. `getBranch()` hands back the live array and the branch call
-    // below truncates it in place, so a handler holding the original reference watches
-    // the entries it is still reasoning about disappear underneath it.
     const entries = Array.isArray(branchEntries) ? [...branchEntries] : [];
     const errorEntry = findOverflowErrorEntry(entries);
     if (!errorEntry) {
@@ -4976,7 +3617,6 @@ export function registerActiveContext(pi: any, options: {
     const sessionMessagesBefore = rebuiltMessageCount(manager);
     const abandoned = entries.slice(errorEntry.index);
     const rolledBackBytes = bytes(abandoned.flatMap((entry: any) => sessionEntryMessages(entry) ?? []));
-    // Lineage first. The abandoned path stays in the tree, and it says why it was left.
     try {
       manager.appendLabelChange(errorEntry.id, `${entryTypePrefix} overflow rollback`);
     } catch (error) {
@@ -4990,8 +3630,6 @@ export function registerActiveContext(pi: any, options: {
       refuseRollback(`the branch failed (${String(error)})`, "session_before_compact", ctx);
       return;
     }
-    // The invariant, measured rather than assumed: the rolled-back window has to be
-    // exactly the failed entry shorter, or the retry sends something nobody built.
     const errorEntryMessages = (sessionEntryMessages(entries[errorEntry.index]) ?? []).length;
     const sessionMessagesAfter = rebuiltMessageCount(manager);
     const holds = sessionMessagesBefore === null || sessionMessagesAfter === null ||
@@ -5014,8 +3652,6 @@ export function registerActiveContext(pi: any, options: {
       replayed: replaySkipReason === null,
       replaySkipReason,
     });
-    // Exactly ONE steered message. Steering drains one at a time at the top of the
-    // retried loop, so a second would be silently held to a turn that never comes.
     let replayed = false;
     if (replaySkipReason === null) {
       if (typeof pi.sendMessage !== "function") {
@@ -5060,18 +3696,12 @@ export function registerActiveContext(pi: any, options: {
       noticeChars: notice.length,
       attemptOrdinal: rollback.attempts,
     };
-    // The tree moved, so the mapping is rebuilt from it. THEN the fold is armed for the
-    // retried pass, in that order: a reload clears the recovery flags, and arming before
-    // it would hand the retry a cleared one. The guards are waived in that pass because
-    // a request that already did not fit has nothing left to economize.
     load(ctx, true);
     curation.pendingRejection = { status: 400, ordinal: currentOrdinal() };
   };
 
   pi.on("session_before_compact", (event: Record<string, unknown>, ctx: any) => {
     const reason = ownValue(event, "reason");
-    // The overflow reason is a provider rejection pi is prepared to retry, and it is
-    // the rollback lane's trigger. Threshold and manual compaction are unchanged.
     if (reason === "overflow" && ownValue(event, "willRetry") === true) {
       nativeCompaction.lastThresholdDecision = {
         handled: true,
@@ -5082,7 +3712,7 @@ export function registerActiveContext(pi: any, options: {
       };
       try { recoverFromOverflow(event, ctx); }
       catch (error) { suspendAutomatic(error, "overflow-rollback", ctx); }
-      try { updateStatus(ctx); } catch { /* Recovery must survive presentation failure. */ }
+      try { updateStatus(ctx); } catch { }
       return { cancel: true };
     }
     if (reason === "manual") {
@@ -5092,7 +3722,7 @@ export function registerActiveContext(pi: any, options: {
         reason: "manual native compaction explicitly requested by the user",
         compactionReason: reason,
       };
-      try { updateStatus(ctx); } catch { /* Manual rescue must survive presentation failure. */ }
+      try { updateStatus(ctx); } catch { }
       return undefined;
     }
     nativeCompaction.lastThresholdDecision = {
@@ -5115,20 +3745,12 @@ export function registerActiveContext(pi: any, options: {
       const snapshot = authoritativeSnapshotFor(ctx);
       startPreparation(snapshot, measurements.latestRatio, ctx);
     } catch {
-      // The next authoritative context event will retry mapping.
     }
     try { await recoverNativeReceipts(ctx); }
     catch (error) { safeNotify(ctx, `Native compaction receipt recovery remains pending: ${String(error)}`, "error"); }
     updateStatus(ctx);
   });
 
-  /**
-   * Admission control. A refusal that names no next action is denial, not governance,
-   * so every refusal carries at least one CONSTRUCTIBLE alternative: a bounded slice
-   * sized to the headroom we actually have, a child fold that is smaller by
-   * construction, and the commit that frees the room. The exact stored size of the
-   * target is known, so this is arithmetic, not a guess.
-   */
   const admit = (input: {
     action: "peek" | "expand";
     ctx: any;
@@ -5155,8 +3777,6 @@ export function registerActiveContext(pi: any, options: {
       alternatives.push({ action: "peek", id: child });
     }
     if (!alternatives.length) {
-      // The floor: folding is always available, and it is the action that creates
-      // the room this read needs.
       alternatives.push({ action: "status", detail: "fold_candidates" });
     }
     throw new Error(
@@ -5196,8 +3816,6 @@ export function registerActiveContext(pi: any, options: {
       }
       const statusOffset = boundedInteger(params.offset, 0, 0, 1_000_000, "offset");
       const statusLimit = boundedInteger(params.limit, 40, 1, 100, "limit");
-      // Paging is explicit and agent-driven: the full tree is reachable, it just
-      // stops riding along on every request that wanted a count.
       const paged = detail === "folds" || detail === "objects";
       const accounting = markAccounting(snapshot, persistence.state);
       return toolPayload(boundStatusPayload({
@@ -5219,23 +3837,15 @@ export function registerActiveContext(pi: any, options: {
         available: true,
         automatic: {
           pressureRatio: measurements.latestRatio,
-          // Status is a READ of the slate, never a delivery of one. `status` is a
-          // read-only context action and the tool-batch safety scan is built on
-          // read-only actions not writing durable state, so asking must not issue a
-          // suggestion, spend the precision budget, or move a suppression counter. An
-          // agent that asks gets the answer; only the push carriers are metered.
           surfacing: statusSurfacing(snapshot),
           refoldRatio: snapshot.policy.refoldRatio,
           chapterPrepareRatio: snapshot.policy.prepareRatio,
           hardFenceRatio: hardFenceRatio(snapshot),
-          // The declared policy, reported. No action reads it back as a setting.
           thresholds: { ...snapshot.thresholds },
           zones: {
             freshBoundary: snapshot.freshBoundary,
             budgetTokens: snapshot.budgetTokens,
           },
-          // What THIS runtime withheld, which is nothing once the deployment declared an
-          // already-net budget. One number, from the same accounting the fence divides by.
           responseReserve: currentCapacity(ctx).outputReservation,
           windowSource: snapshot.windowSource,
           capacity: {
@@ -5285,9 +3895,6 @@ export function registerActiveContext(pi: any, options: {
           projectionCharsPerToken: projectionCharsPerToken(),
           projectionEstimatorErrorShare: estimatorErrorShare(),
           projectionExpectedInflowTokens: expectedInflowTokens(),
-          // What the fence actually weighed, not a second arithmetic over the same bytes:
-          // once occupancy is anchored, re-deriving it here from chars alone would report
-          // a number no decision was made on.
           projectionMarginTokens: measurements.lastProjectedEstimate === null
             ? null
             : projectionMarginTokens(measurements.lastProjectedEstimate, currentCapacity(ctx).window),
@@ -5308,7 +3915,6 @@ export function registerActiveContext(pi: any, options: {
             ...ledgerSummary(instrumentation.ledger),
             projectionRecords: clone(instrumentation.ledger.records),
             cacheObservations: clone(instrumentation.ledger.observations),
-            // THE stream, as the durable entries carry it. One shape, one convention.
             events: clone(instrumentation.ledger.events),
           },
           peek: {
@@ -5333,9 +3939,6 @@ export function registerActiveContext(pi: any, options: {
         ...(detail === "tree" ? { tree: foldTreeDetail(snapshot, persistence.state).slice(statusOffset) } : {}),
       }, typeof detail === "string" ? detail : null, statusOffset));
     }
-    // Peeking or expanding a surfaced fold is the ACTED label, joined to the offer that
-    // named it. It stays ephemeral: the ledger rides the next persisted state, never an
-    // entry of its own, and the used/ignored grades land when the window closes.
     const noteSurfacingAccept = (id: string): void => {
       if (!persistence.state) return;
       persistence.state = noteSurfacingAction(persistence.state, id, markOrdinal(snapshot));
@@ -5344,9 +3947,6 @@ export function registerActiveContext(pi: any, options: {
       const id = String(params.id ?? "").trim();
       if (!id) throw new Error("peek requires id");
       const offset = boundedInteger(params.offset, 0, 0, 1_000_000_000, "offset");
-      // The DEFAULT is the bounded index view. Widening is an explicit argument, so
-      // the default path cannot overfill a window: measured 2026-08-06, 14 raw peek
-      // results held 1.9M characters, 82 percent of everything still unfolded.
       const sliceBytes = boundedInteger(
         params.bytes,
         PEEK_DEFAULT_MAX_BYTES,
@@ -5400,10 +4000,6 @@ export function registerActiveContext(pi: any, options: {
       });
     }
     if (action === "reboundary") {
-      // One verb, both directions. `ids` names the span you want to BE one fold: every
-      // fold overlapping it dissolves and the span is re-cut as one, which merges N
-      // adjacent folds when the span covers them and splits one fold when the span sits
-      // inside it. `id` alone is the plain dissolve, which returns a span to raw.
       if (params.ids !== undefined) {
         const requestedIds = stringIds(params.ids);
         const snapped = snapToFoldBoundaries(snapshot, persistence.state, requestedIds);
@@ -5430,10 +4026,6 @@ export function registerActiveContext(pi: any, options: {
         const created: Array<Record<string, unknown>> = [];
         const correctedBriefs: Record<string, string> = {};
         for (const part of splitCandidateBySize(snapshot, persistence.state, recut)) {
-          // A re-cut that lands back on a span this session already folded meets its own
-          // immutable record. The record wins -- rewriting it would report a conflicting
-          // durable fold and suspend automatic management -- and the supplied brief
-          // becomes a correction beside it, which is what `rebrief` writes anyway.
           const durable = persistence.persistedFoldRecords.get(foldIdFor(part.kind, part.parts));
           const { preparedFold, nextState } = await prepareAndCommitExplicit({
             snapshot, candidate: part, brief: durable ? durable.fold.brief : supplied, ctx, signal,
@@ -5508,8 +4100,6 @@ export function registerActiveContext(pi: any, options: {
     if (action === "expand" || action === "refold") {
       const id = String(params.id ?? "").trim();
       if (!id) throw new Error(`${action} requires id`);
-      // An expand with marks pending opens the commit epoch: the restore and the
-      // batch of folds then cost one rewrite between them instead of two.
       let epochApplied: unknown[] = [];
       if (action === "expand" && pendingMarks(persistence.state).length) {
         const result = await commitPendingMarks({
@@ -5559,9 +4149,6 @@ export function registerActiveContext(pi: any, options: {
       const refsBefore = persistence.state.protected.length;
       const nextProtection = protectEvidence(snapshot, persistence.state, ids, action === "protect");
       if (action === "protect") {
-        // The pin ceiling: protect is a promise to hold bytes raw through every fold,
-        // and a promise with no mass bound can pin the window solid. The refusal is
-        // corrective, not denial: it names the cap and the release valve.
         const capacity = servingCapacity(snapshot.contextWindow);
         const prospectiveShare = capacity.budgetTokens > 0
           ? estimatedTokens(explicitProtectedMass(snapshot, nextProtection).bytes) / capacity.budgetTokens
@@ -5615,9 +4202,6 @@ export function registerActiveContext(pi: any, options: {
       });
     }
     if (action === "fold") {
-      // One call, several {span, brief} pairs. Marking is free and committing is not,
-      // so the shape that should be cheapest to express is the BATCH: an agent that
-      // must spend one call per span curates less than one that spends one call.
       const requested = batchedMarkRequests(params);
       const resolved: Array<{
         candidate: FoldCandidate;
@@ -5660,45 +4244,15 @@ export function registerActiveContext(pi: any, options: {
         }
       }
       const corrections = resolved.flatMap((item) => item.corrections);
-      // Resolve every brief now, while the source is in hand, so the commit epoch
-      // itself stays deterministic and free of provider calls. A span that is not
-      // eligible YET cannot go through preparation at all, so it takes the
-      // deterministic brief: the mark is a decision, and refusing to record it
-      // because the span is momentarily fresh is exactly the drop being fixed.
       const marks: Array<Record<string, unknown>> = [];
       let staged = persistence.state;
       for (const item of resolved) {
         const { candidate } = item;
-        // ACCEPT AND HOLD. A span that is still fresh or protected is not a refusal:
-        // the mark is a standing decision, it is recorded now, and it folds at the
-        // first commit after the span ages out. Refusal is reserved for a mark that
-        // cannot be constructed at all.
-        // A REPEATED DECISION IS INERT. The fold id is derived from the span, so a
-        // span the ladder already prepared carries that exact id in the forest
-        // already, and preparing it a second time throws "Prepared fold already
-        // exists" out of the tool call. Under the old cadence commits were frequent
-        // enough to drain prepared folds before a second decision could land on one;
-        // the quiet runtime commits far less often, so the collision became reachable
-        // in ordinary use -- the ladder marks a span, the agent then folds the same
-        // span, and the agent's call fails. Marking is a standing decision about a
-        // span, and deciding the same thing twice has to be a no-op.
         const alreadyPrepared = staged.folds.some((fold) =>
           fold.id === foldIdFor(candidate.kind, candidate.parts));
         const deferred = refsProtected(candidate.sourceRefs, staged, snapshot) ||
           (candidate.kind === "tool-result" &&
             toolRefsProtected(candidate.sourceRefs, staged, snapshot));
-        // A SUPPLIED BRIEF IS JUDGED HERE, ON EVERY PATH, because here is the only place
-        // the agent can do anything about it.
-        //
-        // `prepareFold` below validates the brief it is given, and it is skipped when the
-        // span is deferred or already prepared. On those two paths the mark used to be
-        // accepted carrying an unchecked brief, and `commitPendingMarks` calls `prepareFold`
-        // with `mark.brief` later, so the first check happened inside the automatic
-        // transaction. That throw is fatal: it is the same position as the defect that lost
-        // four commits this week, and it would suspend folding for a session over a sentence
-        // the agent wrote and was told was fine. Refused as a mark instead, with the
-        // generator's own complaint, which the agent reads in this result and can mark again
-        // against because it still holds the span.
         const suppliedComplaint = item.brief === undefined
           ? null
           : briefContractComplaint(item.brief.trim(), snapshot.policy.maxBriefChars, snapshot.toolName);
@@ -5756,18 +4310,12 @@ export function registerActiveContext(pi: any, options: {
       await persistManual(staged, action, ctx);
       updateStatus(ctx);
       const accounting = markAccounting(snapshot, persistence.state);
-      // MECHANISM 3. The projection is byte-frozen between fold events, so this reply
-      // is the only cache-free channel left: it carries the whole picture, not just
-      // an acknowledgement of the spans this call named.
       const held = pendingMarks(persistence.state).map((mark) => ({
         id: mark.id,
         kind: mark.kind,
         tokens: estimatedTokens(markFreedBytes(snapshot, persistence.state!, mark)),
       }));
       const remainder = unmarkedRemainder(snapshot, persistence.state, projectionCharsPerToken());
-      // The single-span shape is the head of the batched one: one call carrying one
-      // span answers exactly as it always did, and a batch adds fields rather than
-      // replacing them.
       const only = marks.length === 1 && marks[0].ok === true ? marks[0] : null;
       return toolPayload({
         version: 1,
@@ -5786,7 +4334,6 @@ export function registerActiveContext(pi: any, options: {
           }
           : {}),
         marks,
-        // Never silently reinterpreted: a span the runtime moved says so, here.
         corrections,
         argumentsSha256: executionArgumentsSha256,
         durableRevision: persistence.state.revision,
@@ -5802,9 +4349,6 @@ export function registerActiveContext(pi: any, options: {
         unmarkedTokens: remainder.tokens,
         unmarkedShare: remainder.share,
         unmarkedCandidates: remainder.candidates,
-        // The acknowledgement rides the tool result, so it PERSISTS in context the way
-        // every tool result does. Default on;
-        // `guidance.actionResponses: false` returns the accounting without the prose.
         ...(guidance.actionResponses ? {
           awareness: markAwarenessText({ held, remainder, toolName, brandNoun }),
           activation: "accepted as pending marks; no context bytes moved, and nothing else in your " +
@@ -5818,14 +4362,6 @@ export function registerActiveContext(pi: any, options: {
     }
     throw new Error(`Unknown ${toolName} action '${action}'`);
   };
-  /**
-   * Every context-management call, accepted AND refused, in the durable stream.
-   *
-   * A rejected call is the more informative of the two: an agent whose spans keep being
-   * refused looks identical, from fold records alone, to an agent that never tried to
-   * curate at all. The exact validation text is recorded verbatim, because "it failed"
-   * is not a finding and "ids must contain 1-64 values" is.
-   */
   const requestedMarkCount = (params: Record<string, unknown>): number => {
     const batched = denseOwnArrayValues(params?.marks);
     if (batched) return batched.length;
@@ -5841,23 +4377,17 @@ export function registerActiveContext(pi: any, options: {
   ): Promise<unknown> => {
     const operation = ladder.actionQueue.then(async () => {
       const action = String(params?.action ?? "");
-      // The gate's engagement signal, counted BEFORE the call can fail: an agent that
-      // reached for a context verb engaged, whether or not the span was valid.
       curation.contextCalls += 1;
       const attempt = (ok: boolean, error: string | null, corrections: Array<Record<string, unknown>>) => {
         const record = emit("context.attempt", {
           action,
           ok,
           error,
-          // The join key against the worker's own tool-call log: one logical row per
-          // model-emitted invocation, matched by id and never by order or clock.
           tool_call_id: toolCallId,
           marks_requested: requestedMarkCount(params),
           corrections_applied: corrections.length,
           arguments_sha256: sha256Value(params ?? {}),
         });
-        // One record per correction, referencing its attempt: nothing nests, and a
-        // reader counting corrections never has to unpack an array to do it.
         for (const correction of corrections) {
           const from = denseOwnArrayValues(ownValue(correction, "from")) ?? [];
           const to = denseOwnArrayValues(ownValue(correction, "to")) ?? [];
@@ -5909,15 +4439,6 @@ export function registerActiveContext(pi: any, options: {
       if (!lifecycle.latestSnapshot) lifecycle.latestSnapshot = snapshot;
       const divider = args.indexOf(" -- ");
       const selector = (divider >= 0 ? args.slice(0, divider) : args).trim();
-      // THE USER COMMIT. One word, and the only commit verb any caller has: the model
-      // tool still has no commit action, because a verb the runtime is entitled to
-      // overrule is surface without function. A user is not overruled.
-      //
-      // Below maxTarget it applies the eligible marks in hand and stops -- no automatic
-      // top-up, because the user asked to bank the curation they made, not to have the
-      // runtime pick more. At or above maxTarget it is the ordinary event: the planner
-      // may top up toward minTarget. Neither path touches freshness, pins, exactness or
-      // the provider fence.
       if (selector === "commit") {
         const capacity = servingCapacity(snapshot.contextWindow);
         const occupancy = capacity.usedTokens !== null && capacity.budgetTokens > 0
@@ -5925,7 +4446,7 @@ export function registerActiveContext(pi: any, options: {
           : null;
         const topUp = occupancy !== null && occupancy >= thresholds.maxTarget;
         const committed = await runCommitEpoch(snapshot, "user-command", topUp, measurements.latestRatio, true);
-        try { await persist(ctx); } catch { /* The commit already reported its own outcome. */ }
+        try { await persist(ctx); } catch { }
         updateStatus(ctx);
         safeNotify(
           ctx,
@@ -6019,7 +4540,7 @@ export function registerActiveContext(pi: any, options: {
     persistence.persisted = null;
     lifecycle.latestSnapshot = null;
     curation.receipts = [];
-    try { ctx.ui?.setStatus?.(entryTypePrefix, undefined); } catch { /* Shutdown cannot be blocked by UI. */ }
+    try { ctx.ui?.setStatus?.(entryTypePrefix, undefined); } catch { }
   });
 
   return { projectionCandidates };

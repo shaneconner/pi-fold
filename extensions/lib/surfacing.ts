@@ -51,23 +51,6 @@ import type {
 } from "./policy.ts";
 import { exactToolCallParts } from "./transcript.ts";
 
-/**
- * THE SURFACING SLATE.
- *
- * An agent cannot peek a fold it does not know to want. The placeholder it can see is
- * the brief, so a fold whose brief already says what it holds is already discoverable
- * and needs nothing from this module. The case worth spending bytes on is the inverse:
- * the fold's stored CONTENT matches what the session is doing right now and its BRIEF
- * does not say so. That divergence, content hit against brief miss, is the whole
- * trigger, and it is why two channels are scored instead of one.
- *
- * Everything here is deterministic and model-free. Every input is the transcript's own
- * ordering or the durable ledger: no wall clock, no randomness, no embedding call, so
- * the same forest against the same intent always produces the same slate. The named
- * second tier is a small embedding model over the same two channels; it drops in as a
- * second scorer without moving anything else, and it is NOT in this build.
- */
-
 const SURFACING_STOPWORDS: ReadonlySet<string> = new Set([
   "about", "after", "again", "against", "already", "also", "another", "because", "been",
   "before", "being", "between", "both", "came", "come", "could", "does", "doing", "done",
@@ -80,10 +63,6 @@ const SURFACING_STOPWORDS: ReadonlySet<string> = new Set([
   "your",
 ]);
 
-/**
- * Tokens WITH repetition, because BM25 reads term frequency. The old selector deduped
- * here, which was correct for an overlap ratio and would silently flatten tf to 1.
- */
 export function surfacingTokens(value: string): string[] {
   const tokens: string[] = [];
   for (const raw of value.toLowerCase().split(/[^a-z0-9_]+/)) {
@@ -98,16 +77,6 @@ export function distinctSurfacingTokens(value: string): Set<string> {
   return new Set(surfacingTokens(value));
 }
 
-/**
- * The retrieval query is INTENT, never evidence.
- *
- * Measured on memex: a live window of 29,369 characters carried 29,244 characters of
- * raw tool output and 125 characters of the agent's own reasoning, so BM25 was matching
- * briefs against `read` and `shell` dumps and every retrieval number they had was that
- * one defect. Tool RESULTS are excluded here outright; a tool CALL counts as intent,
- * because the name plus its first meaningful argument is a statement of what the agent
- * is trying to do. Our workload is more tool-output-heavy than theirs, not less.
- */
 export function toolCallIntent(message: unknown): string[] {
   const calls = exactToolCallParts(ownValue(message, "content"));
   if (!calls) return [];
@@ -129,13 +98,6 @@ export function toolCallIntent(message: unknown): string[] {
   return pieces;
 }
 
-/**
- * Intent pieces, newest half only. memex replayed 56 real retrieval targets against the
- * agent's own query: the oldest half of the same window scored MRR 0.0485 and 4 targets
- * in the top 5, the whole window 0.0573 and 4, the newest half 0.1071 and 10. The
- * control is the point -- the oldest half of the SAME window halves recall -- so this is
- * a position effect, not a length effect, and one constant settles it.
- */
 export function surfacingIntentText(snapshot: Pick<ActiveContextSnapshot, "messages">): string {
   const newestFirst: string[] = [];
   let chars = 0;
@@ -158,16 +120,6 @@ export function surfacingIntentText(snapshot: Pick<ActiveContextSnapshot, "messa
   const kept = newestFirst.slice(0, Math.max(1, Math.ceil(newestFirst.length * SURFACING_INTENT_RECENCY_SHARE)));
   return kept.reverse().join("\n");
 }
-
-// ---------------------------------------------------------------------------
-// BM25, stdlib only.
-//
-// One index over BOTH channels: each fold contributes a brief document and a content
-// document, so document frequency, average length and the score normalizer are shared.
-// memex's rule that two retrieval LANES must never share a floor holds -- these are two
-// FIELDS of one lane, scored by one query against one corpus, and the divergence
-// trigger is a subtraction, which is exactly the comparison a shared scale earns.
-// ---------------------------------------------------------------------------
 
 export interface SurfacingIndexDocument {
   length: number;
@@ -214,12 +166,6 @@ export function surfacingIdf(index: SurfacingIndex, term: string): number {
   return Math.log(1 + (index.count - frequency + 0.5) / (frequency + 0.5));
 }
 
-/**
- * The saturation ceiling for one query: what a document scores when every query term is
- * saturated in it. Dividing by it turns BM25's unbounded score into an absolute 0..1
- * reading that means the same thing in both channels, which is what makes the
- * content-minus-brief margin a number rather than a coincidence of scale.
- */
 export function surfacingScoreCeiling(index: SurfacingIndex, queryTerms: ReadonlySet<string>): number {
   let ceiling = 0;
   for (const term of queryTerms) ceiling += surfacingIdf(index, term) * (SURFACING_BM25_K1 + 1);
@@ -258,11 +204,6 @@ export function normalizedBm25(
   return roundedScore(bm25Score(index, key, queryTerms) / ceiling);
 }
 
-// ---------------------------------------------------------------------------
-// Candidates: every collapsed fold, both channels.
-// ---------------------------------------------------------------------------
-
-/** The stored source of a fold, descendants included: the roll-up the content channel reads. */
 export function foldContentText(
   fold: { id: string },
   state: ActiveContextState,
@@ -285,12 +226,6 @@ export function foldContentText(
   return pieces.join("\n");
 }
 
-/**
- * Eligibility, unchanged from the retained selector: a fold is a candidate only while
- * it is COLLAPSED (an expanded fold is already visible, so surfacing it is noise) and
- * only while nothing about it is pinned raw (a pin is the agent saying it wants those
- * bytes where they are).
- */
 export function surfacingCandidates(input: {
   state: ActiveContextState;
   snapshot: ActiveContextSnapshot;
@@ -319,25 +254,10 @@ export function surfacingCandidates(input: {
   });
 }
 
-// ---------------------------------------------------------------------------
-// The suppression ledger.
-//
-// One record per fold, not one per showing: the per-suggestion detail a bandit trains
-// on is the EVENT STREAM, which is durable and unbounded, and duplicating it in durable
-// state would put the suppression memory on a ring that can evict the very ignore it
-// exists to remember.
-// ---------------------------------------------------------------------------
-
 export function surfacingLedger(state: Pick<ActiveContextState, "surfacing">): SurfacingRecord[] {
   return state.surfacing ? clone(state.surfacing) : [];
 }
 
-/**
- * Property ORDER matters here: the state digest is a stable stringify, so a
- * `surfacing` key assigned onto a state that did not already carry one would land
- * after `pendingMarks`/`advisory`/`prepared` and replay as digest drift. Rebuild the
- * tail of the record in the same order `parseActiveContextState` produces.
- */
 export function withSurfacingLedger(
   state: ActiveContextState,
   ledger: readonly SurfacingRecord[],
@@ -357,18 +277,6 @@ export function withSurfacingLedger(
   };
 }
 
-/**
- * Silence is the default, so suppression is checked before anything is scored.
- *
- * Two rules, both memex's, both measured there. The COOLDOWN is the outcome window
- * itself: a fold is not offered again until its last offer has an answer, which is one
- * clock instead of two saying the same thing. The SILENCE is the decline rule: offered
- * twice, taken never, and the id leaves the candidate set permanently. memex's
- * strongest single discriminator was exactly this shape (47.7% of ignored candidates
- * had been shown three or more times and never taken, against 0% of accepted ones), and
- * it requires ZERO takes rather than a low ratio, because one acceptance proves the
- * fold can be useful and suppressing it afterwards is a false negative nothing can see.
- */
 export function surfacingSuppressed(
   ledger: readonly SurfacingRecord[],
   ordinal: number,
@@ -381,31 +289,19 @@ export function surfacingSuppressed(
   return suppressed;
 }
 
-/** Ids this ledger will never offer again, whatever the score. */
 export function surfacingSilenced(ledger: readonly SurfacingRecord[]): Set<string> {
   return new Set(ledger.flatMap((record) =>
     record.taken === 0 && record.surfaced >= SURFACING_IGNORE_LIMIT ? [record.id] : []));
 }
-
-// ---------------------------------------------------------------------------
-// Selection: score everything, surface almost nothing.
-// ---------------------------------------------------------------------------
 
 export interface SurfacingSelection {
   slate: SurfacingSuggestion[];
   considered: number;
   suppressed: number;
   divergent: number;
-  /** The intent query the pass scored with; the carrier renders its hook from these. */
   queryTerms: Set<string>;
 }
 
-/**
- * The trigger is DIVERGENCE, not fused score. A fold that scores well on both channels
- * is a fold whose placeholder already says what it holds: the agent can see it, so
- * surfacing it spends bytes to repeat the window back to itself. What earns a
- * suggestion is content the brief does not name.
- */
 export function selectSurfacingSlate(input: {
   state: ActiveContextState;
   snapshot: ActiveContextSnapshot;
@@ -438,7 +334,6 @@ export function selectSurfacingSlate(input: {
     if (suppressed.has(candidate.id)) { suppressedCount += 1; return []; }
     return [{ ...candidate, contentScore, briefScore, margin, slot: 0 }];
   });
-  // Ties break on id so the slate never depends on forest walk order.
   scored.sort((left, right) => right.margin - left.margin ||
     right.contentScore - left.contentScore || left.id.localeCompare(right.id));
   return {
@@ -449,10 +344,6 @@ export function selectSurfacingSlate(input: {
     queryTerms,
   };
 }
-
-// ---------------------------------------------------------------------------
-// Outcomes: acted, used, ignored.
-// ---------------------------------------------------------------------------
 
 export function issueSurfacing(
   state: ActiveContextState,
@@ -469,11 +360,6 @@ export function issueSurfacing(
   return withSurfacingLedger(state, next);
 }
 
-/**
- * ACTED: a context verb targeted the surfaced fold while the offer was still open. The
- * clock restarts from the action, because the second label is graded from what the
- * agent did with what it retrieved.
- */
 export function noteSurfacingAction(
   state: ActiveContextState,
   id: string,
@@ -490,13 +376,6 @@ export function noteSurfacingAction(
   return changed ? withSurfacingLedger(state, next) : state;
 }
 
-/**
- * USED, by provenance scan: terms the fold's CONTENT carries and its BRIEF does not,
- * appearing in the agent's own output or tool calls after it acted. Brief terms prove
- * nothing, because the placeholder was already in the window; content-only terms could
- * only have arrived through the retrieval. Optimizing clicks yields clickbait, so the
- * label a later bandit tunes on is this one, not the peek.
- */
 export function surfacingProvenanceHit(input: {
   state: ActiveContextState;
   snapshot: ActiveContextSnapshot;
@@ -510,9 +389,6 @@ export function surfacingProvenanceHit(input: {
   if (!contentTerms.size) return false;
   for (const term of distinctSurfacingTokens(foldBrief(fold, state))) contentTerms.delete(term);
   if (!contentTerms.size) return false;
-  // The ordinal counts MAPPED entries, so the cut is the message index of the mapped
-  // entry that ordinal names, not an index into `messages`: the two only coincide when
-  // every message carries a ref, and a projection carrier is a message that does not.
   const position = Math.min(Math.max(0, input.sinceOrdinal), snapshot.mapped.length) - 1;
   const cutoff = position >= 0 ? snapshot.mapped[position].index : -1;
   const after = snapshot.messages.slice(cutoff + 1);
@@ -522,12 +398,6 @@ export function surfacingProvenanceHit(input: {
   return matched >= SURFACING_PROVENANCE_TERMS;
 }
 
-/**
- * Resolve every offer whose window has closed. A shown offer nobody acted on is
- * IGNORED; an acted offer whose content shows up downstream is USED, and one that does
- * not stays ACTED. Both grades are terminal; the transitions are returned so the caller
- * emits one stream record per state change instead of inferring them later.
- */
 export function resolveSurfacing(input: {
   state: ActiveContextState;
   snapshot: ActiveContextSnapshot;
@@ -560,11 +430,6 @@ export function resolveSurfacing(input: {
   return { state: unchanged ? input.state : state, transitions };
 }
 
-// ---------------------------------------------------------------------------
-// The carrier line.
-// ---------------------------------------------------------------------------
-
-/** The matched region of the content, so the agent sees WHY the fold surfaced. */
 export function surfacingHook(content: string, queryTerms: ReadonlySet<string>): string {
   const flat = content.replace(/\s+/g, " ").trim();
   let start = 0;
@@ -573,18 +438,11 @@ export function surfacingHook(content: string, queryTerms: ReadonlySet<string>):
     const found = lowered.indexOf(term);
     if (found >= 0 && (start === 0 || found < start)) start = found;
   }
-  // Back up to the start of the matched word so a hook never opens mid-token.
   while (start > 0 && /[a-z0-9_]/i.test(flat[start - 1])) start -= 1;
   const hook = flat.slice(start, start + SURFACING_HOOK_CHARS).trim();
   return hook.length < flat.length - start ? `${hook}...` : hook;
 }
 
-/**
- * One line, one suggestion, and the exact command to act on it. It says plainly what
- * the claim is (this fold holds matching content its brief does not name), so a false
- * positive costs a glance rather than a derailed turn, and it is hard-bounded because a
- * carrier that grows into the problem it reports has argued against itself.
- */
 export function surfacingSlateText(input: {
   slate: readonly SurfacingSuggestion[];
   queryTerms: ReadonlySet<string>;

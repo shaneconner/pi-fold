@@ -89,32 +89,12 @@ export function contextUsageRatio(value: unknown): number | null {
   return tokens / contextWindow;
 }
 
-/**
- * A measured WINDOW ratio, restated as occupancy of the serving budget.
- *
- * The provider reports tokens against its total window and the thermostat is declared
- * against the serving budget, so exactly one conversion stands between them and it is
- * written here rather than inferred at each reader. Before this build the trigger
- * divided by the budget while the freeing target and the backstop divided by the
- * window, which at a 383,616-token budget behind a 400,000-token window is a 4.5-point
- * disagreement, and 10 points at a 100,000-token fixture.
- */
 export function budgetOccupancy(snapshot: ActiveContextSnapshot, windowRatio: number | null): number | null {
   if (typeof windowRatio !== "number" || !Number.isFinite(windowRatio)) return null;
   if (!(snapshot.budgetTokens > 0) || !(snapshot.contextWindow > 0)) return null;
   return windowRatio * snapshot.contextWindow / snapshot.budgetTokens;
 }
 
-/**
- * The fence, as a ratio of the window the measured ratio is denominated against.
- *
- * A measured ratio is tokens over `contextWindow`, so "the request reached its serving
- * budget" is exactly `ratio >= budgetTokens / contextWindow`. When the snapshot carries
- * a budget the runtime uses it verbatim: a deployment that DECLARED its input budget has
- * already netted out its output reservation, and re-subtracting one here would fence it
- * roughly four points early. Only the ctx fallback, where nothing but a raw provider
- * window is known, still estimates the reservation.
- */
 export function hardFenceRatio(value?: unknown, ctx?: any): number {
   const direct = ownValue(value, "contextWindow");
   const reported = ownValue(ctx?.getContextUsage?.(), "contextWindow");
@@ -134,45 +114,16 @@ export function hardFenceRatio(value?: unknown, ctx?: any): number {
   return (contextWindow - reserve) / contextWindow;
 }
 
-/**
- * What the runtime is actually allowed to send, in tokens.
- *
- * The per-request max-input DESCRIPTOR a provider advertises assumes a full output
- * reservation, so it understates the real ceiling by whatever the deployment did not
- * reserve. Measured 2026-08-06 on openai-codex gpt-5.x: a run aborted at ~297k
- * projected tokens against a 272k descriptor, in the same session where the provider
- * had just accepted 339,689 tokens. Serving admits roughly the TOTAL window minus the
- * output reservation actually in force, which at a 16,384 reservation is ~384k.
- *
- * Every number here is introspectable in status on purpose: a fence nobody can audit
- * is how a 25 percent error survived four instrumented runs.
- */
 export interface CapacityAccounting {
-  /** "truthful" once the deployment declares its own serving budget. */
   mode: "descriptor" | "truthful";
-  /** The denominator every pressure ratio and fence is computed against. */
   window: number;
   outputReservation: number;
-  /** The token ceiling: window minus the output reservation. */
   budgetTokens: number;
   usedTokens: number | null;
   headroomTokens: number | null;
-  /** What the provider descriptor claimed, kept so the gap stays visible. */
   descriptorWindow: number | null;
 }
 
-/**
- * ONE denominator, and no guess in front of it.
- *
- * `truthful` means the deployment stated the budget it may actually fill, already net of
- * whatever output reservation it holds back, so the value passes through untouched and
- * the reservation this runtime reports is zero because it withheld nothing. Only the
- * descriptor fallback still subtracts, because a per-request max-input descriptor is a
- * total-window claim and the reservation inside it has to be estimated. That estimate was
- * the defect the reshape removed: the runtime subtracted a fixed 16,384 tokens capped at
- * a tenth of the window while the documentation claimed it subtracted the reservation
- * actually in force.
- */
 export function capacityAccounting(input: {
   window: number;
   truthful: boolean;
@@ -352,8 +303,6 @@ export function persistenceProjection(state: ActiveContextState, snapshot: Activ
     leases: Object.fromEntries(Object.entries(state.leases)
       .filter(([id]) => retained.has(id))),
   };
-  // A pending mark is a promise about evidence that is still in the branch. Once its
-  // source or its named fold leaves, the mark is unfulfillable and must not survive.
   const survivingMarks = (state.pendingMarks ?? []).filter((mark) => mark.mark === "refold"
     ? retained.has(mark.id)
     : mark.parts.every((part) => part.kind === "raw"
@@ -362,8 +311,6 @@ export function persistenceProjection(state: ActiveContextState, snapshot: Activ
   if (survivingMarks.length) projected.pendingMarks = clone(survivingMarks);
   else delete projected.pendingMarks;
   delete projected.pinnedPeeks;
-  // A brief correction names a fold; once that fold is gone the correction has
-  // nothing to present, exactly like a mark whose source left the branch.
   const survivingBriefs = Object.entries(state.briefs ?? {}).filter(([id]) => retained.has(id));
   if (survivingBriefs.length) projected.briefs = Object.fromEntries(clone(survivingBriefs));
   else delete projected.briefs;
@@ -402,11 +349,6 @@ export function toolRefsProtected(
   });
 }
 
-/**
- * Mass the agent's pins hold out of the ladder's reach: explicitly protected evidence
- * outside the fresh tail. A pin's cost must be a number the agent sees on receipts,
- * never a silent commit shortfall.
- */
 export function protectedStaleMass(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -424,12 +366,6 @@ export function protectedStaleMass(
   return { bytes: total, refs };
 }
 
-/**
- * Every byte protect currently holds raw, fresh or stale: the mass the pinned-share
- * cap is measured against. protectedStaleMass narrows to what a commit could not
- * reclaim TODAY; the cap has to see the whole promise, because a pin inside the
- * fresh tail outlives the tail.
- */
 export function explicitProtectedMass(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -452,16 +388,9 @@ export interface AdmissionVerdict {
   requestedTokens: number;
   headroomTokens: number | null;
   budgetTokens: number;
-  /** Bytes of the target that WOULD fit; 0 when even the minimum slice will not. */
   affordableBytes: number;
 }
 
-/**
- * Preflight one read against the exact stored size of its target and the truthful
- * headroom. A read that has not been measured yet is ADMITTED and says so: refusing
- * on absent data would stall a session for a number we never had, and the absence is
- * reported rather than papered over.
- */
 export function admissionVerdict(input: {
   requestedBytes: number;
   capacity: CapacityAccounting;

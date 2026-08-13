@@ -8,7 +8,6 @@ export interface EvidenceRef {
   sha256: string;
 }
 
-// Capture trust-boundary intrinsics before mutable prototypes can influence validation.
 const ArrayConstructor = Array;
 const arrayIsArray = Array.isArray;
 const arrayPrototype = Array.prototype;
@@ -95,7 +94,6 @@ function safeJson(value: unknown, ancestors: unknown[]): string | undefined {
   }
 }
 
-/** Preserve JSON property order without invoking getters, toJSON, coercion, iterators, or mutable prototypes. */
 export function stableStringify(value: unknown): string {
   const serialized = safeJson(value, new ArrayConstructor<unknown>());
   if (typeof serialized !== "string") throw new Error("Value is not JSON-serializable");
@@ -122,7 +120,6 @@ export function ownDataProperty(value: unknown, key: PropertyKey): unknown {
   return descriptor && "value" in descriptor ? descriptor.value : undefined;
 }
 
-/** Copy a dense own-data array without invoking inherited accessors, iterators, or methods. */
 export function denseOwnArrayValues(value: unknown): unknown[] | null {
   if (!arrayIsArray(value) || isProxy(value) || getPrototypeOf(value) !== arrayPrototype) return null;
   const lengthDescriptor = getOwnPropertyDescriptor(value, "length");
@@ -201,21 +198,6 @@ export function objectRefKey(ref: EvidenceRef): string {
   return stableStringify({ sessionId: ref.sessionId, entryId: ref.entryId, role: ref.role });
 }
 
-/**
- * Identity, compared field by field rather than through two serializations.
- *
- * This is exactly `objectRefKey(left) === objectRefKey(right)`: `objectRefKey` is a stable
- * stringify of these same three string fields in this same order, so the serializations are
- * equal precisely when the fields are. What changes is the cost. `exactMapped` runs
- * `objectRefKey` three times per lookup, once directly to index and twice more inside this
- * comparison, and the selection, surfacing, ordering and accounting passes each call
- * `exactMapped` once per ref per fold several times a turn.
- *
- * Deliberately NOT a memo. A cache keyed on the ref object would buy a little more and
- * would add another way for a derived value to go stale behind a mutated object, which is
- * a failure mode this codebase has already paid for once. Removing work is safe in a way
- * that remembering work is not.
- */
 export function sameObjectIdentity(left: EvidenceRef, right: EvidenceRef): boolean {
   return left.sessionId === right.sessionId &&
     left.entryId === right.entryId &&
@@ -233,31 +215,6 @@ export function evidenceValue(message: unknown): unknown {
   };
 }
 
-/**
- * Evidence digests, kept against the message OBJECT.
- *
- * A message is canonicalized and hashed whole to produce its digest, and the messages
- * this runs on are transcript entries: tool results in the tens of kilobytes. Nothing
- * cached the result, so every reading that wanted to confirm a ref rehashed the entire
- * message from scratch. `exactMapped` does exactly that on every lookup, and the
- * selection, surfacing, ordering and accounting passes call it once per ref, per fold,
- * several times a turn. Replayed against the sealed sol-20260812 rep-2 session at its
- * 85 percent point, that single recomputation was 76 percent of all CPU, and it grows
- * with the transcript because the transcript is what it rehashes.
- *
- * A WeakMap on the object is the same shape `MAPPED_BY_KEY` and `BRANCH_POSITIONS`
- * already use one line over, and the same rule gate 113 settled for entry evidence: the
- * session is append-only, so keep the derivation against the object and let a REPLACED
- * object miss rather than serve a stale answer. Entries are never edited in place; they
- * are appended, and a changed message is a different object, which misses and rehashes.
- *
- * What this no longer detects, stated plainly: a message mutated IN PLACE after it was
- * first hashed now keeps its original digest. That case was already half invisible,
- * because the ref a snapshot carries was itself computed from that same object at
- * mapping time, so a mutation that beat the digest would have to be caught by this
- * recomputation alone. No path in this package edits a persisted message, and the
- * runtime clones before it stores.
- */
 const EVIDENCE_DIGESTS = new WeakMap<object, string>();
 
 export function evidenceSha256(message: unknown): string {

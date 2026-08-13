@@ -18,16 +18,9 @@ export function bytes(value: unknown): number {
 export function boundedUtf8(text: string, maximumBytes: number): string {
   const buffer = Buffer.from(text, "utf8");
   if (buffer.length <= maximumBytes) return text;
-  // A multi-byte sequence cut by the bound decodes to one trailing replacement
-  // character; dropping it keeps the slice an exact prefix of the source.
   return buffer.subarray(0, maximumBytes).toString("utf8").replace(/\uFFFD$/, "");
 }
 
-/**
- * The suffix of `text` beginning at a byte offset. A multi-byte sequence cut by the
- * offset decodes to one leading replacement character; dropping it keeps the slice an
- * exact suffix of the source, which is what makes a paged peek losslessly rejoinable.
- */
 export function utf8Slice(text: string, offsetBytes: number): string {
   if (offsetBytes <= 0) return text;
   const buffer = Buffer.from(text, "utf8");
@@ -75,7 +68,6 @@ export function contentText(message: unknown): string {
   return text.join("\n");
 }
 
-/** Pi's exact one-entry projection, kept local so this service has no second transcript owner. */
 export function sessionEntryMessages(entry: Record<string, unknown>): unknown[] {
   if (entry.type === "message" && entry.message && typeof entry.message === "object") {
     const message = entry.message as Record<string, unknown>;

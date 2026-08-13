@@ -88,16 +88,7 @@ export function selectAutomaticChapter(
   maximumSourceRefs: number = snapshot.policy.maxFoldSourceRefs,
   claimed: ReadonlySet<string> = new Set<string>(),
 ): FoldCandidate | null {
-  // Every structurally closed unit is a candidate. What keeps a chapter off the newest
-  // material is `refsProtected` below -- the fresh byte tail and the agent's pins -- and
-  // what keeps it off the running excursion's own evidence is the guard adjudicated at
-  // the commit. There is no position filter here: a unit is composable or it is not.
   const units = chapterUnits(snapshot);
-  // An automatic chapter is raw material, always. Letting a chapter swallow placeholders
-  // once the root count reached `consolidateAfter` was the old approximation of
-  // consolidation, and the count law replaces it outright: a placeholder gets a parent
-  // when the count says it must, under a fold that says what it is, not as a side effect
-  // of which chapter happened to be composable that pass (Shane 2026-08-10).
   const allowedChildren = NO_FOLD_KINDS;
   for (let unitIndex = 0; unitIndex < units.length; unitIndex += 1) {
     const first = units[unitIndex];
@@ -117,15 +108,7 @@ export function selectAutomaticChapter(
       if (claimed.size && refs.some((ref) => claimed.has(objectRefKey(ref)))) continue;
       if (refsProtected(refs, state, snapshot)) continue;
       const size = bytes(encodedFoldSource(snapshot, state, parts, "chapter"));
-      // The chapter cap bounds what the rung COMPOSES, never what it may reclaim: a
-      // single closed unit that alone exceeds it is still accepted (rep 19: six status
-      // results, each above the cap, were exactly the mass nothing could fold).
       if (size > snapshot.policy.maxChapterChars && endIndex > unitIndex) break;
-      // Bite-sized by construction. A multi-unit chapter never grows past the cap, so
-      // the ladder cannot build the 60kB fold whose tail hid the answer (rep 6); a
-      // SINGLE unit that alone exceeds it is still accepted, because there is no
-      // interior boundary to stop at and refusing would leave the biggest span in the
-      // window as the one thing nothing may reclaim.
       const biteSized = size <= MAX_FOLD_SPAN_CHARS || endIndex === unitIndex;
       if (size >= snapshot.policy.minChapterChars && biteSized) best = { kind: "chapter", parts, sourceRefs: refs };
       if (size > MAX_FOLD_SPAN_CHARS) break;
@@ -135,20 +118,6 @@ export function selectAutomaticChapter(
   return null;
 }
 
-/**
- * ONE automatic selection law for stale material.
- *
- * There is no chapter rung and no consolidation rung any more, each with its own
- * trigger: automation proposes the stalest eligible SPAN, and what the span contains
- * decides the fold's kind. Raw narrative folds as a chapter; a parent the root count
- * requires folds as a consolidation. Nothing here is pressure-scaled: the epoch's own
- * commit trigger decides WHEN, and this decides WHAT.
- *
- * One candidate, because that is what a single inline rung can apply. The count law
- * itself is not rationed this way: the commit epoch takes EVERY group the count requires
- * in one pass, and this is the leftover route by which the stalest of them can also ride
- * an epoch's own rewrite.
- */
 export function selectAutomaticStaleSpan(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -162,10 +131,6 @@ export function selectAutomaticStaleSpan(
   return at(folds) < at(chapter) ? folds : chapter;
 }
 
-/**
- * What the commit epoch proposes: a completed read-only tool batch if one is stale, and
- * otherwise the stalest span the one law composes. This is the whole automatic path.
- */
 export function selectAutomaticSpan(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -187,12 +152,6 @@ export interface AutomaticRungSelectionOptions {
   toolOnly?: boolean;
   summarizerAvailable?: boolean;
   failedPreparationIds?: ReadonlySet<string>;
-  /**
-   * Evidence and folds already spoken for by something that is not yet a fold, i.e.
-   * a pending epoch mark. Excluding them makes each eligible turn select NEW stale
-   * content instead of re-selecting the batch a mark already covers, which is the
-   * only way marks accumulate below the commit threshold.
-   */
   claimed?: ReadonlySet<string>;
   claimedFoldIds?: ReadonlySet<string>;
 }
@@ -224,8 +183,6 @@ export function selectAutomaticRung(
   if (options.toolOnly || !Number.isFinite(ratio)) return null;
   const refold = selectAutomaticRefold(snapshot, state, claimedFoldIds);
   if (refold) return { kind: "refold", foldId: refold };
-  // One law decides the span; only the CHAPTER kind still has a preparation path in
-  // front of it, because only a chapter brief is worth a model call.
   const span = selectAutomaticStaleSpan(snapshot, state, claimed);
   if (span?.kind === "consolidation") return { kind: "consolidation", candidate: span };
   const chapter = span;
@@ -296,9 +253,6 @@ export function foldCandidatesDetail(
     } : null,
     wouldFireNow,
     blockedBy,
-    // The one position that still cuts anything, plus the count law read as the
-    // arithmetic it is: the roots it counts, the width it divides by, and how many
-    // parents that count owes right now.
     zones: {
       freshBoundary: snapshot.freshBoundary,
       budgetTokens: snapshot.budgetTokens,
@@ -369,25 +323,6 @@ export function encodedFoldSource(
   }));
 }
 
-/**
- * What a generator reads to brief a PARENT: its children at depth one.
- *
- * `encodedFoldSource` renders a parent's children through `renderFold`, which yields their
- * placeholders, so a parent's source was the children's briefs. Briefing that produces a
- * summary of summaries, and by the second rung the material itself is three descriptions
- * away. So each child is opened here instead: its own brief for orientation, then its
- * contents, with ITS children left as placeholders. Depth one is the whole rule. It bounds
- * the read at one level per rung whatever the ladder's height, and it is the same view an
- * agent gets from expanding the parent, so a brief written from it describes what expanding
- * would actually return.
- *
- * When the opened children do not fit, the LARGEST collapses back to brief-only first, and
- * again until the rest fit. Size is what decides, not position: dropping in span order
- * would spend the whole budget on an early giant and close every child behind it, while
- * taking the giant out first buys back the most room for the fewest subjects lost. A
- * collapsed child still appears, in span order, carrying its brief and saying it is
- * collapsed, so the generator can tell a child it read from a child it only heard about.
- */
 export function consolidationSourceText(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -417,8 +352,6 @@ export function consolidationSourceText(
       ? { collapsed: "brief only: this child did not fit expanded" }
       : { contents: entry.messages }),
   })));
-  // Largest first, and only as many as the budget forces: each collapse is a subject the
-  // brief must describe from one sentence instead of from its contents.
   const bySize = entries
     .filter((entry) => entry.foldId !== null)
     .map((entry) => ({ index: entry.index, size: bytes(entry.messages) }))
@@ -459,17 +392,6 @@ export function boundedOrientation(
   return { beforeRefs: before, beforeText, afterRefs: after.refs, afterText: after.text };
 }
 
-/**
- * What is wrong with a generated brief, said in words its author can act on, or null.
- *
- * Length is a criterion we set, so a brief that misses it is answered rather than cut.
- * Truncating a long brief silently loses whatever the generator put last, which on a group
- * is the last children it covered; the cure is to hand the complaint back and let the
- * generator spend the budget itself. Coverage cannot be checked the same way: no test tells
- * whether a sentence stands for a child, so coverage is instructed in the request and
- * defended by the deterministic index underneath, and what is checked here is the pair of
- * failures that were silent before.
- */
 export function briefContractComplaint(
   brief: string,
   maxBriefChars: number,
@@ -488,18 +410,6 @@ export function briefContractComplaint(
   return null;
 }
 
-/**
- * One brief from the generator, with one chance to cure a criterion it missed.
- *
- * The no-retry rule this lane was built with holds for what it was written about: a
- * generator that fails on a span fails on it again, and looping would spend the session's
- * calls proving it. A contract complaint is the other case. The request stated a limit, the
- * answer missed it, and the complaint names exactly what to change, so the second ask is
- * new information rather than the same ask twice. It is bounded at one, and only a
- * complaint earns it: transport faults, timeouts and attribution drift still fail on the
- * first answer. Both attempts sit inside the caller's timeout, so a brief costs no more
- * wall clock than it did.
- */
 export async function generatedBrief(input: {
   summarize: (request: Record<string, unknown>, ctx?: unknown) => Promise<Record<string, unknown>>;
   request: Record<string, unknown>;
@@ -521,12 +431,6 @@ export async function generatedBrief(input: {
   throw new Error(`Model context brief usefulness contract drift after one cure: ${complaint}`);
 }
 
-/**
- * Attribution is the harness's own wiring, not the generator's judgment, so it is never
- * handed back to be cured: a summarizer that cannot say which model wrote a brief is broken
- * in a way a second ask cannot mend. Shared by the single and batched paths so the two
- * cannot drift.
- */
 function generatorAttribution(result: Record<string, unknown> | null | undefined): BriefProvenance {
   const digest = result?.launchContractDigest;
   if (typeof result?.provider !== "string" || !result.provider ||
@@ -544,20 +448,6 @@ function generatorAttribution(result: Record<string, unknown> | null | undefined
   };
 }
 
-/**
- * Many briefs from one call, with one chance to cure the ones that missed.
- *
- * The lane used to send one request per fold, two at a time, which meant most folds never
- * reached a generator at all: the 2026-08-11 rep committed 87 folds and applied 14 model
- * briefs, the rest keeping the deterministic sentence because the queue was full. A commit
- * folds its spans together, so they are briefed together, and coverage stops competing with
- * throughput.
- *
- * The cure is per-span and the retry carries only the spans that failed, so one bad brief
- * does not make the model rewrite eleven good ones. A span still failing after its cure
- * keeps its deterministic brief and is named in the error, which is the same outcome a
- * single-span failure has always had; the difference is that its neighbours still land.
- */
 export async function generatedBriefs(input: {
   summarize: (request: Record<string, unknown>, ctx?: unknown) => Promise<Record<string, unknown>>;
   request: Record<string, unknown>;
@@ -568,19 +458,12 @@ export async function generatedBriefs(input: {
 }): Promise<{
   briefs: Array<{ brief: string; provenance: BriefProvenance } | null>;
   cured: number;
-  /** One entry per SPAN, null where the span's brief landed. Never the asked-list order. */
   complaints: Array<string | null>;
 }> {
   const settled = new Array<{ brief: string; provenance: BriefProvenance } | null>(input.spans.length)
     .fill(null);
   let pending = input.spans.map((span, index) => ({ span, index }));
   let cured = 0;
-  // Complaints are returned keyed by the SPAN's position in the call, not by its position
-  // in whatever subset was last asked. The two diverge the moment a cure re-asks a subset:
-  // the retry's second span may be the call's fifth, and a caller reading them positionally
-  // then reports one span's failure under another span's name. The `cure` text handed back
-  // to the generator is separately numbered against the ASKED list, because that is the list
-  // the generator is looking at.
   const complaintBySpan = new Array<string | null>(input.spans.length).fill(null);
   let complaints: string[] = [];
   for (let attempt = 0; attempt < 2 && pending.length; attempt += 1) {
@@ -623,11 +506,6 @@ export async function prepareFold(input: {
   state: ActiveContextState;
   generation: number;
   brief?: string;
-  /**
-   * Provenance for a supplied brief. A full record round-trips a brief whose
-   * generator already ran (a pending mark carrying a model brief); the string
-   * forms stay the shorthand for the two model-free kinds.
-   */
   briefProvenance?: "supplied" | "deterministic" | BriefProvenance;
   summarize?: (request: Record<string, unknown>, ctx?: unknown) => Promise<Record<string, unknown>>;
   onSummarizerFailure?: (error: unknown) => void;
@@ -663,12 +541,6 @@ export async function prepareFold(input: {
   let brief: string;
   let provenance: BriefProvenance;
   if (input.brief !== undefined) {
-    // The SAME complaint the generator is given, for the same reason: a limit is only a
-    // limit the caller can meet if the refusal says which rule it missed and what to do.
-    // This used to read "must be non-structural and at most N characters" whatever the
-    // brief did wrong, so an agent whose three-hundred-character brief happened to name
-    // the tool was told about a two-thousand-character cap it was nowhere near. The agent
-    // holds the fold's own material, so it can act on the complaint and mark again.
     const complaint = briefContractComplaint(
       input.brief.trim(), snapshot.policy.maxBriefChars, snapshot.toolName);
     if (complaint !== null) throw new Error(`Supplied brief rejected. ${complaint}`);
@@ -698,9 +570,6 @@ export async function prepareFold(input: {
           request: {
             candidateId,
             sourceRefs: clone(candidate.sourceRefs),
-            // What the generator READS, which for a group is its children opened one level
-            // rather than the placeholders `sourceText` renders. The fold's own identity
-            // stays `sourceSha256` above: what a span IS does not change with how it is read.
             sourceText: readableSource,
             sourceSha256: sha256Text(readableSource),
             children: groupChildren,
@@ -730,8 +599,6 @@ export async function prepareFold(input: {
       brief = modelBrief.brief;
       provenance = modelBrief.provenance;
     } else {
-      // By kind, not by assumption: a group that loses its generator falls back to the
-      // index of its children, and only a chapter falls back to a chapter's brief.
       brief = candidate.kind === "consolidation"
         ? deterministicConsolidationBrief(candidate, state, snapshot.toolName)
         : deterministicChapterCandidateBrief(snapshot, candidate);
@@ -925,9 +792,6 @@ export function commitPreparedFold(input: {
   if (error) throw new Error(`Prepared active-context fold discarded: ${error}`);
   const nested = stateWithNestedFold(input.state, input.prepared.fold);
   const next = clearPrepared({ ...nested, revision: input.state.revision + 1 });
-  // A fold is not committed unless its provider projection preserves every
-  // existing tool-call/output pair atomically. This keeps malformed provider
-  // context non-constructible even if a future selector regresses.
   projectActiveContext(input.snapshot, next);
   return next;
 }
@@ -990,8 +854,6 @@ export function protectEvidence(
   });
   const byKey = new Map(state.protected.map((ref) => [objectRefKey(ref), ref]));
   for (const ref of refs) protect ? byKey.set(objectRefKey(ref), ref) : byKey.delete(objectRefKey(ref));
-  // Atomic: the whole resolved set pins or nothing does. A partial pin that reports
-  // success would leave part of the requested span silently reclaimable.
   if (byKey.size > MAX_ACTIVE_PROTECTED) {
     throw new Error(
       `Protecting ${ids.join(", ")} would hold ${byKey.size} refs, over the ${MAX_ACTIVE_PROTECTED}-ref cap; ` +
@@ -1120,13 +982,6 @@ export function assertProjectionPreservesToolLinkage(source: unknown[], projecte
   }
 }
 
-/**
- * Peek mass the ladder cannot take: results whose evidence the agent protected
- * outright. This is the number that made rep 7's starvation invisible. The mass sat
- * raw in the window, the ROI trigger's eligibility arithmetic could never reach its
- * threshold over it, and no accounting field said so while the window grew to 235k
- * tokens.
- */
 export function pinnedPeekMass(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -1185,13 +1040,6 @@ export function projectActiveContext(
       index += 1;
     }
   }
-  // A peek result is APPEND-ONLY. It used to be rewritten in place once a model call
-  // had seen it, on the theory that the edit was tail-local; rep 22 disproved that.
-  // The result is only tail-local when it ARRIVES, and reclamation deliberately waits
-  // until a later assistant message exists, by which point the window has grown over
-  // it and the edit lands mid-prefix. Two peeks cost 100k fresh tokens that way. The
-  // duplicate bytes are still reclaimed, by the tool-fold rung at the next commit,
-  // which is the one moment a rewrite is already being paid for.
   assertProjectionPreservesToolLinkage(snapshot.messages, output);
   return output;
 }
@@ -1220,9 +1068,6 @@ export function foldStatusRow(fold: ActiveFold, state: ActiveContextState, snaps
     sourceCount: allSourceIds.length,
     sourceIdsTruncated: sourceIds.length < allSourceIds.length,
     sourceSha256: fold.sourceSha256,
-    // A paged row without the brief is a chronological id and nothing else: the
-    // agent that paged the tree to find WHICH fold holds something got the one
-    // field that answers it withheld, while the tree detail carried it all along.
     brief: foldBrief(fold, state),
     sourceChars: fold.sourceChars,
     actions: {
@@ -1236,7 +1081,6 @@ export function foldStatusRow(fold: ActiveFold, state: ActiveContextState, snaps
   };
 }
 
-/** Every fold, nested ones included, in transcript order with each parent before its children. */
 export function orderedFoldTree(state: ActiveContextState, snapshot: ActiveContextSnapshot): ActiveFold[] {
   const byId = foldMap(state);
   const ordered: ActiveFold[] = [];
@@ -1275,12 +1119,6 @@ export function foldTreeDetail(
   }));
 }
 
-/**
- * One compact row per collapsed fold: what is behind it, where its span starts and
- * ends, and the brief that carries whatever key material the fold captured. This is
- * the answer to "which fold has X" that agents were paying 56-83k chars per peek to
- * reconstruct, and it costs a line.
- */
 export function foldIndexRow(
   fold: ActiveFold,
   state: ActiveContextState,
@@ -1309,7 +1147,6 @@ export function foldIndexRow(
   };
 }
 
-/** Every mapped source id to the fold that now holds it, so a lookup never needs a read. */
 export function foldSourceMap(
   state: ActiveContextState,
   snapshot: ActiveContextSnapshot,
@@ -1319,7 +1156,6 @@ export function foldSourceMap(
   for (const fold of orderedFoldTree(state, snapshot)) {
     for (const ref of flattenFoldRefs(fold, state)) entries.push([ref.entryId, fold.id]);
   }
-  // Deepest wins: the innermost fold is the one that actually holds the source.
   const byEntry = new Map(entries);
   const all = [...byEntry.entries()];
   return { entries: all.slice(0, limit), total: all.length, truncated: all.length > limit };
@@ -1354,10 +1190,6 @@ export function activeContextStatus(
   const eligibleEndpoints = eligibleSourceIds.length
     ? [...new Set([eligibleSourceIds[0], eligibleSourceIds.at(-1)!])]
     : [];
-  // The index that used to ride every status call grew from 12.6k to 86.5k chars in
-  // one measured session, injected on every request that asked for state. On the diet
-  // the default payload carries counts, the source map and the folds worth acting on;
-  // the full tree and the object list move behind an explicit paged query.
   const index = statusOptions.diet
     ? visibleCollapsedFolds(state, snapshot)
       .map((fold) => foldIndexRow(fold, state, snapshot))
@@ -1416,20 +1248,8 @@ export function activeContextStatus(
   };
 }
 
-/** Room reserved for the one-line continuation marker a truncated page carries. */
 const STATUS_CONTINUATION_RESERVE_BYTES = 400;
 
-/**
- * Enforce the hard status page cap on one fully assembled status payload.
- *
- * Measured 2026-08-07 (rep 19): one status answer serialized to 526KB, 6.2x the
- * remaining headroom, and aborted the request. The paging affordance existed;
- * nothing forced it. This function is the force: every listing in the payload is
- * truncated at a unit boundary (whole rows, never mid-unit) until the serialized
- * page fits, and a one-line continuation marker names the next offset. Trim order
- * spends the diagnostics first and the listing the caller asked for last, and the
- * requested listing always keeps at least one unit so paging always progresses.
- */
 export function boundStatusPayload(
   payload: Record<string, unknown>,
   detail: string | null,
@@ -1441,9 +1261,6 @@ export function boundStatusPayload(
   const target = cap - STATUS_CONTINUATION_RESERVE_BYTES;
   const fits = (): boolean => size() <= target;
   const omitted: string[] = [];
-  // keepEnd keeps the NEWEST units of a time-ordered ledger; a paged listing keeps
-  // its head so the continuation offset is the next unread unit. Binary search for
-  // the largest keep that fits; a stage that cannot fit alone trims to its floor.
   const shrink = (owner: unknown, key: string, label: string, keepEnd = false, minKeep = 0): number => {
     if (!isPlainRecord(owner) || fits()) return 0;
     const original = ownValue(owner, key);
@@ -1475,8 +1292,6 @@ export function boundStatusPayload(
   if (shrink(payload, "sourceMap", "source map row(s)") > 0) payload.sourceMapTruncated = true;
   shrink(payload, "topFolds", "top fold row(s)");
   const rowLabel = (key: string): string => key === "folds" ? "fold row(s)" : key === "objects" ? "object row(s)" : "tree row(s)";
-  // The listing the caller asked for goes last and never below one unit. Its
-  // machine-readable next offset moves back to the first unit the page dropped.
   let continueAt: number | null = null;
   if (detail === "folds" || detail === "objects") {
     const rideKey = detail === "folds" ? "objects" : "folds";
@@ -1574,7 +1389,6 @@ export interface FoldSourceRequest {
   projectEntry?: (entry: Record<string, unknown>) => unknown[];
 }
 
-/** One exact message per ref identity and digest, read off the immutable session entries. */
 function exactSessionMessages(input: FoldSourceRequest): Map<string, unknown> {
   const projectEntry = input.projectEntry ?? sessionEntryMessages;
   const exact = new Map<string, unknown>();
@@ -1601,13 +1415,6 @@ function exactMessageFor(
   return clone(message);
 }
 
-/**
- * One fold's ENTIRE original source, at every depth.
- *
- * This is the rescue read: restoration and the recovery audit both need the bytes as the
- * session first wrote them, with nothing standing in for anything. Retrieval inside a
- * session is the other function, and it serves one level.
- */
 export function recoverFoldMessages(input: FoldSourceRequest): unknown[] {
   const fold = input.state.folds.find((item) => item.id === input.foldId);
   if (!fold) throw new Error(`Unknown active-context fold ${input.foldId}`);
@@ -1615,7 +1422,6 @@ export function recoverFoldMessages(input: FoldSourceRequest): unknown[] {
   return flattenFoldRefs(fold, input.state).map((ref) => exactMessageFor(exact, ref, input.sessionId));
 }
 
-/** A child fold as its parent's stored span holds it: the placeholder, not the bytes under it. */
 export function storedChildPlaceholder(child: ActiveFold, state: ActiveContextState): Record<string, unknown> {
   return {
     placeholder: "fold",
@@ -1629,18 +1435,6 @@ export function storedChildPlaceholder(child: ActiveFold, state: ActiveContextSt
   };
 }
 
-/**
- * One fold's stored span, AS STORED: one level.
- *
- * A fold's span is what it took in, and what it took in was already whatever the window
- * held: raw entries, and placeholders for folds that were there first. So the honest read
- * of a parent is that same span, children still placeheld. Reading it as the original
- * bytes at every depth would hand back a whole session's transcript for one call and
- * undo the nesting the fold performed.
- *
- * The verbatim floor is untouched by this. A leaf's stored span IS its original bytes, so
- * the bytes are always exactly one peek away from any id the read hands back.
- */
 export function foldStoredSpan(input: FoldSourceRequest): unknown[] {
   const fold = input.state.folds.find((item) => item.id === input.foldId);
   if (!fold) throw new Error(`Unknown active-context fold ${input.foldId}`);
@@ -1654,21 +1448,12 @@ export function foldStoredSpan(input: FoldSourceRequest): unknown[] {
   });
 }
 
-/**
- * Ephemeral point read of one fold's stored span. It returns the same SHA-256-verified
- * span expansion restores, ONE level: raw entries verbatim, child folds still placeheld.
- * It is bounded for one model call and changes no projection: the fold stays collapsed and
- * the durable state is untouched. Any id in the result peeks in one hop, so the verbatim
- * floor is a hop away at every depth rather than a payload nobody asked for.
- */
 export function peekFoldSource(input: {
   foldId: string;
   state: ActiveContextState;
   entries: Array<Record<string, unknown>>;
   sessionId: string;
-  /** Explicit widening. Absent, a peek returns the bounded index view. */
   maximumBytes?: number;
-  /** Byte offset into the exact stored source; the narrowing half of admission control. */
   offset?: number;
   toolName?: string;
   projectEntry?: (entry: Record<string, unknown>) => unknown[];
@@ -1687,9 +1472,6 @@ export function peekFoldSource(input: {
   const offset = Math.min(Math.max(0, input.offset ?? 0), sourceBytes);
   const budget = input.maximumBytes ?? PEEK_DEFAULT_MAX_BYTES;
   const window = offset > 0 ? utf8Slice(source, offset) : source;
-  // Offset zero is the INDEX read and takes head AND tail, because chain keys and
-  // conclusions live at the end of a source and a head-only slice silently omits
-  // exactly that region. An explicit offset is paging and stays contiguous.
   const view = offset > 0
     ? { text: boundedUtf8(window, budget), omittedBytes: 0, contiguous: true }
     : boundedHeadTail(window, budget);
@@ -1700,8 +1482,6 @@ export function peekFoldSource(input: {
     : null;
   const truncated = view.omittedBytes > 0 || nextOffset !== null;
   const children = childFoldIds(fold);
-  // The index view: every nested fold's brief in FULL. A brief is the navigable unit,
-  // so truncating it is the one economy that costs the read its purpose.
   const index = descendantIndexRows(fold, input.state);
   return {
     version: 1,
@@ -1721,8 +1501,6 @@ export function peekFoldSource(input: {
     truncated,
     view: offset > 0 ? "slice" : (view.omittedBytes > 0 ? "index" : "complete"),
     ...(index.length ? { index } : {}),
-    // Narrower and WIDER reads that are always constructible, so a refusal or a
-    // truncation can name one.
     children,
     narrower: {
       ...(nextOffset === null ? {} : { slice: { action: "peek", id: fold.id, offset: nextOffset, bytes: returnedBytes } }),
@@ -1743,10 +1521,6 @@ export function peekFoldSource(input: {
           "placeheld. Peek a child id to read its own span; the fold stayed collapsed and no projection changed."
         : "Complete exact source; the fold stayed collapsed and no projection changed.",
     source: returned,
-    // Serialized AFTER the source on purpose: a reader that just consumed a bounded slice
-    // decides its next action at the end of the payload, and a notice buried before ten
-    // thousand source bytes is a notice unread (measured: a run concluded a staged chain
-    // was finished because the chain key lived in the unshown tail of a truncated peek).
     ...(truncated
       ? {
         truncationReminder: `STOP: ${view.omittedBytes || sourceBytes - returnedBytes} of ${sourceBytes} ` +
@@ -1761,16 +1535,10 @@ export function peekFoldSource(input: {
   };
 }
 
-/** The marker a head+tail view puts where the omitted middle was. */
 export function headTailMarker(omittedBytes: number): string {
   return omittedBytes > 0 ? `\n... [${omittedBytes} exact source bytes omitted] ...\n` : "";
 }
 
-/**
- * A bounded view that keeps the head AND the tail. A head-only bound drops exactly the
- * region a staged chain keeps its key in; the omitted size is stated where the reading
- * ends so "there is more" is never an inference.
- */
 export function boundedHeadTail(
   source: string,
   budget: number,
@@ -1791,7 +1559,6 @@ export function boundedHeadTail(
   };
 }
 
-/** Every descendant fold, in transcript order, with its brief in full. */
 export function descendantIndexRows(
   fold: ActiveFold,
   state: ActiveContextState,
