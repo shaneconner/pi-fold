@@ -13390,6 +13390,153 @@ async function gateNoTokenCeilingReachesTheProvider() {
   };
 }
 
+/**
+ * A DELTA CARRIES THE CHANGE, NEVER A VALUE ITS BASE ALREADY HOLDS.
+ *
+ * The v1 checkpoint became a v2 delta and the envelope was done correctly, but only the
+ * fold refs were ever diffed. The other ten fields were cloned whole onto a wire that
+ * says `kind: "delta"`, which is why the shape looked finished and the payload was not.
+ *
+ * The brief map is the field that made it cost. On sol-20260812 rep 9 the state ledger
+ * was 21.5 MB of a 31.7 MB session, briefs were 17.7 MB of that, 81 percent, and the
+ * projection actually sent to the provider was 0.93 MB. The session file is what every
+ * later turn's derivation reads, so the run burned 50.9 minutes of CPU over 116 minutes
+ * of wall against the native arm's 24 seconds, and wall-clock stopped meaning anything.
+ *
+ * The invariant is not that a brief never changes: the upgrade lane rewrites a
+ * deterministic brief with a model one, and `rebrief` lets the agent correct either. It
+ * is that the wire carries the difference from its base and nothing else, so an addition,
+ * a rewrite and a removal all travel and an unchanged map travels nowhere.
+ */
+async function gateDeltaCarriesOnlyBriefChanges() {
+  const runtime = await epochToolRuntime({ turns: 16, resultChars: 6_000 });
+  const built = runtime.built;
+  const newestDelta = () => {
+    const data = runtime.branch
+      .filter((entry) => entry.customType === context.ACTIVE_CONTEXT_STATE_ENTRY)
+      .map((entry) => entry.data).at(-1);
+    assert.equal(data.kind, "delta", "The fixture wrote a checkpoint, so the delta path went untested");
+    return data;
+  };
+
+  await toolCall(runtime, {
+    action: "fold",
+    marks: [0, 1, 2].map((turn) => ({
+      ids: [built.turnEntries[turn][2]],
+      brief: `Stale inspection ${turn}: the exact output stays recoverable behind this fold.`,
+    })),
+  });
+  await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  // Roots, not folds: the commit consolidates, and expanding a child before its parent is
+  // refused. Read off the live branch because the ladder chose the shape, not the fixture.
+  const snapshotNow = () => context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: runtime.messages,
+    contextEntries: runtime.branch,
+    contextWindow: 100_000,
+  });
+  const roots = context.orderedRoots(materialized(runtime), snapshotNow()).map((root) => root.fold);
+  assert(roots.length >= 2,
+    `The fixture committed ${roots.length} root folds; two are needed to tell one brief's write from another's`);
+  const [first, second] = roots;
+
+  // A brief at the policy cap, so a whole-map write could not hide inside the rest of the
+  // wire. It ends on a period because `rebrief` trims, and a trimmed brief is not the
+  // string this gate then compares the replayed map against.
+  const briefText = (name) => `${`Corrected ${name}: the exact bytes stay recoverable behind this fold. `
+    .padEnd(context.ACTIVE_CONTEXT_POLICY.maxBriefChars - 1, "The span is unchanged beside it. ")}.`;
+
+  await toolCall(runtime, { action: "rebrief", id: first.id, brief: briefText("one") });
+  const afterFirst = newestDelta();
+  assert.equal(afterFirst.briefs, undefined, "The delta stated the whole brief map");
+  assert.deepEqual(Object.keys(afterFirst.addBriefs ?? {}), [first.id], "The rebrief did not name its own fold");
+
+  // The write the defect made expensive: nothing about the briefs changed here, and the
+  // whole map shipped anyway. It has to carry no brief key of any kind.
+  await toolCall(runtime, { action: "expand", id: second.id });
+  const unrelated = newestDelta();
+  assert.equal(unrelated.briefs, undefined);
+  assert.equal(unrelated.addBriefs, undefined, "A write that changed no brief carried one");
+  assert.equal(unrelated.removeBriefIds, undefined);
+  assert(!JSON.stringify(unrelated).includes("Corrected one"),
+    "The write that changed no brief carried the brief's own bytes");
+
+  await toolCall(runtime, { action: "rebrief", id: second.id, brief: briefText("two") });
+  assert.deepEqual(Object.keys(newestDelta().addBriefs), [second.id], "The second rebrief re-shipped the first");
+  await toolCall(runtime, { action: "rebrief", id: first.id, brief: briefText("one again") });
+  assert.deepEqual(Object.keys(newestDelta().addBriefs), [first.id], "A rewrite did not travel as its own change");
+
+  // Materialisation replays every entry in the branch, so this is the round trip: the map
+  // the runtime holds has to be rebuildable from a chain that never stated it whole.
+  assert.deepEqual(materialized(runtime).briefs, {
+    [first.id]: briefText("one again"),
+    [second.id]: briefText("two"),
+  }, "Replaying the deltas did not reproduce the brief map");
+
+  // REMOVAL. `reboundary` with an id alone dissolves the fold and drops its brief with it.
+  await toolCall(runtime, { action: "reboundary", id: first.id });
+  const afterDissolve = newestDelta();
+  assert.deepEqual(afterDissolve.removeBriefIds, [first.id], "The dissolved fold's brief did not travel as a removal");
+  assert.equal(afterDissolve.addBriefs, undefined, "A removal re-shipped the brief that stayed");
+  assert.deepEqual(materialized(runtime).briefs, { [second.id]: briefText("two") },
+    "Replaying the removal did not leave the surviving brief standing");
+
+  // A delta written before this change states the whole map, and sealed sessions hold
+  // thousands of them. The presence of `briefs` is the discriminator, not a fallback: a
+  // wire that states the map is replayed as the map, and it may not also state a change.
+  const chain = runtime.branch.filter((entry) => entry.customType === context.ACTIVE_CONTEXT_STATE_ENTRY);
+  assert(chain.length > 3, "The fixture wrote too few state entries to exercise a chain");
+  const legacyBranch = structuredClone(runtime.branch);
+  for (const [at, entry] of legacyBranch.entries()) {
+    if (entry.customType !== context.ACTIVE_CONTEXT_STATE_ENTRY || entry.data.kind !== "delta") continue;
+    // The whole map AS OF this entry, which is what a pre-2026-08-13 writer put on the
+    // wire. The resulting state is identical either way, so the digests still hold.
+    const whole = context.materializeActiveContextState(runtime.branch.slice(0, at + 1), built.sessionId).briefs;
+    delete entry.data.addBriefs;
+    delete entry.data.removeBriefIds;
+    if (whole) entry.data.briefs = whole;
+  }
+  assert.deepEqual(
+    context.materializeActiveContextState(legacyBranch, built.sessionId).briefs,
+    { [second.id]: briefText("two") },
+    "A sealed session's whole-map deltas no longer replay",
+  );
+
+  const sample = structuredClone(chain.at(-1).data);
+  assert.throws(() => context.parseActiveContextStateV2(
+    { ...sample, briefs: { [second.id]: briefText("two") } }, built.sessionId,
+  ), /states the whole brief map and a change to it/,
+  "A delta stating both the whole map and a change to it was accepted");
+  assert.throws(() => context.parseActiveContextStateV2(
+    { ...sample, removeBriefIds: [first.id, first.id] }, built.sessionId,
+  ), /Invalid active-context delta brief removals/);
+
+  // And the reader refuses a chain that would be ambiguous: a removal the base never
+  // held, and an addition byte-identical to what the base already holds. Both are only
+  // producible by a broken writer, and neither may be absorbed quietly.
+  const brokenRemoval = structuredClone(runtime.branch);
+  brokenRemoval.filter((entry) => entry.customType === context.ACTIVE_CONTEXT_STATE_ENTRY)
+    .at(-1).data.removeBriefIds = ["fold_never_written_here"];
+  assert.throws(() => context.materializeActiveContextState(brokenRemoval, built.sessionId),
+    /Unknown active-context brief removal/);
+  const redundant = structuredClone(runtime.branch);
+  const redundantTail = redundant.filter((entry) => entry.customType === context.ACTIVE_CONTEXT_STATE_ENTRY).at(-1);
+  delete redundantTail.data.removeBriefIds;
+  redundantTail.data.addBriefs = { [second.id]: briefText("two") };
+  assert.throws(() => context.materializeActiveContextState(redundant, built.sessionId),
+    /Redundant active-context brief/);
+
+  return {
+    stateEntries: chain.length,
+    unchangedWriteBytes: JSON.stringify(unrelated).length,
+    briefChars: briefText("one").length,
+    additionsTravelled: 2,
+    rewritesTravelled: 1,
+    removalsTravelled: 1,
+    unchangedMapTravelled: false,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -13503,6 +13650,7 @@ const gates = [
   // 124 is retired, not free: the clean-rollback retry it pinned was deleted the day it
   // shipped, and reusing its number would make the history unreadable.
   [126, "A batched brief names the bytes it was made from", gateBatchedBriefNamesItsSource],
+  [127, "A delta carries only what changed", gateDeltaCarriesOnlyBriefChanges],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

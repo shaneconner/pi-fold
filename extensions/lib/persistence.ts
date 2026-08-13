@@ -632,6 +632,10 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     Object.prototype.hasOwnProperty.call(value, "pinnedPeeks"));
   const hasBriefs = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "briefs"));
+  const hasAddBriefs = Boolean(value && typeof value === "object" &&
+    Object.prototype.hasOwnProperty.call(value, "addBriefs"));
+  const hasRemoveBriefIds = Boolean(value && typeof value === "object" &&
+    Object.prototype.hasOwnProperty.call(value, "removeBriefIds"));
   const hasRider = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "rider"));
   const hasLastCall = Boolean(value && typeof value === "object" &&
@@ -646,6 +650,8 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     ...(hasPendingMarks ? ["pendingMarks"] : []),
     ...(hasPinnedPeeks ? ["pinnedPeeks"] : []),
     ...(hasBriefs ? ["briefs"] : []),
+    ...(hasAddBriefs ? ["addBriefs"] : []),
+    ...(hasRemoveBriefIds ? ["removeBriefIds"] : []),
     ...(hasRider ? ["rider"] : []),
     ...(hasLastCall ? ["lastCall"] : []),
     ...(hasNotices ? ["notices"] : []),
@@ -688,6 +694,18 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     const parsed = addRefs.map(parseFoldRecordRef);
     if (new Set(parsed.map((ref) => ref.id)).size !== parsed.length || new Set(removeIds).size !== removeIds.length) {
       throw new Error("Duplicate active-context delta change");
+    }
+    if (hasAddBriefs) parseBriefOverrides(ownValue(value, "addBriefs"));
+    if (hasRemoveBriefIds) {
+      const removeBriefs = denseOwnArrayValues(ownValue(value, "removeBriefIds"));
+      if (!removeBriefs || removeBriefs.length > MAX_ACTIVE_FOLD_RECORDS ||
+          removeBriefs.some((id) => typeof id !== "string" || !id) ||
+          new Set(removeBriefs).size !== removeBriefs.length) {
+        throw new Error("Invalid active-context delta brief removals");
+      }
+    }
+    if (hasBriefs && (hasAddBriefs || hasRemoveBriefIds)) {
+      throw new Error("Active-context delta states the whole brief map and a change to it");
     }
   }
   const parsed = clone(value) as unknown as ActiveContextStateWireV2;
@@ -851,7 +869,30 @@ export function materializeStatePersistence(
         if (existing) throw new Error(`Duplicate active-context delta addition ${ref.id}`);
         byId.set(ref.id, ref);
       }
-      state = stateFromFoldRefs(wire, [...byId.values()], records);
+      // A delta written before 2026-08-13 carries the whole brief map; a newer one carries
+      // only what changed. The presence of `briefs` is the discriminator, not a fallback:
+      // a wire that states the whole map is replayed as the whole map.
+      const briefs = wire.briefs !== undefined ? clone(wire.briefs) : { ...(state.briefs ?? {}) };
+      if (wire.briefs === undefined) {
+        for (const id of wire.removeBriefIds ?? []) {
+          if (!Object.prototype.hasOwnProperty.call(briefs, id)) {
+            throw new Error(`Unknown active-context brief removal ${id}`);
+          }
+          delete briefs[id];
+        }
+        for (const [id, brief] of Object.entries(wire.addBriefs ?? {})) {
+          if (Object.prototype.hasOwnProperty.call(briefs, id) &&
+              sha256Value(briefs[id]) === sha256Value(brief)) {
+            throw new Error(`Redundant active-context brief ${id}`);
+          }
+          briefs[id] = clone(brief);
+        }
+      }
+      state = stateFromFoldRefs(
+        { ...wire, briefs: Object.keys(briefs).length ? briefs : undefined },
+        [...byId.values()],
+        records,
+      );
     }
     const calculated = semanticStateSha256(state);
     if (calculated !== wire.stateSha256 &&
@@ -927,6 +968,19 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
       throw new Error(`Active-context fold record changed for ${id}`);
     }
   }
+  // A delta carries the CHANGE, never a value its base already holds. The brief map used
+  // to ship whole on every write: 81% of all state bytes on sol-20260812 rep 9, 17.7 MB of
+  // it unchanged, which then made every later turn slower because the session file is what
+  // the runtime derives over.
+  const previousBriefs = previous.briefs ?? {};
+  const nextBriefs = next.briefs ?? {};
+  const addBriefs: Record<string, BriefOverride> = {};
+  for (const [id, brief] of Object.entries(nextBriefs)) {
+    if (!Object.prototype.hasOwnProperty.call(previousBriefs, id)) { addBriefs[id] = clone(brief); continue; }
+    if (sha256Value(previousBriefs[id]) !== sha256Value(brief)) addBriefs[id] = clone(brief);
+  }
+  const removeBriefIds = Object.keys(previousBriefs)
+    .filter((id) => !Object.prototype.hasOwnProperty.call(nextBriefs, id));
   return parseActiveContextStateV2({
     version: 2,
     kind: "delta",
@@ -943,7 +997,8 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
     leases: clone(next.leases),
     ...(next.surfacing?.length ? { surfacing: clone(next.surfacing) } : {}),
     ...(next.pendingMarks?.length ? { pendingMarks: clone(next.pendingMarks) } : {}),
-    ...(next.briefs && Object.keys(next.briefs).length ? { briefs: clone(next.briefs) } : {}),
+    ...(Object.keys(addBriefs).length ? { addBriefs } : {}),
+    ...(removeBriefIds.length ? { removeBriefIds } : {}),
     ...(next.advisory ? { advisory: clone(next.advisory) } : {}),
     ...(next.rider ? { rider: clone(next.rider) } : {}),
     ...(next.lastCall ? { lastCall: clone(next.lastCall) } : {}),
