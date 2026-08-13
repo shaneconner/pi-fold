@@ -3575,6 +3575,60 @@ try {
   checks.anAppliedCommitOwesAReceipt = true;
 }
 
+// GATE 55 - a worker killed from outside still writes its report, so the run stays readable.
+//
+// The supervisor sends SIGTERM when its deadline passes. Node's default handler ends the
+// process there: the `finally` that writes `worker-report.json` does not run, because a
+// signal is not an unwound stack. `adjudicate` refuses a run without that file, so a run
+// killed at the deadline is not a failed run, it is an unreadable one.
+//
+// sol-20260812 rep 7's pifold arm is the case. It released all 64 of 64 stages, folded 27
+// commits with every receipt paid and no suspension, then spent 281 more minutes recovering
+// its own evidence through 83 distinct peeks before the deadline killed it. Six hours of
+// provider spend, a complete session file on disk, and nothing that could be adjudicated or
+// set beside the native arm that ran in the same window.
+//
+// The report this writes is explicitly a failure: ok false, the signal named, and the run
+// still fails. That distinction is the whole point. It rescues the evidence, not the run.
+// ---------------------------------------------------------------------------
+{
+  const worker = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
+  assert(/process\.on\(signal, \(\) => writeSignalReport\(signal\)\)/.test(worker),
+    "the worker installs no signal handler, so a SIGTERM still discards its report");
+  const handler = worker.slice(
+    worker.indexOf("const writeSignalReport = ("),
+    worker.indexOf("for (const signal of ["),
+  );
+  assert(handler.length > 0, "the signal report writer was not found where it is pinned");
+  // Both signals, because the supervisor sends SIGTERM and an operator sends SIGINT, and a
+  // run killed by hand is worth exactly as much evidence as one killed by the deadline.
+  assert(/\["SIGTERM", "SIGINT"\]/.test(worker),
+    "the worker does not preserve its report on both the supervisor's signal and an operator's");
+  // Synchronous, because a signal handler that awaits does not finish before the process ends.
+  assert(/writeFileSync\(reportPath,/.test(handler) && !/await /.test(handler),
+    "the signal report is written asynchronously, so the process can end before it lands");
+  // Exclusive, so a worker that already wrote a real report cannot have it overwritten by
+  // the signal that follows a normal exit.
+  assert(/flag: "wx"/.test(handler),
+    "the signal report can overwrite a report the ordinary path already wrote");
+  // It must NOT read as a pass. A rescued report that said ok true would turn a killed run
+  // into a clean one, which is worse than losing it.
+  assert(/ok: false/.test(handler) && /requiresIndependentAdjudication: true/.test(handler),
+    "the signal report does not declare itself a failure");
+  assert(/terminatedBySignal: signal/.test(handler),
+    "the signal report does not name the signal that ended the run");
+  assert(/process\.exit\(1\)/.test(handler),
+    "a signalled worker does not exit non-zero");
+  // And the fields the adjudicator needs to read the run at all.
+  for (const field of ["runId", "arm", "sessionId", "sessionFile", "deadlineFired",
+    "workerStartedWallMs", "workerFinishedWallMs"]) {
+    assert(new RegExp(`\\b${field}\\b`).test(handler),
+      `the signal report omits ${field}, which the run cannot be read without`);
+  }
+
+  checks.aKilledWorkerStillWritesItsReport = true;
+}
+
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
 assert.deepEqual([...EXPERIMENT_MODES], ["smoke", "full"]);
 assert(plan, "stage plan fixture did not survive gate 4");

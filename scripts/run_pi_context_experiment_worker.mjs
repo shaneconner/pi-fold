@@ -6,7 +6,7 @@
 // machinery is unchanged and
 // the archive stages are replaced by the staged repo-comprehension workload.
 
-import { closeSync, existsSync, fsyncSync, openSync, readFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -178,6 +178,52 @@ let session;
 let report;
 let deadlineFired = false;
 let overflow = null;
+
+// A KILLED WORKER STILL WRITES ITS REPORT.
+//
+// The supervisor sends SIGTERM when its own deadline passes, and Node's default handler
+// ends the process there and then: the `finally` at the bottom of this file that writes
+// `worker-report.json` does not run, because a signal is not an unwound stack. So a run
+// killed at the deadline left no report, and `adjudicate` refuses a run without one
+// ("Run is incomplete: missing worker-report.json"). sol-20260812 rep 7's pifold arm lost
+// six hours that way: it released all 64 of 64 stages, folded 27 commits with every
+// receipt paid and no suspension, spent 281 further minutes recovering its own evidence
+// through 83 distinct peeks, and none of it could be adjudicated or reported beside the
+// native arm that ran in the same provider window. The evidence was all on disk. The one
+// file that makes it readable was the one the kill prevented.
+//
+// This does not rescue the run, and it must not read as one: the report says ok false,
+// names the signal, and the run still fails. It rescues the EVIDENCE, which is the thing
+// six hours of provider spend actually bought.
+const writeSignalReport = (signal) => {
+  try {
+    writeFileSync(reportPath, `${JSON.stringify({
+      ok: false,
+      requiresIndependentAdjudication: true,
+      version: 1,
+      runId: config.runId,
+      arm: config.arm,
+      workerPid,
+      workerStartTicks,
+      workerStartedWallMs,
+      workerStartedMonotonicMs,
+      workerFinishedWallMs: Date.now(),
+      workerFinishedMonotonicMs: monotonicMs(),
+      sessionId: manager?.getSessionId?.() ?? null,
+      sessionFile: manager?.getSessionFile?.() ?? null,
+      overflow,
+      foldSummary: null,
+      terminal: null,
+      deadlineFired,
+      // The distinguishing fact, and the reason this file is not a normal report: the run
+      // was ended from outside rather than by anything the session did.
+      terminatedBySignal: signal,
+      error: { message: `Experiment worker terminated by ${signal}` },
+    }, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+  } catch { /* Already written by the ordinary path, or the directory is gone. */ }
+  process.exit(1);
+};
+for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => writeSignalReport(signal));
 
 try {
   const piVersion = JSON.parse(readFileSync(join(PI_ROOT, "package.json"), "utf8")).version;
