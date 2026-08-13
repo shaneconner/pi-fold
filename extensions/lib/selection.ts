@@ -152,19 +152,12 @@ export function toolCallArguments(snapshot: ActiveContextSnapshot, assistantInde
   return calls.get(id);
 }
 
-/**
- * Anchor budgets for a stage-identified brief. They exist to keep the composed brief
- * inside the hard 1200-character brief cap with the generic prose trimmed away: an
- * argument list, a leading label from the result head, and the result TAIL, which is
- * where a staged chain puts its keys and a report puts its conclusion.
- */
 export const IDENTIFIED_BRIEF_ARGUMENT_CHARS = 240;
 export const IDENTIFIED_BRIEF_VALUE_CHARS = 96;
 export const IDENTIFIED_BRIEF_HEAD_CHARS = 160;
 export const IDENTIFIED_BRIEF_TAIL_CHARS = 120;
 export const IDENTIFIED_BRIEF_CALLS_CHARS = 400;
 
-/** Every scalar argument of a call, in stable key order, bounded per value and in total. */
 export function identifiedCallArguments(
   args: unknown,
   factual: (value: string, maximum: number) => string,
@@ -182,7 +175,6 @@ export function identifiedCallArguments(
   return oneLine(pairs.join(", "), IDENTIFIED_BRIEF_ARGUMENT_CHARS);
 }
 
-/** The last characters of a result, which is the region a truncated read never shows. */
 export function identifiedResultTail(
   message: unknown,
   factual: (value: string, maximum: number) => string,
@@ -192,13 +184,6 @@ export function identifiedResultTail(
   return factual(text.slice(Math.max(0, text.length - IDENTIFIED_BRIEF_TAIL_CHARS)), IDENTIFIED_BRIEF_TAIL_CHARS);
 }
 
-/**
- * The stage-identified brief. The generic prose is trimmed to a few words so the
- * character budget buys ANCHORS instead: which call this was, with which arguments,
- * what the result opened with, and what it ENDED with. The tail anchor is the point
- * of the whole change: a reader deciding which fold holds a chain key can only tell
- * from the tail, and a generic sentence never carried one.
- */
 export function stageIdentifiedToolBrief(input: {
   snapshot: ActiveContextSnapshot;
   refs: EvidenceRef[];
@@ -231,16 +216,6 @@ export function stageIdentifiedToolBrief(input: {
   return usefulBrief(bounded, ACTIVE_CONTEXT_POLICY.maxBriefChars, snapshot.toolName) ? bounded : null;
 }
 
-/**
- * The fold ids a batch of tool results PEEKED, or null if the batch is not one.
- *
- * A peek result is the one tool output whose bytes the runtime already holds: it is a
- * copy of a fold's own stored source. Reclaiming it therefore has an identity the
- * ordinary tool-fold path does not have, and that identity has to be derivable from the
- * transcript alone, because whichever mechanism claims the copy (the epoch's own
- * reclaim marking or the doorless ladder) the record it leaves behind must still point
- * back at the source.
- */
 export function peekedSourceFoldIds(
   snapshot: ActiveContextSnapshot,
   refs: readonly EvidenceRef[],
@@ -262,14 +237,6 @@ export function peekedSourceFoldIds(
   return ids.length ? ids : null;
 }
 
-/**
- * The brief a reclaimed peek copy leaves behind: a pointer, not a summary.
- *
- * The copy's content is the source fold's content, so summarizing it again would mint
- * a second description of bytes that already have one. What the agent needs from the
- * placeholder is the id it already used once, so re-reading the verbatim content is the
- * same one-hop peek it was before the reclaim.
- */
 export function peekReclaimBrief(sourceFoldIds: readonly string[]): string {
   const named = sourceFoldIds.join(", ");
   return sourceFoldIds.length === 1
@@ -304,15 +271,8 @@ export function automaticToolBrief(snapshot: ActiveContextSnapshot, candidate: F
     ? "active-context status inspection"
     : factualBriefValue(name);
   const args = toolCallArguments(snapshot, first.assistantIndex, first.id);
-  // A peek copy is named by what it copied, before anything else. The stage-identified
-  // brief below describes a result by its own head and tail, which for a peek copy is a
-  // second description of a fold that already has one; the pointer is what makes the
-  // reclaim recoverable, so it comes first and it is derived here rather than at the one
-  // call site that happens to know a reclaim is under way.
   const peeked = peekedSourceFoldIds(snapshot, refs);
   if (peeked) return peekReclaimBrief(peeked);
-  // Exact anchors before generic prose: one sentence per tool made every fold of that
-  // tool carry the SAME brief, so no index could answer which fold holds a given stage.
   const identified = stageIdentifiedToolBrief({ snapshot, refs, calls, factualValue, factualToolName });
   if (identified) return identified;
   const targets: string[] = [];
@@ -328,10 +288,8 @@ export function automaticToolBrief(snapshot: ActiveContextSnapshot, candidate: F
   return `Completed one read-only ${names} batch with ${calls.length} exact results${target}; every stale output remains recoverable from this fold.`;
 }
 
-/** The narrowest entry in a parent's index that still names a subject rather than a stub. */
 const MIN_SUBJECT_CHARS = 24;
 
-/** Cut to a character budget without splitting a surrogate pair, marked where it cut. */
 function boundedSubject(text: string, budget: number): string {
   if (text.length <= budget) return text;
   let kept = text.slice(0, Math.max(0, budget - 3)).trimEnd();
@@ -340,22 +298,6 @@ function boundedSubject(text: string, budget: number): string {
   return `${kept}...`;
 }
 
-/**
- * A parent's fallback brief: an index of its children, one entry each.
- *
- * This used to concatenate the children's briefs and slice the result at the cap, which
- * cannot represent them. Ten children whose briefs may each run to the cap need ten times
- * the cap, so the slice landed inside the first child or two and the rest of the group
- * left no trace at all. In the 2026-08-11 rep every parent came out at exactly the cap,
- * the bottom rung showed five of ten children and every rung above it showed ONE: at rung
- * two the first child was itself a capped parent, so it spent the whole budget alone.
- *
- * The budget is divided instead. Children shorter than an even share hand their remainder
- * to the longer ones, so the cut falls on the children that are actually long rather than
- * on whoever sorts last, and every child appears whatever its neighbours cost. Coverage is
- * the property being defended: this is the brief a group carries when no generator wrote
- * it one, and a group that cannot say what a member holds cannot be navigated back into.
- */
 export function deterministicConsolidationBrief(
   candidate: FoldCandidate,
   state: ActiveContextState,
@@ -366,11 +308,6 @@ export function deterministicConsolidationBrief(
   const subjects = candidate.parts.flatMap((part) => {
     if (part.kind !== "fold") return [];
     const child = byId.get(part.foldId);
-    // Through the override map, never off the record: a child upgraded since it committed
-    // presents the model's brief, and reading the record here would index the sentence
-    // that brief replaced. The model may validly name the active-context tool on one line
-    // and carry facts on another. A parent flattens those lines, so keep the facts while
-    // removing the structural tool name that would make the whole parent line unusable.
     return child ? [foldBrief(child, state)
       .replace(new RegExp(escapedToolName, "gi"), "active-context service")
       .replace(/\s+/g, " ")
@@ -379,19 +316,12 @@ export function deterministicConsolidationBrief(
   if (!subjects.length) return "Grouped completed context covering no readable folds.";
   const separator = " | ";
   const lead = `Grouped completed context covering ${subjects.length} folds: `;
-  // Below this width an entry says nothing a reader could act on, so a group too wide to
-  // give every child that much names as many as it can and then says, in the brief itself,
-  // how many it could not name. A count is a poor substitute for a subject and a truthful
-  // one; a slice through the middle of the third child is neither.
   const room = ACTIVE_CONTEXT_POLICY.maxBriefChars - lead.length - 1;
   const named = Math.max(1, Math.min(subjects.length,
     Math.floor((room + separator.length) / (MIN_SUBJECT_CHARS + separator.length))));
   const omitted = subjects.length - named;
   const tail = omitted ? `${separator}${omitted} more folds in this group` : "";
   const budget = room - tail.length - separator.length * (named - 1);
-  // Shortest first, so every subject that fits whole releases what it did not use to the
-  // subjects still to be measured. `owed` is always the even share of what is left among
-  // those that remain, which is the largest floor that still leaves room for all of them.
   const order = subjects.slice(0, named).map((text, index) => ({ text, index })).sort((a, b) =>
     a.text.length - b.text.length || a.index - b.index);
   const bounded = new Array<string>(named);
@@ -405,21 +335,11 @@ export function deterministicConsolidationBrief(
   return `${lead}${bounded.join(separator)}${tail}.`.replace(/\s+/g, " ").trim();
 }
 
-/**
- * Every fold kind, as a span may contain it.
- *
- * The agent path composes with this set, and so does the count law's parent: a fold is a
- * fold, whatever kind made it, and a parent may take any of them. What an automatic
- * CHAPTER may take is nothing of the sort, at any count: a placeholder reaches an
- * automatic fold through exactly one route now, which is the count (Shane 2026-08-10).
- */
 export const ALL_FOLD_KINDS: ReadonlySet<FoldKind> =
   new Set<FoldKind>(["tool-result", "chapter", "consolidation"]);
 
-/** No placeholder is span material. What an automatic chapter composes is raw entries. */
 export const NO_FOLD_KINDS: ReadonlySet<FoldKind> = new Set<FoldKind>();
 
-/** The first pinned fold a span would nest, or null when the span swallows no pin. */
 export function pinnedChildFold(
   parts: FoldPart[],
   state: ActiveContextState,
@@ -439,33 +359,12 @@ export function pinnedChildFold(
   return null;
 }
 
-/**
- * The one refusal nesting keeps.
- *
- * A span may take in any fold, so the pin is the sole thing that can stop it, and a pin
- * is a promise to hold bytes raw. Nesting one would put a fold the agent asked to keep
- * visible behind a placeholder, so the span is refused by name with the release valve
- * in it, the same texture the pinned-share cap uses.
- */
 export function pinnedNestingRefusal(pinned: ActiveFold, toolName: string): string {
   return `fold refused: ${pinned.id} is pinned, and nesting it would hide context you asked to keep. ` +
     `Release it with ${toolName} {"action":"unprotect","ids":["${pinned.id}"]} first, ` +
     "or name a span that stops at its boundary.";
 }
 
-/**
- * The span you named is already folded, said the way every other collision here is said.
- *
- * A fold that already owned the evidence used to reach the agent as
- * "Evidence <id> has multiple direct fold owners", an invariant message thrown out of the
- * tool call with no next move in it. The collision is ordinary: automatic folding and an
- * agent curate the same window, so the ladder taking a span the agent was about to name
- * is the campaign working, not a race. So it reads like the pin refusal above: name the
- * fold holding it, give the two verbs that open it, and name the span that would work.
- *
- * One sentence covers the three ways a caller can point at folded material: an entry a
- * fold directly owns, a span sitting inside one, and a span whose only reading IS one.
- */
 export function foldedSpanRefusal(ownerId: string, subject: string, toolName: string): string {
   return `fold refused: ${subject} is already folded inside ${ownerId}, so there is nothing ` +
     `left to fold there. Read it with ${toolName} {"action":"peek","id":"${ownerId}"}, restore it ` +
@@ -519,22 +418,6 @@ export function chapterUnits(snapshot: ActiveContextSnapshot): ChapterUnit[] {
     .flatMap((segment) => structurallyClosedChapterUnits(snapshot.messages, segment));
 }
 
-/**
- * The automatic jurisdiction, as a list of roots: THE ROOTS THE COUNT COUNTS.
- *
- * Membership, not position, and not kind. Every visible collapsed root belongs unless the
- * agent pinned it or the fresh tail covers it, and an EXPANDED fold is not a placeholder
- * at all. One predicate answers all of it, because that is the same question
- * `refsProtected` already asks of a span's evidence.
- *
- * A consolidation counts here like anything else. A consolidated fold is not a different
- * species of span, and depth is the point: ten visible parents make a grandparent, and
- * under gradual accrual the stalest parent is simply the stalest member of the next group
- * of ten, so the oldest context sits a few layers down after a long session. The only
- * folds outside the count are the held ones, because a counted fold must be groupable and
- * a held one is exactly the fold that cannot be (Shane 2026-08-10). A fold already nested
- * inside a parent is not a root and is never counted separately.
- */
 export function unpinnedStaleFolds(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -543,7 +426,6 @@ export function unpinnedStaleFolds(
     .filter(({ fold }) => !refsProtected(flattenFoldRefs(fold, state), state, snapshot));
 }
 
-/** Everything a pending mark already speaks for: whole folds by id, raw evidence by key. */
 export function pendingMarkClaims(
   state: ActiveContextState,
 ): { foldIds: Set<string>; refKeys: Set<string> } {
@@ -562,7 +444,6 @@ export function pendingMarkClaims(
   return { foldIds, refKeys };
 }
 
-/** Whether the raw material between two roots is material a parent may swallow. */
 function absorbableGap(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -571,9 +452,6 @@ function absorbableGap(
   claims: { refKeys: Set<string> },
 ): boolean {
   if (from > to) return true;
-  // No fold kind is admitted, so any root sitting in the gap -- a parent the count
-  // already made, a fold the agent expanded, a fold the agent pinned -- refuses the
-  // range outright and splits the run there.
   const parts = partsForRange(snapshot, state, from, to, NO_FOLD_KINDS);
   if (!parts) return false;
   const refs = parts.flatMap((part) => part.kind === "raw" ? [part.ref] : []);
@@ -581,7 +459,6 @@ function absorbableGap(
   return !refs.some((ref) => claims.refKeys.has(objectRefKey(ref)));
 }
 
-/** Every tool call in the window, by id, with the assistant and the result that close it. */
 function windowToolLinkage(snapshot: ActiveContextSnapshot): Map<string, { call: number; result: number }> {
   const linkage = new Map<string, { call: number; result: number }>();
   const at = (id: string): { call: number; result: number } => {
@@ -608,15 +485,6 @@ function windowToolLinkage(snapshot: ActiveContextSnapshot): Map<string, { call:
   return linkage;
 }
 
-/**
- * The parent's span, widened until hiding it keeps every tool call with its result.
- *
- * A collapsed parent renders as ONE entry, so a span that opens on a tool-result fold
- * would hide the result while its call stayed visible, and the projection guard rejects
- * that split outright. The widening is the same raw absorption the law already grants
- * between children, applied at the edges: it takes the calling assistant in, never a
- * fold, and if the material it needs is not absorbable the group does not form.
- */
 function linkageClosedSpan(
   snapshot: ActiveContextSnapshot,
   start: number,
@@ -640,7 +508,6 @@ function linkageClosedSpan(
   return { start: from, end: to };
 }
 
-/** One group of exactly `consolidateAfter` roots, read as the parent it must become. */
 function consolidationCandidate(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -657,34 +524,10 @@ function consolidationCandidate(
   if (refsProtected(raw, state, snapshot)) return null;
   if (raw.some((ref) => claims.refKeys.has(objectRefKey(ref)))) return null;
   const sourceRefs = candidateSourceRefs(parts, state);
-  // THE ONE PHYSICAL BOUND, HANDLED LOUDLY. A record carries at most
-  // `maxFoldSourceRefs` exact references. A group over that bound is left UNFORMED
-  // rather than quietly shrunk: shrinking would make the parent a function of the
-  // record format instead of the count, and the law is the count.
   if (sourceRefs.length > snapshot.policy.maxFoldSourceRefs) return null;
   return { kind: "consolidation", parts, sourceRefs };
 }
 
-/**
- * CONSOLIDATION IS A PURE FUNCTION OF THE COUNT (Shane 2026-08-10).
- *
- * Not a crossing event, not a paced rung, and not one candidate per pass. Count the
- * visible unheld roots of every kind; each `consolidateAfter` consecutive ones, stalest
- * first, MUST be under a parent, and the remainder is left alone. From a count of n that
- * is `n / consolidateAfter` parents, and all of them form in the epoch that notices,
- * because a rule that formed one per commit would leave a count the rule says is
- * impossible standing for as many commits as it takes to drain.
- *
- * A parent it made is a root like any other, so the epoch applies the rule to a FIXPOINT:
- * ten parents are a group, and the grandparent that follows is how the oldest context
- * ends up several layers down after a long session.
- *
- * The run is where the count is taken. A hold -- a pin, the fresh tail, an expanded fold,
- * evidence a pending mark spoke for -- cannot be swallowed, so it splits the run and each
- * side counts on its own; a run shorter than the width waits as remainder. Gaps of raw
- * context between children fall into the parent, which is what makes the span one
- * contiguous range instead of a list of islands.
- */
 export function selectAutomaticConsolidations(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -712,30 +555,12 @@ export function selectAutomaticConsolidations(
   return groups;
 }
 
-/** One completed batch the automatic law may take, with the indices it covers. */
 export interface AutomaticToolBatch {
   refs: EvidenceRef[];
   indices: number[];
   bytes: number;
 }
 
-/**
- * MEMBERSHIP, WRITTEN ONCE: every completed tool batch the automatic law may take,
- * stalest first, whether or not anything has claimed it yet.
- *
- * A batch is a member when it is complete and validated, its tool is not blacklisted
- * (`resultCall` runs the batch scan with the deployment's list), its evidence carries
- * exact refs in branch order, it is inside the record's reference bound, it is large
- * enough to be worth a placeholder, and neither an agent pin nor the fresh byte tail
- * covers any part of it. There is no position in that list. A prefix of the window is
- * not more foldable than the middle of it, and the middle is not a wall: it is whatever
- * the ladder has not needed yet plus whatever the agent pinned (Shane 2026-08-10).
- *
- * Ownership is deliberately NOT membership. A batch some fold or pending mark already
- * speaks for is still a member of the class; it is simply taken. The selector filters on
- * ownership because it must propose something new, and the announcement counts the class
- * because that is the mass a commit can reach. One definition, two readings of it.
- */
 export function automaticToolBatches(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -766,11 +591,6 @@ export function automaticToolBatches(
   return batches;
 }
 
-/**
- * The stalest member batch nothing has claimed. `claimed` lets a caller exclude evidence
- * already spoken for by something that is not yet a fold (a pending mark), so repeated
- * calls walk forward instead of returning the same batch.
- */
 export function selectAutomaticToolBatch(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -789,14 +609,6 @@ export function selectAutomaticToolBatch(
   return [];
 }
 
-/**
- * The re-fold path.
- *
- * An expansion is a deliberate act, and the way to make it permanent is a pin: a pinned
- * fold is never re-folded, and a leased one is held for the term of its lease. Anything
- * else the agent opened is an ordinary member of the foldable class again, so automation
- * may return it to its placeholder, stalest and narrowest first.
- */
 export function selectAutomaticRefold(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -845,27 +657,12 @@ export function chapterRangeIsUnitAligned(snapshot: ActiveContextSnapshot, start
   return units.every((unit, index) => index === 0 || unit.start === units[index - 1].end);
 }
 
-/**
- * Bite-sized folds.
- *
- * A fold is only navigable if reading one back is cheap. Measured 2026-08-06 (rep 6):
- * one 60,432-byte chapter fold hid the fact the run needed in its tail, and every peek
- * of it was either truncated short of the answer or too expensive to widen. So a span
- * whose content exceeds the cap becomes SEQUENTIAL folds, each with its own brief,
- * split only at structurally closed unit boundaries -- never mid-entry.
- *
- * A single unit that alone exceeds the cap is returned whole: there is no valid
- * interior boundary, and refusing to fold it would leave the biggest span in the
- * window as the one thing nothing may reclaim. The caller reports the split.
- */
 export function splitCandidateBySize(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
   candidate: FoldCandidate,
   maxChars: number = MAX_FOLD_SPAN_CHARS,
 ): FoldCandidate[] {
-  // A tool-result fold owns exactly one validated assistant batch and a consolidation
-  // owns whole child folds; neither has an interior boundary to split on.
   if (candidate.kind !== "chapter") return [candidate];
   const refs = candidate.sourceRefs.length ? candidate.sourceRefs : candidateSourceRefs(candidate.parts, state);
   const indices = refs.map((ref) => exactMapped(snapshot, ref)?.index ?? -1);
@@ -897,7 +694,6 @@ export function splitCandidateBySize(
   return split.length ? split : [candidate];
 }
 
-/** Exact serialized size of a candidate's whole span, folds and raw entries alike. */
 export function candidateSpanChars(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -909,12 +705,10 @@ export function candidateSpanChars(
   return spanBytes(snapshot, Math.min(...indices), Math.max(...indices) + 1);
 }
 
-/** Exact serialized size of a half-open mapped message range. */
 export function spanBytes(snapshot: ActiveContextSnapshot, start: number, end: number): number {
   return bytes(snapshot.messages.slice(start, end));
 }
 
-/** One auto-snap the runtime applied to a requested span, reported never inferred. */
 export interface SpanCorrection {
   from: string[];
   to: string[];
@@ -926,15 +720,6 @@ export interface SnappedFoldSpan {
   corrections: SpanCorrection[];
 }
 
-/**
- * Resolve a requested span, correcting it where a correction exists.
- *
- * A span the agent got slightly wrong -- crossing a fold it forgot about, reaching
- * into the turn still in flight, landing mid-unit -- is a span it MEANT, and refusing
- * it teaches the agent that curating is a coin flip. So an invalid span SNAPS to the
- * nearest valid edge and the correction is stated in the result. Rejection is reserved
- * for a request with no valid interpretation at all, and it says exactly what failed.
- */
 export function snapFoldCandidate(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -947,11 +732,6 @@ export function snapFoldCandidate(
   } catch (error) {
     directError = error instanceof Error ? error : new Error(String(error));
   }
-  // Nearest first, then the other readings of the same intent. A span that cuts into one
-  // fold has exactly two endpoint corrections -- absorb it, or step past it -- and which
-  // one survives depends on structure the caller cannot see. A whole fold left inside the
-  // corrected span is no longer a reason to fail: the span nests it. What still fails is
-  // a span with no valid frame at all, and a pin the span would swallow.
   const alternatives = snapSpanAlternatives(snapshot, state, ids);
   let lastError: Error = directError;
   for (const snapped of alternatives) {
@@ -964,23 +744,12 @@ export function snapFoldCandidate(
       lastError = error instanceof Error ? error : new Error(String(error));
     }
   }
-  // A suggestion the caller cannot act on is worse than no suggestion: never name a
-  // "nearest valid span" this same validation just refused. Nothing snapped, so the
-  // refusal is the direct one, stated once.
   throw new Error(
     `${directError.message}. No corrected reading of that span is constructible`,
     { cause: lastError },
   );
 }
 
-/**
- * Every constructible reading of a requested span, nearest intent first.
- *
- * The three endpoint modes move the EDGES; the fourth reading moves the FRAME, reading
- * the span as the whole folds it cuts into. The frame reading survives the nesting law
- * because it is still the faithful one where the endpoints cannot snap to closed units:
- * the folds themselves already tile the range exactly.
- */
 export function snapSpanAlternatives(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -1001,13 +770,6 @@ export function snapSpanAlternatives(
   });
 }
 
-/**
- * The requested span read as the whole folds it cuts into.
- *
- * Constructible only when the outward snap lands on a contiguous tiling of two or more
- * foldable roots: then the span the agent named IS those folds, and consolidating them
- * is the one reading that both covers what was asked for and validates.
- */
 export function snapSpanToWholeFolds(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -1033,19 +795,13 @@ export function snapSpanToWholeFolds(
   };
 }
 
-/**
- * The correction itself: pull the endpoints out of any fold they cut through, out of
- * the turn still in flight, and onto structurally closed unit boundaries.
- */
 export function snapSpanIds(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
   ids: string[],
-  /** How an endpoint inside a fold is read: by distance, or always one way. */
   mode: "nearest" | "absorb" | "exclude" = "nearest",
 ): { ids: string[]; corrections: SpanCorrection[] } | null {
   let resolved: Array<{ start: number; end: number; fold?: ActiveFold }>;
-  // An unknown id has no nearest valid edge: there is nothing to snap TO.
   try { resolved = resolveFoldInputIds(snapshot, state, ids); }
   catch { return null; }
   const requested = [resolved[0].start, resolved.at(-1)!.end] as [number, number];
@@ -1059,11 +815,6 @@ export function snapSpanIds(
     });
   };
   const units = chapterUnits(snapshot);
-  // Each correction can undo another: pulling an endpoint onto a unit boundary can put
-  // it back inside a fold, and clamping the width can cut one in half. So the passes run
-  // to a FIXED POINT rather than once each. After the first pass an endpoint inside a
-  // fold always absorbs it, which is outward and therefore terminating: stepping past a
-  // fold here would drop material the agent named, and nesting no longer loses anything.
   for (let pass = 0; pass < state.folds.length + 2; pass += 1) {
     const passStart = start;
     const passEnd = end;
@@ -1098,9 +849,6 @@ export function snapSpanIds(
       end = endUnit.end - 1;
       note("span ended mid-unit; corrected to the end of its closed user/assistant/tool unit");
     }
-    // A chapter spans at most a few closed turns. A longer request is a span the agent
-    // meant, so it is CLAMPED to what one fold may hold rather than refused; the
-    // remainder stays raw and is the agent's to fold next.
     const covered = units.filter((unit) => unit.start >= start && unit.end <= end + 1);
     if (covered.length) {
       const turns: number[] = [];
@@ -1125,14 +873,6 @@ export function snapSpanIds(
   return { ids: [entryIdAt(snapshot, start), entryIdAt(snapshot, end)], corrections };
 }
 
-/**
- * Snap a span OUTWARD to whole-fold boundaries.
- *
- * The re-boundary verb operates on folds, so a span that cuts one in half has exactly
- * one sane reading: the agent meant that fold. Outward rather than nearest, because
- * losing a fold the agent did not name is the surprising outcome and re-cutting a
- * slightly larger span is not.
- */
 export function snapToFoldBoundaries(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -1142,7 +882,6 @@ export function snapToFoldBoundaries(
   const requested: [number, number] = [resolved[0].start, resolved.at(-1)!.end];
   let [start, end] = requested;
   const corrections: SpanCorrection[] = [];
-  // Fixed point: absorbing one fold can pull the span across the next.
   for (let pass = 0; pass < state.folds.length + 1; pass += 1) {
     let moved = false;
     for (const root of orderedRoots(state, snapshot)) {
@@ -1173,39 +912,22 @@ export function manualFoldCandidate(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
   ids: string[],
-  /**
-   * Accept a span that is still fresh or protected. Only a caller that will DEFER the
-   * fold may pass this: it relaxes eligibility, never structure, so contiguity, unit
-   * alignment and batch completeness are still enforced and the commit still refuses
-   * to apply a mark whose span is protected at commit time.
-   */
   options: { allowProtected?: boolean } = {},
 ): FoldCandidate {
   const blockedTool = (refs: EvidenceRef[]): boolean =>
     !options.allowProtected && toolRefsProtected(refs, state, snapshot);
   const blocked = (refs: EvidenceRef[]): boolean =>
     !options.allowProtected && refsProtected(refs, state, snapshot);
-  // The forest as it stands, read once. Building it here can only throw when the STORED
-  // forest is already corrupt, which is the loud case and stays loud; every collision
-  // between this request and a fold that exists is answered below by name.
   const owners = directFoldOwners(state.folds);
   const bounded = (candidate: FoldCandidate): FoldCandidate => {
     if (candidate.sourceRefs.length > snapshot.policy.maxFoldSourceRefs) {
       throw new Error(`Folds may include at most ${snapshot.policy.maxFoldSourceRefs} exact source references`);
     }
-    // Every reading of a requested span leaves through here, so one check covers the
-    // tool-batch, consolidation and chapter readings alike. It runs before anything is
-    // prepared or persisted: no brief is generated, no state is touched, and the caller
-    // gets a span it can act on instead of an invariant it cannot.
     for (const part of candidate.parts) {
       if (part.kind !== "raw") continue;
       const ownerId = owners.get(objectRefKey(part.ref));
       if (ownerId) throw new Error(foldedSpanRefusal(ownerId, part.ref.entryId, snapshot.toolName));
     }
-    // A reading that is exactly one fold that already exists is not a fold to make. It
-    // wraps a placeholder in a placeholder, reclaims nothing, and buries the fold the
-    // caller was pointing at one level deeper, so it is the same refusal: the span is
-    // already folded, and here is what opens it.
     const only = candidate.parts.length === 1 ? candidate.parts[0] : null;
     if (only?.kind === "fold") {
       throw new Error(foldedSpanRefusal(only.foldId, "that span", snapshot.toolName));
@@ -1246,10 +968,6 @@ export function manualFoldCandidate(
   }
   const parts = partsForRange(snapshot, state, start, end, ALL_FOLD_KINDS);
   if (!parts) {
-    // Two shapes reach here, and they are different asks. A span INSIDE one fold is
-    // material that is already folded, so there is no fold to make and the useful answer
-    // names the fold holding it. A span that merely cuts one is a boundary the snap
-    // corrects, and it says which fold moved the edge.
     const cut = orderedRoots(state, snapshot).filter((root) => root.start <= end && start <= root.end);
     const container = cut.find((root) => root.start <= start && root.end >= end);
     throw new Error(container
@@ -1303,7 +1021,6 @@ export function deterministicChapterBrief(
   const composed = `User: ${ask} · Tools: ${tools} · Assistant: ${assistant}`
     .replace(new RegExp(escapeName(toolName), "gi"), "active-context service");
   if (usefulBrief(composed, ACTIVE_CONTEXT_POLICY.maxBriefChars, toolName)) return composed;
-  // Constant floor-of-the-floor: provably passes usefulBrief (no tool name, no structural pattern).
   return `Folded ${refs.length} exact messages from this span's complete turns.`;
 }
 

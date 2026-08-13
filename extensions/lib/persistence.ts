@@ -93,7 +93,6 @@ export function validSurfacingRecord(value: unknown): value is SurfacingRecord {
     SURFACING_OUTCOMES.includes(ownValue(value, "outcome") as SurfacingRecord["outcome"]);
 }
 
-/** One record per fold: a duplicate id is a ledger that forgot an ignore. */
 export function parseSurfacingLog(value: unknown): SurfacingRecord[] {
   const records = denseOwnArrayValues(value);
   if (!records || records.length > SURFACING_MAX_LEDGER_RECORDS || !records.every(validSurfacingRecord) ||
@@ -103,7 +102,6 @@ export function parseSurfacingLog(value: unknown): SurfacingRecord[] {
   return clone(records) as SurfacingRecord[];
 }
 
-/** Stable identity of one pending mark: its phase plus the fold it names. */
 export function pendingMarkKey(mark: Pick<PendingMark, "mark" | "id">): string {
   return `${mark.mark}:${mark.id}`;
 }
@@ -126,17 +124,6 @@ export function validPendingMark(value: unknown): value is PendingMark {
     id === foldIdFor(kind as FoldKind, parts as FoldPart[]);
 }
 
-/**
- * Agent-corrected fold briefs, keyed by fold id. Bounded by the same brief cap a
- * supplied brief obeys, and refused for a fold that is not in the forest, exactly
- * like a pin or a refold mark naming a missing fold.
- */
-/**
- * A model brief written after the fold committed carries its generator with it, so an
- * override is either the bare corrected string the agent wrote or that string beside the
- * attribution. Two shapes, one map: the string form is what every state written before
- * the upgrade lane existed holds, and it must keep parsing and keep its exact digest.
- */
 export function briefOverrideText(override: unknown): string | null {
   if (typeof override === "string") return override;
   const brief = ownValue(override, "brief");
@@ -168,7 +155,6 @@ export function parseBriefOverrides(
   ) as Record<string, BriefOverride>;
 }
 
-/** The brief a fold PRESENTS: the agent's correction when it made one, else the record's. */
 export function foldBrief(
   fold: Pick<ActiveFold, "id" | "brief">,
   state: Pick<ActiveContextState, "briefs">,
@@ -176,11 +162,6 @@ export function foldBrief(
   return briefOverrideText(state.briefs?.[fold.id]) ?? fold.brief;
 }
 
-/**
- * The provenance a fold PRESENTS. A fold RECORD is immutable, so a brief written after
- * the commit lives in the override map and its attribution travels with it; without this
- * lens a model-written upgrade would report the provenance of the brief it replaced.
- */
 export function foldProvenance(
   fold: Pick<ActiveFold, "id" | "provenance">,
   state: Pick<ActiveContextState, "briefs">,
@@ -217,7 +198,6 @@ export function validProvenance(value: unknown): value is BriefProvenance {
       (ownValue(value, "kind") === "supplied" || ownValue(value, "kind") === "deterministic")) return true;
   const hasDigest = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "launchContractDigest"));
-  // legacy provenance kind written by pre-release sessions; normalized to the model kind at presentation
   if (!exactRecord(value, ["kind", "provider", "model", "effort", ...(hasDigest ? ["launchContractDigest"] : [])]) ||
       (ownValue(value, "kind") !== "model" && ownValue(value, "kind") !== "luna") ||
       typeof ownValue(value, "provider") !== "string" || !ownValue(value, "provider") ||
@@ -280,11 +260,6 @@ export function foldMap(state: Pick<ActiveContextState, "folds">): Map<string, A
   return new Map(state.folds.map((fold) => [fold.id, fold]));
 }
 
-/**
- * The folds a span names as children. Read off the parts alone, so a PENDING fold mark
- * answers it too: a mark carries the id its committed fold will get, so the ids here are
- * exactly the folds that must already exist when this span applies.
- */
 export function childFoldIds(fold: Pick<ActiveFold, "parts">): string[] {
   return fold.parts.filter((part): part is Extract<FoldPart, { kind: "fold" }> => part.kind === "fold")
     .map((part) => part.foldId);
@@ -308,20 +283,6 @@ export function flattenFoldRefs(fold: ActiveFold, state: Pick<ActiveContextState
   return visit(fold);
 }
 
-/**
- * Which fold DIRECTLY owns each raw evidence key.
- *
- * One derivation, two readers (Shane 2026-08-11). The forest invariant below reads it to
- * reject a second owner, and the agent-facing candidate builder reads it BEFORE it builds
- * anything, so a span naming evidence some fold already holds comes back as a refusal
- * that names the owner instead of this invariant escaping the tool call as an exception.
- *
- * The two readings stay distinguishable because the input differs. Called on the folds
- * already in state it can only throw when the stored forest is itself corrupt, which no
- * agent input can produce: every state reaches storage through `validateFoldForest`.
- * Called on a forest that includes a candidate the caller just built, a duplicate means
- * the REQUEST collided with an existing fold, and that is the refusal case.
- */
 export function directFoldOwners(folds: readonly ActiveFold[]): Map<string, string> {
   const owner = new Map<string, string>();
   for (const fold of folds) {
@@ -350,18 +311,6 @@ export function validateFoldForest(folds: ActiveFold[]): ActiveFold[] {
         (!fold.parts.length || fold.parts.some((part) => part.kind !== "raw" || part.ref.role !== "toolResult"))) {
       throw new Error("Tool-result fold must own one validated assistant batch of tool results");
     }
-    // WHAT A PARENT IS, RE-DERIVED UNDER THE COUNT LAW (Shane 2026-08-10).
-    //
-    // Two shape rules stood here and both described the old approximation. "Only child
-    // folds" forbade the raw gaps between children, and a parent's span runs from its
-    // first child to its last one, so the gap material inside it is the parent's or the
-    // span is not a span. "Only chapter or consolidation children" forbade tool-result
-    // children, which was true while a bare tool batch nested through a chapter span;
-    // automatic chapters no longer take placeholders at any count, so that rule would
-    // now leave every tool fold as an obstacle no parent could ever reclaim.
-    //
-    // What survives is the one thing that makes a consolidation a consolidation: it
-    // groups folds. A parent with no child fold is a chapter wearing the wrong name.
     if (fold.kind === "consolidation" && !fold.parts.some((part) => part.kind === "fold")) {
       throw new Error("Consolidation folds must contain at least one child fold");
     }
@@ -402,10 +351,6 @@ export function parseActiveContextState(
   const hasLeases = recordLike && Object.prototype.hasOwnProperty.call(value, "leases");
   const hasSurfacing = recordLike && Object.prototype.hasOwnProperty.call(value, "surfacing");
   const hasPendingMarks = recordLike && Object.prototype.hasOwnProperty.call(value, "pendingMarks");
-  // Accepted, never read, never written. `pinnedPeeks` pinned a peek result against
-  // per-projection reclamation, which was deleted after rep 22 measured it rewriting
-  // the prefix mid-window. State written before that cut still carries the key, and
-  // rejecting it here would suspend automatic management on upgrade.
   const hasPinnedPeeks = recordLike && Object.prototype.hasOwnProperty.call(value, "pinnedPeeks");
   const hasBriefs = recordLike && Object.prototype.hasOwnProperty.call(value, "briefs");
   const hasRider = recordLike && Object.prototype.hasOwnProperty.call(value, "rider");
@@ -464,9 +409,6 @@ export function parseActiveContextState(
   }
   const briefs = hasBriefs ? parseBriefOverrides(ownValue(value, "briefs"), ids) : {};
   const source = clone(value) as unknown as ActiveContextState;
-  // Provenance normalization is presentation-only; never mutate a durable
-  // content-addressed fold record: changing its bytes causes the next re-persist
-  // to report a conflicting durable fold and suspend automatic management.
   return {
     version: 1,
     sessionId: source.sessionId,
@@ -478,8 +420,6 @@ export function parseActiveContextState(
       ? Number(ownValue(value, "tokensSinceToolFold"))
       : 0,
     leases,
-    // Omitted when empty so every state written before surfacing existed keeps its
-    // exact digest; the replay digest is order- and presence-sensitive by design.
     ...(surfacing.length ? { surfacing } : {}),
     ...(marks.length ? { pendingMarks: marks } : {}),
     ...(Object.keys(briefs).length ? { briefs } : {}),
@@ -688,10 +628,6 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     Object.prototype.hasOwnProperty.call(value, "surfacing"));
   const hasPendingMarks = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "pendingMarks"));
-  // Accepted, never read, never written. `pinnedPeeks` pinned a peek result against
-  // per-projection reclamation, which was deleted after rep 22 measured it rewriting
-  // the prefix mid-window. State written before that cut still carries the key, and
-  // rejecting it here would suspend automatic management on upgrade.
   const hasPinnedPeeks = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "pinnedPeeks"));
   const hasBriefs = Boolean(value && typeof value === "object" &&
@@ -918,10 +854,6 @@ export function materializeStatePersistence(
       state = stateFromFoldRefs(wire, [...byId.values()], records);
     }
     const calculated = semanticStateSha256(state);
-    // Compatibility window: accept the current digest plus two legacy shapes: one
-    // omitted zero cadence/empty leases; the other used a different replay-property
-    // order. These shims keep already-written v2 events readable and can be removed
-    // at the next wire-version bump.
     if (calculated !== wire.stateSha256 &&
         legacyCadenceOmittedStateSha256(state) !== wire.stateSha256 &&
         legacyReplayOrderStateSha256(state) !== wire.stateSha256) {
@@ -1028,18 +960,10 @@ export function protectionSha256(state: Pick<ActiveContextState, "protected">): 
   return sha256Value([...state.protected].sort((left, right) => objectRefKey(left).localeCompare(objectRefKey(right))));
 }
 
-/**
- * The milestone vocabulary a persisted `advisory` state field may carry. The delivery
- * schedule that spent a per-milestone budget is deleted; this list stays because the
- * state field is written into every state and covered by the state digest, so sealed
- * runs have to keep parsing. It is its own literal now rather than the key set of the
- * deleted budget table.
- */
 export const ADVISORY_MILESTONES = Object.freeze(
   ["orientation", "notice", "tools", "chapters", "urgent"] as AdvisoryMilestone[],
 );
 
-/** The rider is LITERAL persisted bytes, so the bound is on the stored text itself. */
 export const MAX_RIDER_TEXT_BYTES = 4_096;
 
 export function validRiderState(value: unknown): value is NonNullable<ActiveContextState["rider"]> {
@@ -1091,11 +1015,6 @@ export function validAdvisoryState(value: unknown): value is NonNullable<ActiveC
         !/^[a-f0-9]{64}$/.test(String(ownValue(armed, "scheduleKey")))) return false;
   }
   const delivered = ownValue(value, "delivered") as Record<string, unknown>;
-  // No ceiling on the count. One used to sit here at sixteen, bounding a counter nothing
-  // in the runtime increments: `advisory.delivered` is written as an empty map at
-  // construction and never again, so the clause could only ever have rejected a state
-  // this runtime cannot produce. The shape checks stay, because they are what keep a
-  // hand-edited or corrupted file from parsing into something the rest of the code trusts.
   return Reflect.ownKeys(delivered).every((key) => typeof key === "string" &&
     ADVISORY_MILESTONES.includes(key as AdvisoryMilestone) &&
     Number.isSafeInteger(ownValue(delivered, key)) && Number(ownValue(delivered, key)) >= 0);

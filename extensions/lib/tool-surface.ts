@@ -34,28 +34,15 @@ export function buildActiveContextTool(input: {
   const correctionGuidance = input.allowedActions.includes("rebrief")
     ? " Curation is correctable: rebrief replaces a fold's brief, and reboundary with ids re-cuts a span into exactly one fold, which merges adjacent folds when the span covers several and splits one when the span sits inside it. Reboundary with a single id returns that fold's span to raw."
     : "";
-  // The pin. Protection predates this sentence; the sentence exists because a verb
-  // nobody can discover is a verb nobody uses.
   const pinGuidance = input.allowedActions.includes("protect")
     ? " Protect is the pin: protect with ids holds folds or entries against automatic folding, consolidation and refolding until unprotect releases them, so an expanded span you still need stays expanded. Protect reveals nothing on its own: a folded span stays folded, just held. Pinning moves no context bytes, and fold receipts report how much mass you have pinned."
     : "";
-  // Marking is yours, folding is the runtime's. The epoch guidance says how marks
-  // behave and stops there: there is no agent-callable commit verb to describe.
   const epochGuidance = input.allowedActions.includes("unmark")
     ? " Fold scheduling is epoch mode: fold records pending marks and moves no context bytes, and the runtime applies every pending mark in one rewrite when the fold event fires. Mark SEVERAL spans in one call: marks carries several {ids, brief} pairs, and one call answers with your whole picture, every span now held plus the unmarked remainder and what share of the non-fresh window it is. Between fold events nothing else in your context changes, so that result is where the picture lives. Mark freely as you work; when to fold is the runtime's to decide, and unmark withdraws a mark you no longer want."
     : "";
-  // The recovery norm. Every placeholder already states the exact expand call, and a
-  // full run answered questions about folded material from memory anyway, inventing
-  // plausible values instead of reopening the fold. The syntax was discoverable; the
-  // norm was not, so the norm is stated where the syntax lives.
   const recoveryGuidance = input.allowedActions.includes("expand")
     ? " A fold brief is an index entry, not the source: when a question or task depends on material that is folded, peek or expand that fold and answer from the exact bytes, never from memory of them. Recalling folded detail without reopening it is how specifics get misremembered."
     : "";
-  // The standing facts about how this runtime behaves. They belong HERE, in the tool
-  // surface, because the tool surface sits in the stable prefix: it is cached from the
-  // first request and costs nothing per request thereafter, forever. The same sentences
-  // delivered as in-window carriers cost a cache break on the pass that renders them
-  // and every pass that displaces them. Anything always true is said once, here.
   const standingGuidance = " Folding is automatic, lossless and recoverable: the runtime folds stale spans on its own when the window needs room, nothing is ever discarded, and every folded span keeps its exact source. You are never asked to make room and no fold is ever announced in advance. Work normally and let it happen.";
   return {
     name: input.name,

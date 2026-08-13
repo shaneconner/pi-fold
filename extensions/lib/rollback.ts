@@ -18,29 +18,17 @@
 export interface RollbackProbe {
   name: string;
   present: boolean;
-  /** Null when the surface carries no arity contract. */
   arity: number | null;
   expectedArity: number | null;
-  /** A surface the lane cannot run without. */
   required: boolean;
 }
 
 export interface RollbackProbeReport {
   probes: RollbackProbe[];
   failures: string[];
-  /** Every REQUIRED surface answered. */
   armed: boolean;
 }
 
-/**
- * The session-manager surfaces the lane calls, and the arities it calls them with.
- *
- * `branch` and `resetLeaf` are the rollback itself; `appendLabelChange` is the lineage
- * marker, and it must run BEFORE the branch because it appends at the current leaf and
- * advances it, so a label applied afterwards lands on the surviving path instead of the
- * abandoned one. The readers are required because the lane cannot locate the error
- * entry without them.
- */
 const SESSION_MANAGER_PROBES: ReadonlyArray<{ name: string; arity: number | null; required: boolean }> = Object.freeze([
   { name: "branch", arity: 1, required: true },
   { name: "resetLeaf", arity: 0, required: true },
@@ -70,10 +58,6 @@ export function probeRollbackSurfaces(sessionManager: unknown): RollbackProbeRep
       if (expected.required) failures.push(`sessionManager.${expected.name} is missing`);
       continue;
     }
-    // Arity is advisory on purpose: a host that adds an optional parameter has not
-    // broken the call, and refusing to arm over it would be a false alarm. A MISSING
-    // parameter has broken it, so the probe fails only when the surface takes fewer
-    // arguments than the lane passes.
     if (expected.arity !== null && arity !== null && arity < expected.arity && expected.required) {
       failures.push(`sessionManager.${expected.name} takes ${arity} argument(s), the lane passes ${expected.arity}`);
     }
@@ -81,7 +65,6 @@ export function probeRollbackSurfaces(sessionManager: unknown): RollbackProbeRep
   return { probes, failures, armed: failures.length === 0 };
 }
 
-/** The keys `_runAutoCompaction` puts on the overflow event, and the lane reads. */
 const OVERFLOW_EVENT_KEYS: ReadonlyArray<string> = Object.freeze([
   "reason", "willRetry", "branchEntries", "signal",
 ]);
@@ -104,16 +87,6 @@ function entryMessage(entry: unknown): Record<string, unknown> | null {
   return message && typeof message === "object" ? message as Record<string, unknown> : null;
 }
 
-/**
- * The entry the provider rejected: the trailing assistant message whose stop reason is
- * the error pi turned the rejection into.
- *
- * It must be the last MESSAGE on the branch. Custom entries after it are telemetry --
- * this runtime's own event stream appends there -- and they go with the rollback, which
- * is what should happen to records of a request that never landed. A later CONVERSATION
- * entry is a different story: something else already moved the leaf, and rolling back to
- * this entry's parent would abandon work the lane never looked at.
- */
 export function findOverflowErrorEntry(branchEntries: unknown[]): {
   id: string;
   parentId: string | null;
@@ -139,14 +112,6 @@ function contentParts(message: Record<string, unknown>): Record<string, unknown>
     Boolean(part) && typeof part === "object");
 }
 
-/**
- * Tool calls the rolled-back tail leaves unanswered.
- *
- * Possible only when a run died between persisting an assistant tool-call message and
- * persisting its results. A queued user turn after an unsatisfied tool call is a
- * malformed transcript for every provider, so this is the one shape where the rollback
- * happens and the replay does not.
- */
 export function unansweredToolCalls(branchEntries: unknown[]): string[] {
   if (!Array.isArray(branchEntries) || !branchEntries.length) return [];
   const answered = new Set<string>();
@@ -169,17 +134,6 @@ export function unansweredToolCalls(branchEntries: unknown[]): string[] {
   return pending.filter((id) => !answered.has(id));
 }
 
-/**
- * The invariant the whole lane rests on, stated as arithmetic.
- *
- * pi strips the trailing error message from `agent.state.messages` before it emits the
- * overflow event, so at the recovery point agent state already equals the rolled-back
- * branch, and moving the session leaf is the only step left. That equality is an
- * ordering of two internal steps rather than a promise, so it is measured instead of
- * assumed: the rebuilt session context must come back exactly the error entry's own
- * contribution shorter, no more and no less. More means the branch overshot; less means
- * it did not move, and either way the retry would send a window nobody built.
- */
 export function preStripHolds(input: {
   sessionMessagesBefore: number;
   sessionMessagesAfter: number;
@@ -188,13 +142,6 @@ export function preStripHolds(input: {
   return input.sessionMessagesAfter === input.sessionMessagesBefore - input.errorEntryMessages;
 }
 
-/**
- * The notice the agent reads on the retried turn.
- *
- * One message, because pi drains steering one at a time. It says the three things the
- * agent cannot see for itself: the request was rejected for size, the session rolled
- * back and folded, and its work continues from where it was.
- */
 export function rollbackNoticeText(input: {
   brandNoun: string;
   toolName: string;

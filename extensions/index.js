@@ -2,34 +2,15 @@ import { registerActiveContext } from "./active-context.ts";
 import { registerEvidenceIngestion } from "./evidence.js";
 import { createSummarizeContextSpan } from "./summarizer.js";
 
-/**
- * THE public surface: five options, and every name outside them is refused.
- *
- * Unknown keys used to spread through silently, which made every deletion a no-op rather
- * than an error and handed a deployment the opposite of what it asked for. A caller that
- * passes a name believes it bought behavior, so a name this package does not sell is a
- * throw with the replacement named in it.
- */
 const PUBLIC_OPTIONS = Object.freeze([
   "thresholds", "summarizer", "providerInputBudget", "blacklistAutoFoldTools", "guidance",
 ]);
 
-/**
- * Both spellings of the auto-fold list were ALLOW-lists, and the list runs the other way
- * now. Forwarding one silently would be the worst possible outcome of a rename: a set of
- * tools a deployment named to make foldable would become the exact set it barred.
- */
 const INVERTED_AUTO_FOLD_LIST = "renamed blacklistAutoFoldTools, and the sense is INVERTED: " +
   "every completed tool batch folds unmarked, and the list names the exceptions whose " +
   "results must stay raw. An allow-list moved across verbatim would bar exactly the tools " +
   "it meant to permit";
 
-/**
- * Options that left the surface, each answered by name. Deployment identity is hardwired:
- * this is a branded package with one deployment, not a framework a host rebrands, and a
- * consumer that moved `entryTypePrefix` stranded its own durable folds under a namespace
- * nothing would read back.
- */
 const REFUSED_OPTIONS = Object.freeze({
   toolName: "the deployment identity is hardwired to pi-fold: the tool is pi_fold_context",
   toolLabel: "the deployment identity is hardwired to pi-fold",
@@ -68,9 +49,6 @@ export function registerPiFold(pi, options = {}, loadHostModule) {
   }
   const { summarizer = "session", ...activeContextOptions } = options;
   const summarizeContextSpan = createSummarizeContextSpan(summarizer, loadHostModule);
-  // Evidence first, then the runtime. Ingestion is unconditional: the artifacts are the
-  // exact-recovery anchors an oversized tool result folds against, so a deployment that
-  // turned them off kept the folds and lost what makes them lossless.
   registerEvidenceIngestion(pi);
   return registerActiveContext(pi, { ...activeContextOptions, summarizeContextSpan });
 }
