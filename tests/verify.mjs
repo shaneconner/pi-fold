@@ -460,6 +460,23 @@ async function project(runtime) {
 }
 
 /**
+ * THE COMMIT BOUNDARY. Pi fires this where it would otherwise compact, and it is the only
+ * point at which the runtime mutates the projection. A fixture that needs a commit fires
+ * it here rather than pushing occupancy over a threshold, because there is no threshold.
+ */
+async function compactBoundary(runtime, reason = "threshold") {
+  const result = await runtime.handlers.get("session_before_compact")({
+    reason,
+    willRetry: false,
+    branchEntries: runtime.branch,
+    preparation: {},
+    signal: undefined,
+  }, runtime.ctx);
+  await settle();
+  return result;
+}
+
+/**
  * Drive one epoch to its commit. A measurement runs the ladder, which MARKS; the
  * context pass that follows it is where the epoch commits and folds apply. Gates whose
  * invariant is about a committed fold drive both halves through this, which is the same
@@ -469,15 +486,9 @@ async function measureAndCommit(runtime, tokens, contextWindow = runtime.usage.c
   await measure(runtime, tokens, contextWindow, suffix);
   await project(runtime);
   await settle();
-  // Below the fence, the band-top trigger opens the one-round last-call gate before
-  // the commit applies: the second measured pass is the agent's round, and the commit
-  // lands on the context pass after it. Driving the epoch through its REAL trigger
-  // now includes that round.
-  if (materialized(runtime).lastCall) {
-    await measure(runtime, tokens, contextWindow, suffix ? `${suffix}-round` : undefined);
-    await project(runtime);
-    await settle();
-  }
+  await compactBoundary(runtime);
+  await project(runtime);
+  await settle();
   return materialized(runtime);
 }
 
@@ -511,21 +522,9 @@ async function runtimeCommit(runtime, {
   }
   await project(runtime);
   await settle();
-  // A sub-fence band-top crossing defers one gated round behind the last-call; the
-  // response round is part of reaching the epoch through its real trigger.
-  if (!contextEvents(runtime, from).some((record) =>
-      record.kind === "context.commit" && record.deferred === false) &&
-      materialized(runtime).lastCall) {
-    await measure(
-      runtime,
-      tokens ?? runtime.usage.tokens,
-      window,
-      suffix ? `${suffix}-round` : undefined,
-      stopReason,
-    );
-    await project(runtime);
-    await settle();
-  }
+  await compactBoundary(runtime);
+  await project(runtime);
+  await settle();
   const records = contextEvents(runtime, from);
   const commits = records.filter((record) => record.kind === "context.commit");
   // One pass can carry more than one epoch (the handoff and the projection each run

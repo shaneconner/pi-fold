@@ -105,8 +105,6 @@ import {
   COMMIT_RECLAIM_FLOOR_SHARE,
   CONTEXT_RECEIPT_BLOCK_BYTES,
   DEFAULT_CONTEXT_WINDOW,
-  MAX_THRESHOLD_NOTICES,
-  THRESHOLD_NOTICE_SHARES,
   resolveGuidance,
   assertThresholdsServable,
   resolveThresholds,
@@ -148,11 +146,8 @@ import {
 import {
   contextReceipt,
   contextRiderText,
-  curationSignals,
-  lastCallText,
   markAwarenessText,
   receiptBlockText,
-  thresholdNoticeText,
   withReceipt,
 } from "./lib/curation.ts";
 import type {
@@ -165,7 +160,6 @@ import {
   commitPendingMarks,
   consolidationMarks,
   ephemeralPeekMarks,
-  epochCommitDue,
   estimatedTokens,
   foldMarkFor,
   ladderSelectionMark,
@@ -2569,59 +2563,6 @@ export function registerActiveContext(pi: any, options: {
     };
   };
 
-  const measuredCurationSignals = (snapshot: ActiveContextSnapshot): CurationSignals => {
-    const capacity = servingCapacity(snapshot.contextWindow);
-    curation.lastSignals = curationSignals({
-      snapshot,
-      state: persistence.state!,
-      usedTokens: capacity.usedTokens,
-      budgetTokens: capacity.budgetTokens,
-      window: capacity.window,
-      charsPerToken: projectionCharsPerToken(),
-      eligibleFolds: markAccounting(snapshot, persistence.state!).eligibleMarks,
-    });
-    return curation.lastSignals;
-  };
-
-  const commitTriggerDue = (snapshot: ActiveContextSnapshot, ratio: number | null): boolean => {
-    if (!persistence.state) return false;
-    const wall = outputWallDue(snapshot);
-    if (!wall) curation.wallEpisodeOpen = false;
-    if (!wall && !epochCommitDue(snapshot, ratio)) return false;
-    measuredCurationSignals(snapshot);
-    if (wall && !curation.wallEpisodeOpen) {
-      curation.wallEpisodeOpen = true;
-      curation.reopenBaselineShare = null;
-      return true;
-    }
-    if (typeof ratio === "number" && Number.isFinite(ratio) && ratio >= hardFenceRatio(snapshot)) {
-      curation.reopenBaselineShare = null;
-      return true;
-    }
-    if (curation.reopenBaselineShare !== null) {
-      const eligibleShare = markAccounting(snapshot, persistence.state).eligibleFreedBudgetShare;
-      if (eligibleShare - curation.reopenBaselineShare < COMMIT_RECLAIM_FLOOR_SHARE) {
-        const capacity = servingCapacity(snapshot.contextWindow);
-        emit("context.commit", {
-          trigger: "band-top",
-          deferred: true,
-          reason: "reopen-latch",
-          applied_marks: 0,
-          eligible_freed_share: eligibleShare,
-          reopen_baseline_share: curation.reopenBaselineShare,
-          reclaim_floor_share: COMMIT_RECLAIM_FLOOR_SHARE,
-          occupancy_tokens: capacity.usedTokens,
-          expected_inflow_tokens: expectedWallInflowTokens(),
-          budget_tokens: capacity.budgetTokens,
-          window_tokens: snapshot.contextWindow,
-        });
-        return false;
-      }
-      curation.reopenBaselineShare = null;
-    }
-    return true;
-  };
-
   const clearCommitLatchBelowTrigger = (): void => {
     if (curation.reopenBaselineShare === null) return;
     const capacity = servingCapacity(lifecycle.latestSnapshot?.contextWindow ?? null);
@@ -2664,42 +2605,6 @@ export function registerActiveContext(pi: any, options: {
       protectedBytes: Number(epoch?.protectedStaleBytes ?? 0),
       note: null,
     }));
-  };
-
-  const deliverThresholdNotices = (snapshot: ActiveContextSnapshot): boolean => {
-    if (!guidance.thresholdNotices || !persistence.state) return false;
-    const capacity = servingCapacity(snapshot.contextWindow);
-    if (capacity.usedTokens === null || capacity.budgetTokens <= 0) return false;
-    const occupancy = capacity.usedTokens / capacity.budgetTokens;
-    const current = persistence.state.notices ?? { fired: [], ring: [] };
-    let fired = current.fired;
-    let ring = current.ring;
-    let changed = false;
-    for (const share of THRESHOLD_NOTICE_SHARES) {
-      if (occupancy < share || fired.includes(share)) continue;
-      const text = thresholdNoticeText({
-        share,
-        occupancyTokens: capacity.usedTokens,
-        budgetTokens: capacity.budgetTokens,
-        maxTarget: thresholds.maxTarget,
-        toolName,
-        brandNoun,
-      });
-      fired = [...fired, share];
-      ring = [...ring, { share, ordinal: markOrdinal(snapshot), text }];
-      if (ring.length > MAX_THRESHOLD_NOTICES) ring = ring.slice(ring.length - MAX_THRESHOLD_NOTICES);
-      changed = true;
-      emit("context.notice", {
-        share,
-        occupancy,
-        occupancy_tokens: capacity.usedTokens,
-        budget_tokens: capacity.budgetTokens,
-        max_target: thresholds.maxTarget,
-        chars: text.length,
-      });
-    }
-    if (changed) persistence.state = { ...persistence.state, notices: { fired, ring } };
-    return changed;
   };
 
   const statusSurfacing = (snapshot: ActiveContextSnapshot): Record<string, unknown> => {
@@ -2779,71 +2684,6 @@ export function registerActiveContext(pi: any, options: {
     return text;
   };
 
-  const lastCallVerdict = (
-    snapshot: ActiveContextSnapshot,
-    pressure: number | null,
-    phase: string,
-  ): "expose" | "hold" | "proceed" => {
-    const state = persistence.state!;
-    const capacity = servingCapacity(snapshot.contextWindow);
-    const fenceLevel = typeof pressure === "number" && Number.isFinite(pressure) &&
-      pressure >= hardFenceRatio(snapshot);
-    const overBudget = capacity.usedTokens !== null && capacity.budgetTokens > 0 &&
-      capacity.usedTokens > capacity.budgetTokens;
-    if (fenceLevel || overBudget || curation.recoveryAttempts > 0 || curation.pendingRejection) {
-      return "proceed";
-    }
-    if (!state.lastCall) return "expose";
-    if (phase !== "context") return "hold";
-    const delivery = curation.lastCallDelivery;
-    if (!delivery || delivery.exposure !== state.lastCall.exposure) return "hold";
-    return markOrdinal(snapshot) > delivery.ordinal ? "proceed" : "hold";
-  };
-
-  const exposeLastCall = (snapshot: ActiveContextSnapshot): void => {
-    if (!persistence.state) return;
-    const exposureOrdinal = markOrdinal(snapshot);
-    let peekReclaims = 0;
-    for (const mark of ephemeralPeekMarks({ snapshot, state: persistence.state, ordinal: exposureOrdinal })) {
-      const addition = addPendingMark(persistence.state, mark);
-      if (addition.added) { persistence.state = addition.state; peekReclaims += 1; }
-    }
-    const signals = measuredCurationSignals(snapshot);
-    const remainder = unmarkedRemainder(snapshot, persistence.state, projectionCharsPerToken());
-    const accounting = markAccounting(snapshot, persistence.state);
-    const text = lastCallText({
-      signals,
-      unmarked: { spans: remainder.spans, tokens: remainder.tokens },
-      pendingMarks: accounting.pending,
-      peekReclaims,
-      suggestion: deliverSurfacing(snapshot, "lastcall"),
-      toolName,
-      brandNoun,
-    });
-    const record = emit("context.lastcall", {
-      occupancy: signals.occupancy,
-      max_target: thresholds.maxTarget,
-      occupancy_tokens: signals.occupancyTokens,
-      budget_tokens: signals.budgetTokens,
-      unmarked_stale_spans: remainder.spans,
-      unmarked_stale_tokens: remainder.tokens,
-      pending_marks: accounting.pending,
-      pending_agent_marks: accounting.agentMarks,
-      peek_marks: peekReclaims,
-      chars: text.length,
-    });
-    persistence.state = {
-      ...persistence.state,
-      lastCall: {
-        exposure: record.seq,
-        ordinal: markOrdinal(snapshot),
-        contextCalls: curation.contextCalls,
-        agentMarks: accounting.agentMarks,
-        text,
-      },
-    };
-  };
-
   const applyAutomaticRung = async (
     snapshot: ActiveContextSnapshot,
     ratio: number,
@@ -2851,7 +2691,6 @@ export function registerActiveContext(pi: any, options: {
       toolOnly?: boolean;
       waiverRatio?: number;
     } = {},
-    phase = "context",
   ): Promise<Record<string, unknown> | null> => {
     if (!persistence.state || ladder.automaticFailure || ladder.preparing) return null;
     const rungSelectionOptions = {
@@ -2889,48 +2728,10 @@ export function registerActiveContext(pi: any, options: {
       };
       return ladder.lastAutomaticAction;
     };
-    let epoch: Record<string, unknown> | null = null;
+    const epoch: Record<string, unknown> | null = null;
     let inlineRungs = true;
-    const noticesChanged = deliverThresholdNotices(snapshot);
-    let lastCallChanged = false;
-    const commitDue = commitTriggerDue(snapshot, ratio);
-    if (commitDue) {
-      const verdict = lastCallVerdict(snapshot, rungOptions.waiverRatio ?? ratio, phase);
-      if (verdict === "expose") {
-        exposeLastCall(snapshot);
-        lastCallChanged = true;
-      } else if (verdict === "proceed") {
-        epoch = await runCommitEpoch(
-          snapshot,
-          "band-top",
-          true,
-          rungOptions.waiverRatio ?? ratio,
-        );
-        if (persistence.state) {
-          curation.reopenBaselineShare =
-            markAccounting(snapshot, persistence.state).eligibleFreedBudgetShare;
-        }
-      }
-    } else if (persistence.state.lastCall) {
-      const capacity = servingCapacity(snapshot.contextWindow);
-      if (capacity.usedTokens !== null && capacity.budgetTokens > 0 &&
-          capacity.usedTokens / capacity.budgetTokens < thresholds.maxTarget) {
-        const lastCall = persistence.state.lastCall;
-        const attribution = lastCallAttribution(
-          lastCall,
-          markAccounting(snapshot, persistence.state).agentMarks,
-        );
-        emit("context.response", {
-          exposure_seq: lastCall.exposure,
-          commit_seq: null,
-          trigger: null,
-          outcome: "lapsed",
-          ...attribution,
-        });
-        clearLastCall();
-        lastCallChanged = true;
-      }
-    }
+    const noticesChanged = false;
+    const lastCallChanged = false;
     inlineRungs = Boolean(epoch) && Number(epoch?.appliedMarks ?? 0) > 0;
     if (!inlineRungs) {
       const marked = markLadderSelection();
@@ -3085,7 +2886,7 @@ export function registerActiveContext(pi: any, options: {
     const transientAtEntry = captureTransient();
     let action: Record<string, unknown> | null = null;
     try {
-      action = await applyAutomaticRung(snapshot, ratio, rungOptions, phase);
+      action = await applyAutomaticRung(snapshot, ratio, rungOptions);
       if (action) await persist(ctx);
       if (action) ladder.boundaryFailure = null;
       return action;
@@ -3700,7 +3501,7 @@ export function registerActiveContext(pi: any, options: {
     curation.pendingRejection = { status: 400, ordinal: currentOrdinal() };
   };
 
-  pi.on("session_before_compact", (event: Record<string, unknown>, ctx: any) => {
+  pi.on("session_before_compact", async (event: Record<string, unknown>, ctx: any) => {
     const reason = ownValue(event, "reason");
     if (reason === "overflow" && ownValue(event, "willRetry") === true) {
       nativeCompaction.lastThresholdDecision = {
@@ -3725,13 +3526,26 @@ export function registerActiveContext(pi: any, options: {
       try { updateStatus(ctx); } catch { }
       return undefined;
     }
+    let handoff: Record<string, unknown> | null = null;
+    try {
+      const snapshot = authoritativeSnapshotFor(ctx);
+      handoff = await runCommitEpoch(snapshot, "compaction-boundary", true, measurements.latestRatio);
+      await persist(ctx);
+    } catch (error) {
+      suspendAutomatic(error, "compaction-boundary", ctx);
+      return undefined;
+    }
     nativeCompaction.lastThresholdDecision = {
       handled: true,
       retry: false,
-      reason: `blocked stock automatic compaction; ${contextBrand(brandNoun)} folding remains authoritative`,
+      reason: handoff
+        ? `${contextBrand(brandNoun)} handed the prefix off losslessly instead of compacting it`
+        : `${contextBrand(brandNoun)} had nothing eligible to hand off`,
       compactionReason: reason,
       nativeCompactionCompleted: false,
     };
+    try { updateStatus(ctx); } catch { }
+    if (!handoff) return undefined;
     return { cancel: true };
   });
   pi.on("agent_settled", async (_event: unknown, ctx: any) => {
