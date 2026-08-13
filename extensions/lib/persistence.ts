@@ -1049,6 +1049,13 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
     return !held || sha256Value(held) !== sha256Value(mark);
   });
   const marksTravel = previousMarks.length > 0 || nextMarks.length > 0;
+  // The rest travel whole and stay that way. Measured on the same run, the two that were
+  // worth a diff were 20.0 MB of the 21.6 MB ledger; what is left is `notices` at 0.93 MB,
+  // `rider` at 0.32, `surfacing` at 0.13 and `lastCall` at 0.03, all bounded objects with
+  // their own caps rather than collections that grow with the epoch. A diff for a capped
+  // value is a second encoding to keep honest for a few hundred kilobytes a session, and
+  // the reader's own compatibility rule is the part that is easy to get wrong: this build
+  // shipped one such bug and the gate caught it.
   return parseActiveContextStateV2({
     version: 2,
     kind: "delta",
