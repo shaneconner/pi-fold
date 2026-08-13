@@ -3408,13 +3408,6 @@ try {
     "the suspension check does not read the runtime's own suspension event");
   assert(/assertExperiment\(suspensions\.length === 0/.test(suspendCheck),
     "an announced suspension does not fail the run");
-  // A retry is a different outcome of the same record and must not fail the run: the
-  // transaction rolled back clean, the next boundary re-attempted it, and nothing the trial
-  // measures moved. It is reported instead, beside the fold summary.
-  assert(/outcome === "retrying"/.test(suspendCheck),
-    "the check does not tell a retried clean rollback apart from a suspension");
-  assert(worker.includes("cleanRollbackRetries: retries.map("),
-    "retried commits are not reported, so a run that stumbled reads as one that did not");
   // Ordering is the point: the cause is asserted before the symptom, or the report names
   // the aborted request again and the suspension stays buried.
   assert(worker.indexOf("const foldFailures = armRuntime.activeContextEnabled") <
@@ -3443,13 +3436,19 @@ try {
   assert(/state_revision/.test(suspendFn) && /durable_revision/.test(suspendFn),
     "the suspension event omits the two revisions whose disagreement is the symptom");
   assert(/outcome: "suspended"/.test(suspendFn),
-    "the suspension record does not declare its outcome, so a retry cannot be told from a stop");
+    "the suspension record does not declare its outcome");
+  // Every failed automatic transaction reaches that announcement, on the first one. A
+  // bounded retry used to sit here and swallow the first three: it was removed because a
+  // retry is a fallback, and a fallback is how a defect survives long enough to be a
+  // mystery. The transaction must therefore hold no outcome of its own.
   const transaction = runtimeSource.slice(
     runtimeSource.indexOf("const runAutomaticRungTransaction = async ("),
     runtimeSource.indexOf("const attemptAutomaticRung = ("),
   );
-  assert(/outcome: "retrying"/.test(transaction) && /MAX_CLEAN_ROLLBACK_RETRIES/.test(transaction),
-    "a clean rollback no longer earns a bounded retry before folding suspends");
+  assert(/suspendAutomatic\(error, phase, ctx, key, disposition\)/.test(transaction),
+    "a failed automatic transaction no longer reaches the suspension announcement");
+  assert(!/outcome: "retrying"/.test(transaction),
+    "a failed automatic transaction still has an outcome that is not a suspension");
   const kinds = readFileSync(join(PROJECT, "extensions", "lib", "instrumentation.ts"), "utf8");
   assert(kinds.includes(`| "context.suspend"`),
     "context.suspend is not a declared kind of the canonical event stream");

@@ -11626,10 +11626,10 @@ async function gateSuspensionAnnouncesItself() {
     },
   });
   await startRuntime(runtime);
-  // Past the retry allowance, because a clean rollback earns MAX_CLEAN_ROLLBACK_RETRIES
-  // attempts before folding suspends. Gate 124 owns that rule; this gate needs the terminal
-  // outcome, so it drives one commit more than the allowance.
-  for (let attempt = 0; attempt <= context.MAX_CLEAN_ROLLBACK_RETRIES; attempt += 1) {
+  // A clean rollback suspends on the first one now, so one failing commit is the whole
+  // scenario. A second is driven anyway, to prove the announcement does not repeat itself
+  // once folding has stopped and that nothing quietly resumed.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
     await measureAndCommit(runtime, 80_000 + attempt * 2_000, 100_000, `attempt-${attempt}`);
   }
 
@@ -11683,118 +11683,6 @@ async function gateSuspensionAnnouncesItself() {
     stateRevision: suspend.state_revision,
     durableRevision: suspend.durable_revision,
     foldsStopped: after === before,
-  };
-}
-
-/**
- * A ROLLBACK THAT COST NOTHING EARNS ANOTHER ATTEMPT.
- *
- * The other half of the sol-20260812 deaths. Reps 3 and 4 each lost exactly ONE commit and
- * then folded nothing for the rest of the run: the transaction rolled back cleanly, wrote no
- * fold record and no state entry, put back the state it entered with, and suspended. The
- * marks were still pending and the next boundary could have attempted the same work against
- * a freshly built snapshot, but suspension is permanent and only a manual fold clears it,
- * which a headless session never gets. Occupancy then climbed with nothing able to reclaim
- * it and both runs died at the wall twenty minutes later.
- *
- * The opposite rule is equally wrong and is what the pre-guard build did: the same commit
- * vanishing on every later boundary, forever, with nothing reported. So the allowance is a
- * bounded session TOTAL, not a consecutive run. Consecutive is no bound at all here, and
- * this gate proves it rather than asserting it: small tool-batch folds land on nearly every
- * pass, so a reset-on-success counter is reset before it can ever reach its limit. The first
- * cut of this build used one and the fixture retried indefinitely.
- *
- * A partial write is never retried. Retrying over half-written durable state is how a clean
- * loss becomes a corrupt one.
- */
-async function gateCleanRollbackEarnsARetry() {
-  const shape = { turns: 10, resultChars: 12_000, contextWindow: 100_000 };
-  const allowance = context.MAX_CLEAN_ROLLBACK_RETRIES;
-  assert(Number.isSafeInteger(allowance) && allowance >= 1 && allowance <= 8,
-    `The retry allowance is not a small constant: ${allowance}`);
-
-  // 1. A CLEAN ROLLBACK RETRIES. The first failure must not suspend, and it must say so.
-  let fault = "durable fold record refused by the fixture";
-  const runtime = makeRuntime(makeFixture({ ...shape, sessionId: "rollback-retry" }), {
-    beforeAppend(customType) {
-      if (customType === context.ACTIVE_CONTEXT_FOLD_RECORD_ENTRY) throw new Error(fault);
-    },
-  });
-  await startRuntime(runtime);
-  const announcements = () => contextEvents(runtime).filter((event) => event.kind === "context.suspend");
-  const applied = () => contextEvents(runtime).filter(
-    (event) => event.kind === "context.commit" && event.deferred === false).length;
-
-  await measureAndCommit(runtime, 80_000, 100_000, "first");
-  assert.equal(announcements().length, 1, "The first clean rollback was not reported");
-  assert.equal(announcements()[0].outcome, "retrying",
-    "The first clean rollback suspended instead of earning another attempt");
-  assert.equal(announcements()[0].disposition, "none",
-    "The retried failure was not classified as a clean rollback");
-  assert.equal(announcements()[0].clean_rollbacks, 1,
-    "The retried failure does not carry the count the allowance is spent against");
-
-  // 2. AND THE NEXT BOUNDARY REALLY DOES ATTEMPT THE WORK AGAIN. Without this the retry is
-  //    a label on a session that has already stopped folding.
-  const appliedAfterFirst = applied();
-  await measureAndCommit(runtime, 82_000, 100_000, "second");
-  assert(applied() > appliedAfterFirst,
-    "No commit was attempted after the retry, so the retry bought nothing");
-
-  // 3. THE ALLOWANCE IS SPENT AND THEN FOLDING SUSPENDS. Driven one commit past it.
-  for (let attempt = announcements().length; attempt <= allowance; attempt += 1) {
-    await measureAndCommit(runtime, 84_000 + attempt * 2_000, 100_000, `spend-${attempt}`);
-  }
-  const outcomes = announcements().map((event) => event.outcome);
-  assert.equal(outcomes.filter((outcome) => outcome === "retrying").length, allowance,
-    `The allowance was not exactly ${allowance} retries: ${outcomes.join(",")}`);
-  assert.equal(outcomes.filter((outcome) => outcome === "suspended").length, 1,
-    `Folding did not suspend once the allowance was spent: ${outcomes.join(",")}`);
-  assert.equal(outcomes.at(-1), "suspended", "The suspension is not the last word");
-
-  // 4. THE COUNT IS A SESSION TOTAL, WHICH IS THE WHOLE REASON THE BOUND HOLDS. Successful
-  //    folding happened between these failures (that is what the fixture does on every
-  //    pass), and it did not hand the allowance back.
-  const counts = announcements().map((event) => event.clean_rollbacks);
-  assert.deepEqual(counts, counts.map((_unused, index) => index + 1),
-    `The clean-rollback count reset between failures, so the bound does not hold: ${counts.join(",")}`);
-  const foldsBetween = contextEvents(runtime).filter((event) => event.kind === "context.fold").length;
-  assert(foldsBetween > 0,
-    "No folding succeeded during the run, so this proves nothing about resetting on success");
-
-  // 5. A PARTIAL WRITE IS NEVER RETRIED. Let the fold records land and fail the state entry:
-  //    the transaction is then "record-only" and must suspend on the first failure.
-  fault = "durable state entry refused by the fixture";
-  let recordsLanded = 0;
-  const partial = makeRuntime(makeFixture({ ...shape, sessionId: "rollback-partial" }), {
-    beforeAppend(customType) {
-      if (customType === context.ACTIVE_CONTEXT_FOLD_RECORD_ENTRY) recordsLanded += 1;
-      // Only once this transaction has already written durable fold records, which is what
-      // makes it half-written rather than clean.
-      if (customType === context.ACTIVE_CONTEXT_STATE_ENTRY && recordsLanded > 0) {
-        throw new Error("state entry refused after its fold records landed");
-      }
-    },
-  });
-  await startRuntime(partial);
-  await measureAndCommit(partial, 80_000, 100_000, "partial");
-  const partialEvents = contextEvents(partial).filter((event) => event.kind === "context.suspend");
-  assert(partialEvents.length > 0, "A half-written transaction was not reported");
-  const partialWrites = partialEvents.filter((event) => event.disposition !== "none");
-  assert(partialWrites.length > 0,
-    "The fixture never produced a half-written transaction, so this proves nothing");
-  assert.deepEqual([...new Set(partialWrites.map((event) => event.outcome))], ["suspended"],
-    "A transaction that already wrote durable records was retried over its own partial state");
-  // And it is the terminal word for that session, whatever preceded it.
-  assert.equal(partialEvents.at(-1).outcome, "suspended",
-    "A session that half-wrote durable state did not end up suspended");
-
-  return {
-    allowance,
-    outcomes,
-    counts,
-    foldEvents: foldsBetween,
-    partialDispositions: [...new Set(partialWrites.map((event) => event.disposition))],
   };
 }
 
@@ -13370,7 +13258,6 @@ const gates = [
   [121, "An evidence digest is derived once per message object", gateEvidenceDigestDerivedOncePerObject],
   [122, "A commit that vanishes at persistence announces itself", gateVanishedCommitAnnouncesItself],
   [123, "Suspending automatic folding announces itself", gateSuspensionAnnouncesItself],
-  [124, "A clean rollback earns another attempt", gateCleanRollbackEarnsARetry],
   [125, "A parent brief cannot inherit a structural tool name", gateParentBriefCannotInheritToolName],
 ];
 

@@ -115,7 +115,6 @@ import {
   entryTypeNamespace,
   MAX_BRIEF_BATCH_SPANS,
   MAX_BRIEF_UPGRADE_QUEUE,
-  MAX_CLEAN_ROLLBACK_RETRIES,
   MAX_BRIEF_UPGRADES_IN_FLIGHT,
   MAX_FOLD_SPAN_CHARS,
   MAX_PINNED_SHARE,
@@ -479,7 +478,6 @@ export function registerActiveContext(pi: any, options: {
      * constantly between commits and any "reset on success" rule is reset by them on every
      * pass, which is the unbounded case wearing a bound.
      */
-    cleanRollbacks: 0,
     failedPreparations: new Set<string>(),
     actionQueue: Promise.resolve<unknown>(undefined),
   };
@@ -1618,7 +1616,6 @@ export function registerActiveContext(pi: any, options: {
         // costs it every commit it would have made afterwards, and only a manual fold
         // clears the latch, which a headless session never gets.
         outcome: "suspended",
-        clean_rollbacks: ladder.cleanRollbacks,
         repeat: !firstFailure,
         suppressed_callbacks: ladder.automaticFailure?.suppressedCallbacks ?? 0,
         // The two revisions whose disagreement IS the symptom.
@@ -4296,54 +4293,6 @@ export function registerActiveContext(pi: any, options: {
         restoreTransient(transientAtEntry);
       }
       const disposition = stateCommitted ? "state-committed" : recordOnly ? "record-only" : "none";
-      // ONE RETRY FOR A ROLLBACK THAT COST NOTHING.
-      //
-      // "none" means this transaction wrote no fold record and no state entry and put back
-      // the state it entered with. The marks are still pending and the next boundary can
-      // attempt the same work against a freshly built snapshot. Suspending on the first of
-      // those is what turned one lost commit into a dead session twice on sol-20260812:
-      // reps 3 and 4 each lost exactly one commit and then folded nothing for the rest of
-      // the run while inflow continued to the wall. Neither had a user to clear the latch,
-      // which is the only thing that clears it.
-      //
-      // Bounded because the other failure mode is real and was the pre-guard behaviour: the
-      // same commit vanishing on every later boundary, forever, silently. Three, as a
-      // SESSION total: the observed rate is one lost commit per run of four to five, so
-      // three covers a transiently unlucky session with margin while a deterministic failure
-      // spends the allowance on three wasted commits and then says so. A partial write is
-      // never retried, because retrying over half-written durable state is how a clean loss
-      // becomes a corrupt one.
-      if (disposition === "none") ladder.cleanRollbacks += 1;
-      if (disposition === "none" && ladder.cleanRollbacks <= MAX_CLEAN_ROLLBACK_RETRIES &&
-          !ladder.automaticFailure) {
-        ladder.boundaryFailure = boundReceiptText(
-          error instanceof Error ? error.message : String(error),
-          1_200,
-          "automatic context failure",
-        );
-        // Reported on the same record a suspension uses, because they are one event with
-        // two outcomes: an automatic transaction failed, and this is what was done about it.
-        // A retry nobody can see is the defect the suspension record was added to fix.
-        emit("context.suspend", {
-          phase,
-          error: ladder.boundaryFailure,
-          error_name: error instanceof Error ? error.name : typeof error,
-          disposition,
-          outcome: "retrying",
-          repeat: false,
-          suppressed_callbacks: 0,
-          clean_rollbacks: ladder.cleanRollbacks,
-          state_revision: persistence.state?.revision ?? null,
-          durable_revision: persistence.persisted?.revision ?? null,
-          folds_in_memory: persistence.state?.folds.length ?? null,
-          folds_durable: persistence.persisted?.folds.length ?? null,
-          fold_records_durable: persistence.persistedFoldRecords.size,
-          pending_marks: persistence.state?.pendingMarks?.length ?? 0,
-          key,
-        });
-        updateStatus(ctx);
-        return null;
-      }
       suspendAutomatic(error, phase, ctx, key, disposition);
       updateStatus(ctx);
       return stateCommitted ? action : null;
