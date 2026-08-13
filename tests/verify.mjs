@@ -5275,7 +5275,10 @@ async function gatePinnedMassBackstop() {
   await measureAndCommit(runtime, 88_500, 100_000);
   const epoch = (await toolStatus(runtime)).details.automatic.lastAutomaticAction?.epoch;
   assert(epoch, "The pressure backstop did not commit");
-  assert.equal(epoch.trigger, "compaction-boundary");
+  // The FENCE commits this one, not the boundary: 88,500 tokens of declared occupancy
+  // against a 90,000-token serving budget is a crowded projection, and the fence is the
+  // path that owns a request already at the margin.
+  assert.equal(epoch.trigger, "projection-budget");
   assert(epoch.appliedMarks >= 1, "The backstop commit applied nothing");
   assert.equal(typeof epoch.pinnedBytes, "number");
 

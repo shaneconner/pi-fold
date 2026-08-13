@@ -1553,13 +1553,6 @@ export function registerActiveContext(pi: any, options: {
     let measured = projectionExceedsBudget(projected, ctx);
     const rejected = curation.pendingRejection !== null;
     if (!measured.crowded && !rejected) return { projected, aborted: false };
-    const lastCall = persistence.state?.lastCall;
-    const delivery = curation.lastCallDelivery;
-    const roundOpen = Boolean(lastCall) && (!delivery || delivery.exposure !== lastCall.exposure ||
-      markOrdinal(snapshot) <= delivery.ordinal);
-    if (!measured.over && !rejected && roundOpen) {
-      return { projected, aborted: false };
-    }
     const trigger = measured;
     let reduced = projected;
     let attempts = 0;
@@ -1569,9 +1562,19 @@ export function registerActiveContext(pi: any, options: {
       curation.recoveryAttempts += 1;
       let action: Record<string, unknown> | null = null;
       try {
-        action = await attemptAutomaticRung(snapshot, 1, ctx, "projection-budget", {
-          waiverRatio: 1,
-        });
+        // The fence COMMITS. A mark moves no bytes, and the request it is holding is the
+        // one that will not fit, so marking here would spin the loop against an unchanged
+        // projection until it ran out of things to mark.
+        //
+        // THE WAIVER IS FOR THE REQUEST THAT WILL NOT FIT, and only for it. Waiving at
+        // the margin releases the open turn's own evidence to buy headroom the boundary
+        // was about to buy anyway, which is the guard paying for the estimator's caution.
+        // Crowded commits at the measured ratio and holds the turn; over-budget and a
+        // provider rejection waive.
+        const emergency = measured.over || rejected;
+        action = await attemptAutomaticCommit(
+          snapshot, ctx, "projection-budget", emergency ? 1 : measurements.latestRatio,
+        );
       } catch (error) {
         suspendAutomatic(error, "projection-budget", ctx);
         break;
@@ -2724,15 +2727,19 @@ export function registerActiveContext(pi: any, options: {
     // WHAT the rung decides is unchanged; WHEN it takes effect is.
     return markLadderSelection();
   };
-  const runAutomaticRungTransaction = async (
+  /**
+   * The one durable transaction. Whatever it wraps either lands with its state persisted
+   * or leaves the state it entered with, and a failure suspends folding by name rather
+   * than being retried quietly. Marking and committing both go through it, which is why
+   * a commit that vanishes at persistence (gate 122) and a suspension that says nothing
+   * (gate 123) are single properties rather than one per caller.
+   */
+  const runAutomaticTransaction = async (
     snapshot: ActiveContextSnapshot,
     ratio: number,
     ctx: any,
     phase: string,
-    rungOptions: {
-      toolOnly?: boolean;
-      waiverRatio?: number;
-    } = {},
+    operation: () => Promise<Record<string, unknown> | null>,
   ): Promise<Record<string, unknown> | null> => {
     if (!persistence.state || !measurements.lastProviderMeasurement ||
         !durableProviderMeasurementMatches(measurements.lastProviderMeasurement)) return null;
@@ -2750,7 +2757,7 @@ export function registerActiveContext(pi: any, options: {
     const transientAtEntry = captureTransient();
     let action: Record<string, unknown> | null = null;
     try {
-      action = await applyAutomaticRung(snapshot, ratio, rungOptions);
+      action = await operation();
       if (action) await persist(ctx);
       if (action) ladder.boundaryFailure = null;
       return action;
@@ -2767,6 +2774,21 @@ export function registerActiveContext(pi: any, options: {
       return stateCommitted ? action : null;
     }
   };
+  const queueAutomatic = (
+    snapshot: ActiveContextSnapshot,
+    ratio: number,
+    ctx: any,
+    phase: string,
+    operation: () => Promise<Record<string, unknown> | null>,
+  ): Promise<Record<string, unknown> | null> => {
+    const queued = ladder.actionQueue.then(async () => {
+      const action = await runAutomaticTransaction(snapshot, ratio, ctx, phase, operation);
+      resumeBriefUpgrades(snapshot, ctx);
+      return action;
+    });
+    ladder.actionQueue = queued.catch(() => undefined);
+    return queued;
+  };
   const attemptAutomaticRung = (
     snapshot: ActiveContextSnapshot,
     ratio: number,
@@ -2776,15 +2798,24 @@ export function registerActiveContext(pi: any, options: {
       toolOnly?: boolean;
       waiverRatio?: number;
     } = {},
-  ): Promise<Record<string, unknown> | null> => {
-    const operation = ladder.actionQueue.then(async () => {
-      const action = await runAutomaticRungTransaction(snapshot, ratio, ctx, phase, rungOptions);
-      resumeBriefUpgrades(snapshot, ctx);
-      return action;
-    });
-    ladder.actionQueue = operation.catch(() => undefined);
-    return operation;
-  };
+  ): Promise<Record<string, unknown> | null> => queueAutomatic(
+    snapshot, ratio, ctx, phase, () => applyAutomaticRung(snapshot, ratio, rungOptions),
+  );
+  /**
+   * A COMMIT, THROUGH THE SAME TRANSACTION AND THE SAME QUEUE. Two callers reach it: the
+   * compaction boundary, which is the ordinary one, and the projection fence, which is
+   * the emergency one. The fence cannot wait for a boundary because the request it is
+   * holding does not fit, so it commits in place; that is the one exception, and it is
+   * the exception that already existed.
+   */
+  const attemptAutomaticCommit = (
+    snapshot: ActiveContextSnapshot,
+    ctx: any,
+    trigger: string,
+    waiverRatio: number | null,
+  ): Promise<Record<string, unknown> | null> => queueAutomatic(
+    snapshot, waiverRatio ?? 1, ctx, trigger, () => runCommitEpoch(snapshot, trigger, true, waiverRatio),
+  );
   const projectionCandidates = (ctx: any): Array<Record<string, unknown>> => {
     if (lifecycle.shuttingDown || !persistence.state) return [];
     try {
@@ -3393,8 +3424,9 @@ export function registerActiveContext(pi: any, options: {
     let handoff: Record<string, unknown> | null = null;
     try {
       const snapshot = authoritativeSnapshotFor(ctx);
-      handoff = await runCommitEpoch(snapshot, "compaction-boundary", true, measurements.latestRatio);
-      await persist(ctx);
+      handoff = await attemptAutomaticCommit(
+        snapshot, ctx, "compaction-boundary", measurements.latestRatio,
+      );
     } catch (error) {
       suspendAutomatic(error, "compaction-boundary", ctx);
       return undefined;
