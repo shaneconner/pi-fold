@@ -1473,12 +1473,35 @@ async function gateCompactionPolicy() {
   await startRuntime(runtime);
   const hook = runtime.handlers.get("session_before_compact");
   const manual = await hook({ reason: "manual" }, runtime.ctx);
-  const threshold = await hook({ reason: "threshold" }, runtime.ctx);
-  const overflow = await hook({ reason: "overflow" }, runtime.ctx);
   assert.equal(manual, undefined);
-  assert.deepEqual(threshold, { cancel: true });
+  // An overflow Pi will RETRY is the rollback lane's, and it always cancels: the runtime
+  // moves the branch back past the request the provider refused rather than compacting.
+  const overflow = await hook({
+    reason: "overflow", willRetry: true, branchEntries: runtime.branch,
+  }, runtime.ctx);
   assert.deepEqual(overflow, { cancel: true });
-  return { manual: "pass-through", threshold: "cancel", overflow: "cancel" };
+  // A THRESHOLD BOUNDARY IS ANSWERED BY WHAT IT COULD HAND OFF. A three-turn tool-free
+  // window has nothing eligible, so the runtime lets Pi compact rather than cancelling a
+  // compaction and leaving the window exactly as crowded as it found it. The same hook
+  // on a window with foldable mass cancels, which is what gate 03 reads.
+  const barren = await hook({ reason: "threshold" }, runtime.ctx);
+  assert.equal(barren, undefined);
+  const loaded = makeRuntime(makeFixture({ turns: 12, resultChars: 10_000, contextWindow: 100_000 }));
+  await startRuntime(loaded);
+  await measure(loaded, 80_000, 100_000);
+  await project(loaded);
+  await settle();
+  const threshold = await loaded.handlers.get("session_before_compact")({
+    reason: "threshold", willRetry: false, branchEntries: loaded.branch, preparation: {},
+  }, loaded.ctx);
+  await settle();
+  assert.deepEqual(threshold, { cancel: true });
+  return {
+    manual: "pass-through",
+    thresholdWithNothingToHandOff: "pass-through",
+    thresholdWithAHandoff: "cancel",
+    overflow: "cancel",
+  };
 }
 
 async function gatePersistenceChain() {
@@ -6898,18 +6921,24 @@ async function gateOverflowRecovery() {
   //
   // RE-DERIVED 2026-08-10. This asserted `recovered === true` here, and `recovered` was
   // `!measured.over`: our own estimator answering the question the provider had just
-  // answered differently. On this fixture the retried projection is 11,954 tokens of a
-  // 50,400-token budget and the recovery pass folds NOTHING, because there is nothing
-  // that needs folding -- so the old field reported a rescue for a request nobody
-  // rebuilt. Measured 2026-08-10 (luna-20260810 pifold rep 2), the same field reported
-  // recovered twice on a window that had not moved a byte, and the run died anyway.
+  // answered differently. Measured 2026-08-10 (luna-20260810 pifold rep 2), that field
+  // reported recovered twice on a window that had not moved a byte, and the run died
+  // anyway. The verdict is derived from what the pass DID, and the two facts it derives
+  // from ride the same record.
   //
-  // A rejection mutates nothing durable, so a pass that folds nothing hands the provider
-  // a byte-identical request. The verdict is therefore derived from what the pass DID,
-  // and the two facts it derives from ride the same record.
-  assert.equal(recoveryRecord.freed_tokens, 0, "The retried request came back smaller than the rejected one");
-  assert.equal(recoveryRecord.rejected_tokens, recoveryRecord.tokens_after,
-    "The rebuilt request differs in size from the one the provider rejected");
+  // RE-DERIVED AGAIN at the boundary build. The lane COMMITS now rather than marking, so
+  // it can genuinely rebuild a smaller request; on this fixture it still rebuilds
+  // nothing, because a three-turn tool-free window has nothing eligible to fold, and
+  // that is the case the verdict has to get right. What retired with the mark-only lane
+  // is the claim that the retry is byte-identical to the refused request: the loop used
+  // to reproject on every mark and refresh the recorded size as a side effect, so the
+  // two numbers agreed by construction rather than by measurement. They are taken at
+  // different points and the record carries both.
+  assert.equal(recoveryRecord.freed_tokens, 0,
+    "The lane folded something, so this fixture no longer shows a pass that changed nothing");
+  assert.equal(recoveryRecord.loop_reduced, false, "The lane reported a reduction it did not make");
+  assert.equal(recoveryRecord.tokens_before, recoveryRecord.tokens_after,
+    "The retried request changed size in a pass that folded nothing");
   assert.equal(status.recovery.last.recovered, false,
     "An unchanged request was reported as recovered from a provider rejection");
   const rebuiltTokens = Math.ceil(bytesOf(retried.messages) / status.projectionCharsPerToken);
@@ -10254,28 +10283,20 @@ async function gateEveryToolBatchFoldsUnmarked() {
  * mechanism, and folding a session must not depend on whether the runtime narrates it.
  */
 async function gateGuidanceOption() {
-  assert.deepEqual({ ...context.DEFAULT_GUIDANCE }, { thresholdNotices: true, actionResponses: true });
+  // ONE boolean. The threshold-notice switch retired with the notices themselves: a
+  // switch over something nothing emits is a setting a deployment can turn off and
+  // observe no difference from, which is worse than no setting at all.
+  assert.deepEqual({ ...context.DEFAULT_GUIDANCE }, { actionResponses: true });
   // Set whole or partially, but never with a key this option does not have: a typo that
   // silently keeps the default is how a deployment believes it turned something off.
   assert.throws(() => makeRuntime(makeFixture({ turns: 4 }), { guidance: { notices: false } }).tools,
     /guidance has no notices setting/);
-  assert.throws(() => makeRuntime(makeFixture({ turns: 4 }), { guidance: { thresholdNotices: "no" } }).tools,
-    /guidance.thresholdNotices must be a boolean/);
+  assert.throws(() => makeRuntime(makeFixture({ turns: 4 }), { guidance: { thresholdNotices: false } }).tools,
+    /guidance has no thresholdNotices setting/);
+  assert.throws(() => makeRuntime(makeFixture({ turns: 4 }), { guidance: { actionResponses: "no" } }).tools,
+    /guidance.actionResponses must be a boolean/);
   assert.throws(() => makeRuntime(makeFixture({ turns: 4 }), { guidance: true }).tools,
     /guidance must be an object/);
-
-  const noticeCount = async (guidance) => {
-    const runtime = await epochToolRuntime({ turns: 12, resultChars: 16_000, guidance });
-    await measure(runtime, 20_000, 100_000);
-    await measure(runtime, 23_000, 100_000);
-    await measure(runtime, 46_000, 100_000);
-    return { runtime, notices: contextEvents(runtime).filter((r) => r.kind === "context.notice") };
-  };
-  const on = await noticeCount(undefined);
-  assert.deepEqual(on.notices.map((record) => record.share), [0.25, 0.5],
-    "The waypoints did not speak under the default");
-  const off = await noticeCount({ thresholdNotices: false });
-  assert.equal(off.notices.length, 0, "A silenced waypoint still spoke");
 
   // The action response is the mark's prose, and off removes the prose alone: the same
   // mark is still accepted, still pending, still carries its accounting.
@@ -10298,8 +10319,7 @@ async function gateGuidanceOption() {
   assert.equal(silentMark.details.deferred, marked.details.deferred);
   return {
     defaultOn: true,
-    silencedNotices: 0,
-    defaultNotices: on.notices.length,
+    guidanceKeys: Object.keys(context.DEFAULT_GUIDANCE),
     silencedResponseKeys: ["awareness", "activation"],
     markUnchangedWhenSilent: true,
   };
@@ -13199,7 +13219,7 @@ const gates = [
   [101, "Peek copies reclaim with identity", gatePeekReclaimWithIdentity],
   [102, "The public option surface", gatePublicOptionSurface],
   [105, "Every completed tool batch folds unmarked", gateEveryToolBatchFoldsUnmarked],
-  [103, "Guidance is two booleans, default on", gateGuidanceOption],
+  [103, "Guidance is one boolean, default on", gateGuidanceOption],
   [104, "The slate rides the rider, and nothing else", gateSurfacingDeliveryRidesTheBoundary],
   [106, "The boundary commits with no turn ever closed", gateOpenTurnCommits],
   [107, "Model briefs upgrade on the commit boundary", gateBriefUpgradesRideTheBoundary],

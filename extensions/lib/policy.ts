@@ -182,28 +182,26 @@ export const STATUS_DIET_SUGGESTIONS = 5;
 export const THRESHOLD_NOTICE_SHARES: readonly number[] = Object.freeze([0.25, 0.50, 0.75]);
 export const MAX_THRESHOLD_NOTICES = 9;
 export interface ActiveContextGuidance {
-  thresholdNotices: boolean;
   actionResponses: boolean;
 }
 
 export const DEFAULT_GUIDANCE: ActiveContextGuidance = Object.freeze({
-  thresholdNotices: true,
   actionResponses: true,
 });
 
 const GUIDANCE_KEYS: readonly (keyof ActiveContextGuidance)[] = Object.freeze([
-  "thresholdNotices", "actionResponses",
+  "actionResponses",
 ]);
 
 export function resolveGuidance(value: unknown): ActiveContextGuidance {
   if (value === undefined) return DEFAULT_GUIDANCE;
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("guidance must be an object of { thresholdNotices, actionResponses } booleans");
+    throw new Error("guidance must be an object of { actionResponses } booleans");
   }
   for (const key of Object.keys(value)) {
     if (!GUIDANCE_KEYS.includes(key as keyof ActiveContextGuidance)) {
       throw new Error(`guidance has no ${key} setting: the only keys are ` +
-        `${GUIDANCE_KEYS.join(", ")}, and both are booleans`);
+        `${GUIDANCE_KEYS.join(", ")}, and they are booleans`);
     }
   }
   const resolved = { ...DEFAULT_GUIDANCE } as ActiveContextGuidance;
