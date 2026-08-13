@@ -3444,13 +3444,25 @@ try {
   // retry is a fallback, and a fallback is how a defect survives long enough to be a
   // mystery. The transaction must therefore hold no outcome of its own.
   const transaction = runtimeSource.slice(
-    runtimeSource.indexOf("const runAutomaticRungTransaction = async ("),
-    runtimeSource.indexOf("const attemptAutomaticRung = ("),
+    runtimeSource.indexOf("const runAutomaticTransaction = async ("),
+    runtimeSource.indexOf("const queueAutomatic = ("),
   );
   assert(/suspendAutomatic\(error, phase, ctx, key, disposition\)/.test(transaction),
     "a failed automatic transaction no longer reaches the suspension announcement");
   assert(!/outcome: "retrying"/.test(transaction),
     "a failed automatic transaction still has an outcome that is not a suspension");
+  // And BOTH automatic callers are inside it. Marking and committing are one
+  // transaction, so a commit that vanishes at persistence restores the state it entered
+  // with and announces itself for the same reason a mark does. The boundary used to
+  // persist outside it, which left a discarded commit with nothing to roll back to.
+  const queue = runtimeSource.slice(
+    runtimeSource.indexOf("const queueAutomatic = ("),
+    runtimeSource.indexOf("const projectionCandidates = ("),
+  );
+  for (const caller of ["attemptAutomaticRung", "attemptAutomaticCommit"]) {
+    assert(new RegExp(`const ${caller} = \\([\\s\\S]*?queueAutomatic\\(`).test(queue),
+      `${caller} reaches the ladder outside the durable transaction`);
+  }
   const kinds = readFileSync(join(PROJECT, "extensions", "lib", "instrumentation.ts"), "utf8");
   assert(kinds.includes(`| "context.suspend"`),
     "context.suspend is not a declared kind of the canonical event stream");
@@ -3554,24 +3566,34 @@ try {
   "a passing run does not record how many commits were checked and how many went unpaid");
 
   // And the invariant is grounded in the runtime, not only in the fixtures: the receipt is
-  // the last thing the rung application does, which is what makes its absence a throw.
+  // the last thing the COMMIT does, which is what makes its absence a throw. It used to
+  // be the last thing the rung did, on two paths, because the rung owned the epoch; the
+  // boundary owns it now and there is one path.
   const runtimeSource = readFileSync(join(PROJECT, "extensions", "active-context.ts"), "utf8");
-  const rung = runtimeSource.slice(
-    runtimeSource.indexOf("const applyAutomaticRung = async ("),
-    runtimeSource.indexOf("const runAutomaticRungTransaction = async ("),
+  const commitEpoch = runtimeSource.slice(
+    runtimeSource.indexOf("const runCommitEpoch = async ("),
+    runtimeSource.indexOf("const clearCommitLatchBelowTrigger = ("),
   );
-  assert(rung.length > 0, "the automatic rung application was not found where it is pinned");
-  const deliveries = [...rung.matchAll(/noteAutomaticReceipt\([^;]*\);\n(\s*)(\S[^\n]*)/g)];
-  assert(deliveries.length >= 2,
-    `the rung application delivers a receipt on ${deliveries.length} path(s), fewer than the ` +
-    "epoch-only path and the folding path it is known to have");
-  // Every delivery is the last thing that happens before the action is handed back. That is
+  assert(commitEpoch.length > 0, "the commit epoch was not found where it is pinned");
+  const deliveries = [...commitEpoch.matchAll(/noteAutomaticReceipt\([^;]*\);\n(\s*)(\S[^\n]*)/g)];
+  assert(deliveries.length >= 1,
+    `the commit delivers a receipt on ${deliveries.length} path(s), and it has one to deliver on`);
+  // Every delivery is the last thing that happens before the epoch is handed back. That is
   // what makes a missing receipt mean a throw rather than a path we forgot to instrument.
   for (const [, , next] of deliveries) {
-    assert(next.startsWith("return ladder.lastAutomaticAction;"),
+    assert(next.startsWith("return epoch;"),
       `a receipt delivery is followed by ${JSON.stringify(next)} rather than by the return, ` +
-      "so the rung can do more work after paying and a missing receipt stops meaning a throw");
+      "so the commit can do more work after paying and a missing receipt stops meaning a throw");
   }
+  // And the rung itself no longer pays one, because it no longer folds: it marks, and a
+  // mark moves no bytes for a receipt to describe.
+  const rung = runtimeSource.slice(
+    runtimeSource.indexOf("const applyAutomaticRung = async ("),
+    runtimeSource.indexOf("const runAutomaticTransaction = async ("),
+  );
+  assert(rung.length > 0, "the automatic rung application was not found where it is pinned");
+  assert(!/noteAutomaticReceipt\(/.test(rung),
+    "the rung pays a receipt for a mark, which moves no bytes for one to describe");
 
   checks.anAppliedCommitOwesAReceipt = true;
 }
