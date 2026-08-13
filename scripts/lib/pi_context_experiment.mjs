@@ -2650,6 +2650,71 @@ export function rollbackLens(events) {
   };
 }
 
+/**
+ * THE RECEIPT LENS: did every applied commit pay what it owed?
+ *
+ * `noteAutomaticReceipt` is the last statement of the rung application, reached after the
+ * folds are emitted and before the state is persisted. A commit that announces applied
+ * marks and delivers no receipt is therefore a commit that threw partway through: its
+ * folds exist in the event stream and nowhere else, no fold record and no state entry
+ * were written, and its marks went back to pending to be attempted and lost again.
+ *
+ * The window closes at the next projection, because a receipt belongs to the rung that
+ * emitted it. Measured across all six sealed sol-20260812 runs, that window is never
+ * tight: a healthy commit is followed by its receipt within ten to twenty-three events,
+ * and no healthy commit has a projection between the two.
+ *
+ * The corroborating signature, recorded rather than asserted because it is a consequence
+ * and not the rule: a lost commit's next projection reads exactly `applied_marks`
+ * revisions below the commit. Rep 1 lost fourteen folds at revision 99 and read 85 next;
+ * reps 3 and 4 lost eleven at 143 and 153 and read 132 and 142; rep 6 lost nine at 394
+ * and read 385. Rep 1 matters most: it happened on a build with no announcement of any
+ * kind, and nothing in that run's record named it until this lens was run against it.
+ */
+export function receiptLens(events) {
+  const applied = [];
+  const missing = [];
+  for (let index = 0; index < events.length; index += 1) {
+    const commit = events[index];
+    if (commit.kind !== "context.commit" || commit.deferred || !(commit.applied_marks > 0)) continue;
+    applied.push(commit);
+    let paid = false;
+    for (let ahead = index + 1; ahead < events.length; ahead += 1) {
+      if (events[ahead].kind === "context.receipt") { paid = true; break; }
+      if (events[ahead].kind === "context.projection") break;
+    }
+    if (paid) continue;
+    const nextProjection = events.slice(index + 1).find((event) => event.kind === "context.projection");
+    const nextProjectionRevision = Number.isFinite(nextProjection?.revision)
+      ? nextProjection.revision
+      : null;
+    missing.push({
+      seq: commit.seq,
+      revision: Number.isFinite(commit.revision) ? commit.revision : null,
+      appliedMarks: commit.applied_marks,
+      trigger: typeof commit.trigger === "string" ? commit.trigger : "unknown",
+      nextProjectionRevision,
+      // True on every loss measured so far, and the reason the rollback is the whole
+      // commit rather than part of it. Recorded, not required: a future loss that rolls
+      // back differently is still a loss, and must not read as clean because it broke
+      // the pattern.
+      revisionsRolledBack: nextProjectionRevision === null || !Number.isFinite(commit.revision)
+        ? null
+        : commit.revision - nextProjectionRevision,
+    });
+  }
+  return {
+    appliedCommits: applied.length,
+    receipts: events.filter((event) => event.kind === "context.receipt").length,
+    commitsWithoutReceipt: missing.length,
+    missing,
+    definition: "one row per context.commit that applied at least one mark and was not deferred, " +
+      "and for which no context.receipt appears before the next context.projection; the receipt " +
+      "count is every receipt in the stream, which is larger than the commit count because the " +
+      "overflow-recovery lane delivers its own",
+  };
+}
+
 export const FOLD_RECORD_SUFFIX = "-fold-record";
 
 /**

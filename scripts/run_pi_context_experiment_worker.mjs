@@ -29,6 +29,7 @@ import {
   assertExperiment,
   corpusManifestSha256,
   isWindowOverflow,
+  receiptLens,
   validateExperimentManifest,
   validateExperimentRunConfig,
   validateStagePlan,
@@ -369,6 +370,37 @@ try {
     `Active-context folding was suspended during the run (${suspensions.length} announcement(s)); ` +
     `first at ordinal ${suspensions[0]?.ordinal} revision ${suspensions[0]?.state_revision} ` +
     `in phase ${suspensions[0]?.phase}: ${suspensions[0]?.error}`);
+  // AN APPLIED COMMIT OWES A RECEIPT, and the stream alone can say whether it paid.
+  //
+  // `noteAutomaticReceipt` is the last statement of the rung application, after the folds
+  // are emitted and before the state is persisted. So a commit that announces applied marks
+  // and never delivers a receipt is a commit that threw partway: the folds are in the stream
+  // and nowhere else, no fold record, no state entry, and the marks go back to pending.
+  //
+  // This is checked after the suspension, which carries the error verbatim and is the better
+  // message when both fire, and before the terminal stop, which is the symptom. It earns its
+  // place beside the announcement by being build-independent: measured across all six sealed
+  // sol-20260812 runs, every healthy commit is followed by its receipt within ten to
+  // twenty-three events and always before the next projection, and every lost one is followed
+  // by no receipt at all and a next projection reading exactly `applied_marks` revisions lower
+  // (99 to 85 at fourteen folds, 143 to 132 and 153 to 142 at eleven, 394 to 385 at nine).
+  // Reps 3, 4 and 6 are the known losses. Rep 1 is the reason this exists: it lost fourteen
+  // folds the same way on a build that predates every announcement, and nothing in the record
+  // said so until this check was run against it.
+  const contextEvents = armRuntime.activeContextEnabled
+    ? entries
+      .filter((entry) => typeof entry?.customType === "string" &&
+        entry.customType.endsWith(CONTEXT_EVENT_SUFFIX) && entry.data?.kind)
+      .map((entry) => entry.data)
+    : [];
+  const receipts = receiptLens(contextEvents);
+  const unpaid = receipts.missing[0];
+  assertExperiment(receipts.commitsWithoutReceipt === 0,
+    `${receipts.commitsWithoutReceipt} of ${receipts.appliedCommits} applied commit(s) never ` +
+    "delivered a receipt, so their folds left no record and their marks went back to pending; " +
+    `first at seq ${unpaid?.seq} revision ${unpaid?.revision} applying ${unpaid?.appliedMarks} ` +
+    `mark(s) on trigger ${unpaid?.trigger}, with the next projection reading revision ` +
+    `${unpaid?.nextProjectionRevision} (${unpaid?.revisionsRolledBack} revisions back)`);
   assertExperiment(overflow || (terminalMessage?.role === "assistant" &&
     terminalMessage.stopReason === "stop"),
   "Experiment worker did not end at one terminal provider stop");
@@ -379,6 +411,11 @@ try {
       PI_FOLD_STATE_ENTRY, PI_FOLD_FOLD_RECORD_ENTRY);
     foldSummary = {
       foldCount: activeState.folds.length,
+      // Recorded on a passing run too, so a clean stream says the check ran rather than
+      // leaving it to be inferred from the absence of a failure. Zero of zero and zero of
+      // twelve are different facts about a session.
+      appliedCommits: receipts.appliedCommits,
+      commitsWithoutReceipt: receipts.commitsWithoutReceipt,
       expanded: [...(activeState.expanded ?? [])],
       protectedRefs: (activeState.protected ?? []).length,
       // Decisions the run ended still owing: marks the agent placed that no fold

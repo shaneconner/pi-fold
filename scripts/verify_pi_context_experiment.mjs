@@ -57,6 +57,7 @@ import {
   probeAnswerPattern,
   probeTranscripts,
   providerWeather,
+  receiptLens,
   seededShuffle,
   stageCallDisposition,
   stageCodeWords,
@@ -3454,6 +3455,124 @@ try {
     "context.suspend is not a declared kind of the canonical event stream");
 
   checks.suspendedFoldingFailsTheRunByName = true;
+}
+
+// GATE 54 - an applied commit owes a receipt, and a run where one goes unpaid fails on it.
+//
+// Gate 53 catches the loss through the runtime's own announcement. That works, and it only
+// works on builds that announce. This is the same loss read from the event stream alone,
+// which is what makes it worth having twice: `noteAutomaticReceipt` is the last statement of
+// the rung application, so a commit that reports applied marks and never delivers a receipt
+// threw partway through, leaving its folds in the stream and nowhere else, writing no fold
+// record and no state entry, and putting its marks back to pending.
+//
+// Measured across all six sealed sol-20260812 runs. Reps 2 and 5 are clean. Reps 3, 4 and 6
+// are the losses already named. Rep 1 is why this gate exists rather than being folded into
+// gate 53: it lost fourteen folds at revision 99 on a build that announced nothing, its run
+// report said nothing was wrong, and the loss sat unnamed in the record until this lens was
+// run against it. Every loss so far shows the next projection reading exactly `applied_marks`
+// revisions below the commit; the lens records that and does not require it, because a future
+// loss that rolls back differently is still a loss.
+// ---------------------------------------------------------------------------
+{
+  const commit = (seq, revision, appliedMarks, extra = {}) =>
+    ({ kind: "context.commit", seq, revision, applied_marks: appliedMarks, deferred: false,
+      trigger: "band-top", ...extra });
+  const healthy = receiptLens([
+    { kind: "context.capacity", seq: 1, revision: 0 },
+    commit(2, 36, 10),
+    { kind: "context.fold", seq: 3, revision: 36 },
+    { kind: "context.absorb", seq: 4, revision: 36 },
+    { kind: "context.receipt", seq: 5, revision: 36, receipt_kind: "epoch-commit" },
+    { kind: "context.projection", seq: 6, revision: 36 },
+  ]);
+  // Anti-vacuity: a fixture with no applied commit would pass the clean assertion for the
+  // wrong reason, and would say nothing about whether the lens can see a commit at all.
+  assert(healthy.appliedCommits === 1,
+    "the healthy fixture holds no applied commit, so a clean verdict on it means nothing");
+  assert(healthy.commitsWithoutReceipt === 0 && healthy.missing.length === 0,
+    "a commit whose receipt arrives before the next projection was read as unpaid");
+
+  // The real shape of the loss, taken from rep 6: commit, response, folds, absorb, then a
+  // projection reading nine revisions lower with no receipt anywhere between.
+  const lost = receiptLens([
+    commit(817, 394, 9),
+    { kind: "context.response", seq: 818, revision: 394 },
+    { kind: "context.fold", seq: 821, revision: 394 },
+    { kind: "context.absorb", seq: 830, revision: 394 },
+    { kind: "context.projection", seq: 832, revision: 385 },
+    { kind: "context.receipt", seq: 850, revision: 385, receipt_kind: "epoch-commit" },
+  ]);
+  assert(lost.commitsWithoutReceipt === 1, "a commit that delivered no receipt was read as paid");
+  assert(lost.missing[0].revision === 394 && lost.missing[0].nextProjectionRevision === 385 &&
+    lost.missing[0].revisionsRolledBack === 9 && lost.missing[0].appliedMarks === 9,
+  "the unpaid commit does not carry the revisions and the fold count needed to name it");
+  // A receipt AFTER the next projection belongs to a later rung and must not pay this debt.
+  // Without the projection boundary the lens would clear every loss that is followed by any
+  // later healthy commit, which is most of them.
+  assert(lost.receipts === 1,
+    "the fixture's later receipt vanished, so the boundary is being tested against nothing");
+
+  // A deferred commit and a commit that applied nothing are not debts. Both occur in every
+  // run, and counting them would make the check fire constantly and be switched off.
+  const notDebts = receiptLens([
+    commit(10, 40, 0),
+    commit(11, 40, 5, { deferred: true }),
+    { kind: "context.projection", seq: 12, revision: 40 },
+  ]);
+  assert(notDebts.appliedCommits === 0 && notDebts.commitsWithoutReceipt === 0,
+    "a deferred commit or a commit that applied nothing was counted as owing a receipt");
+
+  // The worker reads that lens, fails on it, and names what it found.
+  const worker = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
+  const receiptCheck = worker.slice(
+    worker.indexOf("const contextEvents = armRuntime.activeContextEnabled"),
+    worker.indexOf("Experiment worker did not end at one terminal provider stop"),
+  );
+  assert(receiptCheck.length > 0, "the worker does not check the stream for an unpaid commit");
+  assert(/const receipts = receiptLens\(contextEvents\)/.test(receiptCheck),
+    "the worker derives the unpaid commits itself instead of reading the shared lens");
+  assert(/assertExperiment\(receipts\.commitsWithoutReceipt === 0/.test(receiptCheck),
+    "an applied commit that never delivered a receipt does not fail the run");
+  assert(/unpaid\?\.seq/.test(receiptCheck) && /unpaid\?\.revision/.test(receiptCheck) &&
+    /unpaid\?\.appliedMarks/.test(receiptCheck) && /unpaid\?\.nextProjectionRevision/.test(receiptCheck),
+  "the unpaid-commit failure does not name the seq, the revisions and the fold count");
+  assert(receiptCheck.includes("armRuntime.activeContextEnabled"),
+    "the unpaid-commit check is not scoped to the arm whose runtime can fold");
+  // Cause before symptom, and after the suspension, which carries the error verbatim and is
+  // the better message on a build where both fire.
+  assert(worker.indexOf("const suspensions = foldFailures") <
+    worker.indexOf("const contextEvents = armRuntime.activeContextEnabled") &&
+    worker.indexOf("const contextEvents = armRuntime.activeContextEnabled") <
+    worker.indexOf("Experiment worker did not end at one terminal provider stop"),
+  "the unpaid-commit check does not sit between the suspension and the terminal stop");
+  // A clean run says so. Without this the only evidence the check ran is that nothing failed,
+  // which reads the same as the check being absent.
+  assert(/commitsWithoutReceipt: receipts\.commitsWithoutReceipt/.test(worker) &&
+    /appliedCommits: receipts\.appliedCommits/.test(worker),
+  "a passing run does not record how many commits were checked and how many went unpaid");
+
+  // And the invariant is grounded in the runtime, not only in the fixtures: the receipt is
+  // the last thing the rung application does, which is what makes its absence a throw.
+  const runtimeSource = readFileSync(join(PROJECT, "extensions", "active-context.ts"), "utf8");
+  const rung = runtimeSource.slice(
+    runtimeSource.indexOf("const applyAutomaticRung = async ("),
+    runtimeSource.indexOf("const runAutomaticRungTransaction = async ("),
+  );
+  assert(rung.length > 0, "the automatic rung application was not found where it is pinned");
+  const deliveries = [...rung.matchAll(/noteAutomaticReceipt\([^;]*\);\n(\s*)(\S[^\n]*)/g)];
+  assert(deliveries.length >= 2,
+    `the rung application delivers a receipt on ${deliveries.length} path(s), fewer than the ` +
+    "epoch-only path and the folding path it is known to have");
+  // Every delivery is the last thing that happens before the action is handed back. That is
+  // what makes a missing receipt mean a throw rather than a path we forgot to instrument.
+  for (const [, , next] of deliveries) {
+    assert(next.startsWith("return ladder.lastAutomaticAction;"),
+      `a receipt delivery is followed by ${JSON.stringify(next)} rather than by the return, ` +
+      "so the rung can do more work after paying and a missing receipt stops meaning a throw");
+  }
+
+  checks.anAppliedCommitOwesAReceipt = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
