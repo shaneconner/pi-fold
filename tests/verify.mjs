@@ -65,7 +65,7 @@ const DEPLOYMENT_IDENTITY_FIXTURE = Object.freeze({
     `Expand exactly: acme_context {"action":"expand","id":"${fold.id}"}`,
     "List/page exactly: acme_context {\"action\":\"status\"}",
   ].join("\n"),
-  blockedCompaction: "blocked stock automatic compaction; Acme context folding remains authoritative",
+  handoffCompaction: "Acme context handed the prefix off losslessly instead of compacting it",
   completedCompaction: "native compaction completed; Acme folding state rebuilt",
   compactionNotice: "Pi native compaction ran; Acme folding state was rebuilt.",
   hardFenceNote: "Provider context reached the hard Acme fence without a newly committed lossless fold. The provider request was aborted before transmission; run /compact or make an explicit bounded context fold.",
@@ -486,8 +486,10 @@ async function compactBoundary(runtime, reason = "threshold") {
  * ladder again and the mark it lands overwrites the epoch record the caller came for.
  * A gate that wants the post-commit view calls project() itself.
  */
-async function measureAndCommit(runtime, tokens, contextWindow = runtime.usage.contextWindow, suffix) {
-  await measure(runtime, tokens, contextWindow, suffix);
+async function measureAndCommit(
+  runtime, tokens, contextWindow = runtime.usage.contextWindow, suffix, stopReason,
+) {
+  await measure(runtime, tokens, contextWindow, suffix, stopReason);
   await project(runtime);
   await settle();
   await compactBoundary(runtime);
@@ -752,10 +754,7 @@ async function collectRegistrationSurface(registration, mcpToolName) {
     const tool = [...runtime.tools.values()][0];
     await startRuntime(runtime);
     const initialStatus = structuredClone(runtime.statuses.at(-1));
-    await measure(runtime, 80_000, 100_000);
-    await project(runtime);
-    // The gated last-call round sits between the crossing and its commit.
-    await measure(runtime, 80_500, 100_000);
+    await measureAndCommit(runtime, 80_500, 100_000);
     const foldedProjection = await project(runtime);
     const foldedRecord = runtime.appended.find((entry) => entry.customType.endsWith("-fold-record"));
     assert(foldedRecord?.data?.fold, `Branding fixture produced no fold: ${json.stableStringify({
@@ -780,8 +779,9 @@ async function collectRegistrationSurface(registration, mcpToolName) {
     const carrierMessages = foldedProjection.messages.filter((message) =>
       typeof message?.customType === "string" && message.customType.endsWith("-receipts"));
 
-    await runtime.handlers.get("session_before_compact")({ reason: "threshold" }, runtime.ctx);
-    const blockedStatus = await toolStatus(runtime, tool.name);
+    // The boundary the fold above already crossed IS the compaction decision now, so the
+    // branding of that decision is read from it rather than from a second probe call.
+    const handoffStatus = await toolStatus(runtime, tool.name);
 
     const compactionEntry = {
       type: "compaction",
@@ -839,7 +839,7 @@ async function collectRegistrationSurface(registration, mcpToolName) {
       carrierTypes: carrierMessages.map((message) => message.customType).sort(),
       carrierTexts: carrierMessages.map((message) => message.content),
       carrierSources: carrierMessages.map((message) => message.details?.source),
-      blockedCompaction: blockedStatus.details.automatic.lastCompactionDecision?.reason,
+      handoffCompaction: handoffStatus.details.automatic.lastCompactionDecision?.reason,
       completedCompaction: completedStatus.details.automatic.lastCompactionDecision?.reason,
       compactionNotices: runtime.notifications.map((notice) => notice.message),
       hardFenceNote: fenceStatus.details.automatic.pendingContextNote,
@@ -927,8 +927,8 @@ async function gateNeutralDefaultBranding() {
   assert(surface.carrierTexts.some((text) => text.startsWith("[pi-fold context actions] ")));
   assert.deepEqual(surface.carrierSources, ["pi-fold/active-context"]);
   assert.equal(
-    surface.blockedCompaction,
-    "blocked stock automatic compaction; pi-fold context folding remains authoritative",
+    surface.handoffCompaction,
+    "pi-fold context handed the prefix off losslessly instead of compacting it",
   );
   assert.equal(
     surface.completedCompaction,
@@ -977,7 +977,7 @@ async function gateDeploymentBrandingReproduction() {
   assert.deepEqual(surface.carrierTypes, [fixture.receiptType]);
   assert(surface.carrierTexts.some((text) => text.startsWith(fixture.receiptPrefix)));
   assert.deepEqual(surface.carrierSources, [fixture.source]);
-  assert.equal(surface.blockedCompaction, fixture.blockedCompaction);
+  assert.equal(surface.handoffCompaction, fixture.handoffCompaction);
   assert.equal(surface.completedCompaction, fixture.completedCompaction);
   assert(surface.compactionNotices.includes(fixture.compactionNotice));
   assert.equal(surface.hardFenceNote, fixture.hardFenceNote);
@@ -4156,8 +4156,7 @@ async function gateProjectionInstrumentation() {
   assert(ledgerNow.projectionsUnchanged >= 1);
 
   for (const tokens of [78_000, 82_000, 86_000, 88_000]) {
-    await measure(runtime, tokens, 100_000);
-    await project(runtime);
+    await measureAndCommit(runtime, tokens, 100_000);
   }
   ledgerNow = (await toolStatus(runtime)).details.automatic.instrumentation;
   assert(materialized(runtime).folds.length >= 1, "The fixture never folded");
@@ -4269,10 +4268,8 @@ async function gateStatusIndexDiet() {
   const lean = makeRuntime(makeFixture({ turns: 16, resultChars: 9_000, contextWindow: 100_000 }));
   await startRuntime(lean);
   for (const tokens of [78_000, 84_000, 88_000]) {
-    await measure(fat, tokens, 100_000);
-    await project(fat);
-    await measure(lean, tokens, 100_000);
-    await project(lean);
+    await measureAndCommit(fat, tokens, 100_000);
+    await measureAndCommit(lean, tokens, 100_000);
   }
   const leanResult = await toolStatus(lean);
   const pagedFoldsResult = await toolStatus(lean, "pi_fold_context", "folds");
@@ -5140,9 +5137,7 @@ async function gateCurrentTurnCommitGuard() {
   // The gated last-call round, with the excursion still open on every pass.
   await project(runtime);
   await settle();
-  await measure(runtime, 176_500, 200_000, undefined, "toolUse");
-  await project(runtime);
-  await settle();
+  await measureAndCommit(runtime, 176_500, 200_000, undefined, "toolUse");
   const epoch = (await toolStatus(runtime)).details.automatic.lastAutomaticAction?.epoch;
   assert(epoch, "No commit epoch ran");
   assert.equal(epoch.currentTurnRetained, epochTurnMarks.length,
@@ -5277,16 +5272,10 @@ async function gatePinnedMassBackstop() {
   );
   await startRuntime(runtime);
   for (const tokens of [76_000, 78_000, 80_000]) await measure(runtime, tokens, 100_000);
-  await measure(runtime, 88_000, 100_000);
-  // The crossing exposes the last-call; the commit is the context pass after the round.
-  await project(runtime);
-  await settle();
-  await measure(runtime, 88_500, 100_000);
-  await project(runtime);
-  await settle();
+  await measureAndCommit(runtime, 88_500, 100_000);
   const epoch = (await toolStatus(runtime)).details.automatic.lastAutomaticAction?.epoch;
   assert(epoch, "The pressure backstop did not commit");
-  assert.equal(epoch.trigger, "band-top");
+  assert.equal(epoch.trigger, "compaction-boundary");
   assert(epoch.appliedMarks >= 1, "The backstop commit applied nothing");
   assert.equal(typeof epoch.pinnedBytes, "number");
 
@@ -5370,12 +5359,13 @@ async function gateEpochBatchingUnderFullLevers() {
   const passes = [];
   const step = async (tokens, round = false) => {
     await measure(runtime, tokens, 100_000, undefined, "toolUse");
-    // Above the band top a pass is a full request cycle: the measurement exposes or
-    // holds the last-call, and the context pass that follows is where the round
-    // closes and a commit can land, so the record samples AFTER that pass.
+    // A pass that reaches the BOUNDARY is a full request cycle: the measurement marks,
+    // the context pass follows, and the boundary is where a commit can land, so the
+    // record samples after it. A bare measurement moves nothing.
     if (round) {
       await project(runtime);
       await settle();
+      await compactBoundary(runtime);
     }
     const state = materialized(runtime);
     const action = (await toolStatus(runtime)).details.automatic.lastAutomaticAction;
@@ -5430,16 +5420,16 @@ async function gateEpochBatchingUnderFullLevers() {
   // so the guard holds in full. Gate 56 holds the other half at fence level.
   const accumulated = below.at(-1).marks;
   const foldsAtCrossing = below.at(-1).folds;
-  // The first two steps are full request cycles: the crossing exposes the last-call,
-  // the next context pass closes the round and lands the batch. The remaining steps
-  // are bare measurements, the same parked-window shape this gate always pinned; the
-  // fixture declares a high token count forever, so a projection pass here would put
-  // the estimate inside the fence margin, and the margin lane is gate 56's subject,
-  // not this one's.
+  // The first step is a full request cycle that reaches the BOUNDARY, and the whole
+  // accumulated batch lands there in one commit. The remaining steps are bare
+  // measurements, the same parked-window shape this gate always pinned; the fixture
+  // declares a high token count forever, so a projection pass here would put the
+  // estimate inside the fence margin, and the margin lane is gate 56's subject, not
+  // this one's. There is exactly one crossing because a second boundary with the batch
+  // already landed has nothing but the open turn left, and the waiver would release it.
   const above = [];
   above.push(await step(86_000, true));
-  above.push(await step(86_100, true));
-  for (let index = 2; index < 8; index += 1) above.push(await step(86_000 + index * 100));
+  for (let index = 1; index < 8; index += 1) above.push(await step(86_000 + index * 100));
   const commitPass = above.find((pass) => pass.appliedMarks !== null);
   assert(commitPass, "No commit epoch ran above the band top");
   assert(commitPass.appliedMarks >= accumulated,
@@ -5503,12 +5493,12 @@ async function gateEpochBatchingUnderFullLevers() {
     }, "closing");
   }
   // Full request cycles at the same parked occupancy, with the guard now holding
-  // nothing at all: the turn that protected the excursion is closed.
+  // nothing at all: the turn that protected the excursion is closed. Every one of the
+  // three reaches the boundary, so a batch that dribbled would have three commits to
+  // dribble into and the single-commit assertion below is a real one.
   const closingFrom = runtime.appended.length;
   for (const tokens of [87_000, 87_100, 87_200]) {
-    await measure(runtime, tokens, 100_000);
-    await project(runtime);
-    await settle();
+    await measureAndCommit(runtime, tokens, 100_000);
   }
   const closingSnapshot = context.mapActiveContext({
     sessionId: runtime.built.sessionId,
