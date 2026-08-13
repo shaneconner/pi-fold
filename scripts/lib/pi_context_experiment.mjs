@@ -2716,6 +2716,53 @@ export function receiptLens(events) {
 }
 
 export const FOLD_RECORD_SUFFIX = "-fold-record";
+export const STATE_ENTRY_SUFFIX = "-active-context-state";
+
+/**
+ * WHAT THE WALL CLOCK IS MEASURING BESIDE THE PROVIDER.
+ *
+ * A run's wall clock is not its provider latency. The runtime derives over the whole
+ * session on every turn, so a session that grows faster than the work does buys wall time
+ * that has nothing to do with folding, and comparing arms on the clock silently compares
+ * their bookkeeping too.
+ *
+ * sol-20260812 rep 9 is the case that made this a lens rather than a note. Its pifold arm
+ * wrote 309 active-context state entries totalling 21.6MB, 68.0% of a 31.9MB session,
+ * against 0.93MB of projection actually sent to the provider, and held 98% of a core for
+ * 118 minutes while the native arm spent 24 seconds of CPU. The cause was a state delta
+ * that carried the whole brief map on every write; that is fixed, and every wall-clock
+ * figure recorded before the fix measured it. This lens puts the same reading in the run
+ * record so the next one is visible there rather than in a profiler six hours later.
+ *
+ * It reports rather than judges: there is no threshold here, because the honest bound is
+ * the comparison between arms of the same run, and one arm has no state entries at all.
+ */
+export function sessionLedgerLens(entries, sessionBytes) {
+  const states = entries.filter((entry) => entry?.type === "custom" &&
+    typeof entry.customType === "string" && entry.customType.endsWith(STATE_ENTRY_SUFFIX));
+  const sizes = states.map((entry) => JSON.stringify(entry).length);
+  const stateBytes = sizes.reduce((total, size) => total + size, 0);
+  const fields = {};
+  for (const entry of states) {
+    for (const [key, value] of Object.entries(entry.data ?? {})) {
+      fields[key] = (fields[key] ?? 0) + JSON.stringify(value).length;
+    }
+  }
+  return {
+    sessionBytes,
+    sessionEntries: entries.length,
+    stateEntries: states.length,
+    stateBytes,
+    stateShareOfSession: sessionBytes > 0 ? stateBytes / sessionBytes : null,
+    smallestStateEntryBytes: sizes.length ? Math.min(...sizes) : null,
+    largestStateEntryBytes: sizes.length ? Math.max(...sizes) : null,
+    stateBytesByField: Object.fromEntries(Object.entries(fields)
+      .sort((left, right) => right[1] - left[1]).slice(0, 8)),
+    definition: "the runtime's own durable state entries in the session file, measured " +
+      "as written; wall clock is read against this because every turn derives over the " +
+      "whole session and a growing ledger buys wall time no provider charged for",
+  };
+}
 
 /**
  * THE BRIEF PROVENANCE LENS, read at the END of the run.

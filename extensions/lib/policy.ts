@@ -425,8 +425,16 @@ export interface ActiveContextDeltaV2 {
   tokensSinceToolFold?: number;
   leases?: Record<string, number>;
   surfacing?: SurfacingRecord[];
+  // `pendingMarks` and `briefs` on a delta are the WHOLE value: what every delta written
+  // before 2026-08-13 carries, and what sealed sessions replay. New deltas carry the change
+  // instead. The marks carry an ORDER as well as a membership, so the change is the marks
+  // that are new or rewritten plus the whole key order, which states the removals too.
   pendingMarks?: PendingMark[];
+  addPendingMarks?: PendingMark[];
+  pendingMarkOrder?: string[];
   briefs?: Record<string, BriefOverride>;
+  addBriefs?: Record<string, BriefOverride>;
+  removeBriefIds?: string[];
   advisory?: NonNullable<ActiveContextState["advisory"]>;
   rider?: NonNullable<ActiveContextState["rider"]>;
   lastCall?: NonNullable<ActiveContextState["lastCall"]>;

@@ -219,9 +219,44 @@ function appendHeartbeat(state, worker, sessionFile) {
   return record;
 }
 
+// A SUPERVISOR KILLED FROM OUTSIDE STILL WRITES ITS CANDIDATE REPORT.
+//
+// `systemctl stop` signals the whole cgroup, and Node's default handler ends the process
+// where it stands: the finalization at the bottom of this file, which writes
+// `candidate-report.json` and the artifact table, never runs. The worker installs its own
+// handler for exactly this reason, and sol-20260812 rep 9 proved that handler cannot fire
+// when the worker is busy: signal handlers run on the event loop, and that worker held 98%
+// of a core in synchronous JS for 118 minutes, so systemd escalated to SIGKILL and the run
+// left no worker report and no candidate report at all. The supervisor is the process that
+// CAN run one: it spends the whole run idle between IPC polls.
+//
+// It does not rescue the run and must not read as one. The signal is routed into the same
+// failure path a blown deadline takes, which latches, ends the worker and writes a report
+// that says ok false and names what happened.
+let terminationSignal = null;
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.on(signal, () => { terminationSignal ??= signal; });
+}
+
+// How long the supervisor waits for a signalled worker before ending it outright. A worker
+// that cannot run its own handler cannot exit on request either, and waiting for one that
+// never will is how the supervisor came to be killed alongside it.
+const WORKER_TERMINATION_GRACE_MS = 10_000;
+
+async function endWorker(worker, completion) {
+  if (worker.exitCode === null && worker.signalCode === null) worker.kill("SIGTERM");
+  const graceful = await Promise.race([
+    completion.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), WORKER_TERMINATION_GRACE_MS).unref()),
+  ]);
+  if (!graceful && worker.exitCode === null && worker.signalCode === null) worker.kill("SIGKILL");
+  return completion;
+}
+
 async function supervisedWait({ state, worker, sessionFile, predicate, label, absoluteDeadline, tolerateExit = false }) {
   while (!predicate()) {
     const now = monotonicMs();
+    if (terminationSignal) throw new Error(`${label} terminated by ${terminationSignal}`);
     if (now >= absoluteDeadline) throw new Error(`${label} exceeded its monotonic deadline`);
     if (worker.exitCode !== null || worker.signalCode !== null) {
       if (tolerateExit) return { workerExited: true };
@@ -534,8 +569,7 @@ async function run() {
       version: 1, runId, phase: "supervisor", detail: failure.message,
       wallMs: Date.now(), monotonicMs: monotonicMs(),
     });
-    if (worker.exitCode === null && worker.signalCode === null) worker.kill("SIGTERM");
-    workerExit = await completion;
+    workerExit = await endWorker(worker, completion);
   }
 
   await waitTick(2);
@@ -612,6 +646,10 @@ async function run() {
     planSha256: plan.planSha256,
     targetTreeSha256: plannedFingerprint,
     failure,
+    // Named on its own rather than left to be read out of `failure.message`: a run ended
+    // from outside is not the same finding as one that failed on its own, and rep 9's
+    // deaths were reported as "Request was aborted" precisely because nothing said so.
+    terminatedBySignal: terminationSignal,
     failureLatchEntries,
     artifacts,
   };

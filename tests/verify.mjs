@@ -4735,7 +4735,12 @@ async function gateSchedulingWireRoundTrip() {
   const restored = context.stateFromFoldRefs(checkpoint, checkpoint.foldRefs, new Map());
   assert.deepEqual(restored.pendingMarks, state.pendingMarks);
   const delta = context.makeStateDelta(empty, { ...state, revision: 1 });
-  assert.deepEqual(delta.pendingMarks, state.pendingMarks);
+  // A delta carries the change: the marks that are new or rewritten, and the key order
+  // that places them and states the removals. Gate 127 owns that rule; this is the wire
+  // shape it produces for a state whose marks are all new.
+  assert.equal(delta.pendingMarks, undefined, "The delta stated the whole mark array");
+  assert.deepEqual(delta.addPendingMarks, state.pendingMarks);
+  assert.deepEqual(delta.pendingMarkOrder, state.pendingMarks.map(context.pendingMarkKey));
   assert.equal(context.semanticStateSha256(restored), context.semanticStateSha256(state));
 
   // Empty is absent everywhere, so a pre-0.1.2 digest never moves.
@@ -7504,6 +7509,18 @@ async function gateLeverCollapse() {
   // run keeps materializing. Its per-milestone CEILING does not stay: sixteen bounded a
   // counter no code path increments, so it could only ever have refused a state this
   // runtime cannot write. The shape checks around it are what actually validate the field.
+  //
+  // Reopened and closed again 2026-08-13. The field is genuinely inert: nothing writes it,
+  // `highWater` stays 0, `delivered` stays empty and `armed` is never set on any path. The
+  // obvious repair is to delete it and have the digest keep digesting the constant, and
+  // that does not work, because `stableStringify` walks a record in its OWN key order
+  // rather than sorting. Re-adding the constant with a spread puts it LAST, which happens
+  // to match a state that carries nothing after it and stops matching the moment one
+  // carries `notices`: sol-20260812 rep 9 replays to revision 451 today and dies at
+  // revision 6 that way. Preserving the digest therefore means reproducing a historical key
+  // LAYOUT inside the digest function, which is more mechanism, and more fragile mechanism,
+  // than the thirty bytes per state entry it would remove. The field stays until a digest
+  // version bump is happening for another reason.
   assert.deepEqual([...context.ADVISORY_MILESTONES],
     ["orientation", "notice", "tools", "chapters", "urgent"]);
   assert.equal(context.MAX_ADVISORY_DELIVERIES_PER_MILESTONE, undefined,
@@ -11055,6 +11072,13 @@ async function gateBriefUpgradesRideTheBoundary() {
     record.brief_upgrades_abandoned_ids.split(",").filter(Boolean).length ===
     record.brief_upgrades_abandoned),
   "A commit reported a shed count its named ids do not account for");
+  // The bucket holds two causes. Everything shed HERE is shed for the jam, and a reason
+  // list that does not line up with the id list names the wrong fold either way.
+  assert(shed.every((record) =>
+    record.brief_upgrades_abandoned_reasons.split(",").filter(Boolean).length ===
+    record.brief_upgrades_abandoned &&
+    record.brief_upgrades_abandoned_reasons.split(",").every((reason) => reason === "queue-full")),
+  "A leaf shed by the jam was reported under another cause, or without one");
   // The shed leaves are real folds of this session, not a counter running on its own.
   const shedIds = new Set(shed.flatMap((record) =>
     record.brief_upgrades_abandoned_ids.split(",").filter(Boolean)));
@@ -13389,6 +13413,349 @@ async function gateNoTokenCeilingReachesTheProvider() {
   };
 }
 
+/**
+ * A DELTA CARRIES THE CHANGE, NEVER A VALUE ITS BASE ALREADY HOLDS.
+ *
+ * The v1 checkpoint became a v2 delta and the envelope was done correctly, but only the
+ * fold refs were ever diffed. The other ten fields were cloned whole onto a wire that
+ * says `kind: "delta"`, which is why the shape looked finished and the payload was not.
+ *
+ * The brief map is the field that made it cost. On sol-20260812 rep 9 the state ledger
+ * was 21.5 MB of a 31.7 MB session, briefs were 17.7 MB of that, 81 percent, and the
+ * projection actually sent to the provider was 0.93 MB. The session file is what every
+ * later turn's derivation reads, so the run burned 50.9 minutes of CPU over 116 minutes
+ * of wall against the native arm's 24 seconds, and wall-clock stopped meaning anything.
+ *
+ * The invariant is not that a brief never changes: the upgrade lane rewrites a
+ * deterministic brief with a model one, and `rebrief` lets the agent correct either. It
+ * is that the wire carries the difference from its base and nothing else, so an addition,
+ * a rewrite and a removal all travel and an unchanged map travels nowhere.
+ */
+async function gateDeltaCarriesOnlyBriefChanges() {
+  const runtime = await epochToolRuntime({ turns: 16, resultChars: 6_000 });
+  const built = runtime.built;
+  const newestDelta = () => {
+    const data = runtime.branch
+      .filter((entry) => entry.customType === context.ACTIVE_CONTEXT_STATE_ENTRY)
+      .map((entry) => entry.data).at(-1);
+    assert.equal(data.kind, "delta", "The fixture wrote a checkpoint, so the delta path went untested");
+    return data;
+  };
+
+  await toolCall(runtime, {
+    action: "fold",
+    marks: [0, 1, 2].map((turn) => ({
+      ids: [built.turnEntries[turn][2]],
+      brief: `Stale inspection ${turn}: the exact output stays recoverable behind this fold.`,
+    })),
+  });
+  await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  // Roots, not folds: the commit consolidates, and expanding a child before its parent is
+  // refused. Read off the live branch because the ladder chose the shape, not the fixture.
+  const snapshotNow = () => context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: runtime.messages,
+    contextEntries: runtime.branch,
+    contextWindow: 100_000,
+  });
+  const roots = context.orderedRoots(materialized(runtime), snapshotNow()).map((root) => root.fold);
+  assert(roots.length >= 2,
+    `The fixture committed ${roots.length} root folds; two are needed to tell one brief's write from another's`);
+  const [first, second] = roots;
+
+  // A brief at the policy cap, so a whole-map write could not hide inside the rest of the
+  // wire. It ends on a period because `rebrief` trims, and a trimmed brief is not the
+  // string this gate then compares the replayed map against.
+  const briefText = (name) => `${`Corrected ${name}: the exact bytes stay recoverable behind this fold. `
+    .padEnd(context.ACTIVE_CONTEXT_POLICY.maxBriefChars - 1, "The span is unchanged beside it. ")}.`;
+
+  await toolCall(runtime, { action: "rebrief", id: first.id, brief: briefText("one") });
+  const afterFirst = newestDelta();
+  assert.equal(afterFirst.briefs, undefined, "The delta stated the whole brief map");
+  assert.deepEqual(Object.keys(afterFirst.addBriefs ?? {}), [first.id], "The rebrief did not name its own fold");
+
+  // The write the defect made expensive: nothing about the briefs changed here, and the
+  // whole map shipped anyway. It has to carry no brief key of any kind.
+  await toolCall(runtime, { action: "expand", id: second.id });
+  const unrelated = newestDelta();
+  assert.equal(unrelated.briefs, undefined);
+  assert.equal(unrelated.addBriefs, undefined, "A write that changed no brief carried one");
+  assert.equal(unrelated.removeBriefIds, undefined);
+  assert(!JSON.stringify(unrelated).includes("Corrected one"),
+    "The write that changed no brief carried the brief's own bytes");
+
+  await toolCall(runtime, { action: "rebrief", id: second.id, brief: briefText("two") });
+  assert.deepEqual(Object.keys(newestDelta().addBriefs), [second.id], "The second rebrief re-shipped the first");
+  await toolCall(runtime, { action: "rebrief", id: first.id, brief: briefText("one again") });
+  assert.deepEqual(Object.keys(newestDelta().addBriefs), [first.id], "A rewrite did not travel as its own change");
+
+  // Materialisation replays every entry in the branch, so this is the round trip: the map
+  // the runtime holds has to be rebuildable from a chain that never stated it whole.
+  assert.deepEqual(materialized(runtime).briefs, {
+    [first.id]: briefText("one again"),
+    [second.id]: briefText("two"),
+  }, "Replaying the deltas did not reproduce the brief map");
+
+  // REMOVAL. `reboundary` with an id alone dissolves the fold and drops its brief with it.
+  await toolCall(runtime, { action: "reboundary", id: first.id });
+  const afterDissolve = newestDelta();
+  assert.deepEqual(afterDissolve.removeBriefIds, [first.id], "The dissolved fold's brief did not travel as a removal");
+  assert.equal(afterDissolve.addBriefs, undefined, "A removal re-shipped the brief that stayed");
+  assert.deepEqual(materialized(runtime).briefs, { [second.id]: briefText("two") },
+    "Replaying the removal did not leave the surviving brief standing");
+
+  // THE MARKS ARE THE SAME RULE ONE SHAPE ALONG, and the next largest field: 2.55 MB of
+  // rep 9's 21.6 MB ledger, which a diff takes to 0.16 MB. They carry an ORDER as well as a
+  // membership, and appending after removing does not always reproduce it (four of that
+  // run's 309 writes), so the key order travels whole and states the removals by not naming
+  // them. It is short beside the marks themselves, so there is no case to split and no
+  // branch that can pick the wrong one.
+  //
+  // Driven against the encoding rather than through the runtime, the way gate 38 drives the
+  // wire round trip: the reorder is the case that decides the design, and the ladder does
+  // not reorder on demand.
+  const markFixture = makeFixture({
+    turns: 10, resultChars: 10_000, contextWindow: 100_000, sessionId: "delta-marks",
+  });
+  const base = context.emptyActiveContextState("delta-marks");
+  const proposed = context.topUpMarks({
+    snapshot: epochSnapshot(markFixture), state: base, ordinal: 3, targetShare: 1,
+  }).slice(0, 3);
+  assert.equal(proposed.length, 3, "The mark fixture proposed too few marks to reorder");
+  const key = context.pendingMarkKey;
+  const withMarks = (revision, marks) =>
+    context.withPendingMarks({ ...base, revision }, marks);
+  const one = withMarks(1, proposed.slice(0, 1));
+  const two = withMarks(2, proposed.slice(0, 2));
+  const three = withMarks(3, proposed);
+  const shuffled = withMarks(4, [proposed[2], proposed[0], proposed[1]]);
+  const emptied = withMarks(5, []);
+
+  const growth = context.makeStateDelta(one, two);
+  assert.equal(growth.pendingMarks, undefined, "The delta stated the whole mark array");
+  assert.deepEqual(growth.addPendingMarks, [proposed[1]],
+    "The delta re-shipped a mark its base already held");
+  assert.deepEqual(growth.pendingMarkOrder, [proposed[0], proposed[1]].map(key));
+
+  const reorder = context.makeStateDelta(three, shuffled);
+  assert.equal(reorder.addPendingMarks, undefined, "A reorder shipped marks the base already held");
+  assert.deepEqual(reorder.pendingMarkOrder, [proposed[2], proposed[0], proposed[1]].map(key),
+    "A reorder did not travel, so the replay would rebuild the wrong order");
+
+  const cleared = context.makeStateDelta(three, emptied);
+  assert.deepEqual(cleared.pendingMarkOrder, [], "Clearing the marks did not travel");
+  assert.equal(cleared.addPendingMarks, undefined, "Clearing the marks carried marks with it");
+
+  const quiet = context.makeStateDelta(three, { ...three, revision: 6 });
+  assert.equal(quiet.addPendingMarks, undefined, "A write that changed no mark carried one");
+  assert.deepEqual(quiet.pendingMarkOrder, proposed.map(key));
+  assert(!JSON.stringify(quiet).includes(proposed[0].parts ? JSON.stringify(proposed[0].parts) : "\u0000"),
+    "A write that changed no mark carried a mark's own bytes");
+
+  // THE ROUND TRIP. Replaying the chain has to rebuild the marks the states held, in the
+  // order they held them, from writes that never stated the array whole.
+  const markChain = [
+    stateEntry("delta-marks", context.makeStateCheckpoint(base), "marks-0"),
+    stateEntry("delta-marks", context.makeStateDelta(base, one), "marks-1", "marks-0"),
+    stateEntry("delta-marks", context.makeStateDelta(one, two), "marks-2", "marks-1"),
+    stateEntry("delta-marks", context.makeStateDelta(two, three), "marks-3", "marks-2"),
+    stateEntry("delta-marks", context.makeStateDelta(three, shuffled), "marks-4", "marks-3"),
+  ];
+  assert.deepEqual(
+    context.materializeActiveContextState(markChain, "delta-marks").pendingMarks,
+    shuffled.pendingMarks,
+    "Replaying the chain did not reproduce the marks in the order the state held them",
+  );
+  assert.equal(
+    context.materializeActiveContextState([
+      ...markChain,
+      stateEntry("delta-marks", context.makeStateDelta(shuffled, withMarks(5, [])), "marks-5", "marks-4"),
+    ], "delta-marks").pendingMarks,
+    undefined,
+    "Replaying a cleared array left marks standing",
+  );
+
+  // A wire that states the whole array is replayed as the whole array, and may not also
+  // state a change; additions without an order name marks nothing will place; and a key the
+  // replay cannot resolve is refused rather than dropped, because a dropped mark is
+  // evidence that never gets folded.
+  const markSample = context.makeStateDelta(two, three);
+  assert.throws(() => context.parseActiveContextStateV2(
+    { ...markSample, pendingMarks: [] }, "delta-marks",
+  ), /states the whole mark array and a change to it/);
+  const orderless = structuredClone(markSample);
+  delete orderless.pendingMarkOrder;
+  assert.throws(() => context.parseActiveContextStateV2(orderless, "delta-marks"),
+    /adds pending marks and states no order for them/);
+  assert.throws(() => context.materializeActiveContextState([
+    ...markChain.slice(0, 3),
+    stateEntry("delta-marks", { ...markSample, pendingMarkOrder: [...markSample.pendingMarkOrder, "fold:fold_absent"] },
+      "marks-broken", "marks-2"),
+  ], "delta-marks"), /Unknown active-context pending mark/);
+  assert.throws(() => context.materializeActiveContextState([
+    ...markChain.slice(0, 3),
+    stateEntry("delta-marks", { ...markSample, addPendingMarks: [proposed[0]] }, "marks-redundant", "marks-2"),
+  ], "delta-marks"), /Redundant active-context pending mark/);
+
+  // And a sealed session's whole-array deltas still replay.
+  const legacyMarks = markChain.map((entry, at) => {
+    if (at === 0) return entry;
+    const data = structuredClone(entry.data);
+    const held = context.materializeActiveContextState(markChain.slice(0, at + 1), "delta-marks");
+    delete data.addPendingMarks;
+    delete data.pendingMarkOrder;
+    if (held.pendingMarks?.length) data.pendingMarks = held.pendingMarks;
+    return { ...entry, data };
+  });
+  assert.deepEqual(
+    context.materializeActiveContextState(legacyMarks, "delta-marks").pendingMarks,
+    shuffled.pendingMarks,
+    "A sealed session's whole-array marks no longer replay",
+  );
+
+  // A delta written before this change states the whole map, and sealed sessions hold
+  // thousands of them. The presence of `briefs` is the discriminator, not a fallback: a
+  // wire that states the map is replayed as the map, and it may not also state a change.
+  const chain = runtime.branch.filter((entry) => entry.customType === context.ACTIVE_CONTEXT_STATE_ENTRY);
+  assert(chain.length > 3, "The fixture wrote too few state entries to exercise a chain");
+  const legacyBranch = structuredClone(runtime.branch);
+  for (const [at, entry] of legacyBranch.entries()) {
+    if (entry.customType !== context.ACTIVE_CONTEXT_STATE_ENTRY || entry.data.kind !== "delta") continue;
+    // The whole map AS OF this entry, which is what a pre-2026-08-13 writer put on the
+    // wire. The resulting state is identical either way, so the digests still hold.
+    const held = context.materializeActiveContextState(runtime.branch.slice(0, at + 1), built.sessionId);
+    delete entry.data.addBriefs;
+    delete entry.data.removeBriefIds;
+    delete entry.data.addPendingMarks;
+    delete entry.data.pendingMarkOrder;
+    if (held.briefs) entry.data.briefs = held.briefs;
+    if (held.pendingMarks?.length) entry.data.pendingMarks = held.pendingMarks;
+  }
+  const legacyReplay = context.materializeActiveContextState(legacyBranch, built.sessionId);
+  assert.deepEqual(legacyReplay.briefs, { [second.id]: briefText("two") },
+    "A sealed session's whole-map deltas no longer replay");
+  assert.deepEqual(legacyReplay.pendingMarks, materialized(runtime).pendingMarks,
+    "A sealed session's whole-array marks no longer replay");
+
+  const sample = structuredClone(chain.at(-1).data);
+  assert.throws(() => context.parseActiveContextStateV2(
+    { ...sample, briefs: { [second.id]: briefText("two") } }, built.sessionId,
+  ), /states the whole brief map and a change to it/,
+  "A delta stating both the whole map and a change to it was accepted");
+  assert.throws(() => context.parseActiveContextStateV2(
+    { ...sample, removeBriefIds: [first.id, first.id] }, built.sessionId,
+  ), /Invalid active-context delta brief removals/);
+
+  // And the reader refuses a chain that would be ambiguous: a removal the base never
+  // held, and an addition byte-identical to what the base already holds. Both are only
+  // producible by a broken writer, and neither may be absorbed quietly.
+  const brokenRemoval = structuredClone(runtime.branch);
+  brokenRemoval.filter((entry) => entry.customType === context.ACTIVE_CONTEXT_STATE_ENTRY)
+    .at(-1).data.removeBriefIds = ["fold_never_written_here"];
+  assert.throws(() => context.materializeActiveContextState(brokenRemoval, built.sessionId),
+    /Unknown active-context brief removal/);
+  const redundant = structuredClone(runtime.branch);
+  const redundantTail = redundant.filter((entry) => entry.customType === context.ACTIVE_CONTEXT_STATE_ENTRY).at(-1);
+  delete redundantTail.data.removeBriefIds;
+  redundantTail.data.addBriefs = { [second.id]: briefText("two") };
+  assert.throws(() => context.materializeActiveContextState(redundant, built.sessionId),
+    /Redundant active-context brief/);
+
+  return {
+    stateEntries: chain.length,
+    unchangedWriteBytes: JSON.stringify(unrelated).length,
+    briefChars: briefText("one").length,
+    additionsTravelled: 2,
+    rewritesTravelled: 1,
+    removalsTravelled: 1,
+    unchangedMapTravelled: false,
+    markAdditionsTravelled: growth.addPendingMarks.length,
+    markReorderTravelled: true,
+    marksShippedOnAReorder: 0,
+    markClearTravelled: true,
+  };
+}
+
+/**
+ * THE USER'S OWN COMMIT ANNOUNCES A PERSISTENCE FAILURE TOO.
+ *
+ * `/context commit` ran the epoch, called persist inside a bare `try {} catch {}`, and then
+ * told the user how many marks it had committed. Every automatic path routes that same
+ * failure through the suspension: gate 122 raises it, gate 123 announces it, and gate 124
+ * was retired so nothing swallows the first few quietly. This one path threw the error
+ * away and reported success, which is gate 122's dead session with the user holding the
+ * pen: folds in the event stream, nothing durable, a session that keeps computing folds it
+ * will discard, and a message saying the opposite.
+ */
+async function gateUserCommitAnnouncesPersistenceFailure() {
+  const shape = { turns: 12, resultChars: 16_000, contextWindow: 100_000 };
+  const bank = async (runtime) => {
+    await startRuntime(runtime);
+    // 60,000 against the 90,000-token budget is below the band top, so the ladder marks
+    // and waits: the command is what commits, which is the path under test.
+    await measure(runtime, 60_000, 100_000);
+    assert((materialized(runtime).pendingMarks ?? []).length >= 1,
+      "The quiet band accumulated no mark, so the command had nothing to commit");
+  };
+
+  // ANTI-VACUITY. Unsabotaged, the same command commits, persists and says so. Without
+  // this the assertions below would pass on a command that never did anything.
+  const clean = makeRuntime(makeFixture({ ...shape, sessionId: "user-commit-clean" }));
+  await bank(clean);
+  await clean.commands.get("fold-context").handler("commit", clean.ctx);
+  await settle();
+  assert(materialized(clean).folds.length > 0, "The clean command persisted no fold");
+  assert.equal(contextEvents(clean).filter((event) => event.kind === "context.suspend").length, 0,
+    "A healthy user commit announced a suspension");
+  assert(clean.notifications.some((notice) => /Committed \d+ mark/.test(notice.message)),
+    "The clean command did not report what it committed");
+
+  // THE FAILURE, FOR REAL, through the same injection point gate 123 uses.
+  const fault = "durable state entry refused by the fixture";
+  let armed = false;
+  const runtime = makeRuntime(makeFixture({ ...shape, sessionId: "user-commit-loud" }), {
+    beforeAppend(customType) {
+      if (armed && customType === context.ACTIVE_CONTEXT_STATE_ENTRY) throw new Error(fault);
+    },
+  });
+  await bank(runtime);
+  armed = true;
+  await runtime.commands.get("fold-context").handler("commit", runtime.ctx);
+  await settle();
+
+  const suspensions = contextEvents(runtime).filter((event) =>
+    event.kind === "context.suspend" && event.outcome === "suspended");
+  assert.equal(suspensions.length, 1,
+    `The user command lost its persistence and announced it ${suspensions.length} time(s)`);
+  assert(String(suspensions[0].error).includes(fault),
+    `The suspension does not carry the failure that caused it: ${suspensions[0].error}`);
+  assert.equal(suspensions[0].phase, "user-command",
+    `The suspension names ${suspensions[0].phase} rather than the path that failed`);
+
+  // AND IT DOES NOT CLAIM A COMMIT. The user is told the command failed, by name, and is
+  // never handed a count of marks that no durable state holds.
+  assert(!runtime.notifications.some((notice) => /Committed \d+ mark/.test(notice.message)),
+    "The command reported marks committed after its persistence failed");
+  assert(runtime.notifications.some((notice) => notice.message.includes(fault)),
+    "The user was never told the command failed");
+
+  // AND FOLDING REALLY STOPPED. A suspended session cannot reclaim anything, so continuing
+  // to compute folds is the part that turned one dropped commit into a dead session.
+  const applied = () => contextEvents(runtime).filter((event) =>
+    event.kind === "context.commit" && event.deferred === false).length;
+  const before = applied();
+  await measureAndCommit(runtime, 95_000, 100_000, "post-suspend");
+  assert.equal(applied(), before, "Folding kept committing after the user command suspended it");
+
+  return {
+    announced: suspensions.length,
+    phase: suspensions[0].phase,
+    committedClaimedAfterFailure: false,
+    foldsStopped: true,
+    cleanCommandFolds: materialized(clean).folds.length,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -13502,6 +13869,8 @@ const gates = [
   // 124 is retired, not free: the clean-rollback retry it pinned was deleted the day it
   // shipped, and reusing its number would make the history unreadable.
   [126, "A batched brief names the bytes it was made from", gateBatchedBriefNamesItsSource],
+  [127, "A delta carries only what changed", gateDeltaCarriesOnlyBriefChanges],
+  [128, "The user's commit announces a persistence failure", gateUserCommitAnnouncesPersistenceFailure],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

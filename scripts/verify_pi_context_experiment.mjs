@@ -9,7 +9,7 @@
 
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -58,6 +58,7 @@ import {
   probeTranscripts,
   providerWeather,
   receiptLens,
+  sessionLedgerLens,
   seededShuffle,
   stageCallDisposition,
   stageCodeWords,
@@ -3703,6 +3704,131 @@ try {
     "the report does not carry what was delivered and what had to be nudged");
 
   checks.anEarlyModelStopIsResumedAndAShortRunFails = true;
+}
+
+// GATE 57 - a supervisor killed from outside still writes the run's candidate report, and
+// does not wait forever for a worker that cannot answer.
+//
+// Gate 55 gave the WORKER a signal handler so a killed run stays readable. sol-20260812
+// rep 9 is the case that handler cannot cover: signal handlers run on the event loop, and
+// that worker held 98% of a core in synchronous JS for 118 minutes, so `systemctl stop`
+// logged "Killing process 1004322 (node-MainThread) with signal SIGKILL" and the run left
+// no worker report and no candidate report at all. Everything the six-hour arm measured
+// had to be recovered by reading the session, pace and provider ledgers by hand.
+//
+// The supervisor is the process that CAN answer: it spends the run idle between IPC polls.
+// It routes the signal into the same failure path a blown deadline takes, which latches,
+// ends the worker and falls through to the finalization that writes the report. And it
+// ends the worker on a bound, because a worker that cannot run its own handler cannot
+// exit on request either, and waiting on one that never will is how the supervisor came to
+// be killed beside it.
+// ---------------------------------------------------------------------------
+{
+  const supervisor = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment.mjs"), "utf8");
+  assert(/for \(const signal of \["SIGTERM", "SIGINT"\]\) \{\s*process\.on\(signal, \(\) => \{ terminationSignal \?\?= signal; \}\);/
+    .test(supervisor),
+  "the supervisor installs no handler for both signals, so a stop still discards its report");
+  // FIRST in the wait loop. The deadline and the lost-worker checks both throw their own
+  // message, and a run ended from outside reported under either of those names is the
+  // "Request was aborted" problem again: true, and useless.
+  const loop = supervisor.slice(supervisor.indexOf("async function supervisedWait("));
+  assert(loop.indexOf("if (terminationSignal) throw") > 0 &&
+    loop.indexOf("if (terminationSignal) throw") < loop.indexOf("exceeded its monotonic deadline"),
+  "the wait loop does not read the signal, or reads it after the deadline it would be reported as");
+  assert(/terminatedBySignal: terminationSignal,/.test(supervisor),
+    "the candidate report does not name the signal that ended the run");
+
+  // AND THE BOUND IS DRIVEN FOR REAL, against a child that ignores SIGTERM exactly as a
+  // CPU-bound worker does. Extracted and evaluated rather than read, so this proves the
+  // supervisor escapes rather than that the source contains a kill.
+  const source = supervisor.slice(
+    supervisor.indexOf("async function endWorker("),
+    supervisor.indexOf("async function supervisedWait("),
+  );
+  assert(source.length > 0, "the worker termination helper was not found where it is pinned");
+  const endWorker = new Function("WORKER_TERMINATION_GRACE_MS", `${source}\nreturn endWorker;`)(300);
+  const stubborn = spawn(process.execPath, [
+    "-e", "process.on('SIGTERM', () => {}); process.on('SIGINT', () => {}); " +
+      "setInterval(() => {}, 1000); console.log('ready');",
+  ], { stdio: ["ignore", "pipe", "ignore"] });
+  const completion = new Promise((resolve) => {
+    stubborn.on("exit", (code, signal) => resolve({ code, signal }));
+  });
+  // Its handlers must be installed before the first signal, or this would measure Node's
+  // default handler and pass for the wrong reason.
+  await new Promise((resolve) => stubborn.stdout.once("data", resolve));
+  const startedMs = Date.now();
+  const exit = await endWorker(stubborn, completion);
+  const elapsedMs = Date.now() - startedMs;
+  assert.equal(exit.signal, "SIGKILL",
+    `a worker that ignored SIGTERM exited as ${JSON.stringify(exit)} rather than being ended`);
+  assert(elapsedMs < 5_000,
+    `the supervisor waited ${elapsedMs}ms on a worker that was never going to exit`);
+
+  // ANTI-VACUITY: the same helper leaves a cooperative worker alone to exit on its own, so
+  // the SIGKILL above is the stubborn case and not what every teardown does.
+  const willing = spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 50);"], { stdio: "ignore" });
+  const willingCompletion = new Promise((resolve) => {
+    willing.on("exit", (code, signal) => resolve({ code, signal }));
+  });
+  const willingExit = await endWorker(willing, willingCompletion);
+  assert.equal(willingExit.signal, "SIGTERM",
+    `a cooperative worker exited as ${JSON.stringify(willingExit)} rather than on the first signal`);
+
+  checks.aKilledSupervisorStillWritesTheCandidateReport = true;
+}
+
+// GATE 58 - the wall clock is reported beside the ledger that confounds it.
+//
+// A run's wall clock is not its provider latency. Every turn derives over the whole
+// session, so a session that grows faster than the work does buys wall time nothing
+// charged for. sol-20260812 rep 9's pifold arm wrote 309 state entries totalling 21.6MB,
+// 68.0% of a 31.9MB session, against 0.93MB of projection actually sent, and held 98% of a
+// core for 118 minutes while the native arm spent 24 seconds of CPU. `wallClockMs` alone
+// could not tell that apart from folding being slow, and every wall-clock figure recorded
+// before the state delta was fixed measured it.
+//
+// The lens reports and does not judge. There is no threshold, because the honest bound is
+// the comparison between the two arms of one run and the native arm has no state entries
+// at all. Driven with fixtures rather than matched against source, so it is the arithmetic
+// under test.
+// ---------------------------------------------------------------------------
+{
+  const stateEntry = (data) => ({ type: "custom", customType: "pi-fold-active-context-state", data });
+  const ledger = sessionLedgerLens([
+    { type: "message", message: { role: "user", content: "x" } },
+    stateEntry({ revision: 1, briefs: { a: "b".repeat(100) }, pendingMarks: [] }),
+    stateEntry({ revision: 2, briefs: { a: "b".repeat(400) }, pendingMarks: [1, 2] }),
+    { type: "custom", customType: "pi-fold-active-context-fold-record", data: { fold: {} } },
+  ], 10_000);
+  assert.equal(ledger.stateEntries, 2, "the lens counted something other than the state entries");
+  assert.equal(ledger.sessionEntries, 4, "the lens lost entries that are not state");
+  assert(ledger.stateBytes > 500 && ledger.stateBytes < 10_000,
+    `state bytes came back as ${ledger.stateBytes}`);
+  assert.equal(ledger.stateShareOfSession, ledger.stateBytes / 10_000,
+    "the share is not the state bytes over the session bytes");
+  assert(ledger.largestStateEntryBytes > ledger.smallestStateEntryBytes,
+    "the lens reported no growth across two entries of different size");
+  // The field breakdown is the part that names the cause. Rep 9 was 81% briefs, and a
+  // reader who only sees a total has to go and find that out.
+  assert.equal(Object.keys(ledger.stateBytesByField)[0], "briefs",
+    `the widest field came back as ${JSON.stringify(Object.keys(ledger.stateBytesByField))}`);
+  // A run with no state entries at all is the native arm, and it must read as zero rather
+  // than as missing: the comparison between the arms is the whole point of the lens.
+  const bare = sessionLedgerLens([{ type: "message", message: {} }], 500);
+  assert.equal(bare.stateEntries, 0);
+  assert.equal(bare.stateBytes, 0);
+  assert.equal(bare.stateShareOfSession, 0);
+  assert.equal(bare.largestStateEntryBytes, null,
+    "an arm that wrote no state reported a largest entry");
+  assert.equal(sessionLedgerLens([], 0).stateShareOfSession, null,
+    "an empty session divided by zero instead of declining to answer");
+
+  const adjudicator = readFileSync(join(PROJECT, "scripts", "adjudicate_pi_context_experiment.mjs"), "utf8");
+  assert(/sessionLedger: sessionLedgerLens\(entries, statSync\(sessionFile\)\.size\)/.test(adjudicator),
+    "the adjudication report does not carry the ledger the wall clock is read against");
+
+  checks.theWallClockIsReportedBesideItsLedger = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
