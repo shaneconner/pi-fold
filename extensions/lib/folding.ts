@@ -568,12 +568,20 @@ export async function generatedBriefs(input: {
 }): Promise<{
   briefs: Array<{ brief: string; provenance: BriefProvenance } | null>;
   cured: number;
-  complaints: string[];
+  /** One entry per SPAN, null where the span's brief landed. Never the asked-list order. */
+  complaints: Array<string | null>;
 }> {
   const settled = new Array<{ brief: string; provenance: BriefProvenance } | null>(input.spans.length)
     .fill(null);
   let pending = input.spans.map((span, index) => ({ span, index }));
   let cured = 0;
+  // Complaints are returned keyed by the SPAN's position in the call, not by its position
+  // in whatever subset was last asked. The two diverge the moment a cure re-asks a subset:
+  // the retry's second span may be the call's fifth, and a caller reading them positionally
+  // then reports one span's failure under another span's name. The `cure` text handed back
+  // to the generator is separately numbered against the ASKED list, because that is the list
+  // the generator is looking at.
+  const complaintBySpan = new Array<string | null>(input.spans.length).fill(null);
   let complaints: string[] = [];
   for (let attempt = 0; attempt < 2 && pending.length; attempt += 1) {
     const asked = pending;
@@ -601,11 +609,12 @@ export async function generatedBriefs(input: {
       }
       failed.push(asked[at]);
       next.push(complaint);
+      complaintBySpan[asked[at].index] = complaint;
     }
     pending = failed;
     complaints = next;
   }
-  return { briefs: settled, cured, complaints };
+  return { briefs: settled, cured, complaints: complaintBySpan };
 }
 
 export async function prepareFold(input: {
@@ -654,9 +663,15 @@ export async function prepareFold(input: {
   let brief: string;
   let provenance: BriefProvenance;
   if (input.brief !== undefined) {
-    if (!usefulBrief(input.brief, snapshot.policy.maxBriefChars, snapshot.toolName)) {
-      throw new Error(`Supplied brief must be non-structural and at most ${snapshot.policy.maxBriefChars} characters`);
-    }
+    // The SAME complaint the generator is given, for the same reason: a limit is only a
+    // limit the caller can meet if the refusal says which rule it missed and what to do.
+    // This used to read "must be non-structural and at most N characters" whatever the
+    // brief did wrong, so an agent whose three-hundred-character brief happened to name
+    // the tool was told about a two-thousand-character cap it was nowhere near. The agent
+    // holds the fold's own material, so it can act on the complaint and mark again.
+    const complaint = briefContractComplaint(
+      input.brief.trim(), snapshot.policy.maxBriefChars, snapshot.toolName);
+    if (complaint !== null) throw new Error(`Supplied brief rejected. ${complaint}`);
     brief = input.brief.trim();
     provenance = typeof input.briefProvenance === "object"
       ? clone(input.briefProvenance)
