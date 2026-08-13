@@ -628,6 +628,10 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     Object.prototype.hasOwnProperty.call(value, "surfacing"));
   const hasPendingMarks = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "pendingMarks"));
+  const hasAddPendingMarks = Boolean(value && typeof value === "object" &&
+    Object.prototype.hasOwnProperty.call(value, "addPendingMarks"));
+  const hasPendingMarkOrder = Boolean(value && typeof value === "object" &&
+    Object.prototype.hasOwnProperty.call(value, "pendingMarkOrder"));
   const hasPinnedPeeks = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "pinnedPeeks"));
   const hasBriefs = Boolean(value && typeof value === "object" &&
@@ -648,6 +652,8 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     ...(hasLeases ? ["leases"] : []),
     ...(hasSurfacing ? ["surfacing"] : []),
     ...(hasPendingMarks ? ["pendingMarks"] : []),
+    ...(hasAddPendingMarks ? ["addPendingMarks"] : []),
+    ...(hasPendingMarkOrder ? ["pendingMarkOrder"] : []),
     ...(hasPinnedPeeks ? ["pinnedPeeks"] : []),
     ...(hasBriefs ? ["briefs"] : []),
     ...(hasAddBriefs ? ["addBriefs"] : []),
@@ -706,6 +712,24 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     }
     if (hasBriefs && (hasAddBriefs || hasRemoveBriefIds)) {
       throw new Error("Active-context delta states the whole brief map and a change to it");
+    }
+    if (hasAddPendingMarks) parsePendingMarks(ownValue(value, "addPendingMarks"));
+    if (hasPendingMarkOrder) {
+      const order = denseOwnArrayValues(ownValue(value, "pendingMarkOrder"));
+      if (!order || order.length > MAX_PENDING_MARKS ||
+          order.some((key) => typeof key !== "string" || !key) ||
+          new Set(order).size !== order.length) {
+        throw new Error("Invalid active-context delta pending mark order");
+      }
+    }
+    // The order is what the replay is BUILT from, so additions without it name marks
+    // nothing will place. Refused rather than absorbed, because absorbing it would drop
+    // the marks silently and a dropped mark is evidence that never gets folded.
+    if (hasAddPendingMarks && !hasPendingMarkOrder) {
+      throw new Error("Active-context delta adds pending marks and states no order for them");
+    }
+    if (hasPendingMarks && (hasAddPendingMarks || hasPendingMarkOrder)) {
+      throw new Error("Active-context delta states the whole mark array and a change to it");
     }
   }
   const parsed = clone(value) as unknown as ActiveContextStateWireV2;
@@ -888,8 +912,38 @@ export function materializeStatePersistence(
           briefs[id] = clone(brief);
         }
       }
+      // Same rule for the marks, but the discriminator is the ORDER's presence rather than
+      // the array's absence. A delta written before 2026-08-13 states the whole array when
+      // it has one and states nothing when it does not, so "no array" means "no marks"
+      // there; reading it as "keep the base's marks" would resurrect marks a sealed session
+      // had cleared. The order list is what a NEW delta's replay is built from, so a key it
+      // does not name is removed by not being named.
+      let marks: PendingMark[];
+      if (wire.pendingMarkOrder === undefined) {
+        marks = wire.pendingMarks !== undefined ? clone(wire.pendingMarks) : [];
+      } else {
+        const held = new Map((state.pendingMarks ?? []).map((mark) =>
+          [pendingMarkKey(mark), mark] as const));
+        for (const mark of wire.addPendingMarks ?? []) {
+          const key = pendingMarkKey(mark);
+          const standing = held.get(key);
+          if (standing && sha256Value(standing) === sha256Value(mark)) {
+            throw new Error(`Redundant active-context pending mark ${key}`);
+          }
+          held.set(key, clone(mark));
+        }
+        marks = wire.pendingMarkOrder.map((key) => {
+          const mark = held.get(key);
+          if (!mark) throw new Error(`Unknown active-context pending mark ${key}`);
+          return mark;
+        });
+      }
       state = stateFromFoldRefs(
-        { ...wire, briefs: Object.keys(briefs).length ? briefs : undefined },
+        {
+          ...wire,
+          briefs: Object.keys(briefs).length ? briefs : undefined,
+          pendingMarks: marks.length ? marks : undefined,
+        },
         [...byId.values()],
         records,
       );
@@ -981,6 +1035,20 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
   }
   const removeBriefIds = Object.keys(previousBriefs)
     .filter((id) => !Object.prototype.hasOwnProperty.call(nextBriefs, id));
+  // The marks are the same rule one shape along, and the next largest field after the
+  // briefs: 2.55 MB of rep 9's 21.6 MB ledger, which a diff takes to 0.16 MB. They carry an
+  // ORDER as well as a membership, and appending after removing does not always reproduce
+  // it (four of that run's 309 writes), so the key order travels whole and states the
+  // removals with it. It is short next to the marks themselves, so there is no case to
+  // split and no branch that can pick the wrong one.
+  const previousMarks = previous.pendingMarks ?? [];
+  const nextMarks = next.pendingMarks ?? [];
+  const previousByKey = new Map(previousMarks.map((mark) => [pendingMarkKey(mark), mark] as const));
+  const addPendingMarks = nextMarks.filter((mark) => {
+    const held = previousByKey.get(pendingMarkKey(mark));
+    return !held || sha256Value(held) !== sha256Value(mark);
+  });
+  const marksTravel = previousMarks.length > 0 || nextMarks.length > 0;
   return parseActiveContextStateV2({
     version: 2,
     kind: "delta",
@@ -996,7 +1064,8 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
     tokensSinceToolFold: next.tokensSinceToolFold,
     leases: clone(next.leases),
     ...(next.surfacing?.length ? { surfacing: clone(next.surfacing) } : {}),
-    ...(next.pendingMarks?.length ? { pendingMarks: clone(next.pendingMarks) } : {}),
+    ...(marksTravel ? { pendingMarkOrder: nextMarks.map(pendingMarkKey) } : {}),
+    ...(addPendingMarks.length ? { addPendingMarks: clone(addPendingMarks) } : {}),
     ...(Object.keys(addBriefs).length ? { addBriefs } : {}),
     ...(removeBriefIds.length ? { removeBriefIds } : {}),
     ...(next.advisory ? { advisory: clone(next.advisory) } : {}),

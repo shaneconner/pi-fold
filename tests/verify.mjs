@@ -4736,7 +4736,12 @@ async function gateSchedulingWireRoundTrip() {
   const restored = context.stateFromFoldRefs(checkpoint, checkpoint.foldRefs, new Map());
   assert.deepEqual(restored.pendingMarks, state.pendingMarks);
   const delta = context.makeStateDelta(empty, { ...state, revision: 1 });
-  assert.deepEqual(delta.pendingMarks, state.pendingMarks);
+  // A delta carries the change: the marks that are new or rewritten, and the key order
+  // that places them and states the removals. Gate 127 owns that rule; this is the wire
+  // shape it produces for a state whose marks are all new.
+  assert.equal(delta.pendingMarks, undefined, "The delta stated the whole mark array");
+  assert.deepEqual(delta.addPendingMarks, state.pendingMarks);
+  assert.deepEqual(delta.pendingMarkOrder, state.pendingMarks.map(context.pendingMarkKey));
   assert.equal(context.semanticStateSha256(restored), context.semanticStateSha256(state));
 
   // Empty is absent everywhere, so a pre-0.1.2 digest never moves.
@@ -13500,6 +13505,115 @@ async function gateDeltaCarriesOnlyBriefChanges() {
   assert.deepEqual(materialized(runtime).briefs, { [second.id]: briefText("two") },
     "Replaying the removal did not leave the surviving brief standing");
 
+  // THE MARKS ARE THE SAME RULE ONE SHAPE ALONG, and the next largest field: 2.55 MB of
+  // rep 9's 21.6 MB ledger, which a diff takes to 0.16 MB. They carry an ORDER as well as a
+  // membership, and appending after removing does not always reproduce it (four of that
+  // run's 309 writes), so the key order travels whole and states the removals by not naming
+  // them. It is short beside the marks themselves, so there is no case to split and no
+  // branch that can pick the wrong one.
+  //
+  // Driven against the encoding rather than through the runtime, the way gate 38 drives the
+  // wire round trip: the reorder is the case that decides the design, and the ladder does
+  // not reorder on demand.
+  const markFixture = makeFixture({
+    turns: 10, resultChars: 10_000, contextWindow: 100_000, sessionId: "delta-marks",
+  });
+  const base = context.emptyActiveContextState("delta-marks");
+  const proposed = context.topUpMarks({
+    snapshot: epochSnapshot(markFixture), state: base, ordinal: 3, targetShare: 1,
+  }).slice(0, 3);
+  assert.equal(proposed.length, 3, "The mark fixture proposed too few marks to reorder");
+  const key = context.pendingMarkKey;
+  const withMarks = (revision, marks) =>
+    context.withPendingMarks({ ...base, revision }, marks);
+  const one = withMarks(1, proposed.slice(0, 1));
+  const two = withMarks(2, proposed.slice(0, 2));
+  const three = withMarks(3, proposed);
+  const shuffled = withMarks(4, [proposed[2], proposed[0], proposed[1]]);
+  const emptied = withMarks(5, []);
+
+  const growth = context.makeStateDelta(one, two);
+  assert.equal(growth.pendingMarks, undefined, "The delta stated the whole mark array");
+  assert.deepEqual(growth.addPendingMarks, [proposed[1]],
+    "The delta re-shipped a mark its base already held");
+  assert.deepEqual(growth.pendingMarkOrder, [proposed[0], proposed[1]].map(key));
+
+  const reorder = context.makeStateDelta(three, shuffled);
+  assert.equal(reorder.addPendingMarks, undefined, "A reorder shipped marks the base already held");
+  assert.deepEqual(reorder.pendingMarkOrder, [proposed[2], proposed[0], proposed[1]].map(key),
+    "A reorder did not travel, so the replay would rebuild the wrong order");
+
+  const cleared = context.makeStateDelta(three, emptied);
+  assert.deepEqual(cleared.pendingMarkOrder, [], "Clearing the marks did not travel");
+  assert.equal(cleared.addPendingMarks, undefined, "Clearing the marks carried marks with it");
+
+  const quiet = context.makeStateDelta(three, { ...three, revision: 6 });
+  assert.equal(quiet.addPendingMarks, undefined, "A write that changed no mark carried one");
+  assert.deepEqual(quiet.pendingMarkOrder, proposed.map(key));
+  assert(!JSON.stringify(quiet).includes(proposed[0].parts ? JSON.stringify(proposed[0].parts) : "\u0000"),
+    "A write that changed no mark carried a mark's own bytes");
+
+  // THE ROUND TRIP. Replaying the chain has to rebuild the marks the states held, in the
+  // order they held them, from writes that never stated the array whole.
+  const markChain = [
+    stateEntry("delta-marks", context.makeStateCheckpoint(base), "marks-0"),
+    stateEntry("delta-marks", context.makeStateDelta(base, one), "marks-1", "marks-0"),
+    stateEntry("delta-marks", context.makeStateDelta(one, two), "marks-2", "marks-1"),
+    stateEntry("delta-marks", context.makeStateDelta(two, three), "marks-3", "marks-2"),
+    stateEntry("delta-marks", context.makeStateDelta(three, shuffled), "marks-4", "marks-3"),
+  ];
+  assert.deepEqual(
+    context.materializeActiveContextState(markChain, "delta-marks").pendingMarks,
+    shuffled.pendingMarks,
+    "Replaying the chain did not reproduce the marks in the order the state held them",
+  );
+  assert.equal(
+    context.materializeActiveContextState([
+      ...markChain,
+      stateEntry("delta-marks", context.makeStateDelta(shuffled, withMarks(5, [])), "marks-5", "marks-4"),
+    ], "delta-marks").pendingMarks,
+    undefined,
+    "Replaying a cleared array left marks standing",
+  );
+
+  // A wire that states the whole array is replayed as the whole array, and may not also
+  // state a change; additions without an order name marks nothing will place; and a key the
+  // replay cannot resolve is refused rather than dropped, because a dropped mark is
+  // evidence that never gets folded.
+  const markSample = context.makeStateDelta(two, three);
+  assert.throws(() => context.parseActiveContextStateV2(
+    { ...markSample, pendingMarks: [] }, "delta-marks",
+  ), /states the whole mark array and a change to it/);
+  const orderless = structuredClone(markSample);
+  delete orderless.pendingMarkOrder;
+  assert.throws(() => context.parseActiveContextStateV2(orderless, "delta-marks"),
+    /adds pending marks and states no order for them/);
+  assert.throws(() => context.materializeActiveContextState([
+    ...markChain.slice(0, 3),
+    stateEntry("delta-marks", { ...markSample, pendingMarkOrder: [...markSample.pendingMarkOrder, "fold:fold_absent"] },
+      "marks-broken", "marks-2"),
+  ], "delta-marks"), /Unknown active-context pending mark/);
+  assert.throws(() => context.materializeActiveContextState([
+    ...markChain.slice(0, 3),
+    stateEntry("delta-marks", { ...markSample, addPendingMarks: [proposed[0]] }, "marks-redundant", "marks-2"),
+  ], "delta-marks"), /Redundant active-context pending mark/);
+
+  // And a sealed session's whole-array deltas still replay.
+  const legacyMarks = markChain.map((entry, at) => {
+    if (at === 0) return entry;
+    const data = structuredClone(entry.data);
+    const held = context.materializeActiveContextState(markChain.slice(0, at + 1), "delta-marks");
+    delete data.addPendingMarks;
+    delete data.pendingMarkOrder;
+    if (held.pendingMarks?.length) data.pendingMarks = held.pendingMarks;
+    return { ...entry, data };
+  });
+  assert.deepEqual(
+    context.materializeActiveContextState(legacyMarks, "delta-marks").pendingMarks,
+    shuffled.pendingMarks,
+    "A sealed session's whole-array marks no longer replay",
+  );
+
   // A delta written before this change states the whole map, and sealed sessions hold
   // thousands of them. The presence of `briefs` is the discriminator, not a fallback: a
   // wire that states the map is replayed as the map, and it may not also state a change.
@@ -13510,16 +13624,19 @@ async function gateDeltaCarriesOnlyBriefChanges() {
     if (entry.customType !== context.ACTIVE_CONTEXT_STATE_ENTRY || entry.data.kind !== "delta") continue;
     // The whole map AS OF this entry, which is what a pre-2026-08-13 writer put on the
     // wire. The resulting state is identical either way, so the digests still hold.
-    const whole = context.materializeActiveContextState(runtime.branch.slice(0, at + 1), built.sessionId).briefs;
+    const held = context.materializeActiveContextState(runtime.branch.slice(0, at + 1), built.sessionId);
     delete entry.data.addBriefs;
     delete entry.data.removeBriefIds;
-    if (whole) entry.data.briefs = whole;
+    delete entry.data.addPendingMarks;
+    delete entry.data.pendingMarkOrder;
+    if (held.briefs) entry.data.briefs = held.briefs;
+    if (held.pendingMarks?.length) entry.data.pendingMarks = held.pendingMarks;
   }
-  assert.deepEqual(
-    context.materializeActiveContextState(legacyBranch, built.sessionId).briefs,
-    { [second.id]: briefText("two") },
-    "A sealed session's whole-map deltas no longer replay",
-  );
+  const legacyReplay = context.materializeActiveContextState(legacyBranch, built.sessionId);
+  assert.deepEqual(legacyReplay.briefs, { [second.id]: briefText("two") },
+    "A sealed session's whole-map deltas no longer replay");
+  assert.deepEqual(legacyReplay.pendingMarks, materialized(runtime).pendingMarks,
+    "A sealed session's whole-array marks no longer replay");
 
   const sample = structuredClone(chain.at(-1).data);
   assert.throws(() => context.parseActiveContextStateV2(
@@ -13553,6 +13670,10 @@ async function gateDeltaCarriesOnlyBriefChanges() {
     rewritesTravelled: 1,
     removalsTravelled: 1,
     unchangedMapTravelled: false,
+    markAdditionsTravelled: growth.addPendingMarks.length,
+    markReorderTravelled: true,
+    marksShippedOnAReorder: 0,
+    markClearTravelled: true,
   };
 }
 
