@@ -249,8 +249,18 @@ export function compactionReserveTokens({ descriptorWindow, servingBudgetTokens,
 export const PI_DEFAULT_COMPACTION_RESERVE_TOKENS = 16_384;
 /** The share of the serving budget the projection fence keeps clear; gate 58 pins it. */
 export const PROJECTION_FENCE_MARGIN_SHARE = 0.05;
-/** Where the retired thermostat committed: 0.80 of the serving budget. */
-export const EXPERIMENT_COMPACTION_TRIGGER_SHARE = 0.80;
+/**
+ * The trigger share for a mode, which is a MODE PLAN field because a smoke run cannot
+ * reach the full run's line: see the smoke plan for the arithmetic. Every plan must state
+ * one, so a mode added later cannot inherit a share that its own mass never crosses.
+ */
+export function compactionTriggerShare(mode) {
+  const plan = EXPERIMENT_MODE_PLANS[mode];
+  assertExperiment(plan, `Unknown experiment mode ${mode}`);
+  assertExperiment(typeof plan.compactionTriggerShare === "number",
+    `Experiment mode ${mode} states no compaction trigger share`);
+  return plan.compactionTriggerShare;
+}
 
 export function servedOutputBudget({ contextWindow, contextChars, modelMaxTokens }) {
   const estimate = Math.ceil(contextChars / PI_OUTPUT_BUDGET.charsPerToken);
@@ -351,6 +361,8 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
     chainLength: 6,
     chainStartAfters: Object.freeze([1, 8, 16, 24]),
     chainEarlyLaw: Object.freeze({ maxStage: 8, minLinks: 3 }),
+    // Where the retired thermostat committed. See compactionReserveTokens.
+    compactionTriggerShare: 0.80,
   }),
   smoke: Object.freeze({
     stageCount: 8,
@@ -380,6 +392,19 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
     chainLength: 3,
     chainStartAfters: Object.freeze([1]),
     chainEarlyLaw: Object.freeze({ maxStage: 2, minLinks: 1 }),
+    // REACHABLE WITHIN THE SMOKE'S OWN MASS, which is the only reason the share is a mode
+    // plan field rather than one constant. Eight stages of 12,000 chars is roughly 24,000
+    // estimated tokens against a 251,520-token serving budget, about a tenth of it, so
+    // the full mode's 0.80 line sits eight times further out than this run can ever
+    // reach: a smoke on that share crosses no boundary, folds nothing, and reports a
+    // healthy managed arm that never exercised the one path it exists to exercise.
+    // The bound is the run's own accumulated payload at the FLOOR, not at the target: a
+    // smoke that draws small stages must still cross. Eight stages of 6,000 floor chars
+    // is 12,000 estimated tokens, so 0.03 puts the trigger at 7,545, crossed around the
+    // third stage at the floor and the second at the 12,000-char target, leaving several
+    // crossings inside the run either way. The numbers differ from a full rep; the PATH
+    // is identical, and the path is what a smoke is for.
+    compactionTriggerShare: 0.03,
   }),
 });
 

@@ -22,11 +22,11 @@ import {
   EXPERIMENT_TRANSPORTS,
   EXPERIMENT_DEFAULT_REPO,
   EXPERIMENT_FOLD_SCHEDULING,
-  EXPERIMENT_COMPACTION_TRIGGER_SHARE,
   EXPERIMENT_GUIDANCE_PROFILES,
   PI_DEFAULT_COMPACTION_RESERVE_TOKENS,
   PROJECTION_FENCE_MARGIN_SHARE,
   compactionReserveTokens,
+  compactionTriggerShare,
   EXPERIMENT_MODES,
   EXPERIMENT_MODE_PLANS,
   EXPERIMENT_PROTOCOL_VERSION,
@@ -3878,10 +3878,31 @@ try {
   const descriptorWindow = 272_000;
   const servingBudgetTokens = 251_520;
   const derived = compactionReserveTokens({
-    descriptorWindow, servingBudgetTokens, share: EXPERIMENT_COMPACTION_TRIGGER_SHARE,
+    descriptorWindow, servingBudgetTokens, share: compactionTriggerShare("full"),
   });
   assert.equal(derived.triggerTokens, 201_216,
     "the derived trigger is not the occupancy the retired thermostat committed at");
+  // EVERY MODE STATES A SHARE ITS OWN MASS CAN CROSS. A smoke on the full run's line
+  // reaches a tenth of it, crosses nothing, folds nothing, and reports a healthy managed
+  // arm that never exercised the path it exists to exercise, which is the failure this
+  // half prevents. The bound is the plan's own accumulated payload, not a number typed
+  // beside the share.
+  for (const mode of EXPERIMENT_MODES) {
+    const plan = EXPERIMENT_MODE_PLANS[mode];
+    const share = compactionTriggerShare(mode);
+    const modeDerived = compactionReserveTokens({ descriptorWindow, servingBudgetTokens, share });
+    // What the run actually accumulates, at the estimator the harness declares.
+    const reachableTokens = Math.floor((plan.stageCount * plan.payloadFloorChars) / 4);
+    assert(modeDerived.triggerTokens < reachableTokens,
+      `mode ${mode} places its compaction trigger at ${modeDerived.triggerTokens} tokens, past ` +
+      `the ${reachableTokens} its own ${plan.stageCount} stages can accumulate at the payload ` +
+      "floor, so no run in that mode ever crosses a boundary");
+    // And it is not so low that the run spends itself crossing: at least two stages of
+    // payload have to land before the first crossing, or the first stage folds itself.
+    assert(modeDerived.triggerTokens > (2 * plan.payloadFloorChars) / 4,
+      `mode ${mode} crosses its compaction trigger inside the first two stages`);
+  }
+  assert.throws(() => compactionTriggerShare("no-such-mode"), /Unknown experiment mode/);
   assert(derived.triggerTokens < servingBudgetTokens,
     "the derived compaction trigger does not clear the serving budget");
   assert(derived.headroomTokens >= PROJECTION_FENCE_MARGIN_SHARE * servingBudgetTokens,
@@ -3899,7 +3920,7 @@ try {
   }), /inside the fence margin/,
   "a compaction trigger inside the fence margin was accepted");
   assert.throws(() => compactionReserveTokens({
-    descriptorWindow: 150_000, servingBudgetTokens, share: EXPERIMENT_COMPACTION_TRIGGER_SHARE,
+    descriptorWindow: 150_000, servingBudgetTokens, share: compactionTriggerShare("full"),
   }), /is under the/,
   "a descriptor window under the trigger produced a negative reserve");
   // And the worker takes the derived value rather than a literal, on both arms, and

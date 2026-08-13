@@ -14,7 +14,6 @@ import {
   EXPERIMENT_ALLOWED_TOOLS,
   EXPERIMENT_BEHAVIORAL_MODE,
   EXPERIMENT_CLOSED_BOOK_LABEL,
-  EXPERIMENT_COMPACTION_TRIGGER_SHARE,
   EXPERIMENT_MARKER_ENTRY,
   closedBookPrompt,
   closedBookQuestions,
@@ -29,6 +28,7 @@ import {
   armRuntimeConfiguration,
   assertExperiment,
   compactionReserveTokens,
+  compactionTriggerShare,
   corpusManifestSha256,
   isWindowOverflow,
   receiptLens,
@@ -290,7 +290,7 @@ try {
   const compactionTrigger = compactionReserveTokens({
     descriptorWindow: discoveredModel.contextWindow,
     servingBudgetTokens: config.providerInputBudget ?? discoveredModel.contextWindow,
-    share: EXPERIMENT_COMPACTION_TRIGGER_SHARE,
+    share: compactionTriggerShare(config.mode),
   });
   // The arm IS this settings object plus the extension's conditional registration.
   const isolatedSettings = SettingsManager.inMemory({
