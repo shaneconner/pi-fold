@@ -151,7 +151,6 @@ import {
 } from "./lib/curation.ts";
 import type {
   ContextReceipt,
-  CurationSignals,
 } from "./lib/curation.ts";
 import {
   addPendingMark,
@@ -466,7 +465,6 @@ export function registerActiveContext(pi: any, options: {
   const curation = {
     receipts: [] as ContextReceipt[],
     contextCalls: 0,
-    lastSignals: null as CurationSignals | null,
     reopenBaselineShare: null as number | null,
     wallEpisodeOpen: false,
     recoveryAttempts: 0,
@@ -788,7 +786,6 @@ export function registerActiveContext(pi: any, options: {
     instrumentation.mutationsSinceHandoff = 0;
     curation.receipts = [];
     curation.contextCalls = 0;
-    curation.lastSignals = null;
     curation.reopenBaselineShare = null;
     curation.recoveryAttempts = 0;
     curation.pendingRejection = null;
@@ -3484,7 +3481,6 @@ export function registerActiveContext(pi: any, options: {
           overBudgetReduction: ladder.overBudgetReduction ? clone(ladder.overBudgetReduction) : null,
           curation: {
             occupancyThreshold: thresholds.maxTarget,
-            signals: curation.lastSignals ? { ...curation.lastSignals } : null,
             contextCalls: curation.contextCalls,
             receipts: curation.receipts.map((receipt) => ({ ...receipt })),
           },

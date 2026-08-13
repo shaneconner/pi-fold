@@ -2548,6 +2548,9 @@ async function gateSummarizerOption() {
   assert.equal(loaderCalls, 0, "Default registration imported the host before a model brief was requested");
   const fenceTokens = Math.round(context.hardFenceRatio({ contextWindow: 100_000 }) * 100_000);
   await measureForModel(session, fenceTokens, sessionModel);
+  await project(session);
+  await settle();
+  await compactBoundary(session);
   await settle(8);
   const modelFold = materialized(session).folds.find((fold) => fold.kind === "chapter");
   assert(modelFold, json.stableStringify({
@@ -2622,7 +2625,7 @@ async function gateSummarizerOption() {
   // chapter brief is deterministic with no host module in the picture at all.
   const unwired = makeRuntime(built);
   await startRuntime(unwired);
-  await measure(unwired, fenceTokens, 100_000);
+  await measureAndCommit(unwired, fenceTokens, 100_000);
   assert.equal(
     materialized(unwired).folds.find((fold) => fold.kind === "chapter")?.provenance.kind,
     "deterministic",
@@ -2647,6 +2650,10 @@ async function gateSummarizerOption() {
   failure.ctx.model = sessionModel;
   await startRuntime(failure);
   await measureForModel(failure, fenceTokens, sessionModel);
+  await project(failure);
+  await settle();
+  await compactBoundary(failure);
+  await settle(8);
   // Both lanes meet the same broken generator: the preparation falls back, and the
   // upgrade lane finds the deterministic fold and fails on it once too. What the gate
   // pins is that a failure is a fallback rather than a retry loop.
@@ -2680,7 +2687,8 @@ async function gateSummarizerOption() {
   // the generator directly, and a brief it produces is attributed to the model.
   const escape = makeRuntime(built, { summarizeContextSpan: MODEL_BRIEF });
   await startRuntime(escape);
-  await measure(escape, fenceTokens, 100_000);
+  await measureAndCommit(escape, fenceTokens, 100_000);
+  await settle(8);
   assert.equal(
     materialized(escape).folds.find((fold) => fold.kind === "chapter")?.provenance.kind,
     "model",
@@ -6052,6 +6060,7 @@ async function gateFenceMarginAndDepth() {
   for (let step = 0; step < 12; step += 1) {
     const chars = bytesOf((await project(runtime)).messages);
     await measure(runtime, sevenChars(chars), window);
+    await compactBoundary(runtime);
     const status = (await toolStatus(runtime)).details.automatic;
     climb.push({
       chars,
@@ -7559,10 +7568,7 @@ async function gateOneTruthfulBudget() {
   await measure(runtime, 330_000, 272_000, undefined, "toolUse");
   const announced = await project(runtime);
   await settle();
-  // The gated last-call round; the commit lands on the context pass after it.
-  await measure(runtime, 331_000, 272_000, undefined, "toolUse");
-  await project(runtime);
-  await settle();
+  await measureAndCommit(runtime, 331_000, 272_000, undefined, "toolUse");
 
   // Every curation-side record carries the truthful budget, and none carries the
   // descriptor's 255,616.
@@ -7586,7 +7592,6 @@ async function gateOneTruthfulBudget() {
   const status = (await toolStatus(runtime)).details.automatic;
   assert.equal(status.capacity.budgetTokens, 383_616);
   assert.equal(status.capacity.descriptorWindow, 272_000);
-  assert.equal(status.curation.signals.budgetTokens, 383_616);
 
   return {
     mode: capacity.mode,
@@ -7939,9 +7944,7 @@ async function gateNoYieldCommitGuard() {
   // Climb past the pressure backstop and up to the fence RATIO, but stay under the
   // serving budget: crowded and predicted-unsafe, yet perfectly able to send.
   for (const tokens of [345_000, 355_000, 365_000, 375_000]) {
-    await measure(runtime, tokens, 400_000, undefined, "toolUse");
-    await project(runtime).catch(() => undefined);
-    await settle();
+    await measureAndCommit(runtime, tokens, 400_000, undefined, "toolUse").catch(() => undefined);
   }
   const commits = stream().filter((record) => record.kind === "context.commit");
   const belowFloor = commits.filter((record) =>
@@ -7971,9 +7974,7 @@ async function gateNoYieldCommitGuard() {
     {},
   );
   await startRuntime(overflow);
-  await measure(overflow, 55_000, 60_000, undefined, "toolUse");
-  await project(overflow).catch(() => undefined);
-  await settle();
+  await measureAndCommit(overflow, 55_000, 60_000, undefined, "toolUse").catch(() => undefined);
   const recovery = overflow.appended
     .filter((entry) => entry.customType === "pi-fold-context-event")
     .map((entry) => entry.data)
@@ -9734,11 +9735,12 @@ async function gateFenceOpensTheMiddle() {
   assert(runtime.aborts > abortsBeforeFence,
     "An untransmittable request went out instead of being aborted");
   // One more crossing, once the ladder has taken everything the zone law offers and only
-  // the declared-untakeable mass is left. THIS is the starved pass now: the trigger
+  // the declared-untakeable mass is left. THIS is the starved pass now: the boundary
   // fires, the selectors have nothing, and the deferral has to say so.
-  await measure(runtime, 31_600, 34_000);
-  await project(runtime);
-  await settle();
+  await measureAndCommit(runtime, 31_600, 34_000);
+  // And once more: the crossing above still had the last of the zone's offering to take,
+  // so the pass that reaches the adjudication empty is the one after it.
+  await measureAndCommit(runtime, 31_700, 34_000);
   // AND IT SAYS SO. A commit pass that reaches the adjudication with nothing proposable
   // used to return silently, which is how the rep-2 starvation stayed invisible for 25
   // stages: the last call announced 274,173 tokens of unmarked stale spans and the pass
@@ -10105,7 +10107,7 @@ async function gatePublicOptionSurface() {
       summarizer: { provider: "openai", model: "gpt-brief", effort: "low" },
       providerInputBudget: 90_000,
       blacklistAutoFoldTools: new Set(["repo_stage"]),
-      guidance: { thresholdNotices: true, actionResponses: true },
+      guidance: { actionResponses: true },
     },
   });
   assert.deepEqual(Object.keys(surface.registration), ["projectionCandidates"]);
@@ -11752,7 +11754,7 @@ async function gateAnchoredOccupancy() {
   const basis = new Set();
   for (let step = 0; step < 4; step += 1) {
     const current = pressuredProjections().at(-1);
-    await measure(pressured, Math.ceil(current.chars / 4), 200_000, undefined, "toolUse");
+    await measureAndCommit(pressured, Math.ceil(current.chars / 4), 200_000, undefined, "toolUse");
     await project(pressured);
     await settle();
     basis.add(pressuredProjections().at(-1).estimate_basis);
