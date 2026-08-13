@@ -8926,9 +8926,7 @@ async function gateProjectionIsAppendOnly() {
     })),
   });
   for (const tokens of [40_000, 56_000, 68_000, 76_000, 82_000, 88_000, 60_000, 72_000, 84_000]) {
-    await measure(runtime, tokens, 100_000, undefined, "toolUse");
-    await project(runtime);
-    await settle();
+    await measureAndCommit(runtime, tokens, 100_000, undefined, "toolUse");
   }
 
   const prefixes = stream().filter((record) => record.kind === "context.prefix");
@@ -9038,17 +9036,22 @@ async function gateProtectIsDurablePin() {
   // the lease runs out, hold entries out of commits, release on unprotect, land on
   // the event stream as context.protect, and be advertised in the description text,
   // because a verb nobody can discover is a verb nobody uses.
-  const runtime = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
+  // Wider and lighter than the fixture this gate used to carry. One boundary lands the
+  // whole accumulated batch, so a twelve-turn session commits two or three ROOTS and one
+  // of them alone is past the 25% pinned-share cap: the pin under test would be refused
+  // by the cap gate 92 pins, and this gate would be measuring that refusal instead.
+  const runtime = await epochToolRuntime({ turns: 16, resultChars: 8000 });
   const stream = () => runtime.appended
     .filter((entry) => entry.customType === "pi-fold-context-event")
     .map((entry) => entry.data);
   const description = [...runtime.tools.values()][0].description;
   assert(description.includes("Protect is the pin"), "The pin is not advertised in the tool surface");
 
-  for (const tokens of [70_000, 80_000, 86_000]) {
-    await measure(runtime, tokens, 100_000);
-    await project(runtime);
-  }
+  // ONE crossing. Each one runs consolidation to a fixpoint, so three of them take a
+  // thirty-turn session down to a single root and there is no second fold to leave
+  // unpinned beside the pinned one.
+  await measure(runtime, 70_000, 100_000);
+  await measureAndCommit(runtime, 86_000, 100_000);
   await settle();
   // Roots only: consolidation nests under the counting rule, and a child cannot be
   // expanded while its parent is still a placeholder.
@@ -9068,11 +9071,11 @@ async function gateProtectIsDurablePin() {
   assert(pinned[0].protected_refs_after > pinned[0].protected_refs_before,
     "Protecting a fold must add its evidence refs to the durable pin set");
 
-  // Ten measured requests above the refold ratio: the 8-generation lease is long
-  // exhausted, and the pin is the only thing keeping the span expanded.
+  // Ten measured requests above the refold ratio, each reaching the boundary: the
+  // 8-generation lease is long exhausted, the refold the ladder proposes lands as a mark
+  // and applies at the crossing, and the pin is the only thing keeping the span expanded.
   for (let index = 0; index < 10; index += 1) {
-    await measure(runtime, 86_000 + index, 100_000, `pin-measurement-${index + 1}`);
-    await project(runtime);
+    await measureAndCommit(runtime, 86_000 + index, 100_000, `pin-measurement-${index + 1}`);
   }
   let state = materialized(runtime);
   assert(state.expanded.includes(foldId),
@@ -9099,8 +9102,7 @@ async function gateProtectIsDurablePin() {
   assert.equal(releases.length, 1);
   assert.equal(materialized(runtime).protected.length, 0, "Unprotect must drain the refs protect added");
   for (let index = 0; index < 3; index += 1) {
-    await measure(runtime, 91_000 + index, 100_000, `unpin-measurement-${index + 1}`);
-    await project(runtime);
+    await measureAndCommit(runtime, 91_000 + index, 100_000, `unpin-measurement-${index + 1}`);
   }
   state = materialized(runtime);
   assert(!state.expanded.includes(foldId), "After unprotect the refold rung must reclaim the span");
@@ -9151,8 +9153,7 @@ async function gateRiderIsOneLiteralPerEpoch() {
   // already paid for, never regenerated, replaced only by the next epoch's rider.
   const runtime = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
   for (const tokens of [70_000, 80_000, 86_000]) {
-    await measure(runtime, tokens, 100_000);
-    await project(runtime);
+    await measureAndCommit(runtime, tokens, 100_000);
   }
   await settle();
   const state = materialized(runtime);
@@ -9187,9 +9188,7 @@ async function gateRiderIsOneLiteralPerEpoch() {
     id: materialized(runtime).folds.find((fold) => fold.parentId === null).id,
   });
   for (let index = 0; index < 10 && materialized(runtime).rider.epoch === firstEpoch; index += 1) {
-    await measure(runtime, 86_500 + index, 100_000, `rider-epoch-${index}`);
-    await project(runtime);
-    await settle();
+    await measureAndCommit(runtime, 86_500 + index, 100_000, `rider-epoch-${index}`);
   }
   const later = materialized(runtime);
   assert(later.rider.epoch > firstEpoch, "A later commit must open a new rider epoch");
@@ -9224,8 +9223,7 @@ async function gatePinnedShareCap() {
   // the verb works exactly as before.
   const runtime = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
   for (const tokens of [70_000, 80_000, 86_000]) {
-    await measure(runtime, tokens, 100_000);
-    await project(runtime);
+    await measureAndCommit(runtime, tokens, 100_000);
   }
   await settle();
   const folds = materialized(runtime).folds;
