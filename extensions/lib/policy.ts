@@ -606,19 +606,6 @@ export const PEEK_HEAD_SHARE = 0.6;
 // ---------------------------------------------------------------------------
 
 /**
- * How many times one inflow may be recovered before the runtime gives up.
- *
- * A provider context-overflow rejection mutates nothing durable -- the assistant
- * message never lands and the projection is rebuilt per request -- so recovery is a
- * reduction plus a rebuild, not a branch rewind. Two attempts is the cap: the first
- * folds at fence pressure with the guard fully waived, the second reaches into the
- * fresh tail, and a third would be asking the same question of the same evidence.
- * Past it the run fails LOUDLY, because an inflow that cannot fit after maximal
- * folding is a genuine impossibility rather than a recoverable state.
- */
-export const OVERFLOW_RECOVERY_MAX_ATTEMPTS = 2;
-
-/**
  * Automatic transactions a session may lose to a CLEAN rollback before folding suspends.
  *
  * A clean rollback wrote no fold record and no state entry and put back the state it

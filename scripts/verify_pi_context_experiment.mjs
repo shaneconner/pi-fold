@@ -2493,7 +2493,7 @@ try {
     // delta is zero and the episode's real cost is the freed count against the request
     // the provider refused. A lens reading the delta alone would price this rescue at 0.
     custom({ kind: "context.recovery", seq: 11, ordinal: 40, provider_status: 400, attempts: 1,
-      max_attempts: 2, tokens_before: 40_000, tokens_after: 40_000, budget_tokens: 50_400,
+      tokens_before: 40_000, tokens_after: 40_000, budget_tokens: 50_400,
       margin_tokens: 2_520, recovered: true, rejected_tokens: 51_000, freed_tokens: 11_000,
       loop_reduced: false, rollback_seq: 10 }),
     // An unreplayable tail: the rollback still happened, the retry did not.
@@ -2504,7 +2504,7 @@ try {
       replay_skip_reason: "the rolled-back tail leaves 1 tool call(s) unanswered",
       notice_chars: 460, attempt_ordinal: 2, probes_passed: true }),
     custom({ kind: "context.recovery", seq: 21, ordinal: 55, provider_status: 400, attempts: 2,
-      max_attempts: 2, tokens_before: 52_000, tokens_after: 52_000, budget_tokens: 50_400,
+      tokens_before: 52_000, tokens_after: 52_000, budget_tokens: 50_400,
       margin_tokens: 2_520, recovered: false, rejected_tokens: 52_000, freed_tokens: 0,
       loop_reduced: false, rollback_seq: 20 }),
     // A disarmed lane: nothing silent, and it never counts as a recovery.
@@ -2560,7 +2560,7 @@ try {
       tokens_rolled_back: 40, replayed: true, replay_skip_reason: null, notice_chars: 400,
       attempt_ordinal: 1, probes_passed: true }),
     custom({ kind: "context.recovery", seq: 41, ordinal: 70, provider_status: 400, attempts: 1,
-      max_attempts: 2, tokens_before: 51_000, tokens_after: 40_000, budget_tokens: 50_400,
+      tokens_before: 51_000, tokens_after: 40_000, budget_tokens: 50_400,
       margin_tokens: 2_520, recovered: true, rollback_seq: 40 }),
   ]).rollback;
   assert.equal(legacy.foldedTokensToRecover, 11_000, "a pre-freed-count stream lost its cost");

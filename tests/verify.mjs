@@ -7010,7 +7010,6 @@ async function gateWedgeAbsorption() {
  * branch on the next request -- so the terminal path is a rollback, not a death.
  */
 async function gateOverflowRecovery() {
-  assert.equal(context.OVERFLOW_RECOVERY_MAX_ATTEMPTS, 2);
   const window = 56_000;
   const runtime = makeRuntime(
     makeFixture({ turns: 12, resultChars: 12_000, contextWindow: window }),
@@ -7228,7 +7227,6 @@ async function gateOverflowRecovery() {
 
   return {
     budgetTokens,
-    maxAttempts: context.OVERFLOW_RECOVERY_MAX_ATTEMPTS,
     entriesAbandoned: rollbackRecord.entries_abandoned,
     tokensRolledBack: rollbackRecord.tokens_rolled_back,
     noticeChars: rollbackRecord.notice_chars,

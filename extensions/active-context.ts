@@ -120,7 +120,6 @@ import {
   MAX_FOLD_SPAN_CHARS,
   MAX_PINNED_SHARE,
   MAX_WEDGE_ABSORB_TOKENS,
-  OVERFLOW_RECOVERY_MAX_ATTEMPTS,
   PEEK_DEFAULT_MAX_BYTES,
   PEEK_MIN_SLICE_BYTES,
   PEEK_READ_ONLY_CONTEXT_ACTIONS,
@@ -2078,9 +2077,9 @@ export function registerActiveContext(pi: any, options: {
    * message never lands and this runtime rebuilds the projection from the branch on
    * every request. So the terminal path is not an abort, it is a rollback: do not
    * append the failed exchange, fold at fence pressure until the request fits, rebuild,
-   * and let Pi resend. Recovery is capped, and the cap is what makes it safe -- an
-   * inflow that still will not fit after maximal folding is a genuine impossibility,
-   * and that one fails LOUDLY exactly as before.
+   * and let Pi resend. What bounds it is running out of foldable material, and an inflow
+   * that still will not fit once everything foldable is folded is a genuine impossibility
+   * that fails LOUDLY through `abortOverBudgetProjection`.
    */
   const enforceProjectionBudget = async (
     snapshot: ActiveContextSnapshot,
@@ -2119,7 +2118,14 @@ export function registerActiveContext(pi: any, options: {
     let reducedAtLeastOnce = false;
     // At the fence the only useful action is the fold that keeps the request
     // transmissible, so every reduction runs with every guarded mark waived.
-    while (attempts < OVERFLOW_RECOVERY_MAX_ATTEMPTS && (measured.crowded || measured.over || rejected)) {
+    // Ends when the request fits or when there is nothing left to fold, and those are the
+    // only two honest endings. A counted cap used to sit here as well, described as the
+    // thing that made the lane safe. It was the opposite: reaching it stops folding while
+    // foldable material is still standing, and the very next statement aborts the run for
+    // being over budget, so the cap could only ever convert a reducible window into a dead
+    // session. Running out of material is what bounds this, and that ending is already
+    // loud.
+    while (measured.crowded || measured.over || rejected) {
       attempts += 1;
       curation.recoveryAttempts += 1;
       let action: Record<string, unknown> | null = null;
@@ -2196,7 +2202,6 @@ export function registerActiveContext(pi: any, options: {
       emit("context.recovery", {
         provider_status: curation.pendingRejection?.status ?? null,
         attempts,
-        max_attempts: OVERFLOW_RECOVERY_MAX_ATTEMPTS,
         tokens_before: overflowBefore,
         tokens_after: measured.sizeTokens,
         occupancy_tokens_after: measured.tokens,
@@ -5253,7 +5258,6 @@ export function registerActiveContext(pi: any, options: {
           },
           recovery: {
             attempts: curation.recoveryAttempts,
-            maxAttempts: OVERFLOW_RECOVERY_MAX_ATTEMPTS,
             pendingRejection: curation.pendingRejection ? { ...curation.pendingRejection } : null,
             last: curation.lastRecovery ? clone(curation.lastRecovery) : null,
             rollback: {
