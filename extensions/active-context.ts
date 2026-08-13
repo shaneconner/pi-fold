@@ -351,8 +351,6 @@ export function registerActiveContext(pi: any, options: {
   const surfacingProjectionType = `${entryTypePrefix}-surfacing`;
   const receiptProjectionType = `${entryTypePrefix}-receipts`;
   const riderProjectionType = `${entryTypePrefix}-rider`;
-  const lastCallProjectionType = `${entryTypePrefix}-lastcall`;
-  const noticeProjectionType = `${entryTypePrefix}-notice`;
   const curationProjectionType = `${entryTypePrefix}-curation`;
   const entryNamespace = entryTypeNamespace(entryTypePrefix);
   const providerMeasurementEntryType = `${entryNamespace}-provider-context-measurement`;
@@ -471,7 +469,6 @@ export function registerActiveContext(pi: any, options: {
     lastSignals: null as CurationSignals | null,
     reopenBaselineShare: null as number | null,
     wallEpisodeOpen: false,
-    lastCallDelivery: null as { exposure: number; ordinal: number } | null,
     recoveryAttempts: 0,
     pendingRejection: null as { status: number; ordinal: number } | null,
     lastRecovery: null as Record<string, unknown> | null,
@@ -1767,55 +1764,6 @@ export function registerActiveContext(pi: any, options: {
     return projected;
   };
 
-  const appendNotices = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
-    const notices = persistence.state?.notices;
-    if (!notices?.ring.length) return projected;
-    for (const notice of notices.ring) {
-      if (!carrierAdmitted(`notice-${notice.share}-${notice.ordinal}`)) continue;
-      projected.push({
-        role: "custom",
-        customType: noticeProjectionType,
-        content: notice.text,
-        display: false,
-        details: {
-          source: activeContextSource(entryTypePrefix),
-          ephemeral: true,
-          share: notice.share,
-          noticeOrdinal: notice.ordinal,
-        },
-        timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
-          ? ownValue(snapshot.messages.at(-1), "timestamp")
-          : 0,
-      });
-    }
-    return projected;
-  };
-
-  const appendLastCall = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
-    const lastCall = persistence.state?.lastCall;
-    if (!lastCall) return projected;
-    if (carrierAdmitted(`lastcall-${lastCall.exposure}`)) {
-      projected.push({
-        role: "custom",
-        customType: lastCallProjectionType,
-        content: lastCall.text,
-        display: false,
-        details: {
-          source: activeContextSource(entryTypePrefix),
-          ephemeral: true,
-          exposure: lastCall.exposure,
-        },
-        timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
-          ? ownValue(snapshot.messages.at(-1), "timestamp")
-          : 0,
-      });
-    }
-    if (curation.lastCallDelivery?.exposure !== lastCall.exposure) {
-      curation.lastCallDelivery = { exposure: lastCall.exposure, ordinal: markOrdinal(snapshot) };
-    }
-    return projected;
-  };
-
   const holdFrozen = (projected: unknown[]): unknown[] => {
     freeze.projection = [...projected];
     freeze.active = false;
@@ -1827,8 +1775,7 @@ export function registerActiveContext(pi: any, options: {
       const customType = ownValue(message, "customType");
       return customType !== milestoneProjectionType && customType !== advisoryProjectionType &&
         customType !== surfacingProjectionType && customType !== receiptProjectionType &&
-        customType !== riderProjectionType && customType !== curationProjectionType &&
-        customType !== lastCallProjectionType && customType !== noticeProjectionType;
+        customType !== riderProjectionType && customType !== curationProjectionType;
     });
     const held = freeze.body?.length ?? 0;
     freeze.active = freeze.projection !== null && body.length >= held &&
@@ -1841,8 +1788,6 @@ export function registerActiveContext(pi: any, options: {
     freeze.bodyText = stableStringify(body);
     appendReceipts(projected, snapshot);
     appendRider(projected, snapshot);
-    appendNotices(projected, snapshot);
-    appendLastCall(projected, snapshot);
     return holdFrozen(projected);
   };
   const noteProjection = (projected: unknown[]): void => {
@@ -2181,31 +2126,6 @@ export function registerActiveContext(pi: any, options: {
     return capacity.usedTokens + expectedWallInflowTokens() > capacity.budgetTokens;
   };
 
-  const lastCallAttribution = (
-    lastCall: NonNullable<ActiveContextState["lastCall"]>,
-    agentMarksNow: number,
-  ): { responded: boolean; context_calls: number; marks_added: number; protects: number; unprotects: number } => {
-    const contextCalls = Math.max(0, curation.contextCalls - lastCall.contextCalls);
-    const protectRecords = instrumentation.ledger.events.filter((record) =>
-      record.seq > lastCall.exposure && record.kind === "context.protect");
-    const protects = protectRecords.filter((record) => record.protect === true).length;
-    return {
-      responded: contextCalls > 0,
-      context_calls: contextCalls,
-      marks_added: Math.max(0, agentMarksNow - lastCall.agentMarks),
-      protects,
-      unprotects: protectRecords.length - protects,
-    };
-  };
-
-  const clearLastCall = (): void => {
-    if (!persistence.state?.lastCall) return;
-    const next = { ...persistence.state };
-    delete next.lastCall;
-    persistence.state = next;
-    curation.lastCallDelivery = null;
-  };
-
   const runCommitEpoch = async (
     snapshot: ActiveContextSnapshot,
     trigger: string,
@@ -2417,25 +2337,6 @@ export function registerActiveContext(pi: any, options: {
     instrumentation.mutationsSinceHandoff += 1;
     instrumentation.lastMutationRequest = instrumentation.requests;
     instrumentation.lastMutationTokens = usedTokens;
-    if (persistence.state.lastCall) {
-      const lastCall = persistence.state.lastCall;
-      const attribution = lastCallAttribution(lastCall, accounting.agentMarks);
-      emit("context.response", {
-        exposure_seq: lastCall.exposure,
-        commit_seq: commitEvent.seq,
-        trigger,
-        outcome: attribution.responded ? "responded" : "silent",
-        ...attribution,
-      });
-      clearLastCall();
-    }
-    if (persistence.state.notices && usedTokens !== null && budgetTokens > 0) {
-      const postOccupancy = Math.max(0, usedTokens - estimatedTokens(freedBytes)) / budgetTokens;
-      const fired = persistence.state.notices.fired.filter((share) => postOccupancy >= share);
-      if (fired.length !== persistence.state.notices.fired.length) {
-        persistence.state = { ...persistence.state, notices: { ...persistence.state.notices, fired } };
-      }
-    }
     const riderEpoch = commitEvent.seq;
     if (persistence.state.rider?.epoch !== riderEpoch) {
       const postAccounting = markAccounting(snapshot, persistence.state);
