@@ -3328,17 +3328,21 @@ export function registerActiveContext(pi: any, options: {
       suspendAutomatic(error, "compaction-boundary", ctx);
       return undefined;
     }
+    // CANCELLED WHETHER OR NOT ANYTHING WAS HANDED OFF. Letting Pi compact when the
+    // boundary found nothing eligible is a silent fallback to a lossy summary, and
+    // losslessness is the whole claim: a crossing that reclaims nothing is a STARVED
+    // session, and the fence, the abort and the rollback lane already own that case and
+    // say so out loud. The decision record still names which of the two happened.
     nativeCompaction.lastThresholdDecision = {
       handled: true,
       retry: false,
       reason: handoff
         ? `${contextBrand(brandNoun)} handed the prefix off losslessly instead of compacting it`
-        : `${contextBrand(brandNoun)} had nothing eligible to hand off`,
+        : `${contextBrand(brandNoun)} blocked stock automatic compaction with nothing eligible to hand off`,
       compactionReason: reason,
       nativeCompactionCompleted: false,
     };
     try { updateStatus(ctx); } catch { }
-    if (!handoff) return undefined;
     return { cancel: true };
   });
   pi.on("agent_settled", async (_event: unknown, ctx: any) => {

@@ -1480,12 +1480,17 @@ async function gateCompactionPolicy() {
     reason: "overflow", willRetry: true, branchEntries: runtime.branch,
   }, runtime.ctx);
   assert.deepEqual(overflow, { cancel: true });
-  // A THRESHOLD BOUNDARY IS ANSWERED BY WHAT IT COULD HAND OFF. A three-turn tool-free
-  // window has nothing eligible, so the runtime lets Pi compact rather than cancelling a
-  // compaction and leaving the window exactly as crowded as it found it. The same hook
-  // on a window with foldable mass cancels, which is what gate 03 reads.
-  const barren = await hook({ reason: "threshold" }, runtime.ctx);
-  assert.equal(barren, undefined);
+  // A THRESHOLD BOUNDARY IS ALWAYS CANCELLED, INCLUDING WHEN IT HANDS OFF NOTHING.
+  // A three-turn tool-free window has nothing eligible, and letting Pi compact there
+  // would trade the losslessness claim for a quieter failure: the window is starved, and
+  // the fence, the abort and the rollback lane are what say so. The decision record
+  // names which of the two crossings happened; the answer to Pi is the same.
+  const barren = await hook({
+    reason: "threshold", willRetry: false, branchEntries: runtime.branch, preparation: {},
+  }, runtime.ctx);
+  assert.deepEqual(barren, { cancel: true });
+  const barrenReason = (await toolStatus(runtime)).details.automatic.lastCompactionDecision?.reason;
+  assert.match(barrenReason, /nothing eligible to hand off$/);
   const loaded = makeRuntime(makeFixture({ turns: 12, resultChars: 10_000, contextWindow: 100_000 }));
   await startRuntime(loaded);
   await measure(loaded, 80_000, 100_000);
@@ -1498,7 +1503,7 @@ async function gateCompactionPolicy() {
   assert.deepEqual(threshold, { cancel: true });
   return {
     manual: "pass-through",
-    thresholdWithNothingToHandOff: "pass-through",
+    thresholdWithNothingToHandOff: "cancel",
     thresholdWithAHandoff: "cancel",
     overflow: "cancel",
   };

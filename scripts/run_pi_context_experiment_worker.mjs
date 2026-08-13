@@ -14,6 +14,7 @@ import {
   EXPERIMENT_ALLOWED_TOOLS,
   EXPERIMENT_BEHAVIORAL_MODE,
   EXPERIMENT_CLOSED_BOOK_LABEL,
+  EXPERIMENT_COMPACTION_TRIGGER_SHARE,
   EXPERIMENT_MARKER_ENTRY,
   closedBookPrompt,
   closedBookQuestions,
@@ -27,6 +28,7 @@ import {
   CONTEXT_EVENT_SUFFIX,
   armRuntimeConfiguration,
   assertExperiment,
+  compactionReserveTokens,
   corpusManifestSha256,
   isWindowOverflow,
   receiptLens,
@@ -281,9 +283,21 @@ try {
     createdWallMs: Date.now(),
   });
 
+  // WHERE PI DECIDES TO SHED CONTEXT. Derived, not Pi's default: on this descriptor the
+  // default reserve puts the trigger above the run's own serving budget, so the fence
+  // reaches the window first and a managed arm never sees the hook at all. Both arms take
+  // the same trigger, which is what makes the pairing a pairing.
+  const compactionTrigger = compactionReserveTokens({
+    descriptorWindow: discoveredModel.contextWindow,
+    servingBudgetTokens: config.providerInputBudget ?? discoveredModel.contextWindow,
+    share: EXPERIMENT_COMPACTION_TRIGGER_SHARE,
+  });
   // The arm IS this settings object plus the extension's conditional registration.
   const isolatedSettings = SettingsManager.inMemory({
-    compaction: { enabled: armRuntime.nativeCompactionEnabled, reserveTokens: 16_384 },
+    compaction: {
+      enabled: armRuntime.nativeCompactionEnabled,
+      reserveTokens: compactionTrigger.reserveTokens,
+    },
     branchSummary: { skipPrompt: true },
     // Pinned transport: "auto" rides WebSocket delta requests whose connection drops
     // re-send the full context cold. Old run configs carry no key and keep Pi's default.
@@ -324,6 +338,8 @@ try {
   const settings = session.settingsManager.getCompactionSettings();
   assertExperiment(settings.enabled === armRuntime.nativeCompactionEnabled,
     `Arm ${config.arm} did not get its compaction configuration: ${JSON.stringify(settings)}`);
+  assertExperiment(settings.reserveTokens === compactionTrigger.reserveTokens,
+    `Arm ${config.arm} did not get its compaction trigger: ${JSON.stringify(settings)}`);
   assertExperiment(session.settingsManager.getTransport() === (config.transport ?? "auto"),
     `Run transport pin did not reach the session: ${session.settingsManager.getTransport()}`);
   const retrySettings = session.settingsManager.getRetrySettings();

@@ -22,7 +22,11 @@ import {
   EXPERIMENT_TRANSPORTS,
   EXPERIMENT_DEFAULT_REPO,
   EXPERIMENT_FOLD_SCHEDULING,
+  EXPERIMENT_COMPACTION_TRIGGER_SHARE,
   EXPERIMENT_GUIDANCE_PROFILES,
+  PI_DEFAULT_COMPACTION_RESERVE_TOKENS,
+  PROJECTION_FENCE_MARGIN_SHARE,
+  compactionReserveTokens,
   EXPERIMENT_MODES,
   EXPERIMENT_MODE_PLANS,
   EXPERIMENT_PROTOCOL_VERSION,
@@ -799,7 +803,7 @@ assert(extension.includes('pi.on("session_before_compact"') &&
 "native compaction must be recorded by outcome: every pass an event, the latch on completion");
 assert(extension.includes("appendToolResult({") && extension.includes("toolResultContentSha256(content)"),
   "every tool result must be hashed into the reread-tax ledger");
-assert(worker.includes("compaction: { enabled: armRuntime.nativeCompactionEnabled") &&
+assert(worker.includes("enabled: armRuntime.nativeCompactionEnabled,") &&
   worker.includes("thinkingLevel: config.model.effort") &&
   worker.includes("validateExperimentManifest(closedBook ? {"),
 "the worker must drive compaction from the arm, pin effort, and emit a validated manifest");
@@ -3851,6 +3855,64 @@ try {
     "the adjudication report does not carry the ledger the wall clock is read against");
 
   checks.theWallClockIsReportedBesideItsLedger = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 59 - the compaction trigger clears the fence, and Pi's default does not.
+//
+// `shouldCompact` fires at `contextTokens > contextWindow - reserveTokens` against the
+// DESCRIPTOR window. gpt-5.6-sol declares 272,000 and Pi's default reserve is 16,384, so
+// the default trigger is 255,616 while the run's serving budget is 251,520: the
+// projection fence is 4,096 tokens BELOW the trigger and always reaches the window first,
+// and a managed arm never sees the hook at all. sol-20260812 rep 9 measured exactly that,
+// six hours and zero compaction passes on the pifold arm against four on the native one.
+//
+// Harmless while the fold runtime carried its own occupancy trigger; fatal to one whose
+// only ordinary mutation point IS the boundary. The reserve is derived now, and this gate
+// pins BOTH halves: the derived trigger clears the fence margin, and Pi's default on this
+// descriptor does NOT, because a gate that only checks the derived value would pass just
+// as happily on a descriptor where the default was already fine and would never have
+// caught rep 9. The worker is checked for using the derived value rather than a literal.
+// ---------------------------------------------------------------------------
+{
+  const descriptorWindow = 272_000;
+  const servingBudgetTokens = 251_520;
+  const derived = compactionReserveTokens({
+    descriptorWindow, servingBudgetTokens, share: EXPERIMENT_COMPACTION_TRIGGER_SHARE,
+  });
+  assert.equal(derived.triggerTokens, 201_216,
+    "the derived trigger is not the occupancy the retired thermostat committed at");
+  assert(derived.triggerTokens < servingBudgetTokens,
+    "the derived compaction trigger does not clear the serving budget");
+  assert(derived.headroomTokens >= PROJECTION_FENCE_MARGIN_SHARE * servingBudgetTokens,
+    "the derived trigger sits inside the fence margin");
+  // The half that makes it non-vacuous: Pi's own default on this descriptor is the
+  // rep-9 configuration, and the record says so rather than leaving it to be rederived.
+  assert.equal(derived.defaultTriggerTokens, descriptorWindow - PI_DEFAULT_COMPACTION_RESERVE_TOKENS);
+  assert.equal(derived.defaultTriggerClearsTheBudget, false,
+    "Pi's default already cleared the serving budget here, so this gate proves nothing " +
+    "and the rep-9 measurement it was written from cannot be reproduced");
+  // A trigger inside the fence margin is refused rather than accepted quietly, which is
+  // the failure mode a share tuned by hand would reach.
+  assert.throws(() => compactionReserveTokens({
+    descriptorWindow, servingBudgetTokens, share: 0.96,
+  }), /inside the fence margin/,
+  "a compaction trigger inside the fence margin was accepted");
+  assert.throws(() => compactionReserveTokens({
+    descriptorWindow: 150_000, servingBudgetTokens, share: EXPERIMENT_COMPACTION_TRIGGER_SHARE,
+  }), /is under the/,
+  "a descriptor window under the trigger produced a negative reserve");
+  // And the worker takes the derived value rather than a literal, on both arms, and
+  // checks that Pi actually received it.
+  const worker = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
+  assert(/reserveTokens: compactionTrigger\.reserveTokens/.test(worker),
+    "the worker still pins a literal compaction reserve");
+  assert(!/reserveTokens: 16_384/.test(worker),
+    "the worker still carries Pi's default reserve, which is the rep-9 configuration");
+  assert(/settings\.reserveTokens === compactionTrigger\.reserveTokens/.test(worker),
+    "the worker does not check that its compaction trigger reached the session");
+
+  checks.theCompactionTriggerClearsTheFence = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

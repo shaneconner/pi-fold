@@ -191,6 +191,67 @@ export const PI_OUTPUT_BUDGET = Object.freeze({
  * model's declared window and output maximum. Mirrors the vendor arithmetic named above;
  * harness gate 52 reads Pi's source and fails when that arithmetic moves.
  */
+/**
+ * WHERE PI DECIDES TO SHED CONTEXT, and why the run has to choose it rather than take
+ * Pi's default.
+ *
+ * `shouldCompact` fires when `contextTokens > contextWindow - reserveTokens` against the
+ * DESCRIPTOR window. On gpt-5.6-sol that descriptor reads 272,000 and the default reserve
+ * is 16,384, so Pi's trigger sits at 255,616 while the run's own serving budget is
+ * 251,520: the projection fence is 4,096 tokens BELOW the trigger and always reaches the
+ * window first. A managed arm on that ordering never sees the hook at all. sol-20260812
+ * rep 9 is the measurement: its pifold arm ran six hours, peaked at 229,661 tokens, and
+ * recorded ZERO compaction passes, while the native arm recorded four.
+ *
+ * That ordering was harmless while the fold runtime carried its own occupancy trigger and
+ * cancelled every compaction it saw. It is fatal to a runtime whose only ordinary
+ * mutation point IS the compaction boundary: the boundary never fires, and every commit
+ * falls to the emergency fence, which is a different system from the one under test.
+ *
+ * So the reserve is DERIVED, and it puts Pi's trigger at the occupancy the retired
+ * thermostat used to commit at. Both arms get it, which is what makes the pairing a
+ * pairing: the same moment of "this session must shed context", and two answers to it.
+ */
+export function compactionReserveTokens({ descriptorWindow, servingBudgetTokens, share }) {
+  assertExperiment(Number.isSafeInteger(descriptorWindow) && descriptorWindow > 0,
+    "The descriptor window is required to place the compaction trigger");
+  assertExperiment(Number.isSafeInteger(servingBudgetTokens) && servingBudgetTokens > 0,
+    "The serving budget is required to place the compaction trigger");
+  assertExperiment(typeof share === "number" && share > 0 && share < 1,
+    "The compaction trigger share must sit strictly inside the serving budget");
+  const triggerTokens = Math.floor(share * servingBudgetTokens);
+  const reserveTokens = descriptorWindow - triggerTokens;
+  const headroomTokens = servingBudgetTokens - triggerTokens;
+  // THE HEADROOM IS THE PROPERTY, not the mere ordering: `share` is already below one, so
+  // a trigger under the budget is arithmetic rather than a check. What can actually go
+  // wrong is a trigger so close to the budget that the fence sits inside the gap and
+  // reaches the window first anyway. The fence keeps a margin of
+  // PROJECTION_FENCE_MARGIN_SHARE of the serving budget, so the trigger has to clear it.
+  assertExperiment(headroomTokens >= PROJECTION_FENCE_MARGIN_SHARE * servingBudgetTokens,
+    `The compaction trigger at ${triggerTokens} tokens leaves ${headroomTokens} tokens ` +
+    `under the ${servingBudgetTokens}-token serving budget, inside the fence margin, so ` +
+    "the fence still reaches the window before the boundary does");
+  assertExperiment(reserveTokens > 0,
+    `The descriptor window ${descriptorWindow} is under the ${triggerTokens}-token trigger`);
+  return {
+    reserveTokens,
+    triggerTokens,
+    headroomTokens,
+    // What Pi's own default would have done, recorded because it is the misconfiguration
+    // this function exists to correct and a reader should not have to rederive it.
+    defaultTriggerTokens: descriptorWindow - PI_DEFAULT_COMPACTION_RESERVE_TOKENS,
+    defaultTriggerClearsTheBudget:
+      descriptorWindow - PI_DEFAULT_COMPACTION_RESERVE_TOKENS < servingBudgetTokens,
+  };
+}
+
+/** Pi `core/compaction/compaction.js` DEFAULT_COMPACTION_SETTINGS.reserveTokens. */
+export const PI_DEFAULT_COMPACTION_RESERVE_TOKENS = 16_384;
+/** The share of the serving budget the projection fence keeps clear; gate 58 pins it. */
+export const PROJECTION_FENCE_MARGIN_SHARE = 0.05;
+/** Where the retired thermostat committed: 0.80 of the serving budget. */
+export const EXPERIMENT_COMPACTION_TRIGGER_SHARE = 0.80;
+
 export function servedOutputBudget({ contextWindow, contextChars, modelMaxTokens }) {
   const estimate = Math.ceil(contextChars / PI_OUTPUT_BUDGET.charsPerToken);
   const available = contextWindow - estimate - PI_OUTPUT_BUDGET.safetyTokens;
