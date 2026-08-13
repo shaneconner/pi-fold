@@ -64,11 +64,40 @@ export const ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
   "rebrief", "reboundary", "unmark",
 ] as const);
 export type ActiveContextToolAction = typeof ACTIVE_CONTEXT_TOOL_ACTIONS[number];
+/**
+ * The largest span an agent may hand the rescue path in one call.
+ *
+ * Kept because of what it DOES when it fires, which is throw with the measured size and
+ * the correction named ("choose a smaller bounded span"). That reaches the agent as a
+ * tool error it can act on and call again, which is the only shape a limit is allowed to
+ * take here: not a silent refusal, not a truncation of the span into something the agent
+ * did not choose. Reachable by construction, since the agent picks the span.
+ */
 export const USER_RESCUE_MAX_SOURCE_CHARS = 512_000;
 export const DEFAULT_CONTEXT_WINDOW = 272_000;
+/**
+ * How many ladder generations an expansion survives before it refolds on its own.
+ *
+ * The lifetime of an expand, not a guard on one: an agent that expands a fold to read it
+ * gets it raw for this many generations and then the ladder takes it back, which is what
+ * makes expand a read rather than a permanent unfold. Protect is the verb for keeping
+ * something raw. Also the ceiling the durable-state parser checks a lease against, since
+ * a lease with more generations left than the runtime ever grants did not come from here.
+ */
 export const EXPAND_LEASE_GENERATIONS = 8;
+/**
+ * How many expansions may hold a lease at once.
+ *
+ * This one is a PAIR and has to stay one: `withExpandLease` sheds the most-expired lease
+ * past the bound, and `parseActiveContextState` refuses a state carrying more than it.
+ * Dropping only the shedding would let the runtime write a state it then refuses to read,
+ * which is the self-inflicted wedge class that cost this project two dead runs; dropping
+ * only the parser check would leave a durable map with no stated size at all. What is
+ * shed is the lease closest to expiring anyway, so the cost of reaching this is that one
+ * expansion refolds a generation or two early. Kept, and the coupling written down,
+ * because the coupling is the part that was never written down.
+ */
 export const MAX_EXPAND_LEASES = 64;
-export const MAX_ADVISORY_DELIVERIES_PER_MILESTONE = 16;
 
 // Surfacing SELECTOR structure. These stay INTERNAL constants rather than public
 // options: they are the knobs the surfacing experiment is meant to settle, and an
@@ -108,7 +137,28 @@ export const SURFACING_INTENT_RECENCY_SHARE = 0.5;
 export const SURFACING_INTENT_ARGUMENT_KEYS: readonly string[] = Object.freeze([
   "path", "file_path", "query", "pattern", "command", "brief", "id",
 ]);
+/**
+ * How much of a collapsed fold's stored source the content channel scores.
+ *
+ * A real behavioral bound and not bookkeeping: material past it never scores, so a fold
+ * whose relevant passage sits late in a very large source can fail to surface. Kept for
+ * the cost of the alternative, which is scoring every collapsed fold's ENTIRE stored
+ * source on every turn. That is the per-turn work that scales with the session file, the
+ * exact shape gates 113, 120 and 121 were each built to remove after it took a run from
+ * minutes to hours. Twenty thousand characters is about five thousand tokens, several
+ * times any brief, and the relevance signal a channel needs is not in the tail.
+ */
 export const SURFACING_MAX_CONTENT_CHARS = 20_000;
+/**
+ * How many surfacing records the durable ledger keeps, oldest dropped.
+ *
+ * The same pair as the expand leases: `withSurfacingLedger` trims to it and the state
+ * parser refuses a ledger longer than it, so the two move together or not at all. This
+ * ledger is durable, which is what separates it from the in-process instrumentation rings
+ * that used to be bounded here and no longer are: those cost only process memory and are
+ * bounded again where they are served, while every record here is written into state and
+ * rides the digest on every persist.
+ */
 export const SURFACING_MAX_LEDGER_RECORDS = 256;
 export const SURFACING_HOOK_CHARS = 160;
 
@@ -358,14 +408,6 @@ export function servingBudgetTokens(window: number): number {
 }
 
 export const MAX_PENDING_MARKS = 256;
-/**
- * How many times one commit re-reads its own eligible-root count.
- *
- * A termination bound, not a cadence: a parent is excluded from the count that produced
- * it, so each round divides the standing roots by `consolidateAfter` and the sequence
- * closes in two rounds at any window a session can carry.
- */
-export const EPOCH_CONSOLIDATION_ROUNDS = 4;
 /** Estimate only; provider token accounting always comes from a measured response. */
 export const ESTIMATED_BYTES_PER_TOKEN = 4;
 /** Rendered navigation/topology overhead assumed around a brief when estimating a placeholder. */
@@ -409,8 +451,6 @@ export const PEEK_MIN_SLICE_BYTES = 1_024;
 
 /** How many folds the dieted status payload ranks by what they would reclaim. */
 export const STATUS_DIET_SUGGESTIONS = 5;
-
-export const MAX_PROJECTION_HASH_RECORDS = 64;
 
 // ---------------------------------------------------------------------------
 // Guided curation: the two-signal curation trigger, its bounded last-call gate,
@@ -494,8 +534,6 @@ export const MAX_SURFACING_LINE_BYTES = 384;
 export const MAX_CONTEXT_RECEIPTS = 3;
 /** Hard byte cap on the rendered receipt block, so a receipt can never itself bloat. */
 export const CONTEXT_RECEIPT_BLOCK_BYTES = 900;
-/** Durable instrumentation records kept in the in-memory ledger for status. */
-export const MAX_CONTEXT_ATTEMPT_RECORDS = 128;
 
 // ---------------------------------------------------------------------------
 // The mark response.
@@ -641,11 +679,44 @@ export const ACTIVE_CONTEXT_POLICY = Object.freeze({
   prepareRatio: 0.90,
   warmRatio: 0.55,
   responseReserve: 16_384,
+  /**
+   * WHAT A CHAPTER IS. The four numbers below are the ladder's unit of work, not guards
+   * on it, which is why they are stated here together rather than defended one at a time.
+   *
+   * `minToolChars` and `minChapterChars` are floors: below them a fold costs more window
+   * in placeholder and brief than the raw span it replaces, so folding there loses ground.
+   * `maxChapterChars` and `maxChapterTurns` are the other end, and they are what keeps a
+   * fold a THING the agent can reason about: a chapter is a few consecutive turns on one
+   * piece of work, and a span that ran longer than that is two subjects sharing one
+   * sentence of brief. None of the four ever refuses anything. The selector simply does
+   * not propose a span outside them, so they are read as the shape of a proposal.
+   */
   minToolChars: 2_000,
   minChapterChars: 4_000,
   maxChapterChars: 128_000,
   maxChapterTurns: 4,
+  /**
+   * How much source one generator call carries, which is the batch packer's budget.
+   *
+   * Not a rail. It binds on nearly every call by design, because the packer fills to it:
+   * across the 151 calls of the six sealed sol-20260812 runs the median request was
+   * 153,837 characters and the maximum 199,835, which is 99.9 percent of the budget. That
+   * is the batching working, ten spans to a call where they fit. It is also what sizes
+   * `briefTimeoutMs` below, and `prepareFold` throws rather than trimming when a single
+   * span somehow exceeds it, because a silently shortened source produces a brief about
+   * material the fold does not contain.
+   */
   maxSourceChars: 200_000,
+  /**
+   * The widest fold, in exact references.
+   *
+   * Stated at the selector, which is the reason it survives an audit that deleted several
+   * of its neighbours: a group over this many refs is left UNFORMED rather than trimmed,
+   * so nothing is silently dropped from a fold, and the agent path throws by name
+   * ("Folds may include at most 256 exact source references") so a caller that asked for
+   * too much is told what to ask for instead. The durable parser checks the same number,
+   * so a fold record wider than the runtime can build does not parse.
+   */
   maxFoldSourceRefs: 256,
   /**
    * 2,000 (Shane 2026-08-11), raised from 1,200.
@@ -690,6 +761,16 @@ export const ACTIVE_CONTEXT_POLICY = Object.freeze({
    * for a cap-sized source without leaving a stalled generator holding a slot all session.
    */
   briefTimeoutMs: 300_000,
+  /**
+   * The context a generator gets either side of the span it is briefing.
+   *
+   * A size, not a limit. A brief written with no idea what came before it describes events
+   * without their reason, so the request carries a couple of neighbouring messages at each
+   * end and stops. Both numbers are `break` conditions while the orientation is assembled,
+   * never truncation of a message: whatever fits arrives whole, and the rest is simply not
+   * sent. Small on purpose, because orientation competes with the span itself for the
+   * request budget above and the span is the thing being described.
+   */
   orientationMessages: 2,
   maxOrientationChars: 12_000,
 });

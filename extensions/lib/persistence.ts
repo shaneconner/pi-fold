@@ -20,7 +20,6 @@ import {
   ACTIVE_CONTEXT_POLICY,
   ACTIVE_CONTEXT_STATE_ENTRY,
   EXPAND_LEASE_GENERATIONS,
-  MAX_ADVISORY_DELIVERIES_PER_MILESTONE,
   MAX_EXPAND_LEASES,
   MAX_LAST_CALL_TEXT_BYTES,
   MAX_PENDING_MARKS,
@@ -1092,8 +1091,12 @@ export function validAdvisoryState(value: unknown): value is NonNullable<ActiveC
         !/^[a-f0-9]{64}$/.test(String(ownValue(armed, "scheduleKey")))) return false;
   }
   const delivered = ownValue(value, "delivered") as Record<string, unknown>;
+  // No ceiling on the count. One used to sit here at sixteen, bounding a counter nothing
+  // in the runtime increments: `advisory.delivered` is written as an empty map at
+  // construction and never again, so the clause could only ever have rejected a state
+  // this runtime cannot produce. The shape checks stay, because they are what keep a
+  // hand-edited or corrupted file from parsing into something the rest of the code trusts.
   return Reflect.ownKeys(delivered).every((key) => typeof key === "string" &&
     ADVISORY_MILESTONES.includes(key as AdvisoryMilestone) &&
-    Number.isSafeInteger(ownValue(delivered, key)) && Number(ownValue(delivered, key)) >= 0 &&
-    Number(ownValue(delivered, key)) <= MAX_ADVISORY_DELIVERIES_PER_MILESTONE);
+    Number.isSafeInteger(ownValue(delivered, key)) && Number(ownValue(delivered, key)) >= 0);
 }

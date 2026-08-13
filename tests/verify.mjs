@@ -1070,13 +1070,37 @@ async function gateFoldLattice() {
   const structurallyValidHistoricalBrief = structuredClone(validated);
   structurallyValidHistoricalBrief[0].brief = "pi_fold_context";
   assert.equal(context.validateFoldForest(structurallyValidHistoricalBrief).length, 1);
+  // A REJECTED SUPPLIED BRIEF SAYS WHICH RULE IT MISSED. The refusal used to name the
+  // character cap whatever the brief did wrong, which told an agent nothing when its brief
+  // was well inside the cap and structural. It carries the generator's own complaint now,
+  // so the caller is told what to change and can mark again with the material it still has.
   await assert.rejects(() => context.prepareFold({
     candidate,
     snapshot,
     state: empty,
     generation: 1,
     brief: "pi_fold_context",
-  }), /Supplied brief must be non-structural/);
+  }), /Supplied brief rejected\./);
+  await assert.rejects(() => context.prepareFold({
+    candidate, snapshot, state: empty, generation: 1, brief: "pi_fold_context",
+  }), (error) => {
+    assert(/Name concrete things from the span/.test(error.message),
+      `A structural brief was refused with ${JSON.stringify(error.message)}`);
+    // The wrong rule must not be named: this brief is fifteen characters.
+    assert(!new RegExp(String(context.ACTIVE_CONTEXT_POLICY.maxBriefChars)).test(error.message),
+      "A fifteen-character brief was refused by naming the character cap");
+    return true;
+  });
+  await assert.rejects(() => context.prepareFold({
+    candidate, snapshot, state: empty, generation: 1,
+    brief: `Real facts about the span. ${"padding ".repeat(400)}`,
+  }), (error) => {
+    assert(new RegExp(`limit is ${context.ACTIVE_CONTEXT_POLICY.maxBriefChars}`).test(error.message),
+      `An over-long brief was refused with ${JSON.stringify(error.message)}`);
+    assert(/Cut detail, not subjects/.test(error.message),
+      "The over-long refusal does not say how to shorten it");
+    return true;
+  });
 
   const recovered = context.recoverFoldMessages({
     foldId: committed.prepared.id,
@@ -4107,10 +4131,12 @@ async function gateProjectionInstrumentation() {
   assert.equal(ledger.providerSideMisses, 1);
   assert.equal(context.observeCacheUsage(ledger, { usage: null, change: "append" }), null);
 
-  // The record ring itself: every record keys on a prefix digest, and the ring is
-  // bounded. Restated at iteration 8 against the ring's own constructor: the status
-  // page now delivers a bounded tail of these records, so the page is no longer the
-  // place to prove ring-construction properties.
+  // The record ring itself: every record keys on a prefix digest, and the ledger KEEPS
+  // every one of them. It used to drop its oldest at a constant of 64, which was a second
+  // bound on material that is already bounded where it is read: `boundStatusPayload` trims
+  // exactly this listing to fit the page, newest kept, naming what it dropped. Trimming
+  // here as well meant the page could never reach past the constant however it paged, and
+  // the same pattern on `ledger.events` silently shortened the last-call attribution.
   const recordLedger = context.emptyLedger();
   context.recordProjection(recordLedger, context.compareProjections(null, ["a", "b"]), ["da", "db"]);
   context.recordProjection(recordLedger, context.compareProjections(["a", "b"], ["a", "z"]), ["da", "dz"]);
@@ -4124,8 +4150,10 @@ async function gateProjectionInstrumentation() {
       ["da", `dx${index}`],
     );
   }
-  assert.equal(recordLedger.records.length, context.MAX_PROJECTION_HASH_RECORDS,
-    "The record ring is unbounded");
+  assert.equal(recordLedger.records.length, 72,
+    "The projection ledger dropped records that nothing asked it to drop");
+  assert.equal(recordLedger.records[0].previousCount, 0,
+    "The oldest projection record was evicted, so the page can never reach it");
 
   // End to end. The same session reports rewrites it caused separately from misses it
   // merely observed, and the per-message digests make the append case provable.
@@ -4184,7 +4212,24 @@ async function gateProjectionInstrumentation() {
   const appended = projectionEvents.filter((event) => event.change === "append");
   assert(appended.every((event) => event.first_divergent_index === null),
     "An append recorded a prefix divergence");
-  assert(ledgerNow.projectionRecords.length <= 64, "The record ring is unbounded");
+  // What bounds these listings now, and the only thing that ever should have: the page
+  // that serves them. The ledger keeps everything; `boundStatusPayload` trims whole
+  // records off the newest-kept tail until the page fits, and says what it dropped. Driven
+  // here against a ledger deliberately far longer than a page can carry, so the trim is
+  // exercised rather than assumed.
+  for (let index = 0; index < 90; index += 1) await project(runtime);
+  const grown = (await toolStatus(runtime)).details.automatic.instrumentation;
+  assert(grown.projections > 64,
+    `The runtime recorded ${grown.projections} projections, too few to outgrow the deleted bound`);
+  // The page really trims rather than merely fitting: it holds fewer records than the
+  // ledger recorded. Without this the assertion below would pass on a ledger that never
+  // grew past a page and would say nothing about what replaced the constant.
+  assert(grown.projectionRecords.length < grown.projections,
+    `The page delivered all ${grown.projections} records, so its own trim never ran`);
+  const pageResult = await toolStatus(runtime);
+  const pageBytes = Buffer.byteLength(pageResult.content[0].text, "utf8");
+  assert(pageBytes <= context.CONTEXT_STATUS_RESPONSE_BYTES,
+    `The status page served ${pageBytes} bytes against a ${context.CONTEXT_STATUS_RESPONSE_BYTES}-byte cap`);
   assert(usageEvents.every((event) =>
     typeof event.input_tokens === "number" && typeof event.cache_read_tokens === "number"));
 
@@ -7456,12 +7501,19 @@ async function gateLeverCollapse() {
     assert.equal(context[name], undefined, `${name} survived the collapse`);
   }
   // What the deletions had to LEAVE standing: the `advisory` state field is written into
-  // every state and covered by the state digest, so its vocabulary and its per-milestone
-  // ceiling stay, and every sealed run keeps materializing.
+  // every state and covered by the state digest, so its vocabulary stays and every sealed
+  // run keeps materializing. Its per-milestone CEILING does not stay: sixteen bounded a
+  // counter no code path increments, so it could only ever have refused a state this
+  // runtime cannot write. The shape checks around it are what actually validate the field.
   assert.deepEqual([...context.ADVISORY_MILESTONES],
     ["orientation", "notice", "tools", "chapters", "urgent"]);
-  assert.equal(context.MAX_ADVISORY_DELIVERIES_PER_MILESTONE, 16);
+  assert.equal(context.MAX_ADVISORY_DELIVERIES_PER_MILESTONE, undefined,
+    "A ceiling came back on a delivery counter nothing increments");
   assert.equal(context.validAdvisoryState({ highWater: 0.4, delivered: { notice: 2 } }), true);
+  assert.equal(context.validAdvisoryState({ highWater: 0.4, delivered: { notice: -1 } }), false,
+    "The advisory shape checks went with the ceiling");
+  assert.equal(context.validAdvisoryState({ highWater: 0.4, delivered: { nonsense: 2 } }), false,
+    "An unknown milestone parsed as valid advisory state");
   // And the surfacing SELECTOR outlives the carrier that rendered it: it returns at the
   // commit boundary, now scoring both channels, with its suppression ledger.
   assert.equal(typeof context.selectSurfacingSlate, "function");
@@ -10991,6 +11043,26 @@ async function gateBriefUpgradesRideTheBoundary() {
   assert.equal(slowCommits.every((record) => record.brief_upgrades === 0), true,
     "A brief landed on a boundary while its generator call was still open");
 
+  // WHAT THE JAM COSTS, SAID OUT LOUD. With every call held open the queue fills, and a
+  // leaf that arrives at a full queue is not deferred, it is finished: its source is exact
+  // active evidence at that commit and a placeholder after it, so no later boundary can
+  // brief it. That is the only permanent outcome in this lane and it used to be silent,
+  // invisible to `brief_upgrades_waiting` precisely because a shed leaf is what is no
+  // longer waiting. A slow generator would have shown falling brief quality and no cause.
+  const shed = slowCommits.filter((record) => record.brief_upgrades_abandoned > 0);
+  assert(shed.length,
+    "The lane jammed for four boundaries and no commit reported shedding a single leaf");
+  assert(shed.every((record) =>
+    record.brief_upgrades_abandoned_ids.split(",").filter(Boolean).length ===
+    record.brief_upgrades_abandoned),
+  "A commit reported a shed count its named ids do not account for");
+  // The shed leaves are real folds of this session, not a counter running on its own.
+  const shedIds = new Set(shed.flatMap((record) =>
+    record.brief_upgrades_abandoned_ids.split(",").filter(Boolean)));
+  const slowFolds = new Set(materialized(slow).folds.map((fold) => fold.id));
+  assert([...shedIds].every((id) => slowFolds.has(id)),
+    "A commit named a shed fold the session does not hold");
+
   // ANTI-VACUITY. The second call started while the first was still open, so a lane with
   // one slot could not have started it, and no call here finished before its release:
   // under the previous behavior this timeline produces exactly one brief per boundary.
@@ -11058,6 +11130,7 @@ async function gateBriefUpgradesRideTheBoundary() {
     inFlightBound: context.MAX_BRIEF_UPGRADES_IN_FLIGHT,
     peakInFlight: peakOpen,
     queueCap: context.MAX_BRIEF_UPGRADE_QUEUE,
+    leavesShedWhileJammed: [...shedIds].length,
     upgradesOnTheDrainedBoundary: drainCarrier.brief_upgrades,
     beyondOneSlot: beyondOneSlot.length,
     projectionStableBetweenBoundaries: true,
@@ -11507,7 +11580,42 @@ async function gateOneCallPerCommit() {
   assert(/Brief 1:/.test(retry.cure) && /Brief 2:/.test(retry.cure),
     "The cure did not name its complaints per span");
 
+  // AND THE COMPLAINTS COME BACK KEYED TO THE SPAN, not to the subset that was last asked.
+  // The two orders diverge the instant a cure re-asks a subset: here spans 1 and 3 fail and
+  // spans 0 and 2 land, so the retry's list is [1, 3] and a caller reading it positionally
+  // reports span 3's failure under span 1's name. Driven against the function directly,
+  // because the runtime keeps only the last failure and one is not enough to show an order.
+  const spans = [0, 1, 2, 3].map((index) => ({ candidateId: `span-${index}` }));
+  const overLong = `x${"y".repeat(context.ACTIVE_CONTEXT_POLICY.maxBriefChars * 2)}`;
+  const keyed = await context.generatedBriefs({
+    summarize: async (request) => briefAnswer(request, (id) => {
+      // Both failures survive their cure, and they fail DIFFERENTLY, which is the whole
+      // point: one empty and one over the cap cannot be confused for each other.
+      if (id === "span-1") return "";
+      if (id === "span-3") return overLong;
+      return `Good brief for ${id}, within the stated limit.`;
+    }),
+    request: { spans },
+    spans,
+    maxBriefChars: context.ACTIVE_CONTEXT_POLICY.maxBriefChars,
+    toolName: "acme_context",
+  });
+  assert.equal(keyed.complaints.length, spans.length,
+    "The complaints came back shorter than the spans, so they cannot be read by span");
+  assert(keyed.briefs[0] && keyed.briefs[2], "A span that met the contract was reported as failing");
+  assert(!keyed.briefs[1] && !keyed.briefs[3], "A span that failed twice was reported as landing");
+  assert.equal(keyed.complaints[0], null, "A span that landed carries a complaint");
+  assert.equal(keyed.complaints[2], null, "A span that landed carries a complaint");
+  assert(/empty|no brief|blank/i.test(keyed.complaints[1]),
+    `Span 1 failed empty and its complaint reads ${JSON.stringify(keyed.complaints[1])}`);
+  assert(/\b\d{4,}\b/.test(keyed.complaints[3]),
+    `Span 3 failed over the cap and its complaint reads ${JSON.stringify(keyed.complaints[3])}`);
+  // The two are not interchangeable, which is what makes the keying claim mean something.
+  assert.notEqual(keyed.complaints[1], keyed.complaints[3],
+    "Both failures carry the same complaint, so no ordering could be detected either way");
+
   return {
+    complaintsKeyedBySpan: keyed.complaints.map((entry) => entry === null),
     callsForOneCommit: upgradeCalls.length,
     spansBriefed: briefedSpans.length,
     spansInTheFirstCall: batch.spans.length,
@@ -13056,6 +13164,39 @@ async function gateNoFoldWithoutABrief() {
   assert.equal(asked.length, spentBefore,
     "A generator call was spent on a span the agent had already briefed");
 
+  // A BAD SUPPLIED BRIEF IS REFUSED AS A MARK, ON THE PATH THAT SKIPS THE PREPARATION.
+  //
+  // `prepareFold` validates the brief it is handed, and the mark path skips it when the
+  // span is protected or already prepared. On those paths the mark used to be accepted
+  // carrying an unchecked brief, and the first check then happened inside the automatic
+  // commit, where a throw suspends folding for the whole session. That is the position the
+  // lost-commit defect occupied, reached over a sentence the agent wrote and was told was
+  // fine. So: protect the span first, which is what makes the mark deferred, then mark it
+  // with a brief that cannot pass.
+  const guarded = built.turnEntries[2][2];
+  const pinned = await toolCall(runtime, { action: "protect", ids: [guarded] });
+  assert(pinned.details.protectedRefs > 0,
+    "The fixture could not protect the span it needs deferred, so nothing here is deferred");
+  const marksBefore = materialized(runtime).pendingMarks.length;
+  const refused = await toolCall(runtime, {
+    action: "fold", ids: [guarded], brief: "pi_fold_context",
+  });
+  const refusal = JSON.stringify(refused.details);
+  assert(/Supplied brief rejected/.test(refusal),
+    `A structural brief on a deferred span was not refused: ${refusal.slice(0, 400)}`);
+  assert(/Name concrete things from the span/.test(refusal),
+    "The refusal does not tell the agent what to write instead");
+  assert.equal(materialized(runtime).pendingMarks.length, marksBefore,
+    "A mark carrying a brief that cannot pass was accepted and left to throw at commit");
+  // And the agent is not stranded: the same span takes a good brief on the next call.
+  const retried = await toolCall(runtime, {
+    action: "fold", ids: [guarded],
+    brief: "The third inspection recorded a failing path and its exact stdout, both recoverable.",
+  });
+  assert.equal(retried.details.ok, true,
+    "The agent corrected the brief the refusal complained about and was refused again");
+  await toolCall(runtime, { action: "unprotect", ids: [guarded] });
+
   // EVERY FOLD, AFTER THE LADDER RUNS. The lane and the fallbacks together leave nothing
   // standing with an empty placeholder.
   await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
@@ -13086,6 +13227,8 @@ async function gateNoFoldWithoutABrief() {
     schemaAsksForABrief: true,
     generatedWhenOmitted: true,
     suppliedKeptVerbatim: true,
+    deferredBadBriefRefusedAtTheMark: true,
+    agentCorrectedAndWasAccepted: true,
     generatorCallsSpent: asked.length,
     committedFolds: folds.length,
     foldsWithoutABrief: empty.length,

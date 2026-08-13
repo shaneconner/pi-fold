@@ -20,6 +20,7 @@ import {
   automaticPreparationId,
   boundedOrientation,
   boundStatusPayload,
+  briefContractComplaint,
   commitPreparedFold,
   consolidationSourceText,
   descendantIds,
@@ -104,7 +105,6 @@ import {
   COMMIT_RECLAIM_FLOOR_SHARE,
   CONTEXT_RECEIPT_BLOCK_BYTES,
   DEFAULT_CONTEXT_WINDOW,
-  EPOCH_CONSOLIDATION_ROUNDS,
   MAX_THRESHOLD_NOTICES,
   THRESHOLD_NOTICE_SHARES,
   resolveGuidance,
@@ -535,6 +535,18 @@ export function registerActiveContext(pi: any, options: {
      * right (Shane 2026-08-11).
      */
     cures: 0,
+    /**
+     * LEAVES SHED FOR A FULL QUEUE since the last commit record carried them.
+     *
+     * A parent that loses its turn waits, and a leaf that loses its turn is finished: its
+     * source is exact active evidence at this commit and a placeholder after it, so no
+     * later boundary can brief it and it reads deterministic for the rest of the session.
+     * That is the only permanent outcome in this lane, and it used to happen without a
+     * word: `brief_upgrades_waiting` counts what is still in the lane, and a shed leaf is
+     * precisely what is not. A deployment whose generator is slow enough to hold the queue
+     * full would have watched brief quality fall with nothing in the stream naming why.
+     */
+    abandoned: [] as string[],
     lastError: null as string | null,
   };
 
@@ -2631,12 +2643,13 @@ export function registerActiveContext(pi: any, options: {
       // still there whenever the lane has room, and a group that loses its turn at a busy
       // boundary would otherwise keep the index its children could not write. A leaf is the
       // other way round. Its source is exact active evidence at this commit and a
-      // placeholder after it, so a full queue drops it here and the receipt says so.
+      // placeholder after it, so a full queue sheds it here, permanently, and the next
+      // commit record names it in `brief_upgrades_abandoned`.
       if (parent && (full || childFoldIds(fold).some(pending))) {
         upgrades.deferred.add(foldId);
         continue;
       }
-      if (full) continue;
+      if (full) { upgrades.abandoned.push(foldId); continue; }
       upgrades.deferred.delete(foldId);
       const refs = parent
         ? flattenFoldRefs(fold, persistence.state)
@@ -2690,8 +2703,16 @@ export function registerActiveContext(pi: any, options: {
         // folds and its source will still be there whenever the lane frees up. A leaf
         // cannot wait: its source is exact active evidence at THIS commit and a placeholder
         // after it, so it keeps the deterministic brief it committed with.
+        //
+        // That is the one outcome in this lane that is permanent, and it used to happen
+        // without a word. A leaf abandoned here reads deterministic for the rest of the
+        // session and nothing in the stream distinguishes it from a leaf the lane simply
+        // has not reached yet, so a deployment whose generator is slow enough to hold the
+        // queue full would see brief quality fall with nothing naming the cause. Counted
+        // and carried on the commit that abandoned them.
         for (const item of gathered.slice(at)) {
           if (item.parent) upgrades.deferred.add(item.foldId);
+          else upgrades.abandoned.push(item.foldId);
         }
         break;
       }
@@ -2786,7 +2807,7 @@ export function registerActiveContext(pi: any, options: {
           upgrades.failed.add(member.foldId);
           upgrades.failures += 1;
           upgrades.lastError = boundReceiptText(
-            `span ${at + 1} of ${entry.members.length}: ${generated.complaints[0] ?? "no brief"}`,
+            `span ${at + 1} of ${entry.members.length}: ${generated.complaints[at] ?? "no brief"}`,
             240, "brief upgrade",
           );
           return;
@@ -3324,7 +3345,15 @@ export function registerActiveContext(pi: any, options: {
     // it just made, inside the rewrite it has already paid for. No waiver here: a parent
     // this round cannot apply is held by the ordinary guard and waits, exactly like any
     // other fold. It converges because a parent is excluded from the count it came from.
-    for (let round = 0; round < EPOCH_CONSOLIDATION_ROUNDS; round += 1) {
+    //
+    // The loop's own exits are the real ones, and they are the two immediately below: no
+    // new consolidation mark, or nothing applied. Both are the fixpoint gate 13 states.
+    // A counted bound of four used to wrap this as well, which could only ever cut the
+    // fixpoint short, and only in a session with more than ten thousand visible roots,
+    // since each round divides the count by `consolidateAfter`. It is gone for the same
+    // reason the two scheduling counters were: a bound that cannot fire is unread, and a
+    // bound that can fire here would silently break the law the epoch is here to keep.
+    for (;;) {
       let closing = result.state;
       for (const mark of consolidationMarks({ snapshot, state: closing, ordinal })) {
         const addition = addPendingMark(closing, mark);
@@ -3357,8 +3386,13 @@ export function registerActiveContext(pi: any, options: {
     const upgradeFailures = upgrades.failures;
     const upgradeError = upgrades.lastError;
     const upgradeCures = upgrades.cures;
+    // Read on the same boundary as the failures and for the same reason: these were shed
+    // while the previous boundary's batch was still queueing, so this is the first commit
+    // record that can carry them.
+    const upgradeAbandoned = upgrades.abandoned;
     upgrades.failures = 0;
     upgrades.cures = 0;
+    upgrades.abandoned = [];
     upgrades.lastError = null;
     const bytesAfter = bytes(projectActiveContext(snapshot, persistence.state));
     const freedBytes = Math.max(0, bytesBefore - bytesAfter);
@@ -3415,6 +3449,13 @@ export function registerActiveContext(pi: any, options: {
       // are how the brief cap gets judged against something other than intuition.
       brief_upgrade_cures: upgradeCures,
       brief_upgrade_error: upgradeError,
+      // Leaves the lane will never brief, because the queue was full when they committed
+      // and a leaf's source is gone by the next boundary. The one permanent outcome here,
+      // and the only one `brief_upgrades_waiting` cannot show, since a shed leaf is exactly
+      // what is no longer waiting. A run whose generator is too slow for its ladder reads
+      // as falling brief quality unless this number is beside it.
+      brief_upgrades_abandoned: upgradeAbandoned.length,
+      brief_upgrades_abandoned_ids: upgradeAbandoned.join(","),
       // Everything still owed to a FOLD: queued, in flight, and (always zero once the
       // wedge above ran) written but uncarried. In flight is counted because the lane
       // holds several calls open and work nobody can see is work nobody bounds. Counted in
@@ -5624,6 +5665,31 @@ export function registerActiveContext(pi: any, options: {
         const deferred = refsProtected(candidate.sourceRefs, staged, snapshot) ||
           (candidate.kind === "tool-result" &&
             toolRefsProtected(candidate.sourceRefs, staged, snapshot));
+        // A SUPPLIED BRIEF IS JUDGED HERE, ON EVERY PATH, because here is the only place
+        // the agent can do anything about it.
+        //
+        // `prepareFold` below validates the brief it is given, and it is skipped when the
+        // span is deferred or already prepared. On those two paths the mark used to be
+        // accepted carrying an unchecked brief, and `commitPendingMarks` calls `prepareFold`
+        // with `mark.brief` later, so the first check happened inside the automatic
+        // transaction. That throw is fatal: it is the same position as the defect that lost
+        // four commits this week, and it would suspend folding for a session over a sentence
+        // the agent wrote and was told was fine. Refused as a mark instead, with the
+        // generator's own complaint, which the agent reads in this result and can mark again
+        // against because it still holds the span.
+        const suppliedComplaint = item.brief === undefined
+          ? null
+          : briefContractComplaint(item.brief.trim(), snapshot.policy.maxBriefChars, snapshot.toolName);
+        if (suppliedComplaint !== null) {
+          marks.push({
+            id: foldIdFor(candidate.kind, candidate.parts),
+            kind: candidate.kind,
+            ok: false,
+            deferred: false,
+            reason: `Supplied brief rejected. ${suppliedComplaint}`,
+          });
+          continue;
+        }
         const briefed = !deferred && !alreadyPrepared
           ? await prepareFold({
             candidate,

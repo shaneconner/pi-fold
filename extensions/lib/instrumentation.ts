@@ -1,9 +1,5 @@
 import { evidenceSha256, sha256Value } from "../json.ts";
 import { ownValue } from "./canonical.ts";
-import {
-  MAX_CONTEXT_ATTEMPT_RECORDS,
-  MAX_PROJECTION_HASH_RECORDS,
-} from "./policy.ts";
 
 /**
  * Projection instrumentation.
@@ -271,18 +267,24 @@ export function recordContextEvent(
     ...payload,
   };
   ledger.countsByKind[kind] = (ledger.countsByKind[kind] ?? 0) + 1;
+  // The ledger keeps every event, and every projection record and cache observation
+  // below does the same.
+  //
+  // Each of these used to drop its oldest entries at a constant, which was a second
+  // bound on material that is already bounded where it is READ. `boundStatusPayload`
+  // trims exactly these three listings to fit the status page, at whole-record
+  // boundaries, newest kept, naming in the payload how many it dropped and where to
+  // page from. Trimming here first meant the page could never page back past the
+  // constant however the caller asked, and it silently shortened the one other reader:
+  // `lastCallAttribution` counts `context.protect` records since a round opened, and a
+  // dropped event is a pin the round is not credited with.
+  //
+  // Nothing else reads them and none of them reaches durable state, so the whole cost of
+  // keeping them is process memory for the session's own event records, which the session
+  // file already holds on disk. The longest run in the sol-20260812 campaign emitted 841
+  // events; at the old constant of 128 the drop ran on nearly every one of them.
   ledger.events.push(record);
-  if (ledger.events.length > MAX_CONTEXT_ATTEMPT_RECORDS) {
-    ledger.events = ledger.events.slice(ledger.events.length - MAX_CONTEXT_ATTEMPT_RECORDS);
-  }
   return record;
-}
-
-function bounded<T>(values: T[], next: T): T[] {
-  values.push(next);
-  return values.length > MAX_PROJECTION_HASH_RECORDS
-    ? values.slice(values.length - MAX_PROJECTION_HASH_RECORDS)
-    : values;
 }
 
 export function recordProjection(
@@ -294,7 +296,7 @@ export function recordProjection(
   if (comparison.change === "rewrite") ledger.rewrites += 1;
   else if (comparison.change === "append") ledger.appends += 1;
   else ledger.identical += 1;
-  ledger.records = bounded(ledger.records, {
+  ledger.records.push({
     ...comparison,
     ordinal: ledger.projections,
     // The prefix digest, not the whole projection: it is what a positional cache keys
@@ -343,7 +345,7 @@ export function observeCacheUsage(
   };
   if (missed) ledger.observedMisses += 1;
   if (observation.providerSideMiss) ledger.providerSideMisses += 1;
-  ledger.observations = bounded(ledger.observations, observation);
+  ledger.observations.push(observation);
   return observation;
 }
 
