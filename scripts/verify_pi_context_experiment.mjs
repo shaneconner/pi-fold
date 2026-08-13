@@ -58,6 +58,7 @@ import {
   probeTranscripts,
   providerWeather,
   receiptLens,
+  sessionLedgerLens,
   seededShuffle,
   stageCallDisposition,
   stageCodeWords,
@@ -3775,6 +3776,59 @@ try {
     `a cooperative worker exited as ${JSON.stringify(willingExit)} rather than on the first signal`);
 
   checks.aKilledSupervisorStillWritesTheCandidateReport = true;
+}
+
+// GATE 58 - the wall clock is reported beside the ledger that confounds it.
+//
+// A run's wall clock is not its provider latency. Every turn derives over the whole
+// session, so a session that grows faster than the work does buys wall time nothing
+// charged for. sol-20260812 rep 9's pifold arm wrote 309 state entries totalling 21.6MB,
+// 68.0% of a 31.9MB session, against 0.93MB of projection actually sent, and held 98% of a
+// core for 118 minutes while the native arm spent 24 seconds of CPU. `wallClockMs` alone
+// could not tell that apart from folding being slow, and every wall-clock figure recorded
+// before the state delta was fixed measured it.
+//
+// The lens reports and does not judge. There is no threshold, because the honest bound is
+// the comparison between the two arms of one run and the native arm has no state entries
+// at all. Driven with fixtures rather than matched against source, so it is the arithmetic
+// under test.
+// ---------------------------------------------------------------------------
+{
+  const stateEntry = (data) => ({ type: "custom", customType: "pi-fold-active-context-state", data });
+  const ledger = sessionLedgerLens([
+    { type: "message", message: { role: "user", content: "x" } },
+    stateEntry({ revision: 1, briefs: { a: "b".repeat(100) }, pendingMarks: [] }),
+    stateEntry({ revision: 2, briefs: { a: "b".repeat(400) }, pendingMarks: [1, 2] }),
+    { type: "custom", customType: "pi-fold-active-context-fold-record", data: { fold: {} } },
+  ], 10_000);
+  assert.equal(ledger.stateEntries, 2, "the lens counted something other than the state entries");
+  assert.equal(ledger.sessionEntries, 4, "the lens lost entries that are not state");
+  assert(ledger.stateBytes > 500 && ledger.stateBytes < 10_000,
+    `state bytes came back as ${ledger.stateBytes}`);
+  assert.equal(ledger.stateShareOfSession, ledger.stateBytes / 10_000,
+    "the share is not the state bytes over the session bytes");
+  assert(ledger.largestStateEntryBytes > ledger.smallestStateEntryBytes,
+    "the lens reported no growth across two entries of different size");
+  // The field breakdown is the part that names the cause. Rep 9 was 81% briefs, and a
+  // reader who only sees a total has to go and find that out.
+  assert.equal(Object.keys(ledger.stateBytesByField)[0], "briefs",
+    `the widest field came back as ${JSON.stringify(Object.keys(ledger.stateBytesByField))}`);
+  // A run with no state entries at all is the native arm, and it must read as zero rather
+  // than as missing: the comparison between the arms is the whole point of the lens.
+  const bare = sessionLedgerLens([{ type: "message", message: {} }], 500);
+  assert.equal(bare.stateEntries, 0);
+  assert.equal(bare.stateBytes, 0);
+  assert.equal(bare.stateShareOfSession, 0);
+  assert.equal(bare.largestStateEntryBytes, null,
+    "an arm that wrote no state reported a largest entry");
+  assert.equal(sessionLedgerLens([], 0).stateShareOfSession, null,
+    "an empty session divided by zero instead of declining to answer");
+
+  const adjudicator = readFileSync(join(PROJECT, "scripts", "adjudicate_pi_context_experiment.mjs"), "utf8");
+  assert(/sessionLedger: sessionLedgerLens\(entries, statSync\(sessionFile\)\.size\)/.test(adjudicator),
+    "the adjudication report does not carry the ledger the wall clock is read against");
+
+  checks.theWallClockIsReportedBesideItsLedger = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

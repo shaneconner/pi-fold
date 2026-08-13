@@ -22,6 +22,7 @@ import {
   EXPERIMENT_MARKER_ENTRY,
   EXPERIMENT_TOOL_NAME,
   FOLD_RECORD_SUFFIX,
+  sessionLedgerLens,
   armRuntimeConfiguration,
   assertExperiment,
   buildIncludeResolver,
@@ -634,6 +635,10 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
       meanCacheShare: usageSeries.meanCacheShare,
       pooledCacheShare: usageSeries.pooledCacheShare,
     },
+    // Read beside the wall clock on purpose. Every turn derives over the whole session, so
+    // a ledger that grows faster than the work buys wall time no provider charged for, and
+    // `wallClockMs` alone cannot tell that apart from folding being slow.
+    sessionLedger: sessionLedgerLens(entries, statSync(sessionFile).size),
     contextEvents,
     thinkTime,
     rereadTax: {
