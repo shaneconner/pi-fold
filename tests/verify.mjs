@@ -132,6 +132,10 @@ function makeFixture({
   resultTail = null,
   readArguments = null,
   turnText = null,
+  // Overrides the closing assistant text of each turn. Used by gate 135, where
+  // an agent-recorded fact lives ONLY in that message and must survive the
+  // consolidation that absorbs the turn as a gap.
+  assistantText = null,
   policy = {},
   thresholds,
   contextWindow = 272_000,
@@ -194,7 +198,9 @@ function makeFixture({
       role: "assistant",
       content: [{
         type: "text",
-        text: `Completed task ${turn}.${" a".repeat(chapterChars)}`,
+        text: assistantText
+          ? assistantText(turn)
+          : `Completed task ${turn}.${" a".repeat(chapterChars)}`,
       }],
       stopReason: "stop",
       timestamp: sequence,
@@ -13776,6 +13782,135 @@ async function gateOpeningProseSurvivesDeterministicFolding() {
   };
 }
 
+// ---------------------------------------------------------------------------
+// GATE 135 - a fact the agent recorded in its own turn survives the folds
+// that hide the turn, at both depths.
+//
+// sol-20260814-traps rep 2 (no generator) lost probe-32-01 and probe-48-01 to
+// one shape: a chain value the agent derived and recorded ONCE, in its own
+// assistant message, between two tool batches. The tool fold's brief centred
+// the call and its result, the parent's index was built from the children's
+// briefs alone, and the recorded line reached zero briefs: one assistant
+// message held "trace-a-02: lib/amigaos.c" and no projection ever showed it
+// again. Native lost its one rep-2 probe to the same class, which is what
+// makes this a carrier worth a law rather than a workload quirk.
+//
+// Two carriers, because absorption geometry varies. The tool fold whose batch
+// the note closes appends it as an "agent noted" clause, so the fact is
+// visible from the moment the FIRST fold hides the turn. The consolidation
+// parent walks its whole span and seats every hidden assistant message's
+// leading paragraph as its OWN subject in the division, whether the entry is
+// an unclaimed gap (rep 2's geometry) or claimed into a tool child's interval
+// (the denser geometry this fixture produces); only a chapter or
+// consolidation child's claim is skipped, because those briefs already select
+// their own assistant lines. A note as its own subject is what the division
+// seats whole; the same words inside a truncated child subject are not. The
+// generator is held unresolved for the whole run, exactly as in gate 134:
+// what a fold is COMMITTED with must carry the fact.
+// ---------------------------------------------------------------------------
+async function gateAgentNotesSurviveConsolidation() {
+  const TRACE_FACT = "trace-a-02: lib/amigaos-fixture.c";
+  const noteFor = (turn) => turn === 3
+    ? `${TRACE_FACT}\nRecorded for the dependency appendix.`
+    : `Completed task ${turn} and noted its outcome.`;
+  let pending = 0;
+  const runtime = makeRuntime(
+    makeFixture({ turns: 14, resultChars: 6_000, contextWindow: 100_000, assistantText: noteFor }),
+    { summarizeContextSpan: () => { pending += 1; return new Promise(() => {}); } },
+  );
+  await startRuntime(runtime);
+  await measure(runtime, 92_000, 100_000);
+  await compactBoundary(runtime);
+  const projected = (await project(runtime)).messages;
+  const state = materialized(runtime);
+  const parents = state.folds.filter((fold) => fold.kind === "consolidation");
+  assert(parents.length > 0, "the fixture consolidated nothing, so the gate proves nothing");
+
+  // THE CLAIM, downstream first: the parent that hides turn 3 carries the
+  // recorded line as a note subject, the lead says notes ride beside folds,
+  // and the visible projection shows the fact.
+  const carrier = parents.find((fold) => String(fold.brief).includes(TRACE_FACT));
+  assert(carrier,
+    "an agent-recorded fact did not survive into the parent that hid its turn");
+  assert(/covering \d+ folds and \d+ agent notes: /.test(String(carrier.brief)),
+    "the lead does not say the index carries agent notes beside child folds");
+  assert(JSON.stringify(projected).includes(TRACE_FACT),
+    "the fact is in a stored brief but absent from the visible projection");
+  // And at the shallower depth this fixture drives: the chapter that first
+  // hid the turn seated the fact as one of its notes, so it was visible from
+  // the FIRST fold that hid it, not only once a parent formed.
+  const chapter = state.folds.find((fold) =>
+    fold.kind === "chapter" && String(fold.brief).includes(TRACE_FACT));
+  assert(chapter, "no chapter brief carries the note from its own span");
+
+  // The third kind. A shallower session tool-folds the note's own batch
+  // instead of chaptering it, and there the tool fold's brief appends the
+  // note as an agent-noted clause the moment the batch folds.
+  const shallow = makeRuntime(
+    makeFixture({ turns: 8, resultChars: 6_000, contextWindow: 100_000, assistantText: noteFor }),
+    { summarizeContextSpan: () => new Promise(() => {}) },
+  );
+  await startRuntime(shallow);
+  await measure(shallow, 92_000, 100_000);
+  await compactBoundary(shallow);
+  const shallowState = materialized(shallow);
+  const closer = shallowState.folds.find((fold) => String(fold.brief).includes(TRACE_FACT));
+  assert(closer, "no identified brief carries the note that closed its own batch");
+  assert(String(closer.brief).includes("agent noted \""),
+    "the brief carries the fact outside the agent-noted clause");
+  assert(shallowState.folds.some((fold) => fold.kind === "tool-result" &&
+    /agent noted "/.test(String(fold.brief))),
+    "no tool-result fold appends its closing note, so the batch path is unproven");
+  assert(pending > 0, "no brief upgrade was ever requested, so the race is not being modelled");
+  assert(state.folds.every((fold) => (fold.brief_provenance?.kind ?? "deterministic") !== "model"),
+    "a model brief landed, so this does not prove the deterministic carrier");
+
+  // Anti-vacuity: a run whose assistant turns never state the fact must not
+  // grow it.
+  const bare = makeRuntime(
+    makeFixture({ turns: 14, resultChars: 6_000, contextWindow: 100_000 }),
+    { summarizeContextSpan: () => new Promise(() => {}) },
+  );
+  await startRuntime(bare);
+  await measure(bare, 92_000, 100_000);
+  await compactBoundary(bare);
+  assert(!JSON.stringify((await project(bare)).messages).includes(TRACE_FACT),
+    "the gate matches a fact the fixture never stated");
+
+  // The no-snapshot reading is the pre-change output byte for byte: callers
+  // that cannot read exact evidence lose nothing they ever had, keep the
+  // plain fold-count lead, and never see a note.
+  const liveSnapshot = context.mapActiveContext({
+    sessionId: runtime.built.sessionId,
+    eventMessages: runtime.messages,
+    contextEntries: runtime.branch,
+    contextWindow: 100_000,
+  });
+  const parentCandidate = { kind: "consolidation", parts: carrier.parts };
+  const withSnapshot = context.deterministicConsolidationBrief(
+    parentCandidate, materialized(runtime), "pi_fold_context", liveSnapshot);
+  const withoutSnapshot = context.deterministicConsolidationBrief(
+    parentCandidate, materialized(runtime), "pi_fold_context");
+  assert(withSnapshot.includes(TRACE_FACT), "the snapshot reading dropped the note");
+  assert(!withoutSnapshot.includes(TRACE_FACT));
+  assert(/covering \d+ folds: /.test(withoutSnapshot),
+    "the no-snapshot lead changed, so pre-change callers changed output");
+
+  // Every brief still honours the bound it is composed to.
+  for (const fold of state.folds) {
+    assert(typeof fold.brief === "string" && fold.brief.length > 0, "a fold committed with no brief");
+    assert(fold.brief.length <= context.ACTIVE_CONTEXT_POLICY.maxBriefChars,
+      `a brief ran to ${fold.brief.length} chars, past the ${context.ACTIVE_CONTEXT_POLICY.maxBriefChars} contract`);
+  }
+
+  return {
+    parents: parents.length,
+    carrierNotes: Number(/and (\d+) agent notes/.exec(String(carrier.brief))?.[1]),
+    briefChars: String(carrier.brief).length,
+    closerBriefChars: String(closer.brief).length,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -13899,6 +14034,7 @@ const gates = [
 
   [133, "A projection fingerprint is computed on demand", gateProjectionFingerprintsAreComputedOnDemand],
   [134, "Opening prose survives deterministic folding", gateOpeningProseSurvivesDeterministicFolding],
+  [135, "Agent notes survive consolidation", gateAgentNotesSurviveConsolidation],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

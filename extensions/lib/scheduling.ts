@@ -377,7 +377,7 @@ export function ladderBrief(
 ): string {
   if (candidate.kind === "tool-result") return automaticToolBrief(snapshot, candidate);
   if (candidate.kind === "consolidation") {
-    return deterministicConsolidationBrief(candidate, state, snapshot.toolName);
+    return deterministicConsolidationBrief(candidate, state, snapshot.toolName, snapshot);
   }
   return deterministicChapterCandidateBrief(snapshot, candidate);
 }

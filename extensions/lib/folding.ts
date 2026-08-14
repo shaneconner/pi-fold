@@ -600,7 +600,7 @@ export async function prepareFold(input: {
       provenance = modelBrief.provenance;
     } else {
       brief = candidate.kind === "consolidation"
-        ? deterministicConsolidationBrief(candidate, state, snapshot.toolName)
+        ? deterministicConsolidationBrief(candidate, state, snapshot.toolName, snapshot)
         : deterministicChapterCandidateBrief(snapshot, candidate);
       provenance = { kind: "deterministic" };
     }

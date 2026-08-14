@@ -243,19 +243,41 @@ export function stageIdentifiedToolBrief(input: {
     return null;
   };
   const tail = identifiedResultTail(messages.at(-1), factualValue);
+  // THE AGENT'S OWN CLOSING NOTES (Shane 2026-08-14). The batch the fold absorbs
+  // runs past its results: the assistant messages between the last result and
+  // the next user turn are the agent recording what it just derived, and
+  // sol-20260814-traps rep 2 lost trace-a-02 and trace-d-05 because those lines
+  // lived nowhere else. Each such message contributes its leading paragraph.
+  // The walk stops at the first user turn, tool result, or tool-calling
+  // assistant, because any of those begins work this fold does not absorb.
+  const resultIndices = refs.map((ref) => exactMapped(snapshot, ref)?.index ?? -1);
+  const noteTexts: string[] = [];
+  for (let index = Math.max(...resultIndices) + 1; index < snapshot.mapped.length; index += 1) {
+    const message = snapshot.mapped[index]?.message;
+    const role = messageRole(message);
+    if (role !== "assistant") break;
+    const callsTools = (denseOwnArrayValues(ownValue(message, "content")) ?? [])
+      .some((part) => ownValue(part, "type") === "toolCall");
+    if (callsTools) break;
+    const paragraphText = assistantNoteText(message);
+    if (paragraphText) noteTexts.push(paragraphText);
+  }
   // Compose the identifying parts FIRST, then hand the paragraph what is left of
   // the bound. A fixed head allowance either starves the paragraph or outgrows
-  // the composed contract; the remainder does neither.
-  const assemble = (label: string): string => [
+  // the composed contract; the remainder does neither. The head is seated before
+  // the notes: the instruction prose won gate 134 on sealed evidence, so when
+  // both are long the head keeps its allowance and the notes take the remainder.
+  const assemble = (label: string, noted: string): string => [
     `Read ${oneLine(signatures.join("; "), IDENTIFIED_BRIEF_CALLS_CHARS)}`,
     label ? `opens "${label}"` : "",
     tail ? `ends "${tail}"` : "",
+    noted ? `agent noted "${noted}"` : "",
     calls.length > 1 ? `${calls.length} exact results here` : "exact source here",
   ].filter(Boolean).join(" · ");
   // A present label costs its own wrapper on top of the fixed parts: the
   // ` · opens "` prefix and closing quote are 11 characters that assemble("")
   // does not count, because an empty label drops the whole term.
-  const headAllowance = Math.max(0, IDENTIFIED_BRIEF_CHARS - assemble("").length - 11);
+  const headAllowance = Math.max(0, IDENTIFIED_BRIEF_CHARS - assemble("", "").length - 11);
   const paragraph = leadingParagraph(messages[0]);
   const label = paragraph !== null
     ? factualValue(paragraph, headAllowance)
@@ -263,7 +285,11 @@ export function stageIdentifiedToolBrief(input: {
       String(contentText(messages[0]) ?? "").split(/\r?\n/).find((line) => line.trim()) ?? "",
       IDENTIFIED_BRIEF_HEAD_CHARS,
     );
-  const bounded = oneLine(assemble(label), IDENTIFIED_BRIEF_CHARS);
+  // The notes wrapper costs 18 characters the empty form does not count, the
+  // same accounting as the label's 11.
+  const notesAllowance = Math.max(0, IDENTIFIED_BRIEF_CHARS - assemble(label, "").length - 18);
+  const noted = noteTexts.length ? factualValue(noteTexts.join(" · "), notesAllowance) : "";
+  const bounded = oneLine(assemble(label, noted), IDENTIFIED_BRIEF_CHARS);
   return usefulBrief(bounded, ACTIVE_CONTEXT_POLICY.maxBriefChars, snapshot.toolName) ? bounded : null;
 }
 
@@ -340,6 +366,21 @@ export function automaticToolBrief(snapshot: ActiveContextSnapshot, candidate: F
 }
 
 const MIN_SUBJECT_CHARS = 24;
+const CHAPTER_NOTE_CHARS = 160;
+
+// The leading paragraph of an assistant message read as the agent's own note.
+// Unlike a tool result's opening prose, an unterminated block is KEPT: the
+// whole message is the agent's words, so a note with no blank line is a
+// one-paragraph note, not bulk to refuse.
+function assistantNoteText(message: unknown): string {
+  const lines = String(contentText(message) ?? "").split(/\r?\n/);
+  const kept: string[] = [];
+  for (const line of lines) {
+    if (line.trim()) kept.push(line.trim());
+    else if (kept.length) break;
+  }
+  return kept.join(" ");
+}
 
 function boundedSubject(text: string, budget: number): string {
   if (text.length <= budget) return text;
@@ -353,25 +394,75 @@ export function deterministicConsolidationBrief(
   candidate: FoldCandidate,
   state: ActiveContextState,
   toolName = DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
+  snapshot?: ActiveContextSnapshot,
 ): string {
   const byId = foldMap(state);
   const escapedToolName = toolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const subjects = candidate.parts.flatMap((part) => {
-    if (part.kind !== "fold") return [];
-    const child = byId.get(part.foldId);
-    return child ? [foldBrief(child, state)
-      .replace(new RegExp(escapedToolName, "gi"), "active-context service")
-      .replace(/\s+/g, " ")
-      .trim()] : [];
+  const sanitize = (value: string): string => value
+    .replace(new RegExp(escapedToolName, "gi"), "active-context service")
+    .replace(/\s+/g, " ")
+    .trim();
+  let foldCount = 0;
+  let spanStart = Number.MAX_SAFE_INTEGER;
+  let spanEnd = -1;
+  const seat = (ref: EvidenceRef): void => {
+    const item = snapshot ? exactMapped(snapshot, ref) : null;
+    if (!item) return;
+    spanStart = Math.min(spanStart, item.index);
+    spanEnd = Math.max(spanEnd, item.index);
+  };
+  const childSubjects = candidate.parts.flatMap((part) => {
+    if (part.kind === "fold") {
+      const child = byId.get(part.foldId);
+      if (!child) return [];
+      foldCount += 1;
+      for (const ref of flattenFoldRefs(child, state)) seat(ref);
+      return [sanitize(foldBrief(child, state))];
+    }
+    seat(part.ref);
+    return [];
   });
+  // The agent's own recorded words are the ONLY carrier a derived fact ever
+  // has (sol-20260814-traps rep 2 lost trace-a-02 and trace-d-05 exactly here:
+  // each lived in one assistant turn between two tool batches, the parent
+  // indexed only its children's briefs, and the value reached zero briefs), so
+  // every assistant message the group hides contributes its leading paragraph
+  // as its OWN subject, sharing the division with the child briefs. The child
+  // briefs are not trusted to carry the notes for it: a child's subject is
+  // truncated to its division share, and a note past the cut is the rep-2
+  // loss again one level up, so a note rides whole or not at all, which the
+  // ascending-length division guarantees for anything shorter than its fair
+  // share. The span is WALKED rather than read off the candidate's raw parts,
+  // because absorption geometry varies: rep 2 held its notes as unclaimed raw
+  // parts while denser sessions claim the same assistant text into a child's
+  // interval, and both spellings hide the same words. Non-assistant gaps
+  // contribute nothing: their facts live in the folds beside them. Without a
+  // snapshot the exact text is unreadable and the output is the
+  // pre-2026-08-14 bytes exactly.
+  const notes: string[] = [];
+  if (snapshot && spanEnd >= 0) {
+    for (let index = spanStart; index <= spanEnd; index += 1) {
+      const item = snapshot.mapped[index];
+      if (!item?.message) continue;
+      if (messageRole(item.message) !== "assistant") continue;
+      const noteText = assistantNoteText(item.message);
+      if (noteText) notes.push(sanitize(boundedSubject(noteText, CHAPTER_NOTE_CHARS)));
+    }
+  }
+  const noteCount = notes.length;
+  const subjects = [...childSubjects, ...notes];
   if (!subjects.length) return "Grouped completed context covering no readable folds.";
   const separator = " | ";
-  const lead = `Grouped completed context covering ${subjects.length} folds: `;
+  const lead = noteCount
+    ? `Grouped completed context covering ${foldCount} folds and ${noteCount} agent notes: `
+    : `Grouped completed context covering ${subjects.length} folds: `;
   const room = ACTIVE_CONTEXT_POLICY.maxBriefChars - lead.length - 1;
   const named = Math.max(1, Math.min(subjects.length,
     Math.floor((room + separator.length) / (MIN_SUBJECT_CHARS + separator.length))));
   const omitted = subjects.length - named;
-  const tail = omitted ? `${separator}${omitted} more folds in this group` : "";
+  // With notes in the division, what the slice drops may be a note rather than
+  // a fold, so the tail only claims folds when folds are all it holds.
+  const tail = omitted ? `${separator}${omitted} more ${noteCount ? "in this group" : "folds in this group"}` : "";
   const budget = room - tail.length - separator.length * (named - 1);
   const order = subjects.slice(0, named).map((text, index) => ({ text, index })).sort((a, b) =>
     a.text.length - b.text.length || a.index - b.index);
@@ -1050,8 +1141,6 @@ export function deterministicChapterBrief(
     throw new Error("Deterministic chapter brief requires aligned exact evidence");
   }
   const firstUser = messages.find((message) => messageRole(message) === "user");
-  const firstAssistant = messages.find((message) =>
-    messageRole(message) === "assistant" && contentText(message).trim());
   const toolCounts = new Map<string, number>();
   for (const message of messages) {
     if (messageRole(message) !== "assistant") continue;
@@ -1061,16 +1150,38 @@ export function deterministicChapterBrief(
       if (typeof name === "string" && name) toolCounts.set(name, (toolCounts.get(name) ?? 0) + 1);
     }
   }
+  // EVERY assistant note in the span, not the first line of the first one
+  // (Shane 2026-08-14). A chapter is the first fold that hides its span, and a
+  // value the agent recorded once on a later turn died with the old single
+  // line: sol-20260814-traps rep 2 lost trace-a-02 and trace-d-05 to exactly
+  // that shape, an assistant message between two tool batches whose words
+  // reached zero briefs. Each note is the message's leading paragraph, capped
+  // per note, seated whole in span order until the brief's own bound refuses
+  // the next one, with the count of what did not seat stated rather than cut.
+  const notes = messages.flatMap((message) => {
+    if (messageRole(message) !== "assistant") return [];
+    const note = assistantNoteText(message);
+    return note ? [boundedSubject(note, CHAPTER_NOTE_CHARS)] : [];
+  });
   const ask = oneLine(firstUser ? contentText(firstUser) : "No user ask in this span", 90);
-  const assistant = oneLine(firstAssistant ? contentText(firstAssistant).split(/\r?\n/)[0] :
-    "No assistant text in this span", 110);
   const tools = oneLine([...toolCounts.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([name, count]) => `${count}×${name}`)
     .join(" ") || "no tools", 500);
+  const separator = " | ";
+  const compose = (kept: number): string => {
+    const omitted = notes.length - kept;
+    const shown = kept ? notes.slice(0, kept).join(separator)
+      : (notes.length ? "" : "No assistant text in this span");
+    const tail = omitted ? `${kept ? separator : ""}${omitted} more notes in this span` : "";
+    return `User: ${ask} · Tools: ${tools} · Assistant: ${shown}${tail}`;
+  };
+  let composed = compose(notes.length);
+  for (let kept = notes.length; kept > 0 && composed.length > ACTIVE_CONTEXT_POLICY.maxBriefChars; kept -= 1) {
+    composed = compose(kept - 1);
+  }
   const escapeName = (name: string) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const composed = `User: ${ask} · Tools: ${tools} · Assistant: ${assistant}`
-    .replace(new RegExp(escapeName(toolName), "gi"), "active-context service");
+  composed = composed.replace(new RegExp(escapeName(toolName), "gi"), "active-context service");
   if (usefulBrief(composed, ACTIVE_CONTEXT_POLICY.maxBriefChars, toolName)) return composed;
   return `Folded ${refs.length} exact messages from this span's complete turns.`;
 }
