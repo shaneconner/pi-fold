@@ -4192,6 +4192,23 @@ try {
   assert.deepEqual(driveGuard({ crossings: 0, abandonPending: true }, null).latched, [],
     "the guard acts when no request is in flight at all");
 
+  // AND THE ADJUDICATOR'S OWN CONTRACT, which a resumed run necessarily breaks. The rule
+  // was a bare count of one user message, enforcing that the workload is delivered as one
+  // continuous task rather than fed turn by turn. That held only while nothing could
+  // legitimately prompt again; this arm prompts once per compaction by construction. The
+  // count is now checked against the resumes the worker RECORDED, so an extra user message
+  // that no resume accounts for still breaks it, and the resumes are reported split by
+  // cause: on this arm they are a cost of the mechanism, not an incident.
+  assert(/const recordedResumes = Array\.isArray\(worker\.stageNudges\)/.test(adjudicator),
+    "the resume count is not read from the worker's own record, so nothing constrains it");
+  assert(/userMessages === 1 \+ recordedResumes/.test(adjudicator),
+    "the user-message contract is not checked against the recorded resumes");
+  assert(!/userMessages === 1,/.test(adjudicator),
+    "the bare one-user-message count survives, so every resumed run fails adjudication");
+  assert(/resumesAfterFenceCompaction:[\s\S]{0,160}"fence-compaction"/.test(adjudicator) &&
+    /resumesAfterModelStop:[\s\S]{0,160}"model-ended-turn"/.test(adjudicator),
+    "the adjudicated workload does not split resumes by what caused them");
+
   checks.aForcedCompactionAbortsTheTurnAndOnlyTheFencedArmResumes = true;
 }
 

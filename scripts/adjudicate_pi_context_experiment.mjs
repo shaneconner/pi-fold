@@ -349,8 +349,24 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   const runEntries = entries.slice(markerIndex + 1);
   const userMessages = runEntries.filter((entry) => entry?.type === "message" &&
     entry.message?.role === "user").length;
-  assertExperiment(userMessages === 1,
-    `One-user-message contract broken: ${userMessages} user messages in the run span`);
+  // ONE USER MESSAGE, PLUS EXACTLY THE RESUMES THAT WERE RECORDED.
+  //
+  // The contract is that the workload is delivered as one continuous task rather than fed
+  // to the agent turn by turn, and a bare count of one enforced that only while nothing
+  // could legitimately prompt again. Two things now can. A model that ends its turn early
+  // is resumed (gate 56 of the harness suite), and on the matched-fence arm every crossing
+  // aborts the live turn, because `compact` aborts before it prepares, so that arm is
+  // resumed once per compaction by construction: rep 3 of sol-20260814-fenced compacted
+  // three times and finished all eight stages across four user messages.
+  //
+  // So the count is checked against the resumes the worker RECORDED rather than relaxed. An
+  // extra user message that no resume accounts for still breaks the contract, which is the
+  // spoon-feeding this rule exists to catch, and the resume count is reported beside the
+  // workload rather than absorbed into it: on this arm it is a cost of the mechanism.
+  const recordedResumes = Array.isArray(worker.stageNudges) ? worker.stageNudges.length : 0;
+  assertExperiment(userMessages === 1 + recordedResumes,
+    `One-user-message contract broken: ${userMessages} user messages in the run span ` +
+    `against ${recordedResumes} recorded resume(s)`);
 
   // Closed-book runs grade through the SAME mechanical verdicts and stop there. The
   // prompt law makes "no stage payload bytes" checkable: the sealed prompt hash must
@@ -624,6 +640,14 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
       toolCalls: toolCalls.length,
       probeStages: probes.length,
       deliverables: deliverables.length,
+      // What it took to keep the workload moving, split by cause. A model that stopped
+      // early and a turn our own fence aborted are different costs and the comparison
+      // reads them differently, so neither is reported as the other.
+      resumes: recordedResumes,
+      resumesAfterFenceCompaction: (worker.stageNudges ?? [])
+        .filter((nudge) => nudge.reason === "fence-compaction").length,
+      resumesAfterModelStop: (worker.stageNudges ?? [])
+        .filter((nudge) => nudge.reason === "model-ended-turn").length,
     },
     usage: {
       ...usage,
