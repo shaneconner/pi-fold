@@ -157,8 +157,7 @@ function readInstruction(stage, files) {
     `Read every file delivered in this stage of ${stage.repoKey} and build an accurate working`,
     "model of what it does, what it depends on, and which names it exports.",
     `Files in this stage: ${files.map((file) => file.path).join(", ")}.`,
-    "Record the specific identifiers and line positions you will need later; you will be asked",
-    "about them after many further stages, and you may not get another delivery of these bytes.",
+    "Record the specific identifiers and line positions you will need later.",
   ].join(" ");
 }
 
@@ -169,16 +168,20 @@ function revisitInstruction(stage, files, earlier) {
     `(${earlier.paths.join(", ")}).`,
     `New files in this stage: ${files.map((file) => file.path).join(", ")}.`,
     "Name every call, trait, type or route that crosses between the new files and that earlier",
-    "material, and say explicitly where each earlier fact came from. Those earlier bytes are not",
-    "resent: recover them however you must.",
+    "material, and say explicitly where each earlier fact came from.",
   ].join(" ");
 }
 
 function probeInstruction() {
+  // ASKED AS A COLLEAGUE WOULD ASK, not as a quiz (Shane 2026-08-14). We obviously have to
+  // ask, but the framing is a variable and it was set against us: telling a model its recall
+  // is about to be scored is an instruction to hoard, and v3 already measured that shape
+  // once when sol's summarizer carried 20, 38 and 54 code words verbatim through successive
+  // summaries. The format line stays because the grading is mechanical; the premise goes.
   return [
-    "Answer the following recall questions about material delivered EARLIER in this session.",
-    "Answer each one on its own line in the exact form `<probe-id>: <answer>`, then state in one",
-    "sentence how you recovered each answer. Answer every question even if you are unsure.",
+    "Before we carry on, can you tell me a few things about the work so far?",
+    "Put each answer on its own line as `<probe-id>: <answer>`, then say in one sentence where",
+    "each one came from. Give me your best answer for each, even if you are not certain.",
   ].join(" ");
 }
 

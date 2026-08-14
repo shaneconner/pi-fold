@@ -1181,6 +1181,43 @@ export function stagePayloadText(stage) {
   return `${header.join("\n")}\n${body}\nNEXT_KEY: ${stage.nextKeyPlaceholder ?? "<supervisor>"}\n`;
 }
 
+/**
+ * FRAMING THAT TELLS THE MODEL ITS RECALL IS BEING SCORED (Shane 2026-08-14).
+ *
+ * The plan's existing anti-leak scan looks for probe ANSWERS appearing in instructions,
+ * which is a different failure. This one looks for the premise. Three instruction surfaces
+ * carried it: "you will be asked about them after many further stages, and you may not get
+ * another delivery of these bytes", "Those earlier bytes are not resent: recover them
+ * however you must", and "Answer the following recall questions".
+ *
+ * It is not a cosmetic problem. v3 already measured this shape once from the other
+ * direction, when sol's summarizer carried 20, 38 and 54 code words verbatim through
+ * successive summaries because it could tell they mattered. A model told it is about to be
+ * quizzed optimizes for the quiz, and then both arms are measured doing something no
+ * ordinary session does.
+ *
+ * The patterns are deliberately specific rather than a general search for "test": stage
+ * instructions carry curl's own paths, and `tests/` is a directory in that repository.
+ */
+export const TEST_AWARENESS_PATTERNS = Object.freeze([
+  /you will be asked/i,
+  /you may not get another/i,
+  /are not resent/i,
+  /recover them however you must/i,
+  /recall questions?/i,
+  /\bquiz(zed)?\b/i,
+  /\bgraded\b/i,
+  /\bscored\b/i,
+  /remember (this|these|it) for later/i,
+]);
+
+export function testAwarenessLeaks(text) {
+  if (typeof text !== "string") return [];
+  return TEST_AWARENESS_PATTERNS
+    .filter((pattern) => pattern.test(text))
+    .map((pattern) => String(pattern));
+}
+
 export function validateStagePlan(plan) {
   assertExperiment(exactKeys(plan, [
     "version", "mode", "repo", "seed", "stageCount", "stageIntervalMs", "watchdogMs",
@@ -1214,6 +1251,17 @@ export function validateStagePlan(plan) {
       typeof stage.instructions === "string" && stage.instructions.length > 0 &&
       Array.isArray(stage.files) && Array.isArray(stage.probes),
     `Invalid stage shape at ${index + 1}`);
+    // Every instruction surface the model reads, checked for the premise rather than for
+    // the answers. A plan that tells the agent it is being examined measures a different
+    // thing from the one this experiment is for, and it must not be launchable.
+    for (const [surface, text] of [
+      ["instructions", stage.instructions],
+      ["deliverable", stage.deliverable?.instructions],
+    ]) {
+      const leaks = testAwarenessLeaks(text);
+      assertExperiment(leaks.length === 0,
+        `Stage ${index + 1} ${surface} tells the model it is being tested: ${leaks.join(", ")}`);
+    }
     assertExperiment((stage.kind === "probe") === modePlan.probeStages.includes(stage.ordinal) &&
       (stage.kind === "probe") === (stage.probes.length > 0),
     `Stage ${index + 1} disagrees with the mode plan about being a probe wave`);

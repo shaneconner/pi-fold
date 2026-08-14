@@ -75,6 +75,7 @@ import {
   uniqueIdentifierIndex,
   usageSeriesFromLedger,
   outOfBandUsage,
+  testAwarenessLeaks,
   billedCostFromLedger,
   unansweredRequestsFromLedger,
   LONG_CONTEXT_TIER_PROMPT_TOKENS,
@@ -4314,6 +4315,74 @@ try {
     "the adjudicated report drops the requests that were built and never answered");
 
   checks.bothArmsOutOfBandSpendAndTheBillAreReported = true;
+}
+
+// GATE 62 - no instruction surface tells the model it is being tested, and a plan that does
+// cannot be launched.
+//
+// The plan's existing anti-leak scan looks for probe ANSWERS in instructions. This is the
+// premise rather than the answers, and three surfaces carried it. It is not cosmetic: v3
+// measured the same shape from the other direction when sol's summarizer carried 20, 38 and
+// 54 code words verbatim through successive summaries because it could tell they mattered.
+// A model told it is about to be quizzed optimizes for the quiz, and native's compaction
+// summaries are exactly where that optimization would land.
+// ---------------------------------------------------------------------------
+{
+  // The three historical strings, by their own bytes.
+  for (const carrier of [
+    "Record the identifiers you will need later; you will be asked about them after many stages.",
+    "you may not get another delivery of these bytes",
+    "Those earlier bytes are not resent: recover them however you must.",
+    "Answer the following recall questions about material delivered EARLIER in this session.",
+    "You will be quizzed on this.",
+    "Your answers are graded.",
+  ]) {
+    assert(testAwarenessLeaks(carrier).length > 0,
+      `the scan misses test-awareness framing: ${carrier.slice(0, 60)}`);
+  }
+  // AND IT DOES NOT FIRE ON THE WORK ITSELF. Stage instructions carry curl's own paths, and
+  // `tests/` is a directory in that repository, so a general search for "test" would refuse
+  // every plan the corpus can produce.
+  for (const clean of [
+    "Read every file delivered in this stage and build an accurate working model of what it does.",
+    "Record the specific identifiers and line positions you will need later.",
+    "Files in this stage: tests/unit/unit1300.c, lib/ftplistparser.h.",
+    "Name every call, trait, type or route that crosses between the new files and that earlier material.",
+    "Before we carry on, can you tell me a few things about the work so far?",
+  ]) {
+    assert.deepEqual(testAwarenessLeaks(clean), [],
+      `the scan refuses ordinary working instructions: ${clean.slice(0, 60)}`);
+  }
+  assert.deepEqual(testAwarenessLeaks(undefined), [], "a stage with no deliverable breaks the scan");
+
+  // THE LIVE PLAN, not a fixture of one: every surface the model will actually read.
+  for (const stage of plan.stages) {
+    assert.deepEqual(testAwarenessLeaks(stage.instructions), [],
+      `stage ${stage.ordinal} instructions tell the model it is being tested`);
+    assert.deepEqual(testAwarenessLeaks(stage.deliverable?.instructions), [],
+      `stage ${stage.ordinal} deliverable tells the model it is being tested`);
+  }
+
+  // AND THE PLAN IS REFUSED rather than merely reported, so a reworded instruction cannot
+  // reach a six-hour run.
+  const poisoned = JSON.parse(JSON.stringify(plan));
+  poisoned.stages[0].instructions += " You will be asked about them later.";
+  assert.throws(() => validateStagePlan(poisoned), /tells the model it is being tested/,
+    "a plan carrying the test premise still validates, so it could be launched");
+
+  // The staging source no longer builds any of it.
+  const staging = readFileSync(join(PROJECT, "scripts", "stage_pi_context_experiment.mjs"), "utf8");
+  for (const gone of [
+    "you will be asked", "may not get another delivery", "are not\n    resent",
+    "recover them however you must", "Answer the following recall questions",
+  ]) {
+    assert(!staging.includes(gone), `the staging script still writes "${gone}"`);
+  }
+  // The working half of the instruction stays: dropping the premise must not drop the task.
+  assert(/Record the specific identifiers and line positions you will need later\./.test(staging),
+    "the instruction to record what matters was dropped along with the premise");
+
+  checks.noInstructionTellsTheModelItIsBeingTested = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
