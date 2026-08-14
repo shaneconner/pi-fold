@@ -104,6 +104,8 @@ import {
   closedBookPrompt,
   closedBookQuestions,
   MATCHED_FENCE_OCCUPANCY_SHARE,
+  MATCHED_FENCE_SHARES,
+  matchedFenceShare,
   closedBookSystemPrompt,
   closedBookTranscript,
 } from "./lib/pi_context_experiment.mjs";
@@ -152,6 +154,27 @@ assert.deepEqual(nativeCompactionDisposition("nativefence"),
 assert.equal(MATCHED_FENCE_OCCUPANCY_SHARE, 0.937);
 assert(MATCHED_FENCE_OCCUPANCY_SHARE > 0.894 && MATCHED_FENCE_OCCUPANCY_SHARE < 0.953,
   "The matched fence share left the range of crossings it was derived from");
+assert.equal(matchedFenceShare("full"), MATCHED_FENCE_OCCUPANCY_SHARE);
+assert.throws(() => matchedFenceShare("hybrid"), /Unknown mode/);
+// EVERY MODE MUST BE ABLE TO REACH ITS OWN FENCE. The first matched-trigger smoke sealed
+// green on both arms having never crossed once: eight stages peak near 0.20 occupancy
+// against a 0.937 share, so the arm proved it could launch and never ran the mechanism it
+// exists for. A share a mode cannot reach is an unreachable branch wearing a green tick.
+//
+// The bound is the mode's own accumulated payload, the same quantity gate 59 bounds the
+// compaction trigger against: stages times the floor payload, at four chars per token,
+// against the serving budget the fence is measured on.
+for (const mode of EXPERIMENT_MODES) {
+  const plan = EXPERIMENT_MODE_PLANS[mode];
+  const share = matchedFenceShare(mode);
+  assert(share > 0 && share < 1, `${mode} matched-fence share is not a share: ${share}`);
+  const reachableTokens = (plan.stageCount * plan.payloadFloorChars) / 4;
+  const budget = EXPERIMENT_PROVIDER_INPUT_BUDGETS["openai-codex/gpt-5.6-sol"];
+  assert(share * budget < reachableTokens,
+    `${mode} fences at ${Math.floor(share * budget)} tokens but its stages accumulate at ` +
+    `most ${Math.floor(reachableTokens)}, so the fence can never be crossed in that mode`);
+}
+checks.everyModeCanReachItsMatchedFence = true;
 assert.throws(() => armRuntimeConfiguration("hybrid"), /Unknown arm/);
 checks.armContractExclusive = true;
 

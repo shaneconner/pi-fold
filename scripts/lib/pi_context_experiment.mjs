@@ -55,6 +55,23 @@ export const EXPERIMENT_ARMS = Object.freeze(["pifold", "native", "unmanaged", "
 // adjudicator reports the realized distributions side by side, so a drift between the
 // triggers is visible in the result rather than assumed away.
 export const MATCHED_FENCE_OCCUPANCY_SHARE = 0.937;
+
+// A SMOKE MUST CROSS ITS OWN FENCE OR IT VALIDATES NOTHING. The first matched-trigger
+// smoke (sol-20260814-matched rep 2) sealed green on both arms and recorded zero fence
+// crossings, because eight stages peak near 0.20 occupancy and the full share is 0.937:
+// the arm was proven to launch and seal, and the mechanism it exists for was never run.
+// The compaction that smoke did record came from Pi's own agent_end path, `fromExtension`
+// false, which is the very trigger gate 66 showed cannot fire mid-run.
+//
+// This is the same shape `compactionTriggerShare` already uses for the same reason, and
+// the bound is the same: the share must sit below what the mode's stages actually
+// accumulate, or the fence is unreachable in that mode by construction.
+export const MATCHED_FENCE_SHARES = Object.freeze({ full: 0.937, smoke: 0.03 });
+
+export function matchedFenceShare(mode) {
+  assertExperiment(EXPERIMENT_MODES.includes(mode), `Unknown mode ${mode}`);
+  return MATCHED_FENCE_SHARES[mode];
+}
 export const EXPERIMENT_MODES = Object.freeze(["smoke", "full"]);
 // A closed-book session receives ONLY the probe questions: no transcript, no stage
 // payloads, no tools, no checkout. It publishes the prior-knowledge floor per probe

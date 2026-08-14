@@ -38,7 +38,7 @@ import {
   estimateTokens,
   isWindowOverflow,
   nativeCompactionDisposition,
-  MATCHED_FENCE_OCCUPANCY_SHARE,
+  matchedFenceShare,
   servedOutputBudget,
   stageCallDisposition,
   toolResultContentSha256,
@@ -138,7 +138,7 @@ export function createPiContextExperimentExtension(config) {
   const fenceBudgetTokens = config.providerInputBudget ?? null;
   const fenceThresholdTokens = fenceBudgetTokens === null
     ? null
-    : Math.floor(MATCHED_FENCE_OCCUPANCY_SHARE * fenceBudgetTokens);
+    : Math.floor(matchedFenceShare(config.mode) * fenceBudgetTokens);
   assertExperiment(!harnessFence || Number.isSafeInteger(fenceThresholdTokens),
     "The matched-fence arm requires a declared providerInputBudget to fence against");
   const fenceState = { crossings: 0, inFlight: false, lastTokens: null };
@@ -608,7 +608,7 @@ export function createPiContextExperimentExtension(config) {
               occupancy_tokens: tokens,
               threshold_tokens: fenceThresholdTokens,
               occupancy_share: tokens / fenceBudgetTokens,
-              share_rule: MATCHED_FENCE_OCCUPANCY_SHARE,
+              share_rule: matchedFenceShare(config.mode),
               budget_tokens: fenceBudgetTokens,
             });
             ctx.compact({
