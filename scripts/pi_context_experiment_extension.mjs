@@ -631,14 +631,41 @@ export function createPiContextExperimentExtension(config) {
             ctx.compact({
               onComplete: () => {
                 fenceState.inFlight = false;
-                appendEvent("harness-fence-compacted", { crossing: fenceState.crossings });
+                appendEvent("harness-fence-compacted", {
+                  crossing: fenceState.crossings, serviced_by: "fence",
+                });
               },
               // A FENCE THAT CANNOT COMPACT IS A DEAD ARM, so it says so and latches
-              // rather than quietly leaving the window to grow unopposed.
+              // rather than quietly leaving the window to grow unopposed. One outcome is
+              // not that, and it is the one this arm turns out to produce most of the time.
+              //
+              // ALREADY COMPACTED IS THE CROSSING BEING SERVICED. `compact` aborts the live
+              // turn before it prepares anything, and that abort ends the agent operation,
+              // which is precisely the boundary Pi's own `_checkCompaction` runs at. Gate
+              // 66 found that boundary never arrives during a single long pull-based turn;
+              // the fence supplies one. In rep 1 of sol-20260814-fenced the crossing fired
+              // at 51,853 tokens, the abort landed 18ms later, Pi's own threshold pass
+              // opened 10ms after that and had summarized the branch 12.5 seconds later
+              // (reason "threshold", fromExtension false, entry aed93cd9). Our manual
+              // request then reached `prepareCompaction`, found a branch already ending in
+              // a compaction entry, and threw. The crossing got exactly the compaction it
+              // asked for, from the trigger the arm is matched to.
+              //
+              // Accepted only on PROOF of that, the compaction entry standing on the
+              // branch, which is the same condition `prepareCompaction` refused on. The
+              // message alone is never enough, and every other error still latches.
               onError: (error) => {
                 fenceState.inFlight = false;
+                const message = error?.message ?? String(error);
+                const compacted = ctx.sessionManager.getBranch().at(-1)?.type === "compaction";
+                if (/Already compacted/.test(message) && compacted) {
+                  appendEvent("harness-fence-compacted", {
+                    crossing: fenceState.crossings, serviced_by: "native-threshold",
+                  });
+                  return;
+                }
                 appendFailure(config, "harness-fence-compaction",
-                  `${fenceState.crossings}:${error?.message ?? String(error)}`);
+                  `${fenceState.crossings}:${message}`);
               },
             });
           }

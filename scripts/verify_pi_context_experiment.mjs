@@ -4097,6 +4097,59 @@ try {
   assert(/\} else \{\s*appendFailure\(config, "context-aborted"/.test(extension),
     "an aborted context outside a crossing no longer latches");
 
+  // AND THE CROSSING'S OWN OUTCOME, driven rather than matched. The abort creates the
+  // boundary Pi's `_checkCompaction` runs at, so most crossings are serviced by Pi's own
+  // threshold pass before our manual request is prepared, and the manual request then
+  // throws "Already compacted". That is the arm working. It is accepted only against the
+  // compaction entry actually standing on the branch, which is the same condition
+  // `prepareCompaction` refused on: the message alone is a claim, not evidence.
+  const onErrorBody = extension.slice(
+    extension.indexOf("onError: (error) => {") + "onError: (error) => {".length,
+    extension.indexOf("\n              },\n            });"),
+  );
+  assert(onErrorBody.length > 0, "the fence's error path was not found where it is pinned");
+  const driveOnError = (message, lastEntryType) => {
+    const emitted = [];
+    const latched = [];
+    const state = { crossings: 3, inFlight: true };
+    new Function("fenceState", "ctx", "appendEvent", "appendFailure", "config",
+      `return (error) => {${onErrorBody}};`)(
+      state,
+      { sessionManager: { getBranch: () => [{ type: "message" }, { type: lastEntryType }] } },
+      (kind, details) => emitted.push({ kind, details }),
+      (_config, phase, detail) => latched.push({ phase, detail }),
+      {},
+    )(new Error(message));
+    assert.equal(state.inFlight, false,
+      "a crossing that errored stays in flight, so no later crossing can ever fire");
+    return { emitted, latched };
+  };
+
+  const serviced = driveOnError("Already compacted", "compaction");
+  assert.deepEqual(serviced.latched, [],
+    "a crossing serviced by Pi's own threshold pass is latched as a failure, which kills the arm");
+  assert.equal(serviced.emitted.length, 1, "a serviced crossing records no completion");
+  assert.equal(serviced.emitted[0].kind, "harness-fence-compacted",
+    "a serviced crossing does not record the completion the worker resumes on");
+  assert.equal(serviced.emitted[0].details.serviced_by, "native-threshold",
+    "a serviced crossing does not name which trigger compacted it");
+
+  // PROOF IS REQUIRED. The same message with no compaction on the branch is a real
+  // failure, and every other message is one whatever the branch looks like.
+  const unproven = driveOnError("Already compacted", "message");
+  assert.deepEqual(unproven.emitted, [],
+    "the fence accepts the error message alone, so a crossing that compacted nothing reads as serviced");
+  assert.equal(unproven.latched.length, 1, "an unproven claim of compaction does not latch");
+  for (const message of ["Nothing to compact (session too small)", "No model selected", "boom"]) {
+    const failed = driveOnError(message, "compaction");
+    assert.deepEqual(failed.emitted, [],
+      `a crossing that failed with "${message}" records a completion`);
+    assert.equal(failed.latched.length, 1,
+      `a crossing that failed with "${message}" does not latch, so the window grows unopposed`);
+    assert.equal(failed.latched[0].phase, "harness-fence-compaction",
+      "a failed crossing latches under some other name");
+  }
+
   checks.aForcedCompactionAbortsTheTurnAndOnlyTheFencedArmResumes = true;
 }
 
