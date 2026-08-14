@@ -141,7 +141,11 @@ export function createPiContextExperimentExtension(config) {
     : Math.floor(matchedFenceShare(config.mode) * fenceBudgetTokens);
   assertExperiment(!harnessFence || Number.isSafeInteger(fenceThresholdTokens),
     "The matched-fence arm requires a declared providerInputBudget to fence against");
-  const fenceState = { crossings: 0, inFlight: false, lastTokens: null };
+  // `abandonPending` is the one provider request each crossing is allowed to strand. See
+  // the `before_provider_request` handler: it is armed at the crossing and consumed once.
+  const fenceState = {
+    crossings: 0, inFlight: false, lastTokens: null, abandonPending: false,
+  };
   const summarizeContextSpan = experimentSummarizeContextSpan(config);
   const compactionDisposition = nativeCompactionDisposition(config.arm);
   const allowedTools = new Set([
@@ -538,8 +542,25 @@ export function createPiContextExperimentExtension(config) {
 
       pi.on("before_provider_request", (event, ctx) => {
         if (inFlightProviderRequest) {
-          appendFailure(config, "parallel-provider-request", inFlightProviderRequest.recordSha256);
-          throw new Error("A provider request began before its predecessor produced an assistant response");
+          // OUR OWN ABORT STRANDS ONE REQUEST PER CROSSING. This marker is cleared by the
+          // assistant response its request produces, and an aborted request produces none:
+          // rep 2 of sol-20260814-fenced opened a 174,562-char request 4ms after the fence
+          // abort landed, that request died unanswered (13 requests, 12 responses), and the
+          // next one read as parallel traffic and latched a capability breach that had not
+          // happened. The allowance is armed at the crossing and consumed ONCE, so a second
+          // stranded request, or any stranded request without a crossing behind it, is
+          // still the breach this invariant exists to catch.
+          if (fenceState.abandonPending) {
+            fenceState.abandonPending = false;
+            appendEvent("harness-fence-abandoned-request", {
+              crossing: fenceState.crossings,
+              record_sha256: inFlightProviderRequest.recordSha256,
+            });
+            inFlightProviderRequest = null;
+          } else {
+            appendFailure(config, "parallel-provider-request", inFlightProviderRequest.recordSha256);
+            throw new Error("A provider request began before its predecessor produced an assistant response");
+          }
         }
         const providerTools = Array.isArray(event.payload?.tools) ? event.payload.tools : [];
         const payloadChars = allStrings(event.payload).reduce((total, text) => total + text.length, 0);
@@ -620,6 +641,7 @@ export function createPiContextExperimentExtension(config) {
           if (tokens !== null && tokens > fenceThresholdTokens) {
             fenceState.inFlight = true;
             fenceState.crossings += 1;
+            fenceState.abandonPending = true;
             appendEvent("harness-fence-crossing", {
               crossing: fenceState.crossings,
               occupancy_tokens: tokens,
@@ -771,6 +793,17 @@ export function createPiContextExperimentExtension(config) {
         appendEvent("agent-end", { messageCount: event.messages?.length ?? null });
       });
       pi.on("session_shutdown", () => {
+        // The same one-per-crossing allowance: a run that ends while a crossing's stranded
+        // request is still outstanding never had a response owed to it. Unarmed, this is
+        // the unanswered request it always was.
+        if (inFlightProviderRequest && fenceState.abandonPending) {
+          fenceState.abandonPending = false;
+          appendEvent("harness-fence-abandoned-request", {
+            crossing: fenceState.crossings,
+            record_sha256: inFlightProviderRequest.recordSha256,
+          });
+          inFlightProviderRequest = null;
+        }
         if (inFlightProviderRequest) {
           appendFailure(config, "provider-request-without-response", inFlightProviderRequest.recordSha256);
         }

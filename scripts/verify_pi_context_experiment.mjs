@@ -4150,6 +4150,48 @@ try {
       "a failed crossing latches under some other name");
   }
 
+  // AND THE ONE REQUEST THE ABORT STRANDS. The in-flight marker is cleared by the assistant
+  // response its request produces, and an aborted request produces none, so the next
+  // request read as parallel traffic and latched a capability breach that had not happened.
+  // The allowance is armed at the crossing and consumed once: a second stranded request, or
+  // one with no crossing behind it, is still the breach the invariant exists to catch.
+  assert(/fenceState\.crossings \+= 1;\s*fenceState\.abandonPending = true;/.test(extension),
+    "the stranded-request allowance is not armed at the crossing that strands it");
+  const guard = extension.slice(
+    extension.indexOf("        if (inFlightProviderRequest) {\n          // OUR OWN ABORT"),
+    extension.indexOf("\n        const providerTools ="),
+  );
+  assert(guard.length > 0, "the in-flight provider-request guard was not found where it is pinned");
+  const driveGuard = (state, marker) => {
+    const emitted = [];
+    const latched = [];
+    let threw = false;
+    try {
+      new Function("fenceState", "appendEvent", "appendFailure", "config",
+        `return (inFlightProviderRequest) => {${guard}\n return inFlightProviderRequest; };`)(
+        state, (kind, details) => emitted.push({ kind, details }),
+        (_config, phase, detail) => latched.push({ phase, detail }), {})(marker);
+    } catch { threw = true; }
+    return { emitted, latched, threw };
+  };
+  const armed = { crossings: 2, abandonPending: true };
+  const first = driveGuard(armed, { recordSha256: "abc" });
+  assert.deepEqual(first.latched, [], "the request our own abort stranded is latched as parallel traffic");
+  assert.equal(first.threw, false, "a stranded request still throws, so the run dies on our own abort");
+  assert.equal(first.emitted[0]?.kind, "harness-fence-abandoned-request",
+    "a stranded request is dropped without a record of it");
+  assert.equal(armed.abandonPending, false, "the allowance is not consumed, so it covers every later request");
+  const second = driveGuard(armed, { recordSha256: "def" });
+  assert.equal(second.latched[0]?.phase, "parallel-provider-request",
+    "a second stranded request on one crossing does not latch");
+  assert.equal(second.threw, true, "a second stranded request does not stop the request that follows it");
+  const unarmed = driveGuard({ crossings: 0, abandonPending: false }, { recordSha256: "ghi" });
+  assert.equal(unarmed.latched[0]?.phase, "parallel-provider-request",
+    "genuine parallel provider traffic no longer latches");
+  assert.equal(unarmed.threw, true, "genuine parallel provider traffic is allowed to proceed");
+  assert.deepEqual(driveGuard({ crossings: 0, abandonPending: true }, null).latched, [],
+    "the guard acts when no request is in flight at all");
+
   checks.aForcedCompactionAbortsTheTurnAndOnlyTheFencedArmResumes = true;
 }
 
