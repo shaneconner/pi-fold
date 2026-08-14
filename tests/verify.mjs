@@ -13482,6 +13482,113 @@ async function gateDeltaCarriesOnlyBriefChanges() {
  * pen: folds in the event stream, nothing durable, a session that keeps computing folds it
  * will discard, and a message saying the opposite.
  */
+// GATE 133 - a projection fingerprint is computed when one is asked for, and it is the one
+// the eager map held.
+//
+// Replaying a ledger hashed the whole fold forest twice for every revision it had ever
+// written. One revision is ever read, by one caller, on the restore path, and
+// `materializeActiveContextState` takes `.state` and drops the map entirely, so a session
+// paid for hundreds of digests nothing could reach. Profiled against sol-20260813-paired
+// rep 1 at its full 1,276 entries, canonicalizing and hashing was 72% of a materialisation.
+//
+// The saving is worth nothing if a fingerprint changes, so the gate does not compare the
+// lazy map against itself. Every revision is recomputed INDEPENDENTLY by replaying the
+// branch up to the entry that wrote it and hashing the state that comes out, and the map
+// has to agree with that. Laziness is then pinned where it lives: the replay records the
+// revision and hashes nothing, and `get` is what hashes.
+async function gateProjectionFingerprintsAreComputedOnDemand() {
+  const runtime = await epochToolRuntime({ turns: 16, resultChars: 6_000 });
+  const built = runtime.built;
+  const sessionId = built.sessionId;
+  const stateEntryType = context.ACTIVE_CONTEXT_STATE_ENTRY;
+  const foldRecordEntryType = context.ACTIVE_CONTEXT_FOLD_RECORD_ENTRY;
+
+  // More revisions than any reader wants, which is the case the eager map paid for.
+  await toolCall(runtime, {
+    action: "fold",
+    marks: [0, 1, 2].map((turn) => ({
+      ids: [built.turnEntries[turn][2]],
+      brief: `Stale inspection ${turn}: the exact output stays recoverable behind this fold.`,
+    })),
+  });
+  await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  const snapshotNow = () => context.mapActiveContext({
+    sessionId,
+    eventMessages: runtime.messages,
+    contextEntries: runtime.branch,
+    contextWindow: 100_000,
+  });
+  const roots = context.orderedRoots(materialized(runtime), snapshotNow()).map((root) => root.fold);
+  assert(roots.length >= 2, `The fixture committed ${roots.length} root folds; two are needed`);
+  await toolCall(runtime, { action: "expand", id: roots[0].id });
+  await toolCall(runtime, {
+    action: "rebrief",
+    id: roots[1].id,
+    brief: "Corrected: the exact bytes stay recoverable behind this fold.",
+  });
+  await toolCall(runtime, {
+    action: "rebrief",
+    id: roots[1].id,
+    brief: "Corrected again: the exact bytes stay recoverable behind this fold.",
+  });
+
+  const persistence = context.materializeStatePersistence(
+    runtime.branch, sessionId, stateEntryType, foldRecordEntryType);
+
+  // INDEPENDENT RECOMPUTATION. Replay the branch up to each state entry and hash what comes
+  // out; nothing here consults the lazy map to decide what the answer should be.
+  const stateEntryIndices = runtime.branch
+    .map((entry, index) => (entry?.customType === stateEntryType ? index : -1))
+    .filter((index) => index >= 0);
+  assert(stateEntryIndices.length >= 4,
+    `The fixture wrote ${stateEntryIndices.length} state entries; several revisions are needed ` +
+    "or the per-revision cost this removes never existed in the fixture");
+  const revisionsChecked = new Set();
+  for (const index of stateEntryIndices) {
+    const at = context.materializeActiveContextState(
+      runtime.branch.slice(0, index + 1), sessionId, stateEntryType, foldRecordEntryType);
+    assert.deepEqual(persistence.projectionFingerprints.get(at.revision), {
+      topologySha256: context.topologySha256(at),
+      protectionSha256: context.protectionSha256(at),
+    }, `The fingerprint for revision ${at.revision} is not the one that revision's state hashes to`);
+    revisionsChecked.add(at.revision);
+  }
+  assert(revisionsChecked.size >= 3,
+    `Only ${revisionsChecked.size} distinct revisions were checked, so the map was barely read`);
+
+  // Computed ONCE. The same object comes back, so a second reader re-hashes nothing.
+  const revision = Math.max(...revisionsChecked);
+  const first = persistence.projectionFingerprints.get(revision);
+  assert(first && typeof first.topologySha256 === "string", "A written revision has no fingerprint");
+  assert.equal(persistence.projectionFingerprints.get(revision), first,
+    "A second read rebuilt the fingerprint instead of returning the one already computed");
+
+  // A revision the ledger never wrote has none, which is what the restore path reads when a
+  // receipt names a revision this branch does not carry.
+  assert.equal(persistence.projectionFingerprints.get(revision + 10_000), undefined,
+    "A revision the ledger never wrote answers with a fingerprint");
+
+  // AND THE LAZINESS ITSELF, pinned where it lives: the replay records the revision and
+  // hashes nothing. Without this the map could be eager again and every assertion above
+  // would still pass.
+  const source = readFileSync(join(projectRoot, "extensions", "lib", "persistence.ts"), "utf8");
+  const remember = source.slice(
+    source.indexOf("const rememberProjection = ("),
+    source.indexOf("rememberProjection();"),
+  );
+  assert(remember.length > 0, "the projection recorder was not found where it is pinned");
+  assert(!/topologySha256|protectionSha256/.test(remember),
+    "materialisation hashes every revision it records, which is the cost this gate removes");
+  assert(/fingerprintSources\.set\(state\.revision, state\)/.test(remember),
+    "the recorder no longer holds the revision's own state, so a fingerprint could read another's");
+
+  return {
+    stateEntries: stateEntryIndices.length,
+    revisionsChecked: revisionsChecked.size,
+    cachedOnSecondRead: true,
+  };
+}
+
 async function gateUserCommitAnnouncesPersistenceFailure() {
   const shape = { turns: 12, resultChars: 16_000, contextWindow: 100_000 };
   const bank = async (runtime) => {
@@ -13671,6 +13778,7 @@ const gates = [
   [131, "Derivation cost is recorded and summable", gateDerivationCostIsRecordedAndSummable],
   [132, "Canonicalization is memoized per message object", gateCanonicalizationIsMemoizedPerMessageObject],
   [128, "The user's commit announces a persistence failure", gateUserCommitAnnouncesPersistenceFailure],
+  [133, "A projection fingerprint is computed on demand", gateProjectionFingerprintsAreComputedOnDemand],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

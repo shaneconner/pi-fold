@@ -766,12 +766,29 @@ export function stateFromFoldRefs(
   return parseActiveContextState(state, wire.sessionId, false);
 }
 
+export interface ProjectionFingerprint {
+  topologySha256: string;
+  protectionSha256: string;
+}
+
+/**
+ * A REVISION'S FINGERPRINTS, COMPUTED WHEN ONE IS ASKED FOR.
+ *
+ * A `Map` satisfies this, which is what it was until 2026-08-13. The narrower shape is the
+ * point: the only reader takes ONE revision on the restore path, and the eager map hashed
+ * the fold forest twice for every revision the ledger ever held, on every materialization,
+ * including the ones that discard the map entirely.
+ */
+export interface ProjectionFingerprints {
+  get(revision: number): ProjectionFingerprint | undefined;
+}
+
 export interface MaterializedStatePersistence {
   state: ActiveContextState;
   wireVersion: 0 | 1 | 2;
   records: Map<string, FoldRecordEntry>;
   stateSha256: string;
-  projectionFingerprints: Map<number, { topologySha256: string; protectionSha256: string }>;
+  projectionFingerprints: ProjectionFingerprints;
 }
 
 export function materializeStatePersistence(
@@ -783,16 +800,41 @@ export function materializeStatePersistence(
   let state = emptyActiveContextState(sessionId);
   let wireVersion: 0 | 1 | 2 = 0;
   const records = new Map<string, FoldRecordEntry>();
-  const projectionFingerprints = new Map<number, { topologySha256: string; protectionSha256: string }>();
+  // WHAT A FINGERPRINT IS MADE OF, HELD BY REFERENCE UNTIL ONE IS ASKED FOR.
+  //
+  // Replaying a ledger hashed the whole fold forest twice per revision, and one revision is
+  // ever read, by one caller, on the restore path. `materializeActiveContextState` takes
+  // `.state` and drops the map, so every request on a folding session paid for hundreds of
+  // digests it could not reach. Profiled against sol-20260813-paired rep 1 at its full
+  // 1,276 entries, materialization was 98% of a derivation, and canonicalizing and hashing
+  // was 72% of that.
+  //
+  // Holding the fields costs no copy: `state` is REPLACED on every delta rather than
+  // mutated (see `stateFromFoldRefs` below), so a reference taken here keeps that
+  // revision's own values, and the fold objects inside are shared with `records`.
+  const fingerprintSources = new Map<number, Pick<ActiveContextState,
+    "folds" | "expanded" | "protected">>();
+  const fingerprintCache = new Map<number, ProjectionFingerprint>();
+  const projectionFingerprints: ProjectionFingerprints = {
+    get(revision: number): ProjectionFingerprint | undefined {
+      const cached = fingerprintCache.get(revision);
+      if (cached) return cached;
+      const source = fingerprintSources.get(revision);
+      if (!source) return undefined;
+      const computed = {
+        topologySha256: topologySha256(source),
+        protectionSha256: protectionSha256(source),
+      };
+      fingerprintCache.set(revision, computed);
+      return computed;
+    },
+  };
   let stateSha256 = semanticStateSha256(state);
   let stateStart = -1;
   let checkpointIndex = -1;
   let v2Seen = false;
   const rememberProjection = (): void => {
-    projectionFingerprints.set(state.revision, {
-      topologySha256: topologySha256(state),
-      protectionSha256: protectionSha256(state),
-    });
+    fingerprintSources.set(state.revision, state);
   };
   rememberProjection();
   for (let index = 0; index < entries.length; index += 1) {
