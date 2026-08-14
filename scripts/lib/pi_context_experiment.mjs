@@ -2288,6 +2288,79 @@ function scanAssistantMessages(entries, start, end, matches) {
   return { index: -1, text: "", skipped };
 }
 
+// ---------------------------------------------------------------------------
+// WHAT A WAVE COST TO ANSWER (Shane 2026-08-14). The probe score alone hides
+// which waves were free.
+//
+// In sol-20260814-deployment the native arm compacted at entries 99, 250, 329
+// and 457 while the probe waves landed at 91, 236, 321 and 470, so three of four
+// waves were asked while it still held everything since its last compaction, and
+// wave 16 was asked with NO compaction having happened at all and stages 1-15
+// entirely raw. That is a free wave, and a score of 21/21 that includes it reads
+// as recall when part of it is just an uncompacted window.
+//
+// Compaction and folding both fire on occupancy, which is emergent, so a static
+// plan cannot schedule a wave to land after one. What it can do is stop hiding
+// it: this reports, per wave and per arm, how far back the last context reset
+// was and how much digging the wave actually took. A wave answered with no
+// recovery calls right after a reset is a different measurement from one that
+// took six searches, and the two should never be summed without saying so.
+export function probeWaveRecovery({ entries, transcripts }) {
+  assertExperiment(Array.isArray(entries), "Wave recovery requires the session branch");
+  assertExperiment(Array.isArray(transcripts), "Wave recovery requires the probe transcripts");
+  // A reset is whatever ended the arm's ability to read the material directly:
+  // a compaction entry for native, a committed fold epoch for pifold.
+  const resets = [];
+  entries.forEach((entry, index) => {
+    if (entry?.type === "compaction") resets.push({ index, kind: "compaction" });
+    else if (typeof entry?.customType === "string" &&
+      entry.customType.endsWith(CONTEXT_EVENT_SUFFIX) &&
+      entry?.data?.kind === "context.commit") resets.push({ index, kind: "commit" });
+  });
+  return transcripts.map((wave) => {
+    const from = wave.resultEntryIndex;
+    const to = wave.answerEntryIndex;
+    if (from === null || from === undefined) {
+      return {
+        stage: wave.stage, delivered: false, historySearches: 0, contextToolCalls: 0,
+        fileReads: 0, recoveryCalls: 0, lastResetKind: null, entriesSinceReset: null,
+      };
+    }
+    const end = to === null || to === undefined ? entries.length : to;
+    let historySearches = 0;
+    let contextToolCalls = 0;
+    let fileReads = 0;
+    for (let index = from + 1; index < end; index += 1) {
+      const message = entries[index]?.message;
+      if (message?.role !== "toolResult") continue;
+      if (message.toolName === EXPERIMENT_HISTORY_TOOL_NAME) historySearches += 1;
+      else if (message.toolName === "read") fileReads += 1;
+      else if (message.toolName === EXPERIMENT_TOOL_NAME) continue;
+      // Anything else is the arm's own context tool (peek, status, expand), which
+      // only the pifold arm has. Counted by what it IS rather than named peek,
+      // since one tool carries every verb.
+      else if (typeof message.toolName === "string" && message.toolName.length > 0) {
+        contextToolCalls += 1;
+      }
+    }
+    const priorResets = resets.filter((reset) => reset.index < from);
+    const last = priorResets.length === 0 ? null : priorResets[priorResets.length - 1];
+    return {
+      stage: wave.stage,
+      delivered: true,
+      historySearches,
+      contextToolCalls,
+      fileReads,
+      recoveryCalls: historySearches + contextToolCalls + fileReads,
+      lastResetKind: last === null ? null : last.kind,
+      // No reset yet means the arm still held the WHOLE run raw, which is the
+      // strongest form of the free wave and is reported as such rather than as a
+      // large number that reads like distance.
+      entriesSinceReset: last === null ? null : from - last.index,
+    };
+  });
+}
+
 export function probeTranscripts({ entries, plan }) {
   const stageIndex = stageResultIndexByOrdinal(entries);
   const probeStages = plan.stages.filter((stage) => stage.probes.length > 0);

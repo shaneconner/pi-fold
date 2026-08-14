@@ -109,6 +109,7 @@ import {
   normalizeTraceAnswer,
   probeClassOf,
   probeMechanicalVerdicts,
+  probeWaveRecovery,
   probeProvenance,
   quotedIncludeSpecs,
   traceStepTranscripts,
@@ -4733,6 +4734,80 @@ try {
     validateStagePlan(reseal(bad));
   }, /disagrees with carrier/);
   checks.aWithdrawnCodeWordTrapsAFirstHitSearch = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 66 - a wave that cost nothing to answer says so.
+//
+// The probe score alone hides which waves were free. In sol-20260814-deployment
+// the native arm compacted at entries 99, 250, 329 and 457 while the waves
+// landed at 91, 236, 321 and 470, so wave 16 was answered with NO compaction yet
+// and stages 1-15 entirely raw. Occupancy is emergent and a static plan cannot
+// schedule a wave to land after a reset, so the instrument reports the condition
+// instead of pretending to control it. The same lens caught the other arm's
+// failure from the opposite side: pifold answered wave 32 with zero recovery
+// calls and lost both of its probes there, which is the shape of a guess.
+// ---------------------------------------------------------------------------
+{
+  const entryAt = (index) => ({ id: `e${index}`, type: "message" });
+  const toolResult = (toolName) => ({ type: "message", message: { role: "toolResult", toolName } });
+  const entries = [
+    toolResult(EXPERIMENT_TOOL_NAME),          // 0: wave one delivered
+    toolResult("read"),                        // 1
+    entryAt(2),                                // 2: wave one answered
+    { type: "compaction" },                    // 3: the reset
+    toolResult(EXPERIMENT_TOOL_NAME),          // 4: wave two delivered
+    toolResult(EXPERIMENT_HISTORY_TOOL_NAME),  // 5
+    toolResult(EXPERIMENT_HISTORY_TOOL_NAME),  // 6
+    toolResult("pi_fold_context"),             // 7
+    toolResult(EXPERIMENT_TOOL_NAME),          // 8: another stage, never recovery
+    entryAt(9),                                // 9: wave two answered
+  ];
+  const transcripts = [
+    { stage: 16, resultEntryIndex: 0, answerEntryIndex: 2 },
+    { stage: 32, resultEntryIndex: 4, answerEntryIndex: 9 },
+  ];
+  const rows = probeWaveRecovery({ entries, transcripts });
+  assert.equal(rows.length, 2);
+  // THE FREE WAVE: nothing had reset yet, which is reported as null rather than
+  // as a large distance that would read like the opposite.
+  assert.equal(rows[0].lastResetKind, null);
+  assert.equal(rows[0].entriesSinceReset, null);
+  assert.equal(rows[0].fileReads, 1);
+  assert.equal(rows[0].recoveryCalls, 1);
+  // THE DUG WAVE, and the stage tool is never counted as recovery: asking for
+  // the next stage is the workload, not an attempt to recover anything.
+  assert.equal(rows[1].lastResetKind, "compaction");
+  assert.equal(rows[1].entriesSinceReset, 1);
+  assert.equal(rows[1].historySearches, 2);
+  assert.equal(rows[1].contextToolCalls, 1);
+  assert.equal(rows[1].fileReads, 0);
+  assert.equal(rows[1].recoveryCalls, 3);
+  // A committed fold epoch is the pifold arm's reset, so both arms report against
+  // the same column rather than one of them reporting nothing.
+  const folded = [
+    { type: "custom", customType: `acme-${CONTEXT_EVENT_SUFFIX}`, data: { kind: "context.commit" } },
+    toolResult(EXPERIMENT_TOOL_NAME),
+    entryAt(2),
+  ];
+  const foldedRows = probeWaveRecovery({
+    entries: folded, transcripts: [{ stage: 16, resultEntryIndex: 1, answerEntryIndex: 2 }],
+  });
+  assert.equal(foldedRows[0].lastResetKind, "commit");
+  assert.equal(foldedRows[0].entriesSinceReset, 1);
+  // ZERO RECOVERY IS REPORTABLE, which is the pifold wave-32 shape.
+  assert.equal(foldedRows[0].recoveryCalls, 0);
+  // An undelivered wave reports as such rather than throwing or scoring zero work.
+  const missing = probeWaveRecovery({
+    entries, transcripts: [{ stage: 48, resultEntryIndex: null, answerEntryIndex: null }],
+  });
+  assert.equal(missing[0].delivered, false);
+  // The adjudicator actually reports it, or the lens is dead code.
+  const grader = readFileSync(join(PROJECT, "scripts", "adjudicate_pi_context_experiment.mjs"), "utf8");
+  assert(/probeWaveRecovery\(\{ entries: runEntries, transcripts: probes \}\)/.test(grader) &&
+    /^\s*waveRecovery,$/m.test(grader),
+  "the wave-recovery lens is computed but never reported");
+  checks.aWaveThatCostNothingToAnswerSaysSo = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

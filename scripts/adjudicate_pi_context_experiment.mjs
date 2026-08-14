@@ -41,6 +41,7 @@ import {
   nativeCompactionDisposition,
   probeClassOf,
   probeMechanicalVerdicts,
+  probeWaveRecovery,
   probeProvenance,
   probeTranscripts,
   quotedIncludeSpecs,
@@ -560,6 +561,11 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   // the blind grader is a second reader. Echo probes are graded separately, as
   // consistency with the agent's OWN earlier answer beside plan truth.
   const probeVerdicts = probeMechanicalVerdicts({ plan, transcripts: probes });
+  // What each wave COST to answer, reported beside the score so a free wave is
+  // never read as recall. sol-20260814-deployment had two: native answered wave
+  // 16 with nothing compacted yet and stages 1-15 fully raw, and pifold answered
+  // wave 32 with zero recovery calls and lost both of its probes there.
+  const waveRecovery = probeWaveRecovery({ entries: runEntries, transcripts: probes });
   const echoes = echoVerdicts({ plan, transcripts: probes });
 
   // Audit traces: every chain step graded absolutely (against the harness walk)
@@ -708,6 +714,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     overflowPoint,
     probeClassSummary,
     probeVerdicts,
+    waveRecovery,
     echoes,
     auditTraces,
     provenance,
