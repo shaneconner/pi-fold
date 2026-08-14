@@ -10,7 +10,7 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { dirname, join, normalize, relative } from "node:path";
+import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import {
   RUNTIME_HOME,
   assertSoak,
@@ -157,25 +157,19 @@ export const EXPERIMENT_PROVIDER_INPUT_BUDGETS = Object.freeze({
   "openai-codex/gpt-5.6-luna": 251_520,
   "openai-codex/gpt-5.6-sol": 251_520,
 });
-// The campaign's brief generator. Fold briefs are MODEL-WRITTEN in the shipped package,
-// and the deterministic brief exists only as the automatic fallback when a generator
-// fails, so an arm that registered the runtime with no generator wired measured the
-// fallback in every fold and called it the mechanism. This descriptor is what the pifold
-// arm registers, and it travels config -> manifest -> registration -> evidence so the
-// brief regime of a sealed run is a readable fact rather than an inference from silence.
-// A cheap model at medium effort: the brief is a bounded summary of a bounded span, and
-// the frontier model's turn is the thing under measurement, not the summarizing.
-// gpt-5.6-luna wrote this until 2026-08-11, when it went to 38 percent availability for
-// this account for hours and took rep 4 with it while every other model on the same
-// account answered. terra is the same generation, answers 4 of 4, and bills less per
-// brief. The choice deliberately is not the session's own model: the descriptor exists
-// because briefing with the arm's frontier model would bill the comparison for its own
-// summarizing and confound the thing under measurement.
-export const EXPERIMENT_BRIEF_GENERATOR = Object.freeze({
-  provider: "openai-codex",
-  model: "gpt-5.6-terra",
-  effort: "medium",
-});
+// THE BRIEF GENERATOR IS UNPINNED (Shane 2026-08-14). The pifold arm now runs
+// with NO generator, which is the condition both external reviews recommended
+// making permanent: in sol-20260814-traps the generator cost 30 out-of-band calls,
+// 1.79M tokens and $3.62 of the arm's $23.99, and the run STILL fabricated two
+// code words, because the fold was committed with a deterministic brief and the
+// model brief that carried the fact landed 126 entries after the probe. The
+// deterministic brief now preserves the result's opening prose (package gate 134),
+// so what a fold is committed with is what the model reads, at generator cost
+// zero. This run measures that condition before any deletion of the upgrade lane:
+// if recall holds and the bill drops as predicted, the lane goes with evidence;
+// if recall craters, the lane earned its keep and stays. A sealed run's brief
+// regime stays a readable fact: the manifest carries briefGenerator only when one
+// was registered, and gate 50 reads pre-lane runs exactly as before.
 // How much provider weather one run is allowed to survive. Pi retries a retryable
 // assistant error by re-sending the same request after a backoff, having removed the
 // failed attempt from agent state, so a retry costs zero tokens and changes nothing the
@@ -363,83 +357,34 @@ export const EXPERIMENT_TERMINAL_STABILIZATION_MS = 2 * 60 * 1_000;
 
 // The model may read the pinned checkout freely: rereading after a stop-the-world event is
 // the behaviour under measurement, so removing the read tool would destroy the metric.
-// SEARCH OVER WHAT THIS SESSION HAS ALREADY SAID (Shane 2026-08-14).
-//
-// Both arms get it, neither is told to use it. Until now the surface was `read` plus the
-// stage tool for both arms and `pi_fold_context` for pi-fold alone, so only one arm had any
-// route back to its own past. That was fair while probe answers were re-derivable from
-// files: in luna-20260807 native dug through 108 file reads to pi-fold's 39 and both arms
-// maxed recall. v3 then made the recall targets transcript-only by design ("SOF/FIN answers
-// exist only in the transcript"), which closed native's only route and left it nothing,
-// which is why its recall collapsed while its file reads did not rise.
-//
-// Compaction removes material from the context and leaves it in the session file, exactly
-// as folding does, so a search over the session's own record is a capability both mechanisms
-// could really offer. Giving it to both turns the comparison into the one worth publishing:
-// whether a structured brief and an exact expand beat brute search over the raw log.
+// THE TRANSCRIPT-SEARCH TOOL IS WITHDRAWN FROM THE PRIMARY COMPARISON (Shane
+// 2026-08-14; both external reviews concurred). It ran in exactly one sealed
+// campaign, sol-20260814-traps, and what it measured there was itself: the native
+// arm answered probes off its own earlier answers, which Pi's compaction summary
+// preserves as a completed-work checklist, and one wave's genuine dig cost six
+// refining queries. An arm holding an exact archive search is not a
+// bytes-abandoned baseline, so the primary comparison gives each arm only its
+// shipped mechanism: compaction for native, briefs plus peek/expand for pi-fold,
+// and the checkout for both. The tool NAME stays exported because the wave
+// recovery lens reads it out of sealed transcripts, where it really occurred.
 export const EXPERIMENT_HISTORY_TOOL_NAME = "session_history";
-export const EXPERIMENT_ALLOWED_TOOLS = Object.freeze(
-  ["read", EXPERIMENT_TOOL_NAME, EXPERIMENT_HISTORY_TOOL_NAME]);
-export const HISTORY_MATCH_LIMIT = 8;
-export const HISTORY_EXCERPT_CHARS = 600;
+export const EXPERIMENT_ALLOWED_TOOLS = Object.freeze(["read", EXPERIMENT_TOOL_NAME]);
 
-function messagePlainText(message) {
-  if (typeof message?.content === "string") return message.content;
-  if (!Array.isArray(message?.content)) return "";
-  const parts = [];
-  for (const part of message.content) {
-    if (typeof part === "string") { parts.push(part); continue; }
-    if (typeof part?.text === "string") parts.push(part.text);
-    if (typeof part?.name === "string" && part?.type === "toolCall") {
-      parts.push(`${part.name} ${JSON.stringify(part.arguments ?? {})}`);
-    }
-  }
-  return parts.join("\n");
+// READ CONTAINMENT (Shane 2026-08-14). Pi's read tool resolves any path against
+// cwd with no guard of its own, and the corpus sweep found what that permits: 10
+// sealed runs escaped the checkout, 178 escaping reads returned content, and 14
+// results across 5 runs carried the plan's own expectedAnswer, every one on a
+// native or nativefence arm. The judgment is CONTAINMENT, not spelling: the
+// RESOLVED path is what leaves or stays, since ".." and absolute forms are also
+// how legitimate reads inside the checkout arrive (60 such in two pifold runs).
+export function readEscapesCheckout(repoDir, requestedPath) {
+  assertExperiment(typeof repoDir === "string" && repoDir.length > 0 && isAbsolute(repoDir),
+    "Read containment requires the absolute checkout root");
+  const requested = typeof requestedPath === "string" ? requestedPath : "";
+  const resolved = resolve(repoDir, requested);
+  return { escapes: resolved !== repoDir && !resolved.startsWith(repoDir + sep), resolved };
 }
 
-/**
- * THE SANDBOX IS THE BRANCH ITSELF.
- *
- * `entries` is what the caller passes from `sessionManager.getBranch()`, which is this
- * session's own path up to the current leaf. It cannot reach another run, because another
- * run is another session file, and it cannot reach the future, because the branch ends at
- * now. Only conversational messages are searched: the runtime's own custom entries carry
- * durable state, fold records and event streams, and those are machinery rather than
- * anything the session said.
- *
- * A bound that silently drops matches would let this tool answer "not found" about material
- * that is there, so the count of every match is returned beside the ones that fit and the
- * caller is told to narrow. The bound is stated, never hidden.
- */
-export function searchSessionHistory(entries, query, options = {}) {
-  assertExperiment(Array.isArray(entries), "History search requires the session branch");
-  const limit = Number.isSafeInteger(options.limit) && options.limit > 0
-    ? options.limit : HISTORY_MATCH_LIMIT;
-  const excerptChars = Number.isSafeInteger(options.excerptChars) && options.excerptChars > 0
-    ? options.excerptChars : HISTORY_EXCERPT_CHARS;
-  const needle = typeof query === "string" ? query.trim().toLowerCase() : "";
-  if (needle.length === 0) return { query: "", totalMatches: 0, matches: [], truncated: false };
-  const matches = [];
-  let totalMatches = 0;
-  for (let index = 0; index < entries.length; index += 1) {
-    const entry = entries[index];
-    if (entry?.type !== "message") continue;
-    const text = messagePlainText(entry.message);
-    if (text.length === 0) continue;
-    const at = text.toLowerCase().indexOf(needle);
-    if (at < 0) continue;
-    totalMatches += 1;
-    if (matches.length >= limit) continue;
-    const from = Math.max(0, at - Math.floor(excerptChars / 3));
-    matches.push({
-      position: index,
-      role: entry.message?.role ?? null,
-      toolName: entry.message?.toolName ?? null,
-      excerpt: text.slice(from, from + excerptChars),
-    });
-  }
-  return { query: needle, totalMatches, matches, truncated: totalMatches > matches.length };
-}
 export const EXPERIMENT_PIFOLD_EXTRA_TOOLS = Object.freeze(["pi_fold_context"]);
 
 // Pacing exists to keep stage RELEASE external (soak integrity), not to burn wall-clock:
@@ -859,19 +804,21 @@ export function codeWordSentence(ordinal, codeWord) {
 
 // ---------------------------------------------------------------------------
 // CODE WORD REISSUES (Shane 2026-08-14). A fact stated once and CONTRADICTED
-// later, which is the case a single search gets wrong.
+// later, which is the case naive text recovery gets wrong.
 //
-// searchSessionHistory returns the EARLIEST matches first, so a query on "code
-// word for stage 15" surfaces the original before the correction by
-// construction: an agent that searches once and takes the first relevant hit
-// answers with the withdrawn value. That is not hypothetical. It is the exact
-// query the native arm used to win probe-32-04 in sol-20260814-deployment.
-// Chronological summarization should carry the correction instead, so this
-// separates recall that tracks supersession from recall that merely finds text.
+// Any earliest-first reading of the transcript, a text search over the session
+// file or a skim of the raw log, meets the original before the correction by
+// construction: take the first relevant hit and the answer is the withdrawn
+// value. That was not hypothetical while the transcript-search tool ran; it was
+// the exact query the native arm used on probe-32-04 in sol-20260814-deployment.
+// The tool is withdrawn from the primary comparison, and the trap keeps its
+// point without it: a summarizer that carries context CHRONOLOGICALLY must keep
+// the correction and drop the superseded value, so this separates recall that
+// tracks supersession from recall that merely retains text.
 //
 // The reissue sentence deliberately repeats the "code word for stage NN"
-// phrasing, so both sentences answer the same search and ORDER is the only thing
-// that distinguishes them.
+// phrasing, so both sentences answer the same text query and ORDER is the only
+// thing that distinguishes them.
 export function stageCodeWordReissues(seed, stageCount) {
   const draws = seededSequence(`${seed}:code-word-reissues`, stageCount);
   const words = draws.map((value) => `cw-${value.toString(16).padStart(8, "0").slice(0, 6)}`);

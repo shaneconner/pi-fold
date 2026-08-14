@@ -15,7 +15,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   EXPERIMENT_ARMS,
-  EXPERIMENT_BRIEF_GENERATOR,
   EXPERIMENT_DEFAULT_GUIDED_CURATION,
   EXPERIMENT_PROVIDER_INPUT_BUDGETS,
   EXPERIMENT_TRANSPORT,
@@ -81,7 +80,6 @@ import {
   usageSeriesFromLedger,
   outOfBandUsage,
   testAwarenessLeaks,
-  searchSessionHistory,
   EXPERIMENT_HISTORY_TOOL_NAME,
   EXPERIMENT_ALLOWED_TOOLS,
   EXPERIMENT_TOOL_NAME,
@@ -110,6 +108,7 @@ import {
   probeClassOf,
   probeMechanicalVerdicts,
   probeWaveRecovery,
+  readEscapesCheckout,
   probeProvenance,
   quotedIncludeSpecs,
   traceStepTranscripts,
@@ -2876,19 +2875,15 @@ try {
 // carry, and the second half of this gate pins that join.
 // ---------------------------------------------------------------------------
 {
-  // A cheap model at medium effort: the brief is a bounded summary of a bounded span, and
-  // the arm's own frontier model is the thing under measurement, not the summarizing.
-  // gpt-5.6-luna held this until 2026-08-11, when it sat at 38 percent availability for
-  // this account for hours while every other model on it answered 4 of 4.
-  assert.deepEqual({ ...EXPERIMENT_BRIEF_GENERATOR },
-    { provider: "openai-codex", model: "gpt-5.6-terra", effort: "medium" });
-  // The generator must never be the model the arm itself runs. That is the whole reason
-  // this is a descriptor rather than "session": briefing with the arm's own frontier model
-  // would bill the comparison for its own summarizing and confound what is measured.
-  for (const sessionModel of ["gpt-5.6-sol", "gpt-5.6-luna"]) {
-    assert.notEqual(EXPERIMENT_BRIEF_GENERATOR.model, sessionModel,
-      "the brief generator must not be a model an arm runs as its own session model");
-  }
+  // The campaign pin is GONE (Shane 2026-08-14): the pifold arm runs with no
+  // generator, measuring the condition both external reviews recommend making
+  // permanent before any deletion of the upgrade lane. The descriptor VALIDATION
+  // laws stay, because sealed runs carry descriptors and must keep reading; the
+  // fixture descriptor below is a literal so this gate cannot depend on a pin
+  // that no longer exists.
+  const EXPERIMENT_BRIEF_GENERATOR = Object.freeze({
+    provider: "openai-codex", model: "gpt-5.6-terra", effort: "medium",
+  });
 
   // Only the arm that registers the runtime writes briefs, so only it may carry a
   // generator: on any other arm the descriptor would be a fact about nothing.
@@ -2929,9 +2924,10 @@ try {
     ...manifest, briefGenerator: { provider: "openai" },
   }), /brief generator is not a provider\/model\/effort descriptor/);
 
-  assert(supervisor.includes("briefGenerator: EXPERIMENT_BRIEF_GENERATOR") &&
-    supervisor.includes("armRuntimeConfiguration(arm).activeContextEnabled"),
-  "the supervisor must pin the campaign's brief generator onto the arm that folds");
+  assert(!supervisor.includes("briefGenerator: EXPERIMENT_BRIEF_GENERATOR"),
+    "the supervisor still pins a campaign generator, so the no-generator condition never runs");
+  assert(!/EXPERIMENT_BRIEF_GENERATOR,/.test(supervisor),
+    "the supervisor still imports the retired generator pin");
   assert(worker.includes("{ briefGenerator: config.briefGenerator }"),
     "the worker must seal the run's brief generator into the manifest");
   assert(extension.includes("{ summarizeContextSpan }"),
@@ -4479,99 +4475,36 @@ try {
   checks.noInstructionTellsTheModelItIsBeingTested = true;
 }
 
-// GATE 63 - both arms can search their own past, neither is told to, and the search cannot
-// reach anything but this session.
+// ---------------------------------------------------------------------------
+// GATE 63 - the transcript-search tool is WITHDRAWN, and each arm carries only
+// its shipped mechanism.
 //
-// The surface was `read` plus the stage tool for both arms and `pi_fold_context` for
-// pi-fold alone, so only one arm had a route back to what it had already seen. That was
-// fair while probe answers were re-derivable from files: luna-20260807's native arm dug
-// through 108 file reads to pi-fold's 39 and both maxed recall. v3 then made the recall
-// targets transcript-only by design, which closed native's only route, and rep 1 of
-// sol-20260814-fenced-full left 10 of 21 probes unanswered with only 1 of its 10 matches
-// riding a compaction summary: the recall was genuine and unaided, and there was nothing
-// left to aid it with.
+// The tool ran in exactly one sealed campaign, sol-20260814-traps, and measured
+// itself: Pi's compaction summary preserves answered probes as a completed-work
+// checklist, so the native arm re-read its own answers rather than exercising
+// compaction, and its one genuine dig cost six refining queries. An arm holding
+// an exact archive search is not a bytes-abandoned baseline (both external
+// reviews, 2026-08-14). The tool name stays exported because the wave-recovery
+// lens reads it out of sealed transcripts, where the searches really happened.
 // ---------------------------------------------------------------------------
 {
-  assert.deepEqual([...EXPERIMENT_ALLOWED_TOOLS], ["read", EXPERIMENT_TOOL_NAME, EXPERIMENT_HISTORY_TOOL_NAME],
-    "the history tool is not on the surface both arms get");
+  assert.deepEqual([...EXPERIMENT_ALLOWED_TOOLS], ["read", EXPERIMENT_TOOL_NAME],
+    "the primary surface is read plus the stage tool, and nothing else");
   assert(!EXPERIMENT_PIFOLD_EXTRA_TOOLS.includes(EXPERIMENT_HISTORY_TOOL_NAME),
-    "the history tool is an arm-specific extra, so only one arm would carry it");
-
-  const message = (role, text, extra = {}) =>
-    ({ type: "message", message: { role, content: [{ type: "text", text }], ...extra } });
-  const branch = [
-    { type: "custom", customType: "pi-fold-active-context-state", data: { secret: "cw-a92fdc" } },
-    message("user", "Begin the staged repository assignment."),
-    message("toolResult", "stage 02 delivered lib/altsvc.h and the audit code word cw-a92fdc.", { toolName: "repo_stage" }),
-    message("assistant", "Read them; cw-a92fdc noted."),
-    message("toolResult", "stage 08 delivered lib/cf-h1-proxy.c first.", { toolName: "repo_stage" }),
-  ];
-
-  const hit = searchSessionHistory(branch, "cw-a92fdc");
-  assert.equal(hit.totalMatches, 2, "the search does not find what the session actually said");
-  assert.equal(hit.matches[0].position, 2, "a match does not carry where in the session it sits");
-  assert.equal(hit.matches[0].role, "toolResult", "a match does not carry who said it");
-  assert(hit.matches[0].excerpt.includes("cw-a92fdc"), "the excerpt does not contain the match");
-  assert.equal(hit.truncated, false, "a complete result claims to be truncated");
-
-  // THE RUNTIME'S OWN ENTRIES ARE NOT THE SESSION TALKING. Durable state, fold records and
-  // event streams are machinery, and a search that read them would hand one arm its own
-  // bookkeeping as though the conversation had said it. The fixture carries a message
-  // payload ON a custom entry deliberately: an entry type is not a promise about what the
-  // entry contains, so the filter has to be what excludes it rather than the shape.
-  assert.equal(searchSessionHistory([{
-    type: "custom",
-    customType: "pi-fold-active-context-state",
-    message: { role: "assistant", content: [{ type: "text", text: "cw-a92fdc" }] },
-  }], "cw-a92fdc").totalMatches, 0,
-  "the search reads the runtime's custom entries, so an arm can read its own bookkeeping");
-
-  // CASE-INSENSITIVE BOTH WAYS. The query is lowered before matching, so a fixture whose
-  // text is already lower-case proves nothing: the session has to be the mixed-case side.
-  const mixed = [message("assistant", "Alt-Svc origin selection uses struct Curl_peer.")];
-  assert.equal(searchSessionHistory(mixed, "alt-svc").totalMatches, 1,
-    "a lower-case query misses mixed-case text the session actually contains");
-  assert.equal(searchSessionHistory(mixed, "ALT-SVC").totalMatches, 1,
-    "an upper-case query misses text the session actually contains");
-  assert.equal(searchSessionHistory(branch, "CW-A92FDC").totalMatches, 2, "the search is case sensitive");
-  assert.equal(searchSessionHistory(branch, "never-said-this").totalMatches, 0,
-    "the search finds a phrase the session never contained");
-  assert.equal(searchSessionHistory(branch, "   ").totalMatches, 0, "a blank query matches the whole session");
-
-  // A BOUND THAT DROPS MATCHES SILENTLY WOULD LET THIS ANSWER "not found" ABOUT MATERIAL
-  // THAT IS THERE. The total is always reported and truncation is always declared.
-  const many = Array.from({ length: 20 }, (_unused, index) => message("assistant", `hit ${index} marker`));
-  const bounded = searchSessionHistory(many, "marker", { limit: 3 });
-  assert.equal(bounded.totalMatches, 20, "the bound hides how many matches there really were");
-  assert.equal(bounded.matches.length, 3, "the bound did not hold");
-  assert.equal(bounded.truncated, true, "a truncated result does not say so");
-  assert.deepEqual(bounded.matches.map((match) => match.position), [0, 1, 2],
-    "truncation does not keep the earliest matches, so the result depends on where it stopped");
-
-  // NOT ADVERTISED. `promptSnippet` and `promptGuidelines` are the fields that reach the
-  // system prompt, and a tool the agent is TOLD to use measures the telling. The stage tool
-  // sets both, which is what makes their absence here a choice rather than an oversight.
+    "the history tool came back as an arm-specific extra");
+  assert.equal(EXPERIMENT_HISTORY_TOOL_NAME, "session_history",
+    "the lens constant drifted, so sealed runs' searches would stop being readable");
   const extension = readFileSync(join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"), "utf8");
-  const registration = extension.slice(
-    extension.indexOf("name: EXPERIMENT_HISTORY_TOOL_NAME"),
-    extension.indexOf("name: EXPERIMENT_TOOL_NAME"),
-  );
-  assert(registration.length > 0, "the history tool registration was not found where it is pinned");
-  assert(!/promptSnippet|promptGuidelines/.test(registration),
-    "the history tool advertises itself in the system prompt, so the run measures the telling");
-  assert(/searchSessionHistory\(branch, params\.query\)/.test(registration) &&
-    /ctx\.sessionManager\.getBranch\(\)/.test(registration),
-  "the history tool does not search this session's own branch, which is what makes it a sandbox");
-  assert(/appendEvent\("history-search"/.test(registration),
-    "a history search leaves no record, so the search cost cannot be attributed");
-  // And no instruction surface names it, which is the same rule gate 62 enforces one layer up.
+  assert(!extension.includes("EXPERIMENT_HISTORY_TOOL_NAME,") ||
+    !/registerTool\(\{\s*name: EXPERIMENT_HISTORY_TOOL_NAME/.test(extension),
+  "the extension still registers the transcript-search tool");
+  assert(!/searchSessionHistory/.test(extension),
+    "the extension still carries the search implementation");
   const staging = readFileSync(join(PROJECT, "scripts", "stage_pi_context_experiment.mjs"), "utf8");
-  assert(!staging.includes(EXPERIMENT_HISTORY_TOOL_NAME),
-    "a stage instruction names the history tool, which tells the agent to use it");
-
-  checks.bothArmsCanSearchTheirOwnSessionAndNeitherIsToldTo = true;
+  assert(!staging.includes("session_history"),
+    "a stage instruction names the withdrawn tool");
+  checks.eachArmCarriesOnlyItsShippedMechanism = true;
 }
-
 // GATE 64 - the serving budget is a declared BASIS, and an arm that needs one cannot run
 // without it.
 //
@@ -4638,23 +4571,21 @@ try {
   assert.equal(reissueAnnouncedAt(carriers, 1), 3);
   assert.equal(reissueAnnouncedAt(carriers, 2), null);
 
-  // THE TRAP ITSELF. A transcript carrying the original and then the withdrawal,
-  // searched the way an agent searches, hands back the stale value first.
-  const historyEntries = [
-    { type: "message", message: { role: "toolResult", toolName: "repo_stage",
-      content: [{ type: "text", text: `STAGE 01. ${codeWordSentence(1, words[0])}` }] } },
-    { type: "message", message: { role: "toolResult", toolName: "repo_stage",
-      content: [{ type: "text", text: `STAGE 03. ${codeWordReissueSentence(1, replacements[0])}` }] } },
-  ];
-  const found = searchSessionHistory(historyEntries, "code word for stage 01");
-  assert.equal(found.totalMatches, 2,
-    "the withdrawal must answer the same search as the original, or it is not a trap");
-  assert(found.matches[0].excerpt.includes(words[0]),
-    "the first hit is not the withdrawn value, so a first-hit reader would not be caught");
-  assert(!found.matches[0].excerpt.includes(replacements[0]),
-    "the first hit already carries the correction, so the trap is vacuous");
-  assert(found.matches[1].excerpt.includes(replacements[0]),
-    "the correction is not reachable at all, so the probe would be unanswerable");
+  // THE TRAP ITSELF. Both sentences answer the same text query, and the one an
+  // earliest-first reading meets carries the withdrawn value alone: any naive
+  // recovery over the raw transcript (a text search, a skim from the top) lands
+  // on the stale value by construction, while chronological summarization must
+  // carry the correction. The properties are asserted on the sentences
+  // themselves, since the sentences are what any reader reads.
+  const original = codeWordSentence(1, words[0]);
+  const withdrawal = codeWordReissueSentence(1, replacements[0]);
+  const phrase = "code word for stage 01";
+  assert(original.includes(phrase) && withdrawal.includes(phrase),
+    "the withdrawal must answer the same text query as the original, or it is not a trap");
+  assert(original.includes(words[0]) && !original.includes(replacements[0]),
+    "the earliest-met sentence already carries the correction, so the trap is vacuous");
+  assert(withdrawal.includes(replacements[0]) && !withdrawal.includes(words[0]),
+    "the correction does not carry the live value alone, so order stops mattering");
 
   // Wave selection: one wave demands a withdrawn carrier, the next a standing
   // one, and each expects the value that is LIVE for the carrier it drew.
@@ -4808,6 +4739,60 @@ try {
     /^\s*waveRecovery,$/m.test(grader),
   "the wave-recovery lens is computed but never reported");
   checks.aWaveThatCostNothingToAnswerSaysSo = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 67 - a read that leaves the checkout is refused, and containment is the
+// RESOLVED path.
+//
+// Pi's read tool applies no containment of its own: resolveReadPathAsync
+// resolves against cwd and reads whatever exists. The corpus sweep (2026-08-14,
+// one predicate over every sealed run) found 10 runs that used it: 313 escaping
+// reads, 178 returning content, 14 results across 5 runs carrying the plan's own
+// expectedAnswer, every one on a native or nativefence arm. sol-20260812
+// native-rep9 is the proof of use: /proc/self/cmdline to run-config.json to
+// stages-full.json, then probe-64-06 answered verbatim off the key with a false
+// provenance sentence. Zero pifold runs ever left the checkout, so the
+// contamination inflated the arm pi-fold loses to.
+//
+// The judgment is containment, not spelling: ".." and absolute forms are also
+// how legitimate reads INSIDE the checkout arrive (60 such across two pifold
+// runs), so a string predicate is exactly wrong. And a blocked read is a
+// refusal the model can correct, not a run failure: it leaked nothing.
+// ---------------------------------------------------------------------------
+{
+  const repoDir = "/state/campaign/runs/run-1/repo";
+  const inside = (path) => readEscapesCheckout(repoDir, path);
+  // Stays: relative, absolute-inside, dot-segments that resolve back inside,
+  // and the checkout root itself.
+  assert.equal(inside("lib/vtls/gtls.h").escapes, false);
+  assert.equal(inside(`${repoDir}/lib/vtls/gtls.h`).escapes, false);
+  assert.equal(inside("lib/../lib/vtls/gtls.h").escapes, false);
+  assert.equal(inside(".").escapes, false);
+  // Refused: every route the contaminated runs actually took.
+  assert.equal(inside("../run-config.json").escapes, true);
+  assert.equal(inside("../../../stages-full.json").escapes, true);
+  assert.equal(inside("/proc/self/cmdline").escapes, true);
+  assert.equal(inside("/opt/checkout-elsewhere/scripts/stage_pi_context_experiment.mjs").escapes, true);
+  // The sibling-prefix trap: a directory whose name merely STARTS with the
+  // checkout root is outside it, which is why the boundary is root + separator.
+  assert.equal(readEscapesCheckout(repoDir, `${repoDir}-shadow/file.c`).escapes, true);
+  // The resolved path travels with the verdict so the artifact names what was
+  // actually judged, not what was typed.
+  assert.equal(inside("../run-config.json").resolved, "/state/campaign/runs/run-1/run-config.json");
+  assert.throws(() => readEscapesCheckout("relative/repo", "x"), /absolute checkout root/);
+  // And the extension enforces it on the read tool through THIS predicate, with
+  // the refusal correctable and the attempt recorded as its own event.
+  const extension = readFileSync(join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"), "utf8");
+  assert(/readEscapesCheckout\(config\.repoDir, requested\)/.test(extension),
+    "the extension does not judge reads with the shared containment predicate");
+  assert(/read-escape-blocked/.test(extension),
+    "a blocked read leaves no event, so a probing run would be invisible");
+  assert(/block: true, reason: "This run reads only files inside the repository checkout/.test(extension),
+    "the refusal does not tell the model how to correct");
+  assert(!/appendFailure\(config, "read-escape/.test(extension),
+    "a blocked read latches a failure, which turns a leak-free refusal into a dead six-hour run");
+  checks.aReadOutsideTheCheckoutIsRefusedByResolution = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

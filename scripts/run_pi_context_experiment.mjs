@@ -19,7 +19,6 @@ import { fileURLToPath } from "node:url";
 import {
   EXPERIMENT_ARMS,
   EXPERIMENT_BEHAVIORAL_MODE,
-  EXPERIMENT_BRIEF_GENERATOR,
   EXPERIMENT_CLOSED_BOOK_LABEL,
   EXPERIMENT_SESSION_TYPES,
   EXPERIMENT_DEPENDENCY_KEYS,
@@ -414,11 +413,10 @@ async function run() {
       ? { sessionType }
       : {
         ...(providerInputBudget === null ? {} : { providerInputBudget }),
-        // Fold briefs are model-written wherever they are measured. Only the arm that
-        // registers the runtime writes any, so only it carries the generator.
-        ...(armRuntimeConfiguration(arm).activeContextEnabled
-          ? { briefGenerator: EXPERIMENT_BRIEF_GENERATOR }
-          : {}),
+        // No brief generator: the deterministic brief carries the opening prose
+        // now (package gate 134), and this run measures the no-generator condition
+        // the reviews recommend making permanent. See EXPERIMENT_BRIEF_GENERATOR's
+        // retirement note in the library.
       }),
     transport: EXPERIMENT_TRANSPORT,
     repetition,

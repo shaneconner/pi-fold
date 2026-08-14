@@ -32,8 +32,7 @@ import {
   EXPERIMENT_ALLOWED_TOOLS,
   EXPERIMENT_MARKER_ENTRY,
   EXPERIMENT_PIFOLD_EXTRA_TOOLS,
-  EXPERIMENT_HISTORY_TOOL_NAME,
-  searchSessionHistory,
+  readEscapesCheckout,
   EXPERIMENT_TOOL_NAME,
   PI_OUTPUT_BUDGET,
   assertExperiment,
@@ -323,52 +322,11 @@ export function createPiContextExperimentExtension(config) {
           "Active-context registration did not expose the context tool for the pifold arm");
       }
 
-      // AVAILABLE TO BOTH ARMS AND ADVERTISED TO NEITHER (Shane 2026-08-14).
-      //
-      // No `promptSnippet` and no `promptGuidelines`, which is the whole point: those two
-      // fields are what reach the system prompt, and a tool the agent is TOLD to use
-      // measures the telling. It appears in the tool list like any other capability, and
-      // whether it occurs to the agent to search its own past is part of what is being
-      // measured rather than something the harness supplies.
-      //
-      // The sandbox is structural rather than a check: the branch is this session's own
-      // path up to the current leaf, so there is no other run to reach and no future to
-      // read. Registered here in the harness and not in the package, on the same rule that
-      // keeps everything experiment-only out of what ships.
-      pi.registerTool({
-        name: EXPERIMENT_HISTORY_TOOL_NAME,
-        label: "Session History",
-        description: "Search this session's own earlier messages for a phrase and return " +
-          "the passages that contain it, with their position in the session.",
-        executionMode: "sequential",
-        parameters: Type.Object({
-          query: Type.String({ minLength: 2, maxLength: 200 }),
-        }, { additionalProperties: false }),
-        async execute(toolCallId, params, _signal, _onUpdate, ctx) {
-          const branch = ctx.sessionManager.getBranch();
-          const found = searchSessionHistory(branch, params.query);
-          appendEvent("history-search", {
-            toolCallId,
-            query: found.query,
-            total_matches: found.totalMatches,
-            returned: found.matches.length,
-            truncated: found.truncated,
-            branch_entries: branch.length,
-          });
-          if (found.totalMatches === 0) {
-            return { content: [{ type: "text", text:
-              `No earlier message in this session contains ${JSON.stringify(found.query)}.` }] };
-          }
-          const header = found.truncated
-            ? `${found.totalMatches} messages contain ${JSON.stringify(found.query)}; ` +
-              `the ${found.matches.length} earliest are below. Narrow the phrase to see others.`
-            : `${found.totalMatches} message(s) contain ${JSON.stringify(found.query)}.`;
-          const body = found.matches.map((match) =>
-            `--- position ${match.position} (${match.role}${match.toolName ? `: ${match.toolName}` : ""})\n` +
-            match.excerpt).join("\n\n");
-          return { content: [{ type: "text", text: `${header}\n\n${body}` }] };
-        },
-      });
+      // The transcript-search tool is WITHDRAWN (Shane 2026-08-14; both external
+      // reviews concurred). It ran in one sealed campaign and measured itself:
+      // native answered probes off its own earlier answers, preserved verbatim by
+      // Pi's compaction summary, and an arm holding exact archive search is not a
+      // bytes-abandoned baseline. Each arm now carries only its shipped mechanism.
 
       pi.registerTool({
         name: EXPERIMENT_TOOL_NAME,
@@ -502,6 +460,33 @@ export function createPiContextExperimentExtension(config) {
         if (!allowedTools.has(event.toolName)) {
           appendFailure(config, "forbidden-tool", `${event.toolName}:${event.toolCallId}`);
           return { block: true, reason: "This run permits only repository reading and stage progression." };
+        }
+        // READ IS CONFINED TO THE CHECKOUT (Shane 2026-08-14). Pi's read tool
+        // resolves any relative or absolute path against cwd with no containment,
+        // and the corpus sweep found 10 sealed runs that used that: 313 escaping
+        // reads, 178 returning content, and 14 results across 5 runs carrying the
+        // plan's own expectedAnswer, every one on a native or nativefence arm
+        // (sol-20260812 native-rep9 walked /proc/self/cmdline to run-config.json
+        // to stages-full.json and answered probe-64-06 verbatim off the key).
+        // Containment, not spelling: the RESOLVED path is judged, because ".."
+        // and absolute are also how legitimate reads inside the checkout arrive.
+        // A blocked read is refused with a correctable reason rather than failing
+        // the run: it leaked nothing, and the model can continue inside the
+        // checkout. It is recorded as its own event so a run that probes the
+        // boundary is visible in the artifacts.
+        if (event.toolName === "read") {
+          const requested = typeof event.input?.path === "string" ? event.input.path
+            : typeof event.input?.file_path === "string" ? event.input.file_path : "";
+          const { escapes, resolved } = readEscapesCheckout(config.repoDir, requested);
+          if (escapes) {
+            appendEvent("read-escape-blocked", {
+              toolCallId: event.toolCallId,
+              requested,
+              resolved,
+            });
+            return { block: true, reason: "This run reads only files inside the repository checkout. " +
+              "Give a path relative to the checkout root." };
+          }
         }
         appendEvent("tool-call", {
           toolName: event.toolName,
