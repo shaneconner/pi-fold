@@ -9,7 +9,7 @@
 // adjudicator turns into evidence.
 //
 //   node scripts/run_pi_context_experiment.mjs --run-dir <dir> --unit <unit> \
-//        --campaign-dir <dir> --plan <stages.json> --arm pifold|native|unmanaged \
+//        --campaign-dir <dir> --plan <stages.json> --arm pifold|native|unmanaged|nativefence \
 //        [--model-provider openai-codex] [--model-id gpt-5.6-sol] [--effort xhigh]
 
 import { execFileSync, spawn } from "node:child_process";
@@ -332,7 +332,7 @@ async function run() {
   const effort = argumentValue("--effort", "xhigh");
   assertExperiment(requestedRunDir && unit && campaignDir && planPath, "Experiment run requires --run-dir, --unit, --campaign-dir and --plan");
   assertExperiment(closedBook || EXPERIMENT_ARMS.includes(arm),
-    "Experiment run requires --arm pifold|native|unmanaged");
+    `Experiment run requires --arm ${EXPERIMENT_ARMS.join("|")}`);
   // Deployment fact resolved from the model pin, never a flag: rep 16 aborted after the
   // curation thresholds ran against the 255,616-token descriptor budget because this
   // fact never reached the registration. Unlisted models run in descriptor mode.

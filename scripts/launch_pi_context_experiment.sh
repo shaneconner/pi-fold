@@ -98,7 +98,7 @@ for ARM in $ARMS; do
   IFS=$OLD_IFS
   # "closedbook" is not an arm: it launches the plan's closed-book floor session
   # (question list only, no stages, no tools, no checkout) through the same unit shape.
-  case "$ARM" in pifold|native|unmanaged|closedbook) ;; *) echo "unknown arm $ARM" >&2; exit 2;; esac
+  case "$ARM" in pifold|native|unmanaged|nativefence|closedbook) ;; *) echo "unknown arm $ARM" >&2; exit 2;; esac
   if [ "$ARM" = closedbook ]; then
     ARM_ARGS="--session-type closed-book"
   else
