@@ -12899,8 +12899,107 @@ async function gateDerivationCostIsRecordedAndSummable() {
   return {
     projections: series.length,
     derivations: spent.derivations,
+    hits: spent.derivation_hits,
+    savedShare: spent.derivation_hits === undefined ? null
+      : Number((spent.derivation_hits / (spent.derivation_hits + spent.derivations)).toFixed(3)),
     deriveMs: spent.derive_ms,
     maxPerRequestDerivations: Math.max(...deltas),
+  };
+}
+
+/**
+ * ONE CANONICALIZATION PER MESSAGE OBJECT, AND THE COST THAT BUYS IT.
+ *
+ * Mapping the branch canonicalized and hashed every event message on EVERY derivation,
+ * then canonicalized a branch candidate again on each digest match: roughly twice the
+ * session's bytes of stringify-and-sha, repeated for each of the ten or so derivations a
+ * request runs. Measured on sol-20260813-paired rep 1's sealed session (330 messages,
+ * 1,276 entries), one request's ten derivations cost 544 ms before and 247 ms after, with
+ * the warm derivations falling from about 50 ms each to about 14 ms. The cold derivation
+ * costs 18 ms MORE, which is the memo being populated and is the whole price.
+ *
+ * This is gate 121's rule one layer up, so it is pinned the same way and for the same
+ * reason: content addressing must survive across distinct objects AND distinct content
+ * must map distinctly, because either property alone admits a wrong cache. The one cost
+ * is ASSERTED rather than left to be discovered as a bug: a message mutated in place
+ * keeps its first canonical form. The session is append-only, so nothing mutates a
+ * message that has already been mapped, and stating the limit is the honest alternative
+ * to guarding against a case that cannot arise.
+ */
+async function gateCanonicalizationIsMemoizedPerMessageObject() {
+  const sessionId = "canon-memo-test";
+  const build = (texts) => {
+    const entries = [];
+    const messages = [];
+    let parentId = null;
+    texts.forEach((text, i) => {
+      const message = { role: "user", content: [{ type: "text", text }], timestamp: i + 1 };
+      const id = `${sessionId}-entry-${String(i + 1).padStart(3, "0")}`;
+      entries.push({ type: "message", id, parentId, message });
+      messages.push(message);
+      parentId = id;
+    });
+    return { entries, messages };
+  };
+  const map = (built, eventMessages) => context.mapActiveContext({
+    sessionId,
+    eventMessages: eventMessages ?? built.messages,
+    contextEntries: built.entries,
+    contextWindow: 100_000,
+  });
+
+  // (a) CONTENT ADDRESSING SURVIVES DISTINCT OBJECTS. The event message and the branch
+  // entry's message are different objects carrying the same bytes, which is the ordinary
+  // case: a memo keyed on identity alone would fail to map them to each other.
+  const built = build(["alpha payload", "beta payload", "gamma payload"]);
+  const copies = built.messages.map((message) => JSON.parse(JSON.stringify(message)));
+  assert(copies.every((copy, i) => copy !== built.messages[i]),
+    "The fixture reused the same objects, so distinct-object mapping is not being tested");
+  const viaCopies = map(built, copies);
+  assert.equal(viaCopies.mapped.length, copies.length);
+  assert(viaCopies.mapped.every((item) => item.ref !== null),
+    "A message whose content matches the branch exactly did not map, so content " +
+    "addressing did not survive being a different object");
+
+  // (b) DISTINCT CONTENT MAPS DISTINCTLY. If the memo ever returned one message's
+  // canonical form for another, two different payloads would collide onto one ref.
+  const refs = viaCopies.mapped.map((item) => item.ref.sha256);
+  assert.equal(new Set(refs).size, refs.length,
+    `Three distinct payloads produced ${new Set(refs).size} distinct refs: the memo is ` +
+    "serving one message's canonical form for another");
+
+  // Re-mapping the SAME objects is byte-identical, which is what makes a warm derivation
+  // safe to serve from the memo at all.
+  const again = map(built, copies);
+  assert.deepEqual(again.mapped.map((item) => item.ref.sha256), refs,
+    "A second derivation over the same objects produced different refs");
+
+  // (c) THE STATED COST. A message mutated in place keeps its first canonical form. This
+  // is asserted, not worked around: the session is append-only and nothing mutates an
+  // already-mapped message, so the memo is allowed to be wrong about a case that does
+  // not occur, and the gate records exactly how it is wrong.
+  const mutable = build(["one", "two"]);
+  const mapped = map(mutable);
+  const firstRef = mapped.mapped[0].ref.sha256;
+  mutable.messages[0].content[0].text = "one, changed after mapping";
+  const afterMutation = map(mutable);
+  assert.equal(afterMutation.mapped[0].ref.sha256, firstRef,
+    "A message mutated in place produced a NEW canonical form. That is not a failure of " +
+    "correctness for an append-only session, but it means this gate no longer describes " +
+    "the memo and the comment above it is now wrong");
+
+  // A genuinely new object with that same changed text is canonicalized afresh, so the
+  // staleness above is bounded to the mutated object and does not spread.
+  const rebuilt = build(["one, changed after mapping", "two"]);
+  const rebuiltRef = map(rebuilt).mapped[0].ref.sha256;
+  assert.notEqual(rebuiltRef, firstRef,
+    "Changed content in a fresh object reused the stale canonical form, so the memo is " +
+    "keyed on something other than the object");
+  return {
+    distinctObjectsMapped: viaCopies.mapped.filter((item) => item.ref).length,
+    distinctRefs: new Set(refs).size,
+    inPlaceMutationKeepsFirstForm: true,
+    freshObjectRecomputes: true,
   };
 }
 
@@ -13570,6 +13669,7 @@ const gates = [
   [129, "A retired state field is refused by name", gateRetiredStateFieldsAreRefusedByName],
   [130, "A boundary waives the guard rather than no-op", gateBoundaryWaivesTheGuardRatherThanNoOp],
   [131, "Derivation cost is recorded and summable", gateDerivationCostIsRecordedAndSummable],
+  [132, "Canonicalization is memoized per message object", gateCanonicalizationIsMemoizedPerMessageObject],
   [128, "The user's commit announces a persistence failure", gateUserCommitAnnouncesPersistenceFailure],
 ];
 

@@ -463,6 +463,7 @@ export function registerActiveContext(pi: any, options: {
     // do not roll back either.
     derivations: 0,
     deriveMs: 0,
+    derivationHits: 0,
   };
   const freeze = {
     body: null as unknown[] | null,
@@ -545,7 +546,35 @@ export function registerActiveContext(pi: any, options: {
   const currentOrdinal = (): number =>
     lifecycle.latestSnapshot ? markOrdinal(lifecycle.latestSnapshot) : 0;
 
-  const beginMutationPass = (): void => { instrumentation.mutationsSinceHandoff = 0; };
+  /**
+   * ONE DERIVATION PER DISTINCT BRANCH, WITHIN ONE PASS.
+   *
+   * A lifecycle pass asks for the authoritative snapshot repeatedly: the fence asks, the
+   * ladder asks, the accounting asks, the status surface asks. Instrumented on a fixture,
+   * a single request cost up to TEN derivations, and a derivation remaps the entire
+   * branch. On sol-20260813-paired rep 2 one of those cost 18.5 seconds.
+   *
+   * The memo is deliberately the SMALLEST one that is airtight rather than the largest
+   * one that would pay. It lives for exactly one pass and is dropped at the start of the
+   * next, so nothing it holds can outlive the moment it was true. Within a pass the only
+   * way the branch changes is by APPENDING, which moves a length, so keying on the two
+   * lengths and the window catches every change that can occur. A cache that had to
+   * reason about entries being replaced underneath it would be the kind of guard this
+   * project does not keep; this one cannot face that question.
+   */
+  const derivationMemo = {
+    key: null as string | null,
+    snapshot: null as ActiveContextSnapshot | null,
+  };
+  const dropDerivationMemo = (): void => {
+    derivationMemo.key = null;
+    derivationMemo.snapshot = null;
+  };
+
+  const beginMutationPass = (): void => {
+    instrumentation.mutationsSinceHandoff = 0;
+    dropDerivationMemo();
+  };
 
   const emit = (kind: ContextEventKind, payload: Record<string, unknown> = {}): ContextEvent => {
     const record = recordContextEvent(instrumentation.ledger, kind, {
@@ -733,20 +762,30 @@ export function registerActiveContext(pi: any, options: {
     if (!lifecycle.latestSnapshot || lifecycle.latestSnapshot.sessionId !== sessionId) {
       throw new Error("A current same-session Pi context event is required");
     }
-    return timedDerivation(() => mapActiveContext({
+    const entries = ctx.sessionManager.buildContextEntries();
+    const window = budgetWindowFor(ctx) ?? undefined;
+    const key = `${sessionId}:${entries.length}:${lifecycle.latestSnapshot.messages.length}:${window}`;
+    if (derivationMemo.snapshot && derivationMemo.key === key) {
+      instrumentation.derivationHits += 1;
+      return derivationMemo.snapshot;
+    }
+    const derived = timedDerivation(() => mapActiveContext({
       sessionId,
       eventMessages: lifecycle.latestSnapshot.messages,
-      contextEntries: ctx.sessionManager.buildContextEntries(),
+      contextEntries: entries,
       policy: lifecycle.latestSnapshot.policy,
       toolName,
       brandNoun,
       entryTypePrefix,
       blacklistAutoFoldTools,
       readOnlyContextActions,
-      contextWindow: budgetWindowFor(ctx) ?? undefined,
+      contextWindow: window,
       netBudget: providerInputBudget !== null,
       thresholds,
     }));
+    derivationMemo.key = key;
+    derivationMemo.snapshot = derived;
+    return derived;
   };
 
   const providerMeasurementBranchIndex = (
@@ -1847,6 +1886,7 @@ export function registerActiveContext(pi: any, options: {
       chars_per_token: charsPerToken,
       derivations: instrumentation.derivations,
       derive_ms: Math.round(instrumentation.deriveMs),
+      derivation_hits: instrumentation.derivationHits,
     });
     emit("context.prefix", {
       change: comparison.change,

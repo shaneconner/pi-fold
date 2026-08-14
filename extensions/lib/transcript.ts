@@ -363,6 +363,38 @@ export function toolFreshIndices(
 
 type EntryEvidence = { message: unknown; ref: BranchObject["ref"] };
 
+/**
+ * ONE CANONICALIZATION PER MESSAGE OBJECT.
+ *
+ * Mapping the branch canonicalizes and hashes EVERY event message, then canonicalizes a
+ * branch candidate again on each digest match. That is roughly twice the session's bytes
+ * of stringify-and-sha per derivation, and a derivation runs many times per request: on
+ * sol-20260813-paired rep 2 a single one cost 18.5 seconds against a 16.7 MB session,
+ * where rep 1 cost 3.5 against 7.1 MB. The work was never the mapping, it was rebuilding
+ * the same strings for messages that had not changed since the last pass.
+ *
+ * This is gate 121's rule at the layer above it, and it carries gate 121's tradeoff
+ * unchanged and on purpose: the memo is keyed on the message OBJECT, so a replaced object
+ * misses and recomputes rather than serving stale, and a message MUTATED IN PLACE keeps
+ * its first canonical form. The session is append-only, so nothing mutates a message that
+ * has already been mapped; the cost is stated rather than guarded against.
+ */
+const MESSAGE_WIRE = new WeakMap<object, { wire: string; digest: string }>();
+
+function messageWire(message: unknown): { wire: string; digest: string } | null {
+  const key = message && typeof message === "object" ? message as object : null;
+  if (key) {
+    const cached = MESSAGE_WIRE.get(key);
+    if (cached) return cached;
+  }
+  let wire: string;
+  try { wire = stableStringify(evidenceValue(message)); }
+  catch { return null; }
+  const canonical = { wire, digest: sha256Text(wire) };
+  if (key) MESSAGE_WIRE.set(key, canonical);
+  return canonical;
+}
+
 const ENTRY_EVIDENCE = new WeakMap<object, {
   sessionId: string;
   projectEntry: (entry: Record<string, unknown>) => unknown[];
@@ -425,19 +457,16 @@ export function mapActiveContext(input: {
   let cursor = 0;
   for (let index = 0; index < input.eventMessages.length; index += 1) {
     const message = input.eventMessages[index];
-    let wire: string | null = null;
-    let digest: string | null = null;
-    try {
-      wire = stableStringify(evidenceValue(message));
-      digest = sha256Text(wire);
-    } catch {
+    const canonical = messageWire(message);
+    if (!canonical) {
       mapped.push({ index, message, ref: null });
       continue;
     }
+    const { wire, digest } = canonical;
     let match = -1;
     for (let branchIndex = cursor; branchIndex < branchObjects.length; branchIndex += 1) {
       const candidate = branchObjects[branchIndex];
-      if (candidate.ref.sha256 === digest && stableStringify(evidenceValue(candidate.message)) === wire) {
+      if (candidate.ref.sha256 === digest && messageWire(candidate.message)?.wire === wire) {
         match = branchIndex;
         break;
       }
