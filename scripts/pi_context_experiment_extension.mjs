@@ -38,6 +38,7 @@ import {
   estimateTokens,
   isWindowOverflow,
   nativeCompactionDisposition,
+  MATCHED_FENCE_OCCUPANCY_SHARE,
   servedOutputBudget,
   stageCallDisposition,
   toolResultContentSha256,
@@ -126,6 +127,21 @@ export function experimentSummarizeContextSpan(config, loadHostModule) {
 
 export function createPiContextExperimentExtension(config) {
   const pifold = config.arm === "pifold";
+  // THE MATCHED-TRIGGER FENCE. Only the nativefence arm carries it, and only because Pi's
+  // own threshold cannot: `_checkCompaction` runs after agent_end and before prompt
+  // submission, and this workload is one prompt wrapping every stage, so on
+  // sol-20260813-paired rep 1 it was evaluated exactly once, after all 64 stages, while
+  // the projection sat inside its nominal band on 24 of 110 requests.
+  const harnessFence = config.arm === "nativefence";
+  // The SAME budget pi-fold measures its own fence against, so the two arms are compared
+  // on one denominator rather than on two that merely look alike.
+  const fenceBudgetTokens = config.providerInputBudget ?? null;
+  const fenceThresholdTokens = fenceBudgetTokens === null
+    ? null
+    : Math.floor(MATCHED_FENCE_OCCUPANCY_SHARE * fenceBudgetTokens);
+  assertExperiment(!harnessFence || Number.isSafeInteger(fenceThresholdTokens),
+    "The matched-fence arm requires a declared providerInputBudget to fence against");
+  const fenceState = { crossings: 0, inFlight: false, lastTokens: null };
   const summarizeContextSpan = experimentSummarizeContextSpan(config);
   const compactionDisposition = nativeCompactionDisposition(config.arm);
   const allowedTools = new Set([
@@ -574,8 +590,42 @@ export function createPiContextExperimentExtension(config) {
         closeStopTheWorld();
       });
 
-      pi.on("message_end", (event) => {
+      pi.on("message_end", (event, ctx) => {
         const reason = event.message?.role === "assistant" ? event.message.stopReason : null;
+        // THE FENCE FIRES ON WHAT THE PROVIDER COUNTED, on the same reading pi-fold's own
+        // fence is anchored to, and it fires ONCE per crossing: `compact` does not await,
+        // so without the in-flight latch a single crossing would queue one compaction per
+        // message until the summary landed.
+        if (harnessFence && event.message?.role === "assistant" && !fenceState.inFlight) {
+          const usage = typeof ctx?.getContextUsage === "function" ? ctx.getContextUsage() : null;
+          const tokens = typeof usage?.tokens === "number" ? usage.tokens : null;
+          fenceState.lastTokens = tokens;
+          if (tokens !== null && tokens > fenceThresholdTokens) {
+            fenceState.inFlight = true;
+            fenceState.crossings += 1;
+            appendEvent("harness-fence-crossing", {
+              crossing: fenceState.crossings,
+              occupancy_tokens: tokens,
+              threshold_tokens: fenceThresholdTokens,
+              occupancy_share: tokens / fenceBudgetTokens,
+              share_rule: MATCHED_FENCE_OCCUPANCY_SHARE,
+              budget_tokens: fenceBudgetTokens,
+            });
+            ctx.compact({
+              onComplete: () => {
+                fenceState.inFlight = false;
+                appendEvent("harness-fence-compacted", { crossing: fenceState.crossings });
+              },
+              // A FENCE THAT CANNOT COMPACT IS A DEAD ARM, so it says so and latches
+              // rather than quietly leaving the window to grow unopposed.
+              onError: (error) => {
+                fenceState.inFlight = false;
+                appendFailure(config, "harness-fence-compaction",
+                  `${fenceState.crossings}:${error?.message ?? String(error)}`);
+              },
+            });
+          }
+        }
         if (event.message?.role === "assistant") {
           if (!inFlightProviderRequest) {
             appendFailure(config, "orphan-provider-response", sha256Json(event.message));

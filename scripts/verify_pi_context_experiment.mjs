@@ -103,6 +103,7 @@ import {
   EXPERIMENT_SESSION_TYPES,
   closedBookPrompt,
   closedBookQuestions,
+  MATCHED_FENCE_OCCUPANCY_SHARE,
   closedBookSystemPrompt,
   closedBookTranscript,
 } from "./lib/pi_context_experiment.mjs";
@@ -121,7 +122,7 @@ const checks = {};
 // ---------------------------------------------------------------------------
 // GATE 1 - arm contract
 // ---------------------------------------------------------------------------
-assert.deepEqual([...EXPERIMENT_ARMS], ["pifold", "native", "unmanaged"]);
+assert.deepEqual([...EXPERIMENT_ARMS], ["pifold", "native", "unmanaged", "nativefence"]);
 // The pifold arm runs compaction ON: the runtime's overflow recovery lane arms off
 // `session_before_compact`, so an arm with compaction off would be measuring a deployment
 // nobody is asked to run.
@@ -131,6 +132,26 @@ assert.deepEqual(armRuntimeConfiguration("native"),
   { activeContextEnabled: false, nativeCompactionEnabled: true, toleratesOverflow: false });
 assert.deepEqual(armRuntimeConfiguration("unmanaged"),
   { activeContextEnabled: false, nativeCompactionEnabled: false, toleratesOverflow: true });
+// THE MATCHED-TRIGGER ARM. Compaction ON because the harness invokes it; fold runtime OFF
+// because a summary and a lossless fold are the two things this arm exists to tell apart.
+// It is deliberately identical to `native` in configuration: what differs is that the
+// harness fences it, and that difference lives in the extension rather than in a runtime
+// option, so nothing experiment-only reaches the shipped package.
+assert.deepEqual(armRuntimeConfiguration("nativefence"),
+  { activeContextEnabled: false, nativeCompactionEnabled: true, toleratesOverflow: false });
+assert.deepEqual(armRuntimeConfiguration("nativefence"), armRuntimeConfiguration("native"));
+// A COMPLETED COMPACTION IS THIS ARM'S DATUM, never its failure, and it stops the world
+// exactly as `native` does. Deriving rather than restating it is the point: an arm added
+// to the table gets its disposition from the same rule as every other.
+assert.deepEqual(nativeCompactionDisposition("nativefence"),
+  { latchOnPass: false, stopsTheWorld: true, latchOnCompletion: false });
+// The share is a number the comparison rests on, so it is pinned rather than left to
+// drift: it is the MEDIAN occupancy of sol-20260813-paired rep 1's seven fence commits
+// (0.894, 0.942, 0.953, 0.913, 0.937, 0.911, 0.953), and it must sit inside that observed
+// range or it is no longer the empirical match it claims to be.
+assert.equal(MATCHED_FENCE_OCCUPANCY_SHARE, 0.937);
+assert(MATCHED_FENCE_OCCUPANCY_SHARE > 0.894 && MATCHED_FENCE_OCCUPANCY_SHARE < 0.953,
+  "The matched fence share left the range of crossings it was derived from");
 assert.throws(() => armRuntimeConfiguration("hybrid"), /Unknown arm/);
 checks.armContractExclusive = true;
 

@@ -30,7 +30,31 @@ export const EXPERIMENT_PROTOCOL_VERSION = 3;
 // (a) pifold: active-context runtime ON, native auto-compaction OFF.
 // (b) native: pi-fold OFF, Pi native auto-compaction ON.
 // (c) unmanaged: both OFF; the run terminates at window overflow, which is the datum.
-export const EXPERIMENT_ARMS = Object.freeze(["pifold", "native", "unmanaged"]);
+export const EXPERIMENT_ARMS = Object.freeze(["pifold", "native", "unmanaged", "nativefence"]);
+
+// THE MATCHED-TRIGGER ARM. `native` cannot answer the question that decides whether
+// lossless folding earns its place, because Pi's own threshold check runs only after
+// agent_end and before prompt submission (dist/core/agent-session.js:1508) and this
+// workload is ONE prompt wrapping 64 stages. Measured on sol-20260813-paired: rep 1's
+// agent_end fired once, after all 64 stages, and the arm recorded zero compaction passes
+// while its projection sat inside Pi's nominal band on 24 of 110 requests. A `native` arm
+// therefore compacts once, at the end, or never: it is not a comparator, it is a control
+// for having no context management at all.
+//
+// `nativefence` supplies the missing comparator. It runs with the fold runtime OFF and
+// the harness invoking `ctx.compact()` at the same occupancy pi-fold's projection fence
+// actually fires at, so both arms transition for the same reason and differ only in WHAT
+// the transition does: preserve the bytes losslessly, or replace them with a summary.
+//
+// The share is EMPIRICAL and says so. pi-fold's fence margin is
+// `max(floorShare * window, estimatorError * estimate + expectedInflow)`, whose dynamic
+// terms depend on runtime state the harness cannot reproduce, so a bit-identical formula
+// is not available. This is the median occupancy at which rep 1's seven fence commits
+// actually fired: 0.894, 0.942, 0.953, 0.913, 0.937, 0.911, 0.953. Because a match cannot
+// be asserted it is MEASURED: both arms record the occupancy of every crossing, and the
+// adjudicator reports the realized distributions side by side, so a drift between the
+// triggers is visible in the result rather than assumed away.
+export const MATCHED_FENCE_OCCUPANCY_SHARE = 0.937;
 export const EXPERIMENT_MODES = Object.freeze(["smoke", "full"]);
 // A closed-book session receives ONLY the probe questions: no transcript, no stage
 // payloads, no tools, no checkout. It publishes the prior-knowledge floor per probe
@@ -1755,6 +1779,9 @@ export function armRuntimeConfiguration(arm) {
     pifold: { activeContextEnabled: true, nativeCompactionEnabled: true, toleratesOverflow: false },
     native: { activeContextEnabled: false, nativeCompactionEnabled: true, toleratesOverflow: false },
     unmanaged: { activeContextEnabled: false, nativeCompactionEnabled: false, toleratesOverflow: true },
+    // Compaction is ENABLED because the harness invokes it, and the fold runtime is OFF
+    // because a summary and a lossless fold are the two things being told apart.
+    nativefence: { activeContextEnabled: false, nativeCompactionEnabled: true, toleratesOverflow: false },
   }[arm];
 }
 
