@@ -186,7 +186,11 @@ for (const mode of EXPERIMENT_MODES) {
   const plan = EXPERIMENT_MODE_PLANS[mode];
   const share = matchedFenceShare(mode);
   assert(share > 0 && share < 1, `${mode} matched-fence share is not a share: ${share}`);
-  const reachableTokens = (plan.stageCount * plan.payloadFloorChars) / 4;
+  // The floor binds every stage EXCEPT a probe (`stage.kind !== "probe"`), so a probe
+  // stage guarantees nothing and counting it here would overstate what the mode is certain
+  // to accumulate. The smoke's margin is narrow enough that the difference decides it.
+  const payloadStages = plan.stageCount - plan.probeStages.length;
+  const reachableTokens = (payloadStages * plan.payloadFloorChars) / 4;
   const budget = EXPERIMENT_PROVIDER_INPUT_BUDGETS["openai-codex/gpt-5.6-sol"];
   assert(share * budget < reachableTokens,
     `${mode} fences at ${Math.floor(share * budget)} tokens but its stages accumulate at ` +
@@ -3957,8 +3961,11 @@ try {
     const plan = EXPERIMENT_MODE_PLANS[mode];
     const share = compactionTriggerShare(mode);
     const modeDerived = compactionReserveTokens({ descriptorWindow, servingBudgetTokens, share });
-    // What the run actually accumulates, at the estimator the harness declares.
-    const reachableTokens = Math.floor((plan.stageCount * plan.payloadFloorChars) / 4);
+    // What the run actually accumulates, at the estimator the harness declares, counting
+    // only the stages the floor binds: a probe stage is exempt from it and guarantees
+    // nothing.
+    const reachableTokens = Math.floor(
+      ((plan.stageCount - plan.probeStages.length) * plan.payloadFloorChars) / 4);
     assert(modeDerived.triggerTokens < reachableTokens,
       `mode ${mode} places its compaction trigger at ${modeDerived.triggerTokens} tokens, past ` +
       `the ${reachableTokens} its own ${plan.stageCount} stages can accumulate at the payload ` +
