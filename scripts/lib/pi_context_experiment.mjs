@@ -2606,6 +2606,144 @@ export function usageSeriesFromLedger(ledger) {
   };
 }
 
+// The provider's second pricing tier. A request whose prompt passes this many tokens bills
+// at a higher rate on every component. Pi's own recorded `usage.cost` ALREADY reflects it,
+// so this constant exists to report EXPOSURE and never to compute money.
+//
+// It is the line the whole cost result used to turn on. luna-20260807 declared no serving
+// budget: native drifted to 369,024 tokens and crossed on 17 of 117 calls for $20.99, while
+// folding held pi-fold at 236,861 so it never left the base tier, at $13.89. Declaring a
+// 251,520 budget and fencing native beneath it puts both arms under the line by
+// construction, and sol-20260814-fenced-full rep 1 crossed it zero times on either arm.
+// Neither configuration is wrong; reporting the crossings is what keeps them apart.
+export const LONG_CONTEXT_TIER_PROMPT_TOKENS = 272_000;
+
+const EMPTY_OUT_OF_BAND = Object.freeze({
+  calls: 0, inputFresh: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0,
+  totalTokens: 0, costUsd: 0,
+});
+
+function addUsage(into, usage, costUsd) {
+  const read = (key) => (Number.isFinite(usage?.[key]) ? usage[key] : 0);
+  return {
+    calls: into.calls + 1,
+    inputFresh: into.inputFresh + read("input"),
+    cacheRead: into.cacheRead + read("cacheRead"),
+    cacheWrite: into.cacheWrite + read("cacheWrite"),
+    output: into.output + read("output"),
+    reasoning: into.reasoning + read("reasoning"),
+    totalTokens: into.totalTokens + read("totalTokens"),
+    costUsd: into.costUsd + (Number.isFinite(costUsd) ? costUsd : 0),
+  };
+}
+
+/**
+ * WHAT A RUN SPENT WHERE ITS OWN PROVIDER LEDGER CANNOT SEE IT.
+ *
+ * Both arms call the provider outside the conversation, and neither call reaches
+ * `before_provider_request`, so the ledger the usage totals are built from misses both.
+ *
+ *   - NATIVE'S COMPACTION summarizes the branch through its own request. Pi records the
+ *     usage on the compaction ENTRY. Every compaction window in sol-20260814-fenced-full
+ *     rep 1 held zero ledger records across 88 to 118 seconds: 5 calls, 75,375 fresh input,
+ *     26,058 output, $1.16.
+ *   - PI-FOLD'S BRIEF GENERATOR is the same shape one layer along, recorded on
+ *     `context.brief`: 28 calls, 1,586,200 fresh input for 32,141 of output, $3.56, with
+ *     cacheRead zero on every one because it runs a different model from the session it
+ *     summarizes and so shares no prefix with it.
+ *
+ * Reporting one arm's hidden spend and not the other's is what would make the comparison
+ * dishonest, so both are read from the same session file and returned under one shape. An
+ * arm that makes neither kind of call reports zeros rather than nulls, because "none" is a
+ * measurement here and absence would read as "not looked for".
+ */
+export function outOfBandUsage(entries) {
+  assertExperiment(Array.isArray(entries), "Out-of-band usage requires the session entries");
+  let compaction = { ...EMPTY_OUT_OF_BAND };
+  let briefGenerator = { ...EMPTY_OUT_OF_BAND };
+  for (const entry of entries) {
+    if (entry?.type === "compaction") {
+      compaction = addUsage(compaction, entry.usage, entry.usage?.cost?.total);
+      continue;
+    }
+    const data = entry?.data;
+    if (data?.kind !== "context.brief") continue;
+    // A generator call that failed or timed out reports no usage and is still a call the
+    // run made. Counting it keeps `calls` the number of times we asked, which is the
+    // number the lane's own records can be joined against.
+    briefGenerator = addUsage(briefGenerator, data.usage,
+      data.usage?.costTotal ?? data.usage?.cost?.total);
+  }
+  const totals = ["inputFresh", "cacheRead", "cacheWrite", "output", "reasoning",
+    "totalTokens", "costUsd", "calls"].reduce((into, key) => {
+    into[key] = compaction[key] + briefGenerator[key];
+    return into;
+  }, {});
+  return { compaction, briefGenerator, totals };
+}
+
+/**
+ * WHAT PI BILLED, summed from the same records the tokens are summed from.
+ *
+ * Cost is read, never computed: Pi writes `usage.cost` on every provider response and on
+ * every compaction entry, and those figures already carry the long-context tier. What is
+ * computed here is only the EXPOSURE to that tier, the count of message calls whose prompt
+ * passed it, because that count is what separates a run billed at one rate from a run
+ * billed at two.
+ */
+export function billedCostFromLedger(ledger) {
+  assertExperiment(Array.isArray(ledger), "Billed cost requires the provider ledger");
+  const responses = ledger.filter((record) => record?.kind === "provider-response");
+  let messageCallsUsd = 0;
+  let longContextCalls = 0;
+  let peakPromptTokens = 0;
+  let callsWithoutCost = 0;
+  for (const response of responses) {
+    const usage = response.usage ?? {};
+    const cost = usage.cost?.total;
+    if (Number.isFinite(cost)) messageCallsUsd += cost; else callsWithoutCost += 1;
+    const prompt = (Number.isFinite(usage.input) ? usage.input : 0) +
+      (Number.isFinite(usage.cacheRead) ? usage.cacheRead : 0);
+    if (prompt > peakPromptTokens) peakPromptTokens = prompt;
+    if (prompt > LONG_CONTEXT_TIER_PROMPT_TOKENS) longContextCalls += 1;
+  }
+  return {
+    messageCalls: responses.length,
+    messageCallsUsd,
+    // Named rather than absorbed: a run whose provider stopped reporting cost would
+    // otherwise read as a cheap run.
+    callsWithoutCost,
+    longContextCalls,
+    longContextTierPromptTokens: LONG_CONTEXT_TIER_PROMPT_TOKENS,
+    peakPromptTokens,
+  };
+}
+
+/**
+ * A REQUEST THAT WAS BUILT AND NEVER ANSWERED, which is a bound on a run's cost and not a
+ * measurement of it.
+ *
+ * The fenced arm's compaction aborts the live turn, so the request in flight at each
+ * crossing dies unanswered: 4 of them in sol-20260814-fenced-full rep 1, totalling
+ * 3,825,542 projected chars. Whether the provider billed for those is not recoverable from
+ * our artifacts, so they are reported as what they are and never folded into a total.
+ */
+export function unansweredRequestsFromLedger(ledger) {
+  assertExperiment(Array.isArray(ledger), "Unanswered requests require the provider ledger");
+  const answered = new Set(ledger
+    .filter((record) => record?.kind === "provider-response")
+    .map((record) => record.requestOrdinal));
+  const orphans = ledger.filter((record) => record?.kind === "provider-request" &&
+    !answered.has(record.ordinal));
+  return {
+    count: orphans.length,
+    projectedChars: orphans.reduce((total, record) =>
+      total + (Number.isFinite(record.payloadChars) ? record.payloadChars : 0), 0),
+    billed: "unknown: a request aborted after it was built leaves no record of what the " +
+      "provider charged for it",
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Context event stream metrics: the runtime's own canonical record of what happened to the
 // projection, read from the session's context-event customs. Two lenses, both deterministic

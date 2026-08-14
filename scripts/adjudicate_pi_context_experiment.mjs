@@ -50,6 +50,9 @@ import {
   traceStepTranscripts,
   traceStepVerdicts,
   usageSeriesFromLedger,
+  outOfBandUsage,
+  billedCostFromLedger,
+  unansweredRequestsFromLedger,
   validateExperimentManifest,
   validateExperimentRunConfig,
   validateStagePlan,
@@ -604,6 +607,10 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     `Provider ledger reports ${usageSeries.series.length} responses against ` +
     `${usage.requests} assistant messages in the session`);
   const thinkTime = thinkTimeFromPace(paceRecords);
+  // Read once, reported under two headings: what was spent where the ledger cannot see it,
+  // and what Pi billed for everything including that.
+  const outOfBand = outOfBandUsage(entries);
+  const billed = billedCostFromLedger(ledger);
 
   const report = {
     ok: true,
@@ -658,6 +665,24 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
       mutationRule: usageSeries.mutationRule,
       meanCacheShare: usageSeries.meanCacheShare,
       pooledCacheShare: usageSeries.pooledCacheShare,
+    },
+    // WHAT THE MESSAGE LOOP CANNOT SEE, and what Pi actually billed for all of it.
+    //
+    // `usage` above is the conversation alone. Native's compactions and pi-fold's brief
+    // generator both call the provider outside it and neither reaches the request hook, so
+    // both were invisible until 2026-08-14: rep 1 of sol-20260814-fenced-full hid 1,586,200
+    // fresh generator tokens on one arm and 75,375 compaction tokens on the other, and the
+    // arm with the larger hidden spend was the one the headline favoured.
+    //
+    // Cost is READ from the same records rather than computed, so the long-context tier is
+    // already inside it; the crossing COUNT is reported beside it because that tier is
+    // where a declared serving budget silently decides the result.
+    outOfBand,
+    billed: {
+      ...billed,
+      outOfBandUsd: outOfBand.totals.costUsd,
+      totalUsd: billed.messageCallsUsd + outOfBand.totals.costUsd,
+      unansweredRequests: unansweredRequestsFromLedger(ledger),
     },
     // Read beside the wall clock on purpose. Every turn derives over the whole session, so
     // a ledger that grows faster than the work buys wall time no provider charged for, and

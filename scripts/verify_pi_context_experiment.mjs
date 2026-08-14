@@ -74,6 +74,10 @@ import {
   toolResultContentSha256,
   uniqueIdentifierIndex,
   usageSeriesFromLedger,
+  outOfBandUsage,
+  billedCostFromLedger,
+  unansweredRequestsFromLedger,
+  LONG_CONTEXT_TIER_PROMPT_TOKENS,
   validateExperimentManifest,
   validateExperimentRunConfig,
   validateStagePlan,
@@ -4210,6 +4214,106 @@ try {
     "the adjudicated workload does not split resumes by what caused them");
 
   checks.aForcedCompactionAbortsTheTurnAndOnlyTheFencedArmResumes = true;
+}
+
+// GATE 61 - both arms' out-of-band provider calls are counted, and the bill is read rather
+// than computed.
+//
+// `usage` is built from the provider ledger, and the ledger is written by the request hook.
+// Neither arm's out-of-band calls reach that hook, so both were invisible: native's
+// compaction summarizes the branch through its own request (every compaction window in
+// sol-20260814-fenced-full rep 1 held zero ledger records across 88 to 118 seconds), and
+// pi-fold's brief generator does the same one layer along. Rep 1 hid 1,586,200 fresh
+// generator tokens on one arm and 75,375 compaction tokens on the other, and the arm with
+// the larger hidden spend was the one the headline favoured. Reporting one and not the
+// other is what makes a comparison dishonest, so the gate drives BOTH shapes.
+//
+// Cost is read from the records Pi already wrote, so the long-context tier is inside it.
+// The crossing COUNT is separate and reported, because a declared serving budget decides
+// that exposure silently: luna-20260807 declared none, native drifted to 369,024 tokens and
+// crossed on 17 of 117 calls, and that surcharge was the entire cost result.
+// ---------------------------------------------------------------------------
+{
+  const compactionEntry = (input, output, cost) => ({
+    type: "compaction",
+    usage: { input, output, cacheRead: 0, cacheWrite: 0, reasoning: 1, totalTokens: input + output, cost: { total: cost } },
+  });
+  const briefEntry = (input, output, cost) => ({
+    type: "custom",
+    data: { kind: "context.brief", usage: { input, output, cacheRead: 0, totalTokens: input + output, costTotal: cost } },
+  });
+
+  // AN ARM THAT MAKES NEITHER KIND OF CALL REPORTS ZEROS, never nulls: "none" is a
+  // measurement here, and an absent field would read as "not looked for".
+  const quiet = outOfBandUsage([{ type: "message" }, { type: "custom", data: { kind: "context.fold" } }]);
+  assert.deepEqual(quiet.compaction, {
+    calls: 0, inputFresh: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0,
+    totalTokens: 0, costUsd: 0,
+  }, "an arm that never compacted reports something other than zero compaction spend");
+  assert.equal(quiet.totals.calls, 0, "a run with no out-of-band calls reports some");
+
+  const native = outOfBandUsage([
+    { type: "message" }, compactionEntry(8_306, 4_791, 0.18526), compactionEntry(23_468, 4_876, 0.26362),
+  ]);
+  assert.equal(native.compaction.calls, 2, "compaction entries are not counted as calls");
+  assert.equal(native.compaction.inputFresh, 31_774, "compaction input is not summed");
+  assert.equal(native.compaction.output, 9_667, "compaction OUTPUT is not summed, which is the billed token");
+  assert(Math.abs(native.compaction.costUsd - 0.44888) < 1e-9, "compaction cost is not summed");
+  assert.equal(native.briefGenerator.calls, 0, "a native run reports generator calls it never made");
+  assert.equal(native.totals.output, 9_667, "the totals do not carry what the split does");
+
+  const folded = outOfBandUsage([briefEntry(56_000, 1_100, 0.127), briefEntry(60_000, 1_200, 0.133)]);
+  assert.equal(folded.briefGenerator.calls, 2, "generator records are not counted as calls");
+  assert.equal(folded.briefGenerator.inputFresh, 116_000, "generator input is not summed");
+  assert.equal(folded.compaction.calls, 0, "a folding run reports compactions it never ran");
+  // A generator call that failed reports no usage and is still a call the run made, so the
+  // count stays joinable against the lane's own records.
+  const withFailure = outOfBandUsage([briefEntry(10, 1, 0.01), { type: "custom", data: { kind: "context.brief", outcome: "error" } }]);
+  assert.equal(withFailure.briefGenerator.calls, 2, "a generator call that reported no usage is not counted as a call");
+  assert.equal(withFailure.briefGenerator.inputFresh, 10, "a failed call invented usage it never reported");
+
+  // THE BILL, read from the same records the tokens are read from.
+  const response = (input, cacheRead, cost) => ({
+    kind: "provider-response", requestOrdinal: 0,
+    usage: cost === null ? { input, cacheRead } : { input, cacheRead, cost: { total: cost } },
+  });
+  const bill = billedCostFromLedger([
+    { kind: "provider-request", ordinal: 1, payloadChars: 10 },
+    response(1_000, 100_000, 0.5), response(2_000, 300_000, 4.81), response(3_000, 10_000, 0.25),
+  ]);
+  assert.equal(bill.messageCalls, 3, "the billed lens miscounts message calls");
+  assert(Math.abs(bill.messageCallsUsd - 5.56) < 1e-9, "billed cost is not summed from the records");
+  assert.equal(bill.longContextCalls, 1,
+    "a call whose prompt passed the long-context tier is not counted, so a surcharged run reads like a base-tier one");
+  assert.equal(bill.peakPromptTokens, 302_000, "the peak prompt is not the largest input plus cache read");
+  assert.equal(bill.longContextTierPromptTokens, LONG_CONTEXT_TIER_PROMPT_TOKENS);
+  // A provider that stopped reporting cost must not read as a cheap run.
+  const partial = billedCostFromLedger([response(1, 1, 0.25), response(1, 1, null)]);
+  assert.equal(partial.callsWithoutCost, 1, "a response carrying no cost is absorbed silently");
+  assert(Math.abs(partial.messageCallsUsd - 0.25) < 1e-9, "a response with no cost invented one");
+
+  // AND THE REQUESTS THAT WERE BUILT AND NEVER ANSWERED, a bound and never a total.
+  const orphans = unansweredRequestsFromLedger([
+    { kind: "provider-request", ordinal: 1, payloadChars: 100 },
+    { kind: "provider-response", requestOrdinal: 1 },
+    { kind: "provider-request", ordinal: 2, payloadChars: 964_700 },
+    { kind: "provider-request", ordinal: 3, payloadChars: 942_853 },
+  ]);
+  assert.equal(orphans.count, 2, "a request that never produced a response is not reported");
+  assert.equal(orphans.projectedChars, 1_907_553, "the unanswered mass is not summed");
+  assert(/unknown/.test(orphans.billed),
+    "the unanswered requests claim to know what the provider charged, which the artifacts cannot say");
+  assert.equal(unansweredRequestsFromLedger([
+    { kind: "provider-request", ordinal: 1 }, { kind: "provider-response", requestOrdinal: 1 },
+  ]).count, 0, "a fully answered run reports unanswered requests");
+
+  // And the adjudicator reports all of it rather than computing a bill of its own.
+  assert(/outOfBand,/.test(adjudicator) && /totalUsd: billed\.messageCallsUsd \+ outOfBand\.totals\.costUsd/
+    .test(adjudicator), "the adjudicated report does not carry the out-of-band spend or the total bill");
+  assert(/unansweredRequests: unansweredRequestsFromLedger\(ledger\)/.test(adjudicator),
+    "the adjudicated report drops the requests that were built and never answered");
+
+  checks.bothArmsOutOfBandSpendAndTheBillAreReported = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
