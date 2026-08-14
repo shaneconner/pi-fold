@@ -75,7 +75,16 @@ export interface ActiveContextThresholds {
 
 export const DEFAULT_THRESHOLDS: Readonly<ActiveContextThresholds> = Object.freeze({
   maxTarget: 0.80,
-  minTarget: 0.35,
+  // 0.20, down from 0.35 (Shane 2026-08-14). The cut depth is what sets the epoch
+  // cadence: every commit rewrites the prefix from the earliest folded byte, so the
+  // cost of an epoch is nearly flat in how deep it cuts, while the relief it buys is
+  // the whole distance to the trigger. sol-20260814-traps rep 1 ran six commits, each
+  // freeing to 0.35 and refilling in two to three stages; at 0.20 the same run shape
+  // owes roughly a quarter fewer epochs, which is a quarter fewer full-prefix
+  // rewrites, the dominant self-inflicted cache break. The floor stays well above
+  // the fresh tail and the pinned-mass floor, so the validation laws below bind
+  // exactly as before.
+  minTarget: 0.20,
   freshTail: 0.02,
   consolidateAfter: 10,
 });

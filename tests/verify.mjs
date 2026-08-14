@@ -122,6 +122,9 @@ function makeFixture({
   // so this changes what the ladder is being shown, not whether it may act.
   toolName = "read",
   resultChars = 10_000,
+  // Overrides the whole result body. Used by gate 134, where the SHAPE of the
+  // result matters: a header line, then prose, then a blank line, then bulk.
+  resultText = null,
   chapterChars = 0,
   mentionToolName = false,
   peekTurns = [],
@@ -179,7 +182,9 @@ function makeFixture({
         toolName: peek ? "pi_fold_context" : toolName,
         content: [{
           type: "text",
-          text: `Result ${turn}: ${"r".repeat(resultChars)}${resultTail ? ` ${resultTail(turn)}` : ""}`,
+          text: resultText
+            ? resultText(turn)
+            : `Result ${turn}: ${"r".repeat(resultChars)}${resultTail ? ` ${resultTail(turn)}` : ""}`,
         }],
         isError: false,
         timestamp: sequence,
@@ -3764,8 +3769,8 @@ async function gateEpochQuotaTopUp() {
   // The freeing target IS the hysteresis, on one denominator: what is used, less where
   // the thermostat lands, over the serving budget. The separate window-share floor is
   // gone, so this asserts equality rather than a maximum against a number that could
-  // never bind: at maxTarget 0.80 and minTarget 0.35 the hysteresis share bottoms out
-  // at 0.45 of budget, and the retired floor was 0.40 of the WINDOW (0.405 of budget at
+  // never bind: at maxTarget 0.80 and minTarget 0.20 the hysteresis share bottoms out
+  // at 0.60 of budget, and the retired floor was 0.40 of the WINDOW (0.405 of budget at
   // the fixture's 90,000-token budget behind a 100,000-token window).
   assert.equal(epoch.targetBudgetShare, epoch.hysteresisTargetShare);
   near(epoch.targetBudgetShare,
@@ -5118,11 +5123,14 @@ async function gatePinnedMassBackstop() {
 
   // The starvation itself: marks the commit cannot apply inflate the freed share the
   // top-up measures against, so the top-up concludes its work is already done.
+  // Eleven marked results, up from eight (2026-08-14): the adequacy floor below is
+  // the hysteresis gap, and minTarget 0.35 -> 0.20 widened it 0.45 -> 0.60, so the
+  // fixture owes more marked mass to stay a starvation proof rather than a shortfall.
   const wide = makeFixture({ turns: 24, resultChars: 26_000, contextWindow: 100_000 });
   const wideSnapshot = wide.snapshot;
   let starved = context.emptyActiveContextState(wide.sessionId);
   const ineligible = [];
-  for (let turn = 0; turn < 8; turn += 1) {
+  for (let turn = 0; turn < 11; turn += 1) {
     const resultId = wide.turnEntries[turn][2];
     const candidate = context.manualFoldCandidate(wideSnapshot, starved, [resultId], { allowProtected: true });
     const mark = context.foldMarkFor({
@@ -7495,7 +7503,10 @@ async function gateQuietRuntimeStormReplay() {
   // occupancy constants are fields of the declared object now; their values are the
   // proven ones, unchanged.
   assert.equal(context.DEFAULT_THRESHOLDS.maxTarget, 0.80);
-  assert.equal(context.DEFAULT_THRESHOLDS.minTarget, 0.35);
+  // 0.20 (Shane 2026-08-14): the cut depth sets the epoch cadence, and a commit
+  // costs nearly the same however deep it cuts, so cutting deeper buys the same
+  // relief with fewer full-prefix rewrites.
+  assert.equal(context.DEFAULT_THRESHOLDS.minTarget, 0.20);
   assert.equal(context.COMMIT_RECLAIM_FLOOR_SHARE, 0.02);
 
   // Plain epoch scheduling is unchanged: the cadence trigger is the guided-mode deletion.
@@ -13658,6 +13669,100 @@ async function gateUserCommitAnnouncesPersistenceFailure() {
   };
 }
 
+// ---------------------------------------------------------------------------
+// GATE 134 - a fact stated in the result's opening prose survives the fold it is
+// committed with, before any model brief exists.
+//
+// The deterministic brief kept the FIRST LINE of a result. A result that opens
+// with a header and then states what matters in prose on the next line therefore
+// committed a brief holding the header alone. sol-20260814-traps rep 1 is the
+// bill: folds committed at entries 107/111/121 carrying "STAGE 09 / read", the
+// probe answered at entry 185, and the model brief that did carry the code word
+// and the correction WITHDRAWING an earlier one landing at entry 311, 126 entries
+// too late. The arm answered with cw-b7e4c1, a code word present nowhere in the
+// run, and cited a source it had never read.
+//
+// The rule this pins: what a fold is COMMITTED with must stand on its own the
+// moment the fold becomes visible. An asynchronous upgrade may improve the prose
+// later; it must never be the first carrier of a fact the model needs. So the
+// gate holds the generator unresolved for the whole run and asserts against the
+// projection anyway.
+// ---------------------------------------------------------------------------
+async function gateOpeningProseSurvivesDeterministicFolding() {
+  const CODE_WORD = "cw-d7148b";
+  const stageResult = (turn) => [
+    `STAGE ${String(turn).padStart(2, "0")} / read`,
+    "Read every file delivered in this stage and build a working model of it. " +
+      `Files in this stage: lib/file-${turn}.c, lib/other-${turn}.h. ` +
+      `Audit note: the code word for stage ${String(turn).padStart(2, "0")} is ${CODE_WORD}. ` +
+      "Audit note: the code word given for stage 06 was issued in error; " +
+      `the code word for stage 06 is ${CODE_WORD}.`,
+    "",
+    `----- BEGIN lib/file-${turn}.c -----`,
+    "b".repeat(9_000),
+    `----- END lib/file-${turn}.c -----`,
+  ].join("\n");
+
+  // The generator is wired but NEVER settles, so every fold in this run is
+  // committed with, and stays on, its deterministic brief.
+  let pending = 0;
+  const runtime = makeRuntime(
+    makeFixture({ turns: 8, resultText: stageResult, contextWindow: 100_000 }),
+    {
+      summarizeContextSpan: () => {
+        pending += 1;
+        return new Promise(() => {});
+      },
+    },
+  );
+  await startRuntime(runtime);
+  await measure(runtime, 92_000, 100_000);
+  // The boundary is the ONLY point the runtime mutates the projection, so the
+  // fold is committed here rather than by pushing occupancy over a threshold.
+  await compactBoundary(runtime);
+
+  const projected = (await project(runtime)).messages;
+  const state = materialized(runtime);
+  assert(state.folds.length > 0, "the fixture folded nothing, so the gate proves nothing");
+  const text = JSON.stringify(projected);
+
+  // THE CLAIM. The committed brief carries the prose fact, with no model brief in
+  // existence anywhere in the run.
+  assert(text.includes(CODE_WORD),
+    "a fact stated in the result's opening prose did not survive the fold it was committed with");
+  // And it is the DETERMINISTIC brief carrying it, not a generator result.
+  assert(pending > 0, "no brief upgrade was ever requested, so the race is not being modelled");
+  assert(state.folds.every((fold) => (fold.brief_provenance?.kind ?? "deterministic") !== "model"),
+    "a model brief landed, so this does not prove the deterministic carrier");
+
+  // Anti-vacuity, both directions. The header alone is not what is being matched,
+  // and a run whose results carry no prose still folds without inventing one.
+  assert(text.includes("STAGE 0"), "the header vanished, so the head is not being read at all");
+  const bare = makeRuntime(
+    makeFixture({ turns: 8, resultChars: 9_000, contextWindow: 100_000 }),
+    { summarizeContextSpan: () => new Promise(() => {}) },
+  );
+  await startRuntime(bare);
+  await measure(bare, 92_000, 100_000);
+  await compactBoundary(bare);
+  const bareText = JSON.stringify((await project(bare)).messages);
+  assert(!bareText.includes(CODE_WORD), "the gate matches a fact the fixture never stated");
+
+  // Every deterministic brief still honours the contract it is bounded by, so
+  // widening the head cannot smuggle an oversized placeholder into the window.
+  for (const fold of state.folds) {
+    assert(typeof fold.brief === "string" && fold.brief.length > 0, "a fold committed with no brief");
+    assert(fold.brief.length <= context.ACTIVE_CONTEXT_POLICY.maxBriefChars,
+      `a deterministic brief ran to ${fold.brief.length} chars, past the ${context.ACTIVE_CONTEXT_POLICY.maxBriefChars} contract`);
+  }
+  return {
+    folds: state.folds.length,
+    upgradesRequested: pending,
+    proseFactInProjection: true,
+    longestBrief: Math.max(...state.folds.map((fold) => fold.brief.length)),
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -13778,7 +13883,9 @@ const gates = [
   [131, "Derivation cost is recorded and summable", gateDerivationCostIsRecordedAndSummable],
   [132, "Canonicalization is memoized per message object", gateCanonicalizationIsMemoizedPerMessageObject],
   [128, "The user's commit announces a persistence failure", gateUserCommitAnnouncesPersistenceFailure],
+
   [133, "A projection fingerprint is computed on demand", gateProjectionFingerprintsAreComputedOnDemand],
+  [134, "Opening prose survives deterministic folding", gateOpeningProseSurvivesDeterministicFolding],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

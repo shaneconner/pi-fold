@@ -1285,12 +1285,21 @@ export function boundStatusPayload(
   const automatic = ownValue(payload, "automatic");
   const instrumentation = isPlainRecord(automatic) ? ownValue(automatic, "instrumentation") : undefined;
   const surfacing = isPlainRecord(automatic) ? ownValue(automatic, "surfacing") : undefined;
+  const lastAction = isPlainRecord(automatic) ? ownValue(automatic, "lastAutomaticAction") : undefined;
+  const lastEpoch = isPlainRecord(lastAction) ? ownValue(lastAction, "epoch") : undefined;
   shrink(instrumentation, "projectionRecords", "projection record(s)", true);
   shrink(instrumentation, "cacheObservations", "cache observation(s)", true);
   shrink(instrumentation, "events", "context event(s)", true);
   shrink(surfacing, "log", "surfacing log row(s)", true);
   if (shrink(payload, "sourceMap", "source map row(s)") > 0) payload.sourceMapTruncated = true;
   shrink(payload, "topFolds", "top fold row(s)");
+  // The last epoch's receipt lists grow with commit depth (a 0.20 minTarget epoch
+  // applies dozens of marks). They are the commit's own receipt, so they outlast
+  // every other diagnostic, but they still page away before any listing row the
+  // caller actually asked for: on the detail pages, where none of the diagnostics
+  // above exist, they are the mass that made one fold row miss the cap.
+  shrink(lastEpoch, "applied", "applied receipt row(s)", true);
+  shrink(lastEpoch, "absorbed", "absorbed receipt row(s)", true);
   const rowLabel = (key: string): string => key === "folds" ? "fold row(s)" : key === "objects" ? "object row(s)" : "tree row(s)";
   let continueAt: number | null = null;
   if (detail === "folds" || detail === "objects") {

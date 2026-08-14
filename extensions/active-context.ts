@@ -481,7 +481,6 @@ export function registerActiveContext(pi: any, options: {
   const curation = {
     receipts: [] as ContextReceipt[],
     contextCalls: 0,
-    reopenBaselineShare: null as number | null,
     wallEpisodeOpen: false,
     recoveryAttempts: 0,
     pendingRejection: null as { status: number; ordinal: number } | null,
@@ -856,7 +855,6 @@ export function registerActiveContext(pi: any, options: {
     instrumentation.mutationsSinceHandoff = 0;
     curation.receipts = [];
     curation.contextCalls = 0;
-    curation.reopenBaselineShare = null;
     curation.recoveryAttempts = 0;
     curation.pendingRejection = null;
     curation.lastRecovery = null;
@@ -2527,15 +2525,6 @@ export function registerActiveContext(pi: any, options: {
     return epoch;
   };
 
-  const clearCommitLatchBelowTrigger = (): void => {
-    if (curation.reopenBaselineShare === null) return;
-    const capacity = servingCapacity(lifecycle.latestSnapshot?.contextWindow ?? null);
-    if (capacity.usedTokens === null || capacity.budgetTokens <= 0) return;
-    if (capacity.usedTokens / capacity.budgetTokens < thresholds.maxTarget) {
-      curation.reopenBaselineShare = null;
-    }
-  };
-
   const noteAutomaticReceipt = (
     snapshot: ActiveContextSnapshot,
     action: Record<string, unknown>,
@@ -2915,7 +2904,6 @@ export function registerActiveContext(pi: any, options: {
   const handleContext = async (event: { messages: unknown[] }, ctx: any) => {
     if (lifecycle.shuttingDown) return { messages: event.messages };
     beginMutationPass();
-    clearCommitLatchBelowTrigger();
     if (!persistence.state) persistence.state = emptyActiveContextState(ctx.sessionManager.getSessionId());
     lifecycle.latestSnapshot = null;
     lifecycle.latestSnapshotError = null;

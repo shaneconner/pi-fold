@@ -154,6 +154,17 @@ export function toolCallArguments(snapshot: ActiveContextSnapshot, assistantInde
 
 export const IDENTIFIED_BRIEF_ARGUMENT_CHARS = 240;
 export const IDENTIFIED_BRIEF_VALUE_CHARS = 96;
+// The bound on a COMPOSED stage-identified brief. The head keeps the result's
+// leading paragraph and gets exactly what remains of this after the parts that
+// identify the fold (call signatures, tail anchor, fixed text), so the paragraph
+// takes every character the contract can give it. Set 100 below the 1,200 the
+// brief is held to (gate 51) because one later append exists: commit-time gap
+// absorption adds its one sentence to a decided brief (scheduling.ts), and a
+// brief composed to the line would be pushed over by it. Gate 134 pins the
+// paragraph surviving.
+export const IDENTIFIED_BRIEF_CHARS = 1_100;
+// The head bound for a result with NO terminated opening paragraph: its first
+// line, exactly the pre-paragraph behaviour.
 export const IDENTIFIED_BRIEF_HEAD_CHARS = 160;
 export const IDENTIFIED_BRIEF_TAIL_CHARS = 120;
 export const IDENTIFIED_BRIEF_CALLS_CHARS = 400;
@@ -201,18 +212,58 @@ export function stageIdentifiedToolBrief(input: {
     );
     return args ? `${factualToolName(call.name)}(${args})` : factualToolName(call.name);
   });
-  const label = factualValue(
-    String(contentText(messages[0]) ?? "").split(/\r?\n/).find((line) => line.trim()) ?? "",
-    IDENTIFIED_BRIEF_HEAD_CHARS,
-  );
+  // THE LEADING PARAGRAPH, not the first line (Shane 2026-08-14). A tool result
+  // that opens with a header line and then states, in prose, what the caller must
+  // do or know had everything after that header dropped: the head kept ONE line
+  // and the header was it. sol-20260814-traps rep 1 is what that costs. A stage
+  // result opens "STAGE 09 / read" and carries its audit note, including a code
+  // word and a correction WITHDRAWING an earlier one, on the next line. The fold
+  // committed at entry 121 with a head of "STAGE 09 / read", the model brief that
+  // did carry both facts landed at entry 311, and the answer at entry 185 in
+  // between was a fabricated code word present nowhere in the run.
+  //
+  // Reading to the first blank line is the generic form of that: a result whose
+  // payload follows a blank line contributes its whole opening paragraph, and a
+  // result that is bulk from line one contributes exactly what it did before. The
+  // deterministic brief is what a fold is COMMITTED with, so it has to stand alone
+  // the moment the fold appears, and never be the thing an async upgrade rescues.
+  // Paragraph-shaped means TERMINATED: an opening block is only kept whole when
+  // a blank line ends it before the bulk. A result that is bulk from its first
+  // line has no opening prose to keep, and handing its first thousand characters
+  // to the brief is noise that inflates every status page and shrinks every
+  // fold's reclaimable mass; that result contributes its first line, exactly as
+  // before.
+  const leadingParagraph = (message: unknown): string | null => {
+    const lines = String(contentText(message) ?? "").split(/\r?\n/);
+    const kept: string[] = [];
+    for (const line of lines) {
+      if (line.trim()) kept.push(line.trim());
+      else if (kept.length) return kept.join(" ");
+    }
+    return null;
+  };
   const tail = identifiedResultTail(messages.at(-1), factualValue);
-  const composed = [
+  // Compose the identifying parts FIRST, then hand the paragraph what is left of
+  // the bound. A fixed head allowance either starves the paragraph or outgrows
+  // the composed contract; the remainder does neither.
+  const assemble = (label: string): string => [
     `Read ${oneLine(signatures.join("; "), IDENTIFIED_BRIEF_CALLS_CHARS)}`,
     label ? `opens "${label}"` : "",
     tail ? `ends "${tail}"` : "",
     calls.length > 1 ? `${calls.length} exact results here` : "exact source here",
   ].filter(Boolean).join(" · ");
-  const bounded = oneLine(composed, ACTIVE_CONTEXT_POLICY.maxBriefChars);
+  // A present label costs its own wrapper on top of the fixed parts: the
+  // ` · opens "` prefix and closing quote are 11 characters that assemble("")
+  // does not count, because an empty label drops the whole term.
+  const headAllowance = Math.max(0, IDENTIFIED_BRIEF_CHARS - assemble("").length - 11);
+  const paragraph = leadingParagraph(messages[0]);
+  const label = paragraph !== null
+    ? factualValue(paragraph, headAllowance)
+    : factualValue(
+      String(contentText(messages[0]) ?? "").split(/\r?\n/).find((line) => line.trim()) ?? "",
+      IDENTIFIED_BRIEF_HEAD_CHARS,
+    );
+  const bounded = oneLine(assemble(label), IDENTIFIED_BRIEF_CHARS);
   return usefulBrief(bounded, ACTIVE_CONTEXT_POLICY.maxBriefChars, snapshot.toolName) ? bounded : null;
 }
 
