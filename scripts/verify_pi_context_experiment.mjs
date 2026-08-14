@@ -8,7 +8,7 @@
 //   node scripts/verify_pi_context_experiment.mjs
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -4759,9 +4759,30 @@ try {
 // how legitimate reads INSIDE the checkout arrive (60 such across two pifold
 // runs), so a string predicate is exactly wrong. And a blocked read is a
 // refusal the model can correct, not a run failure: it leaked nothing.
+//
+// The 2026-08-14 external review then held the gate to its own prose: "resolved
+// path" was proven only as normalized SPELLING, on a root that never existed.
+// The gate now drives a real filesystem: the judged target is canonical, a link
+// inside the checkout pointing outside is refused by where it LANDS, a
+// symlinked alias of the root itself still admits its own files, a path that
+// does not exist keeps the lexical verdict because it cannot leak, and a read
+// naming NO path is refused as missing rather than coerced to the root and
+// waved through, which was an allow on malformed input.
 // ---------------------------------------------------------------------------
 {
-  const repoDir = "/state/campaign/runs/run-1/repo";
+  const ground = mkdtempSync(join(tmpdir(), "pi-context-experiment-containment-"));
+  const runDir = join(ground, "state", "campaign", "runs", "run-1");
+  const repoDir = join(runDir, "repo");
+  mkdirSync(join(repoDir, "lib", "vtls"), { recursive: true });
+  mkdirSync(join(repoDir, "notes"), { recursive: true });
+  mkdirSync(`${repoDir}-shadow`, { recursive: true });
+  writeFileSync(join(repoDir, "lib", "vtls", "gtls.h"), "struct gtls;\n");
+  writeFileSync(join(runDir, "run-config.json"), "{}\n");
+  writeFileSync(join(ground, "state", "campaign", "stages-full.json"), "{}\n");
+  writeFileSync(join(`${repoDir}-shadow`, "file.c"), "int shadow;\n");
+  symlinkSync(join(runDir, "run-config.json"), join(repoDir, "notes", "current"));
+  symlinkSync(join("..", "lib", "vtls", "gtls.h"), join(repoDir, "notes", "header"));
+  symlinkSync(repoDir, join(ground, "repo-alias"));
   const inside = (path) => readEscapesCheckout(repoDir, path);
   // Stays: relative, absolute-inside, dot-segments that resolve back inside,
   // and the checkout root itself.
@@ -4777,19 +4798,46 @@ try {
   // The sibling-prefix trap: a directory whose name merely STARTS with the
   // checkout root is outside it, which is why the boundary is root + separator.
   assert.equal(readEscapesCheckout(repoDir, `${repoDir}-shadow/file.c`).escapes, true);
+  // A link is judged by where it LANDS. The spelling "notes/current" never
+  // leaves the root; the filesystem object it names is the run configuration
+  // one level up, and that is what the verdict reports.
+  const followed = inside("notes/current");
+  assert.equal(followed.escapes, true);
+  assert.equal(followed.resolved, realpathSync.native(join(runDir, "run-config.json")));
+  assert.equal(followed.cause, "link-target");
+  // A link that lands inside stays readable, and so does the checkout reached
+  // through a symlinked alias of its own root: canonical against canonical.
+  assert.equal(inside("notes/header").escapes, false);
+  assert.equal(readEscapesCheckout(join(ground, "repo-alias"), "lib/vtls/gtls.h").escapes, false);
+  // A path that does not exist cannot leak and keeps the lexical verdict, in
+  // both directions.
+  assert.equal(inside("lib/never-written.c").escapes, false);
+  assert.equal(inside("../never-written.json").escapes, true);
+  // A read naming NO path is refused as missing, never coerced to the root.
+  for (const missing of [undefined, null, "", "   "]) {
+    const verdict = readEscapesCheckout(repoDir, missing);
+    assert.equal(verdict.escapes, true, "a pathless read was waved through");
+    assert.equal(verdict.resolved, null);
+    assert.equal(verdict.cause, "missing-path");
+  }
   // The resolved path travels with the verdict so the artifact names what was
   // actually judged, not what was typed.
-  assert.equal(inside("../run-config.json").resolved, "/state/campaign/runs/run-1/run-config.json");
+  assert.equal(inside("../run-config.json").resolved,
+    realpathSync.native(join(runDir, "run-config.json")));
   assert.throws(() => readEscapesCheckout("relative/repo", "x"), /absolute checkout root/);
+  rmSync(ground, { recursive: true, force: true });
   // And the extension enforces it on the read tool through THIS predicate, with
-  // the refusal correctable and the attempt recorded as its own event.
+  // the refusal correctable, the missing-path case named as its own correction,
+  // and the attempt recorded as its own event.
   const extension = readFileSync(join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"), "utf8");
   assert(/readEscapesCheckout\(config\.repoDir, requested\)/.test(extension),
     "the extension does not judge reads with the shared containment predicate");
   assert(/read-escape-blocked/.test(extension),
     "a blocked read leaves no event, so a probing run would be invisible");
-  assert(/block: true, reason: "This run reads only files inside the repository checkout/.test(extension),
+  assert(/This run reads only files inside the repository checkout/.test(extension),
     "the refusal does not tell the model how to correct");
+  assert(/This read named no path/.test(extension),
+    "a pathless read is not refused with its own correction");
   assert(!/appendFailure\(config, "read-escape/.test(extension),
     "a blocked read latches a failure, which turns a leak-free refusal into a dead six-hour run");
   checks.aReadOutsideTheCheckoutIsRefusedByResolution = true;

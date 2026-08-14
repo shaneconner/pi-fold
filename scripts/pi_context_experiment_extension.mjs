@@ -476,16 +476,19 @@ export function createPiContextExperimentExtension(config) {
         // boundary is visible in the artifacts.
         if (event.toolName === "read") {
           const requested = typeof event.input?.path === "string" ? event.input.path
-            : typeof event.input?.file_path === "string" ? event.input.file_path : "";
-          const { escapes, resolved } = readEscapesCheckout(config.repoDir, requested);
+            : typeof event.input?.file_path === "string" ? event.input.file_path : null;
+          const { escapes, resolved, cause } = readEscapesCheckout(config.repoDir, requested);
           if (escapes) {
             appendEvent("read-escape-blocked", {
               toolCallId: event.toolCallId,
               requested,
               resolved,
+              cause,
             });
-            return { block: true, reason: "This run reads only files inside the repository checkout. " +
-              "Give a path relative to the checkout root." };
+            return { block: true, reason: cause === "missing-path"
+              ? "This read named no path. Give one path relative to the checkout root."
+              : "This run reads only files inside the repository checkout. " +
+                "Give a path relative to the checkout root." };
           }
         }
         appendEvent("tool-call", {

@@ -9,7 +9,7 @@
 // Spec: wiki meta/memory/folds/pi_context_governor/fold-vs-compaction_experiment.
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import {
   RUNTIME_HOME,
@@ -377,12 +377,36 @@ export const EXPERIMENT_ALLOWED_TOOLS = Object.freeze(["read", EXPERIMENT_TOOL_N
 // native or nativefence arm. The judgment is CONTAINMENT, not spelling: the
 // RESOLVED path is what leaves or stays, since ".." and absolute forms are also
 // how legitimate reads inside the checkout arrive (60 such in two pifold runs).
+//
+// Two hardenings from the 2026-08-14 external review, both fail-closed. The
+// judged target is the FILESYSTEM object, not the spelling: an existing path is
+// canonicalized through its links before it is judged, since a link inside the
+// checkout can point outside it (no sealed checkout carries one and no arm holds
+// a tool that could create one, so this closes the class rather than an
+// exploit). A path that does not exist cannot leak bytes and keeps the lexical
+// verdict. And a read that names NO path is refused as missing rather than
+// coerced to "" and waved through as the checkout root, which was an allow on
+// malformed input.
 export function readEscapesCheckout(repoDir, requestedPath) {
   assertExperiment(typeof repoDir === "string" && repoDir.length > 0 && isAbsolute(repoDir),
     "Read containment requires the absolute checkout root");
-  const requested = typeof requestedPath === "string" ? requestedPath : "";
-  const resolved = resolve(repoDir, requested);
-  return { escapes: resolved !== repoDir && !resolved.startsWith(repoDir + sep), resolved };
+  if (typeof requestedPath !== "string" || requestedPath.trim().length === 0) {
+    return { escapes: true, resolved: null, cause: "missing-path" };
+  }
+  const root = realpathSync.native(repoDir);
+  const resolved = resolve(root, requestedPath);
+  let canonical = resolved;
+  try {
+    canonical = realpathSync.native(resolved);
+  } catch {
+    // Nothing exists at the target, so nothing can leak; the lexical verdict
+    // below still refuses a spelling that leaves the root.
+  }
+  return {
+    escapes: canonical !== root && !canonical.startsWith(root + sep),
+    resolved: canonical,
+    cause: canonical === resolved ? "resolution" : "link-target",
+  };
 }
 
 export const EXPERIMENT_PIFOLD_EXTRA_TOOLS = Object.freeze(["pi_fold_context"]);
