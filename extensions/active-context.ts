@@ -448,6 +448,21 @@ export function registerActiveContext(pi: any, options: {
     requests: 0,
     lastMutationRequest: 0,
     lastMutationTokens: null as number | null,
+    // WHAT THE SESSION SPENDS DERIVING ITSELF, cumulative for the process.
+    //
+    // Every lifecycle event remaps the whole branch, so the cost of a turn is not the
+    // cost of one derivation: it is however many the handlers happen to run. Measuring
+    // it at the two entry points and carrying the running totals on the projection means
+    // a consumer differences consecutive projections for the per-request cost and reads
+    // the last one for the exact session total. That is a SUM. The alternative, taking
+    // one terminal derivation and multiplying by the request count, treats every early
+    // request as though the session were already at its final size, which is invalid
+    // precisely when growth is the thing under study.
+    //
+    // These are process counters, not state. A rollback does not return the CPU, so they
+    // do not roll back either.
+    derivations: 0,
+    deriveMs: 0,
   };
   const freeze = {
     body: null as unknown[] | null,
@@ -683,7 +698,23 @@ export function registerActiveContext(pi: any, options: {
   const currentCapacity = (ctx: any): ReturnType<typeof capacityAccounting> =>
     servingCapacity(budgetWindowFor(ctx));
 
-  const snapshotForEvent = (ctx: any, messages: unknown[]): ActiveContextSnapshot => mapActiveContext({
+  /**
+   * The one place a derivation is timed. Both entry points route through it, so the
+   * counters cannot drift from the work: a new call site that forgets to time itself
+   * would have to call `mapActiveContext` directly, which nothing outside these two
+   * functions does.
+   */
+  const timedDerivation = (derive: () => ActiveContextSnapshot): ActiveContextSnapshot => {
+    const started = Date.now();
+    try { return derive(); }
+    finally {
+      instrumentation.derivations += 1;
+      instrumentation.deriveMs += Date.now() - started;
+    }
+  };
+
+  const snapshotForEvent = (ctx: any, messages: unknown[]): ActiveContextSnapshot =>
+    timedDerivation(() => mapActiveContext({
     sessionId: ctx.sessionManager.getSessionId(),
     eventMessages: messages,
     contextEntries: ctx.sessionManager.buildContextEntries(),
@@ -695,14 +726,14 @@ export function registerActiveContext(pi: any, options: {
     contextWindow: budgetWindowFor(ctx) ?? undefined,
     netBudget: providerInputBudget !== null,
     thresholds,
-  });
+  }));
 
   const authoritativeSnapshotFor = (ctx: any): ActiveContextSnapshot => {
     const sessionId = ctx.sessionManager.getSessionId();
     if (!lifecycle.latestSnapshot || lifecycle.latestSnapshot.sessionId !== sessionId) {
       throw new Error("A current same-session Pi context event is required");
     }
-    return mapActiveContext({
+    return timedDerivation(() => mapActiveContext({
       sessionId,
       eventMessages: lifecycle.latestSnapshot.messages,
       contextEntries: ctx.sessionManager.buildContextEntries(),
@@ -715,7 +746,7 @@ export function registerActiveContext(pi: any, options: {
       contextWindow: budgetWindowFor(ctx) ?? undefined,
       netBudget: providerInputBudget !== null,
       thresholds,
-    });
+    }));
   };
 
   const providerMeasurementBranchIndex = (
@@ -1814,6 +1845,8 @@ export function registerActiveContext(pi: any, options: {
       anchor_tokens: reading.anchorTokens,
       delta_chars: reading.deltaChars,
       chars_per_token: charsPerToken,
+      derivations: instrumentation.derivations,
+      derive_ms: Math.round(instrumentation.deriveMs),
     });
     emit("context.prefix", {
       change: comparison.change,

@@ -12815,6 +12815,95 @@ async function gateNoTokenCeilingReachesTheProvider() {
  * same occupancy through the projection fence, where the boundary is not the trigger, and
  * requires the guard to hold.
  */
+/**
+ * WHAT THE SESSION SPENDS DERIVING ITSELF, ON THE RECORD AND SUMMABLE.
+ *
+ * PT-4 measured one derivation at 3.5s on a 7.1 MB session and 18.5s on a 16.7 MB one,
+ * and the reading offered for sol-20260813-paired rep 2 was that terminal cost times the
+ * request count. That arithmetic is invalid, and the outside review was right to reject
+ * it: multiplying the FINAL derivation by every earlier request treats every early
+ * request as though the session were already at its final size, which is exactly wrong
+ * when growth over time is the asserted mechanism. The honest number is a sum of what
+ * each derivation actually cost, and nothing recorded it.
+ *
+ * Every lifecycle event remaps the whole branch, so a turn's cost is however many
+ * derivations its handlers run, not one. Carrying cumulative counters on the projection
+ * lets a consumer difference consecutive projections for a per-request cost and read the
+ * last one for the exact session total.
+ *
+ * This gate pins the counters against the DERIVATIONS rather than against a stopwatch: a
+ * wall clock in a gate is a flake, so what is asserted is that the count advances by
+ * exactly the number of derivations performed, that it is monotonic, and that time is
+ * accumulated as a number that never decreases. The one timing assertion is the weakest
+ * one that still has content: elapsed milliseconds are non-negative and finite.
+ */
+async function gateDerivationCostIsRecordedAndSummable() {
+  const runtime = makeRuntime(
+    makeFixture({ turns: 8, resultChars: 6_000, contextWindow: 100_000 }),
+    { providerInputBudget: 90_000 },
+  );
+  await startRuntime(runtime);
+  const projections = () => contextEvents(runtime)
+    .filter((event) => event.kind === "context.projection");
+
+  await measure(runtime, 40_000, 100_000, undefined, "toolUse");
+  await project(runtime);
+  await settle();
+  const first = projections().at(-1);
+  assert(first, "No projection was recorded at all");
+  assert(Number.isSafeInteger(first.derivations) && first.derivations > 0,
+    `A projection recorded ${first.derivations} derivations, so nothing is being counted`);
+  assert(Number.isFinite(first.derive_ms) && first.derive_ms >= 0,
+    `A projection recorded ${first.derive_ms} derive_ms`);
+
+  // THE COUNTER TRACKS THE WORK. Each authoritative snapshot is one derivation, so
+  // driving a known number of them must move the counter by exactly that number. This is
+  // what makes the total a sum rather than an estimate.
+  const before = projections().at(-1);
+  const extra = 5;
+  for (let i = 0; i < extra; i += 1) await toolStatus(runtime);
+  await measure(runtime, 42_000, 100_000, undefined, "toolUse");
+  await project(runtime);
+  await settle();
+  const after = projections().at(-1);
+  assert(after.derivations > before.derivations,
+    "Five status calls and a projection advanced the derivation counter by nothing");
+  assert(after.derive_ms >= before.derive_ms,
+    `derive_ms went backwards: ${before.derive_ms} then ${after.derive_ms}`);
+
+  // MONOTONIC ACROSS EVERY PROJECTION IN THE SESSION. A counter that resets cannot be
+  // differenced, which is the whole reason it is carried cumulatively.
+  const series = projections();
+  assert(series.length >= 2, "Too few projections to check monotonicity");
+  for (let i = 1; i < series.length; i += 1) {
+    assert(series[i].derivations >= series[i - 1].derivations,
+      `Derivation count fell from ${series[i - 1].derivations} to ${series[i].derivations} ` +
+      `at projection ${i}`);
+    assert(series[i].derive_ms >= series[i - 1].derive_ms,
+      `derive_ms fell from ${series[i - 1].derive_ms} to ${series[i].derive_ms} ` +
+      `at projection ${i}`);
+  }
+
+  // AND THE PER-REQUEST COST IS RECOVERABLE, which is the property the whole record
+  // exists for: consecutive projections difference to a positive number of derivations.
+  const deltas = series.slice(1).map((event, i) => event.derivations - series[i].derivations);
+  assert(deltas.some((delta) => delta > 0),
+    "No pair of consecutive projections differences to any derivation, so per-request " +
+    "cost cannot be recovered and only the session total is readable");
+
+  // A ROLLBACK DOES NOT RETURN THE CPU. These are process counters, not state, so a
+  // reset would misreport work that was genuinely performed.
+  const spent = series.at(-1);
+  assert(spent.derivations >= series[0].derivations,
+    "The derivation counter reset during the session");
+  return {
+    projections: series.length,
+    derivations: spent.derivations,
+    deriveMs: spent.derive_ms,
+    maxPerRequestDerivations: Math.max(...deltas),
+  };
+}
+
 async function gateBoundaryWaivesTheGuardRatherThanNoOp() {
   // THE FIXTURE IS THE SHAPE, the same one gate 106 uses: one user message and nothing
   // after it but tool-calling assistants and their results, so no turn ever closes, the
@@ -13480,6 +13569,7 @@ const gates = [
   [127, "A delta carries only what changed", gateDeltaCarriesOnlyBriefChanges],
   [129, "A retired state field is refused by name", gateRetiredStateFieldsAreRefusedByName],
   [130, "A boundary waives the guard rather than no-op", gateBoundaryWaivesTheGuardRatherThanNoOp],
+  [131, "Derivation cost is recorded and summable", gateDerivationCostIsRecordedAndSummable],
   [128, "The user's commit announces a persistence failure", gateUserCommitAnnouncesPersistenceFailure],
 ];
 
