@@ -4483,6 +4483,39 @@ try {
   checks.bothArmsCanSearchTheirOwnSessionAndNeitherIsToldTo = true;
 }
 
+// GATE 64 - the serving budget is a declared BASIS, and an arm that needs one cannot run
+// without it.
+//
+// Declaring 251,520 is the descriptor window less Pi's reserve, and it caps both arms below
+// the provider's 272,000 long-context tier by construction. luna-20260807 (Sol throughout;
+// the campaign name is only a label) predates the constant: native drifted to 369,024 and
+// was billed the surcharge on 17 of 117 calls at $20.99, while folding held pi-fold at
+// 236,861 so it never left the base tier at $13.89. That surcharge was the whole cost
+// result, and declaring a budget designs it out, which is how sol-20260814-fenced-full came
+// back the other way at $20.88 to $13.74. Neither basis is wrong. Running one and reporting
+// the other would be, so the basis is stated at launch and recorded in the manifest.
+// ---------------------------------------------------------------------------
+{
+  const runner = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment.mjs"), "utf8");
+  assert(/--provider-input-budget/.test(runner), "the run cannot declare its own basis");
+  assert(/requestedBudget === null \|\| requestedBudget === "none"/.test(runner),
+    "the budget is settable to an arbitrary number, which makes it a tuning dial rather than a basis");
+  assert(/arm !== "nativefence" \|\| providerInputBudget !== null/.test(runner),
+    "the matched-fence arm can be launched with no budget to fence against, and would die after being paid for");
+  // The declared value still comes from the model pin and never from the flag: the flag can
+  // only say "none", so a run cannot quietly serve a budget no deployment would have.
+  assert(/EXPERIMENT_PROVIDER_INPUT_BUDGETS\[`\$\{modelProvider\}\/\$\{modelId\}`\]/.test(runner),
+    "the declared budget stopped coming from the model pin");
+
+  const launcher = readFileSync(join(PROJECT, "scripts", "launch_pi_context_experiment.sh"), "utf8");
+  assert(/--provider-input-budget\)/.test(launcher) && /BUDGET_ARGS/.test(launcher),
+    "the launcher cannot pass the basis through, so it could only be set by hand");
+  assert(/none\) BUDGET_ARGS="--provider-input-budget none";; \*\)/.test(launcher),
+    "the launcher accepts a basis it cannot mean");
+
+  checks.theServingBudgetIsADeclaredBasis = true;
+}
+
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
 assert.deepEqual([...EXPERIMENT_MODES], ["smoke", "full"]);
 assert(plan, "stage plan fixture did not survive gate 4");

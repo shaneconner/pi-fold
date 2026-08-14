@@ -333,10 +333,32 @@ async function run() {
   assertExperiment(requestedRunDir && unit && campaignDir && planPath, "Experiment run requires --run-dir, --unit, --campaign-dir and --plan");
   assertExperiment(closedBook || EXPERIMENT_ARMS.includes(arm),
     `Experiment run requires --arm ${EXPERIMENT_ARMS.join("|")}`);
-  // Deployment fact resolved from the model pin, never a flag: rep 16 aborted after the
-  // curation thresholds ran against the 255,616-token descriptor budget because this
-  // fact never reached the registration. Unlisted models run in descriptor mode.
-  const providerInputBudget = EXPERIMENT_PROVIDER_INPUT_BUDGETS[`${modelProvider}/${modelId}`] ?? null;
+  // Deployment fact resolved from the model pin, never a tunable: rep 16 aborted after the
+  // curation thresholds ran against the 255,616-token descriptor budget because this fact
+  // never reached the registration. Unlisted models run in descriptor mode.
+  //
+  // `--provider-input-budget none` declares NONE, and it is a basis rather than a tuning
+  // dial (Shane 2026-08-14). Declaring 251,520 is the descriptor window less Pi's reserve,
+  // and it caps BOTH arms below the provider's 272,000 long-context tier by construction.
+  // luna-20260807 (Sol throughout; the campaign name is only a label) predates the constant:
+  // native drifted to 369,024 tokens and was billed the surcharge on 17 of 117 calls at
+  // $20.99, while folding held pi-fold at 236,861 so it never left the base tier at $13.89.
+  // That surcharge was the entire cost result, and declaring a budget designs it out, which
+  // is how sol-20260814-fenced-full came back $20.88 to $13.74 the other way. Neither basis
+  // is wrong; running one while reporting the other would be. The manifest records whichever
+  // was used, so a sealed run states its own basis.
+  const requestedBudget = argumentValue("--provider-input-budget", null);
+  assertExperiment(requestedBudget === null || requestedBudget === "none",
+    "Experiment run accepts --provider-input-budget none, or nothing at all: the declared " +
+    "budget is a model fact and is not otherwise settable");
+  const providerInputBudget = requestedBudget === "none"
+    ? null
+    : EXPERIMENT_PROVIDER_INPUT_BUDGETS[`${modelProvider}/${modelId}`] ?? null;
+  // The matched fence measures a share of the declared budget, so it has nothing to fence
+  // against without one. Refused here rather than at the extension, so the run fails at
+  // launch instead of after the model has been paid for.
+  assertExperiment(arm !== "nativefence" || providerInputBudget !== null,
+    "The nativefence arm fences against a declared serving budget and cannot run without one");
   const runDir = resolve(requestedRunDir);
   const requiredRoot = join(EXPERIMENT_STATE_ROOT, basename(resolve(campaignDir)), "runs");
   assertExperiment(dirname(runDir) === requiredRoot, `Run directory must live under ${requiredRoot}`);
