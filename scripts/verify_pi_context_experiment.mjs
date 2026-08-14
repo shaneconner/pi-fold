@@ -46,7 +46,12 @@ import {
   assertBlindPacket,
   buildConversationProbes,
   buildProbes,
+  definitionSubject,
   codeWordSentence,
+  codeWordReissueSentence,
+  effectiveCodeWord,
+  reissueAnnouncedAt,
+  stageCodeWordReissues,
   computeRereadTax,
   contextEventMetrics,
   MEMEX_FOLD_LANE_ACCEPT_RATE,
@@ -334,6 +339,26 @@ try {
       .map((probe) => probe.kind),
     ["symbol-file", "definition-line"]);
   assert(probes.every((probe) => REPO_PROBE_KINDS.includes(probe.kind)));
+  // A symbol-file question names the CONSTRUCT, not the bare identifier, so a
+  // header declaring `struct X` and an implementation defining X-prefixed
+  // functions stop being two defensible answers (Shane 2026-08-14).
+  assert.equal(definitionSubject({ identifier: "gtls_shared_creds", kind: "struct" }),
+    "struct gtls_shared_creds");
+  assert.equal(definitionSubject({ identifier: "AlphaSink", kind: "trait" }), "trait AlphaSink");
+  assert.equal(definitionSubject({ identifier: "alpha_entry", kind: "fn" }),
+    "the function alpha_entry");
+  assert.throws(() => definitionSubject({ identifier: "x" }), /identifier and a kind/);
+  // Anti-vacuity: the qualifier must actually change the subject, or naming the
+  // construct is decorative and the ambiguity survives.
+  assert.notEqual(definitionSubject({ identifier: "gtls_shared_creds", kind: "struct" }),
+    "gtls_shared_creds");
+  for (const probe of probes.filter((candidate) => candidate.kind === "symbol-file")) {
+    const fact = facts.find((candidate) => candidate.path === probe.sourcePath);
+    const definition = fact.definitions.find((candidate) => candidate.line === probe.sourceLine);
+    assert(definition, `symbol-file probe ${probe.id} points at no definition`);
+    assert(probe.question.includes(`defines ${definitionSubject(definition)}?`),
+      `symbol-file probe ${probe.id} did not name its construct: ${probe.question}`);
+  }
   // Every answer is a fact of the pinned bytes, verified here against the file itself.
   for (const probe of probes) {
     const fact = facts.find((candidate) => candidate.path === probe.sourcePath);
@@ -407,17 +432,24 @@ try {
   writeFileSync(join(fixture, "bulk-b.rs"), `${bulk}z`);
   const bulkFacts = ["bulk-a.rs", "bulk-b.rs"].map((name) => fileFacts(fixture, join(fixture, name)));
   const fixtureWord = (ordinal) => `cw-${String(ordinal).padStart(6, "0")}`;
-  const stageOf = (ordinal, kind, files, stageProbes, deliverable, chainStep = null) => {
+  const stageOf = (ordinal, kind, files, stageProbes, deliverable, chainStep = null,
+    codeWordReissue = null) => {
     const codeWord = kind === "probe" ? null : fixtureWord(ordinal);
-    // Weave order mirrors the stager: base, then the audit step, code word LAST.
+    // Weave order mirrors the stager: base, then the audit step, code word LAST,
+    // then any withdrawal of an earlier stage's word.
     let instructions = `stage ${ordinal} instructions`;
     if (chainStep !== null) instructions = `${instructions} ${auditStepSentence(chainStep)}`;
     if (codeWord !== null) instructions = `${instructions} ${codeWordSentence(ordinal, codeWord)}`;
+    if (codeWordReissue !== null) {
+      instructions = `${instructions} ` +
+        `${codeWordReissueSentence(codeWordReissue.stage, codeWordReissue.codeWord)}`;
+    }
     const stage = {
       ordinal,
       kind,
       instructions,
       codeWord,
+      codeWordReissue,
       chainStep,
       files: files.map((fact) => ({
         path: fact.path, sha256: fact.sha256, lines: fact.lines, chars: fact.chars, bytes: fact.bytes,
@@ -1852,7 +1884,7 @@ try {
     "the stager must generate one seeded code word per stage");
   assert(staging.includes("codeWordSentence(ordinal, codeWord)"),
     "the stager must weave the code word into the stage instructions");
-  assert(staging.includes("collectCheckoutDefinitions(checkoutDir, codeWords)") &&
+  assert(staging.includes("collectCheckoutDefinitions(checkoutDir,\n        [...codeWords, ...reissueWords])") &&
     staging.includes("uniqueIdentifierIndex(checkoutDefinitions.entries)") &&
     staging.includes("checkoutPaths: checkoutDefinitions.paths"),
   "symbol uniqueness, code-word collisions, and include resolution must be judged " +
@@ -2102,6 +2134,24 @@ try {
   assert.equal(normalizeTraceAnswer("  `lib/rand.h`. "), "lib/rand.h");
   assert.equal(normalizeTraceAnswer("\"7\","), "7");
   assert.equal(normalizeTraceAnswer(null), null);
+  // Presentation forms of the SAME value, which the grader must not read as a
+  // miss (Shane 2026-08-14). Emphasis, a leading ./, and a trailing line
+  // position on a path.
+  assert.equal(normalizeTraceAnswer("**lib/vtls/gtls.h**"), "lib/vtls/gtls.h");
+  assert.equal(normalizeTraceAnswer("_lib/vtls/gtls.h_"), "lib/vtls/gtls.h");
+  assert.equal(normalizeTraceAnswer("./lib/vtls/gtls.h"), "lib/vtls/gtls.h");
+  assert.equal(normalizeTraceAnswer("`lib/vtls/gtls.h:43`"), "lib/vtls/gtls.h");
+  assert.equal(normalizeTraceAnswer("lib/vtls/gtls.h:43:9"), "lib/vtls/gtls.h");
+  // The line-suffix strip is confined to path-shaped values, so a
+  // definition-line answer keeps its digits and a bare identifier is untouched.
+  assert.equal(normalizeTraceAnswer("43"), "43");
+  assert.equal(normalizeTraceAnswer("Curl_gtls_shared_creds_free"), "Curl_gtls_shared_creds_free");
+  // The other direction, which is the property that matters: nothing above may
+  // collapse two DIFFERENT values together. Both are the real mismatches from
+  // the sol-20260814-deployment pifold arm, and both must stay mismatches.
+  assert.notEqual(normalizeTraceAnswer("lib/vtls/gtls.c"), normalizeTraceAnswer("lib/vtls/gtls.h"));
+  assert.notEqual(normalizeTraceAnswer("cw-509a30"), normalizeTraceAnswer("cw-668aac"));
+  assert.notEqual(normalizeTraceAnswer("lib/vtls/gtls.h"), normalizeTraceAnswer("lib/vtls/gtls2.h"));
   assert.equal(probeClassOf("stage-fact"), "conversation");
   assert.equal(probeClassOf("chain-link"), "derived");
   assert.equal(probeClassOf("derivation-control"), "derived");
@@ -4341,6 +4391,9 @@ try {
     "Answer the following recall questions about material delivered EARLIER in this session.",
     "You will be quizzed on this.",
     "Your answers are graded.",
+    // Hoarding direction: the second-pass carriers, by their own bytes.
+    "Record the specific identifiers and line positions you will need later.",
+    "keep an exact working memory of the identifiers, paths and line positions you have seen",
   ]) {
     assert(testAwarenessLeaks(carrier).length > 0,
       `the scan misses test-awareness framing: ${carrier.slice(0, 60)}`);
@@ -4350,7 +4403,6 @@ try {
   // every plan the corpus can produce.
   for (const clean of [
     "Read every file delivered in this stage and build an accurate working model of what it does.",
-    "Record the specific identifiers and line positions you will need later.",
     "Files in this stage: tests/unit/unit1300.c, lib/ftplistparser.h.",
     "Name every call, trait, type or route that crosses between the new files and that earlier material.",
     "Before we carry on, can you tell me a few things about the work so far?",
@@ -4383,9 +4435,45 @@ try {
   ]) {
     assert(!staging.includes(gone), `the staging script still writes "${gone}"`);
   }
-  // The working half of the instruction stays: dropping the premise must not drop the task.
-  assert(/Record the specific identifiers and line positions you will need later\./.test(staging),
-    "the instruction to record what matters was dropped along with the premise");
+  // The working half of the instruction stays: dropping the premise must not drop
+  // the task. What survives is the ASSIGNMENT, not a memory strategy.
+  assert(staging.includes("build an accurate working") &&
+    staging.includes("model of what it does, what it depends on, and which names it exports."),
+  "the reading task was dropped along with the hoarding direction");
+  // Scoped to the function BODY: the comment above it quotes the removed line on
+  // purpose, and a scan of the whole file would be satisfied by deleting the
+  // explanation rather than the instruction.
+  const readBody = /function readInstruction\(stage, files\) \{\n  return \[\n([\s\S]*?)\n  \]/.exec(staging);
+  assert(readBody, "the sweep cannot read readInstruction, so it is scanning nothing");
+  assert.deepEqual(testAwarenessLeaks(readBody[1]), [],
+    "the read instruction still tells the model what to hoard");
+  const probeBody = /function probeInstruction\(\) \{[\s\S]*?return \[\n([\s\S]*?)\n  \]/.exec(staging);
+  assert(probeBody, "the sweep cannot read probeInstruction, so it is scanning nothing");
+  assert.deepEqual(testAwarenessLeaks(probeBody[1]), [],
+    "the probe instruction still tells the model it is being tested");
+  // A guess is not evidence of recall. Inviting one turned pi-fold's lost stage-15
+  // code word into a confident cw-509a30 that exists nowhere in the plan, and the
+  // run then found its own invention on a later search.
+  assert(!/even if you are not certain/.test(probeBody[1]),
+    "the probe instruction still licenses a guess over a check");
+
+  // EVERY MODEL-FACING SURFACE THE WORKER BUILDS, not just the plan's. The system
+  // prompt reaches more requests than any stage instruction and was never scanned,
+  // which is how "keep an exact working memory of the identifiers, paths and line
+  // positions you have seen" survived the first pass.
+  const worker = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
+  for (const [name, pattern] of [
+    ["workloadSystemPrompt", /function workloadSystemPrompt\(\) \{\n  return \[\n([\s\S]*?)\n  \]/],
+    ["workloadPrompt", /function workloadPrompt\(firstChallenge\) \{\n  return \[\n([\s\S]*?)\n  \]/],
+    ["resumePrompt", /function resumePrompt\(stage, stageCount\) \{\n  return \[\n([\s\S]*?)\n  \]/],
+  ]) {
+    const found = pattern.exec(worker);
+    assert(found, `the sweep cannot read ${name}, so it is scanning nothing`);
+    assert.deepEqual(testAwarenessLeaks(found[1]), [],
+      `${name} tells the model it is being tested or what to hoard`);
+  }
+  assert(!/keep an exact working memory/.test(worker),
+    "the worker still directs the model's memory strategy");
 
   checks.noInstructionTellsTheModelItIsBeingTested = true;
 }
@@ -4514,6 +4602,137 @@ try {
     "the launcher accepts a basis it cannot mean");
 
   checks.theServingBudgetIsADeclaredBasis = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 65 - a code word that was WITHDRAWN and replaced, which is the case a
+// single search gets wrong.
+//
+// searchSessionHistory returns the EARLIEST matches first, so one query on
+// "code word for stage NN" surfaces the withdrawn value before its replacement.
+// That is the exact query the native arm used to win probe-32-04 in
+// sol-20260814-deployment, so this trap is aimed at the strategy that actually
+// won rather than at a hypothetical one. The gate proves the trap TRAPS (a
+// first-hit reader lands on the stale value), that both waves are measured (one
+// carrier withdrawn, one standing), and that the asking does not give it away:
+// the question is byte-identical either way, so the agent cannot tell a trapped
+// carrier from a clean one by reading the question.
+// ---------------------------------------------------------------------------
+{
+  const words = stageCodeWords("reissue-fixture", 8);
+  const replacements = stageCodeWordReissues("reissue-fixture", 8);
+  assert.equal(new Set([...words, ...replacements]).size, 16,
+    "originals and replacements share a value, so a probe would have two right answers");
+  // Stage 1's word is withdrawn at stage 3; stage 2's stands.
+  const carriers = [
+    { ordinal: 1, kind: "read", codeWord: words[0], codeWordReissue: null },
+    { ordinal: 2, kind: "read", codeWord: words[1], codeWordReissue: null },
+    { ordinal: 3, kind: "read", codeWord: words[2],
+      codeWordReissue: { stage: 1, codeWord: replacements[0] } },
+    { ordinal: 4, kind: "probe", codeWord: null, codeWordReissue: null },
+  ];
+  assert.equal(effectiveCodeWord(carriers, 1), replacements[0]);
+  assert.equal(effectiveCodeWord(carriers, 2), words[1]);
+  assert.notEqual(effectiveCodeWord(carriers, 1), words[0]);
+  assert.equal(reissueAnnouncedAt(carriers, 1), 3);
+  assert.equal(reissueAnnouncedAt(carriers, 2), null);
+
+  // THE TRAP ITSELF. A transcript carrying the original and then the withdrawal,
+  // searched the way an agent searches, hands back the stale value first.
+  const historyEntries = [
+    { type: "message", message: { role: "toolResult", toolName: "repo_stage",
+      content: [{ type: "text", text: `STAGE 01. ${codeWordSentence(1, words[0])}` }] } },
+    { type: "message", message: { role: "toolResult", toolName: "repo_stage",
+      content: [{ type: "text", text: `STAGE 03. ${codeWordReissueSentence(1, replacements[0])}` }] } },
+  ];
+  const found = searchSessionHistory(historyEntries, "code word for stage 01");
+  assert.equal(found.totalMatches, 2,
+    "the withdrawal must answer the same search as the original, or it is not a trap");
+  assert(found.matches[0].excerpt.includes(words[0]),
+    "the first hit is not the withdrawn value, so a first-hit reader would not be caught");
+  assert(!found.matches[0].excerpt.includes(replacements[0]),
+    "the first hit already carries the correction, so the trap is vacuous");
+  assert(found.matches[1].excerpt.includes(replacements[0]),
+    "the correction is not reachable at all, so the probe would be unanswerable");
+
+  // Wave selection: one wave demands a withdrawn carrier, the next a standing
+  // one, and each expects the value that is LIVE for the carrier it drew.
+  const withCarriers = (requireReissued) => buildConversationProbes({
+    stages: carriers.map((stage) => ({ ...stage, files: [{ path: `f${stage.ordinal}.rs` }] })),
+    probeOrdinal: 6,
+    seed: "reissue-fixture",
+    kinds: ["stage-fact"],
+    usedStages: new Set(),
+    requireReissued,
+  })[0];
+  const trappedProbe = withCarriers(true);
+  const cleanProbe = withCarriers(false);
+  assert.equal(trappedProbe.sourceStage, 1);
+  assert.equal(trappedProbe.expectedAnswer, replacements[0]);
+  assert.notEqual(trappedProbe.expectedAnswer, words[0]);
+  // The clean carrier is whichever standing stage the shuffle drew. A stage that
+  // ANNOUNCES a withdrawal is itself untrapped: its own word still stands, which
+  // is why this reads the drawn ordinal rather than pinning one.
+  assert.equal(reissueAnnouncedAt(carriers, cleanProbe.sourceStage), null);
+  assert.equal(cleanProbe.expectedAnswer, words[cleanProbe.sourceStage - 1]);
+  assert.notEqual(cleanProbe.sourceStage, trappedProbe.sourceStage);
+  // No tell: the two questions differ only in the stage number they name.
+  const anonymised = (probe) =>
+    probe.question.replace(`stage ${String(probe.sourceStage).padStart(2, "0")}`, "stage NN");
+  assert.equal(anonymised(trappedProbe), anonymised(cleanProbe));
+  assert(!/reissu|withdraw|correct|replac|error/i.test(trappedProbe.question),
+    "the question announces that a correction exists, and would measure the announcement");
+
+  // Plan laws. Every mutation below was run against the unmutated plan first, so
+  // none of these assertions passes by accident of an unrelated failure.
+  const reseal = (mutated) => {
+    mutated.planSha256 = stagePlanSha256(mutated);
+    return mutated;
+  };
+  const carrierIndex = plan.stages.findIndex((stage) => stage.kind !== "probe");
+  const announcerIndex = plan.stages.findIndex((stage) => stage.kind !== "probe" &&
+    stage.ordinal > plan.stages[carrierIndex].ordinal);
+  const carrierOrdinal = plan.stages[carrierIndex].ordinal;
+  // The unmutated plan validates, which is what makes each throw below attributable.
+  validateStagePlan(reseal(structuredClone(plan)));
+  // A withdrawal must name an EARLIER stage.
+  assert.throws(() => {
+    const bad = structuredClone(plan);
+    bad.stages[announcerIndex].codeWordReissue =
+      { stage: bad.stages[announcerIndex].ordinal, codeWord: replacements[5] };
+    validateStagePlan(reseal(bad));
+  }, /reissues a stage that is not earlier/);
+  // A withdrawal that changes nothing is not a withdrawal.
+  assert.throws(() => {
+    const bad = structuredClone(plan);
+    const unchanged = bad.stages[carrierIndex].codeWord;
+    bad.stages[announcerIndex].codeWordReissue = { stage: carrierOrdinal, codeWord: unchanged };
+    bad.stages[announcerIndex].instructions +=
+      ` ${codeWordReissueSentence(carrierOrdinal, unchanged)}`;
+    validateStagePlan(reseal(bad));
+  }, /malformed, unchanged, or repeated/);
+  // A withdrawal the agent was never shown cannot be recalled.
+  assert.throws(() => {
+    const bad = structuredClone(plan);
+    bad.stages[announcerIndex].codeWordReissue =
+      { stage: carrierOrdinal, codeWord: replacements[5] };
+    validateStagePlan(reseal(bad));
+  }, /does not carry its reissue sentence/);
+  // A stage-fact probe expecting the WITHDRAWN value is the defect this whole
+  // mechanism exists to make impossible.
+  assert.throws(() => {
+    const bad = structuredClone(plan);
+    const wave = bad.stages.find((stage) => stage.probes.some((probe) => probe.kind === "stage-fact"));
+    const probe = wave.probes.find((candidate) => candidate.kind === "stage-fact");
+    const target = bad.stages[probe.sourceStage - 1];
+    const announcer = bad.stages.find((stage) => stage.kind !== "probe" &&
+      stage.ordinal > target.ordinal && stage.ordinal < wave.ordinal);
+    assert(announcer, "smoke fixture has no stage between the carrier and its wave");
+    announcer.codeWordReissue = { stage: target.ordinal, codeWord: replacements[6] };
+    announcer.instructions += ` ${codeWordReissueSentence(target.ordinal, replacements[6])}`;
+    validateStagePlan(reseal(bad));
+  }, /disagrees with carrier/);
+  checks.aWithdrawnCodeWordTrapsAFirstHitSearch = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

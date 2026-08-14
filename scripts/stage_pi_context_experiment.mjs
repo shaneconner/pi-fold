@@ -30,6 +30,8 @@ import {
   buildIncludeResolver,
   buildProbes,
   codeWordSentence,
+  codeWordReissueSentence,
+  stageCodeWordReissues,
   corpusManifestSha256,
   extractDefinitions,
   fileFacts,
@@ -152,12 +154,18 @@ function collectCheckoutDefinitions(checkoutDir, codeWords) {
   return { entries, paths };
 }
 
+// The reading task, and nothing about how to remember it (Shane 2026-08-14). This
+// used to close with "Record the specific identifiers and line positions you will
+// need later", which names the exact three things the repo-class probes ask for.
+// Keeping it was defensible while it was the only such line; the second-pass sweep
+// found the same direction in the system prompt, and a hoarding instruction is
+// still one when it is phrased as ordinary work. Building a working model of what
+// the code does, depends on and exports is the assignment and is enough.
 function readInstruction(stage, files) {
   return [
     `Read every file delivered in this stage of ${stage.repoKey} and build an accurate working`,
     "model of what it does, what it depends on, and which names it exports.",
     `Files in this stage: ${files.map((file) => file.path).join(", ")}.`,
-    "Record the specific identifiers and line positions you will need later.",
   ].join(" ");
 }
 
@@ -181,7 +189,7 @@ function probeInstruction() {
   return [
     "Before we carry on, can you tell me a few things about the work so far?",
     "Put each answer on its own line as `<probe-id>: <answer>`, then say in one sentence where",
-    "each one came from. Give me your best answer for each, even if you are not certain.",
+    "each one came from. If you are not sure of one, say so rather than guessing.",
   ].join(" ");
 }
 
@@ -194,10 +202,14 @@ function deliverableInstruction(ordinal, referencesStages) {
   ].join(" ");
 }
 
-function buildPlan({ repo, mode, seed, facts, codeWords, uniqueIdentifiers, checkoutPaths }) {
+function buildPlan({
+  repo, mode, seed, facts, codeWords, reissueWords, uniqueIdentifiers, checkoutPaths,
+}) {
   const modePlan = EXPERIMENT_MODE_PLANS[mode];
   assertExperiment(codeWords.length === modePlan.stageCount,
     "Stage code words must cover every stage");
+  assertExperiment(reissueWords.length === modePlan.stageCount,
+    "Reissue code words must cover every stage");
   const eligible = facts.filter((fact) => fact.lines >= MIN_FILE_LINES && fact.lines <= MAX_FILE_LINES);
   assertExperiment(eligible.length >= modePlan.stageCount,
     `Pinned corpus has ${eligible.length} eligible files, fewer than ${modePlan.stageCount} stages`);
@@ -233,6 +245,7 @@ function buildPlan({ repo, mode, seed, facts, codeWords, uniqueIdentifiers, chec
       kind: isProbe ? "probe" : isRevisit ? "revisit" : "read",
       files: isProbe ? [] : takeFiles(modePlan.payloadTargetChars),
       codeWord,
+      codeWordReissue: null,
     });
   }
 
@@ -286,13 +299,53 @@ function buildPlan({ repo, mode, seed, facts, codeWords, uniqueIdentifiers, chec
     }
   }
 
+  // Pass 2b: code word reissues, AFTER the chains, because a withdrawal names an
+  // earlier stage number and the plan's anti-leak law refuses any stage whose
+  // text carries both a chain link's stage and that link's path. Revisit
+  // instructions already obey this rule for the same reason; a withdrawal is the
+  // same shape and obeys it the same way, by declining the announcer rather than
+  // by weakening the law. Every reissueEvery-th payload stage has its word
+  // withdrawn, announced at the first legal payload stage at least reissueGap
+  // later. A stage with no legal announcer left in the run is simply not
+  // withdrawn: a correction has to be DELIVERED to be recalled.
+  const chainResolvedStages = new Set();
+  for (const chain of chains) {
+    for (const link of chain.links) {
+      // SOF answers with a stage and is anchored by a path; FIN is the reverse.
+      // Either way the link BINDS one stage to one path, and the anti-leak law
+      // refuses any text carrying both.
+      if (link.hop === "SOF") chainResolvedStages.add(link.expectedAnswer);
+      if (link.hop === "FIN") chainResolvedStages.add(link.input);
+    }
+  }
+  for (const skeleton of skeletons) {
+    if (skeleton.kind === "probe") continue;
+    if (skeleton.ordinal % modePlan.reissueEvery !== 0) continue;
+    // Excluding every chain-resolved stage is SUFFICIENT rather than merely
+    // careful: the only text a withdrawal adds is a mention of stage S, so the
+    // law can newly fire only where some link binds S to a path the announcing
+    // stage already names. A stage no link resolves to has no such path, and the
+    // announcer's own text was already legal. Predicting the paths instead
+    // failed: a chain step names its ANCHOR path in its own step sentence, not
+    // just the files that stage delivered.
+    if (chainResolvedStages.has(skeleton.ordinal)) continue;
+    const announcer = skeletons.find((candidate) => candidate.kind !== "probe" &&
+      candidate.ordinal >= skeleton.ordinal + modePlan.reissueGap &&
+      candidate.codeWordReissue === null);
+    if (announcer === undefined) continue;
+    announcer.codeWordReissue = {
+      stage: skeleton.ordinal,
+      codeWord: reissueWords[skeleton.ordinal - 1],
+    };
+  }
+
   // Pass 3: instructions, probes, payload hashes.
   const usedCarrierStages = new Set();
   const probedLinks = new Set();
   const probedChains = new Set();
   const echoedTargets = new Set();
   const stages = [];
-  for (const { ordinal, kind, files: takenFacts, codeWord } of skeletons) {
+  for (const { ordinal, kind, files: takenFacts, codeWord, codeWordReissue } of skeletons) {
     const isProbe = kind === "probe";
     const deliverable = ordinal % modePlan.deliverableEvery === 0 && !isProbe
       ? {
@@ -341,6 +394,10 @@ function buildPlan({ repo, mode, seed, facts, codeWords, uniqueIdentifiers, chec
           kinds: waveKinds.filter((kind) => CONVERSATION_PROBE_KINDS.includes(kind)),
           usedStages: usedCarrierStages,
           excludedBindingStages: chainStageNodes,
+          // Waves alternate between demanding a carrier whose code word was
+          // withdrawn and one whose word still stands, wherever the mode's
+          // carrier horizon can supply both.
+          requireReissued: modePlan.reissueAlternates ? waveIndex % 2 === 0 : null,
         }),
       };
       const earlierFacts = stages.flatMap((stage) =>
@@ -386,12 +443,19 @@ function buildPlan({ repo, mode, seed, facts, codeWords, uniqueIdentifiers, chec
     const chainStep = chainStepByStage.get(ordinal) ?? null;
     if (chainStep !== null) instructions = `${instructions} ${auditStepSentence(chainStep)}`;
     if (codeWord !== null) instructions = `${instructions} ${codeWordSentence(ordinal, codeWord)}`;
+    // The withdrawal rides LAST, after this stage's own code word, so the two
+    // audit notes read in the order they were issued.
+    if (codeWordReissue !== null) {
+      instructions = `${instructions} ` +
+        `${codeWordReissueSentence(codeWordReissue.stage, codeWordReissue.codeWord)}`;
+    }
 
     const stage = {
       ordinal,
       kind,
       instructions,
       codeWord,
+      codeWordReissue,
       chainStep,
       files: files.map((fact) => ({
         path: fact.path, sha256: fact.sha256, lines: fact.lines, chars: fact.chars, bytes: fact.bytes,
@@ -472,9 +536,13 @@ try {
   for (;;) {
     try {
       const codeWords = stageCodeWords(seed, EXPERIMENT_MODE_PLANS[mode].stageCount);
-      const checkoutDefinitions = collectCheckoutDefinitions(checkoutDir, codeWords);
+      const reissueWords = stageCodeWordReissues(seed, EXPERIMENT_MODE_PLANS[mode].stageCount);
+      // Both sets face the collision scan: a reissued word that already exists in
+      // the checkout is answerable from disk exactly as an original would be.
+      const checkoutDefinitions = collectCheckoutDefinitions(checkoutDir,
+        [...codeWords, ...reissueWords]);
       plan = buildPlan({
-        repo, mode, seed, facts, codeWords,
+        repo, mode, seed, facts, codeWords, reissueWords,
         uniqueIdentifiers: uniqueIdentifierIndex(checkoutDefinitions.entries),
         checkoutPaths: checkoutDefinitions.paths,
       });

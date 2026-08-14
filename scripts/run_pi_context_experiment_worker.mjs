@@ -120,11 +120,17 @@ const checkoutSha256 = closedBook ? null : corpusManifestSha256(observed);
 assertExperiment(closedBook || checkoutSha256 === config.targetTreeSha256,
   "Pinned checkout does not reproduce the staged corpus fingerprint");
 
+// NO MEMORY DIRECTION (Shane 2026-08-14). This prompt used to say "keep an exact
+// working memory of the identifiers, paths and line positions you have seen",
+// which named the three things the probes ask about, on every request, in both
+// arms. That is the hoarding instruction the probe wording was cleaned of, sitting
+// one layer up and reaching far more requests: gate 62 was only scanning stage
+// surfaces and never read this one. What the assignment IS stays; how to remember
+// it is the thing under measurement and is no longer supplied.
 function workloadSystemPrompt() {
   return [
     "You are a careful software analyst carrying out one continuous repository comprehension",
-    "assignment. Read what you are given accurately, keep an exact working memory of the",
-    "identifiers, paths and line positions you have seen, cross-reference new material against",
+    "assignment. Read what you are given accurately, cross-reference new material against",
     "earlier material, and write the deliverables you are asked for. Work in one continuous run",
     "and finish only after the assignment ends.",
   ].join(" ");

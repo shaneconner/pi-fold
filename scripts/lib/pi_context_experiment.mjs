@@ -479,6 +479,14 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
     ]),
     deliverableEvery: 8,
     revisitEvery: 3,
+    // How far after a stage its code word is reissued. See CODE WORD REISSUES.
+    // Three keeps the original and its correction in different fold spans on the
+    // measured cadence, which is the case worth testing. Waves alternate between
+    // demanding a withdrawn carrier and a standing one, so a run always measures
+    // both cells rather than leaving the split to the shuffle.
+    reissueEvery: 3,
+    reissueGap: 3,
+    reissueAlternates: true,
     // Audit traces: 4 chains x 6 links, anchored progressively deeper into the run.
     // The early law guarantees wave 16 has aged links to probe; measured headroom on
     // the pinned curl corpus is 3-7 links at stage <= 8 across 12 seeds.
@@ -518,6 +526,16 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
     ]),
     deliverableEvery: 3,
     revisitEvery: 2,
+    // Smoke's ONE stage-fact probe sits at wave 4, whose carrier horizon is
+    // stages 1-2, and stage 1 is a chain anchor on every seed, so no carrier
+    // there can be both withdrawn and corrected in time. Smoke therefore stages
+    // withdrawals (the weave, the plan laws and the whole-plan uniqueness rule
+    // all run) but does not demand a withdrawn CARRIER, which is unreachable at
+    // this size. Gate 65 drives both selection branches directly, so the path
+    // smoke cannot reach is still covered before a full run.
+    reissueEvery: 1,
+    reissueGap: 1,
+    reissueAlternates: false,
     // One chain of 3 links exercises every hop evaluator, the step renderer, and the
     // chain laws inside an 8-stage run: a broken chain must not first appear in a
     // 5-hour full run. Roughly half of seeds are unconstructible on the real corpus
@@ -754,7 +772,8 @@ export function buildProbes({ facts, seed, count, uniqueIdentifiers, rotationOff
     probes.push({
       id: `probe-${String(probes.length + 1).padStart(2, "0")}`,
       kind: "symbol-file",
-      question: `Which repository-relative file defines ${unique.identifier}? Answer with the path only.`,
+      question: `Which repository-relative file defines ${definitionSubject(unique)}? ` +
+        "Answer with the path only.",
       expectedAnswer: fact.path,
       sourcePath: fact.path,
       sourceLine: unique.line,
@@ -763,6 +782,31 @@ export function buildProbes({ facts, seed, count, uniqueIdentifiers, rotationOff
   assertExperiment(probes.length === count,
     `Pinned corpus yielded ${probes.length} mechanical probes, needed ${count}`);
   return probes;
+}
+
+// A symbol-file probe claims THE defining file, so the question has to name the
+// CONSTRUCT and not just the identifier (Shane 2026-08-14). The uniqueness index
+// only sees the constructs DEFINITION_PATTERNS matches, and it carries no C
+// function pattern, so "which file defines gtls_shared_creds" passed uniqueness
+// while `lib/vtls/gtls.c` defined Curl_gtls_shared_creds_create, _up_ref, _free,
+// _expired and _different: a coin flip between the header that declares the
+// struct and the implementation that carries the functions, and the two arms
+// called it opposite ways. Naming the construct settles it from data already on
+// the definition, without widening the pattern set, which would put unverified C
+// prototypes into definition-line ground truth. The decoy file is left standing:
+// knowing where `struct X` is declared rather than merely where the token occurs
+// is the thing being asked.
+export function definitionSubject(definition) {
+  assertExperiment(typeof definition?.identifier === "string" && typeof definition?.kind === "string",
+    "A definition subject needs an identifier and a kind");
+  switch (definition.kind) {
+    case "struct": case "enum": case "trait": case "class": case "type":
+      return `${definition.kind} ${definition.identifier}`;
+    case "fn": case "func": case "def":
+      return `the function ${definition.identifier}`;
+    default:
+      return definition.identifier;
+  }
 }
 
 export function uniqueIdentifierIndex(facts) {
@@ -813,42 +857,117 @@ export function codeWordSentence(ordinal, codeWord) {
   return `Audit note: the code word for stage ${String(ordinal).padStart(2, "0")} is ${codeWord}.`;
 }
 
+// ---------------------------------------------------------------------------
+// CODE WORD REISSUES (Shane 2026-08-14). A fact stated once and CONTRADICTED
+// later, which is the case a single search gets wrong.
+//
+// searchSessionHistory returns the EARLIEST matches first, so a query on "code
+// word for stage 15" surfaces the original before the correction by
+// construction: an agent that searches once and takes the first relevant hit
+// answers with the withdrawn value. That is not hypothetical. It is the exact
+// query the native arm used to win probe-32-04 in sol-20260814-deployment.
+// Chronological summarization should carry the correction instead, so this
+// separates recall that tracks supersession from recall that merely finds text.
+//
+// The reissue sentence deliberately repeats the "code word for stage NN"
+// phrasing, so both sentences answer the same search and ORDER is the only thing
+// that distinguishes them.
+export function stageCodeWordReissues(seed, stageCount) {
+  const draws = seededSequence(`${seed}:code-word-reissues`, stageCount);
+  const words = draws.map((value) => `cw-${value.toString(16).padStart(8, "0").slice(0, 6)}`);
+  assertExperiment(new Set(words).size === words.length,
+    "Reissued code words collided; stage the campaign with a different seed");
+  return words;
+}
+
+export function codeWordReissueSentence(ordinal, codeWord) {
+  return `Audit note: the code word given for stage ${String(ordinal).padStart(2, "0")} ` +
+    `was issued in error; the code word for stage ${String(ordinal).padStart(2, "0")} ` +
+    `is ${codeWord}.`;
+}
+
+// The value a stage's code word CURRENTLY holds: the last reissue naming it, or
+// the word it was first given. Every reader of a stage-fact answer goes through
+// this, so the plan and the grader cannot disagree about which value is live.
+export function effectiveCodeWord(stages, ordinal) {
+  assertExperiment(Array.isArray(stages), "Effective code word requires the stages");
+  const carrier = stages.find((stage) => stage.ordinal === ordinal);
+  assertExperiment(carrier !== undefined, `No stage ${ordinal} to read a code word from`);
+  const reissues = stages
+    .filter((stage) => stage.codeWordReissue !== null && stage.codeWordReissue !== undefined &&
+      stage.codeWordReissue.stage === ordinal)
+    .sort((left, right) => left.ordinal - right.ordinal);
+  return reissues.length === 0
+    ? carrier.codeWord
+    : reissues[reissues.length - 1].codeWordReissue.codeWord;
+}
+
+// Which stage announces the reissue for a carrier, or null when it was never
+// reissued. Used to keep a trapped carrier out of a wave whose horizon does not
+// yet contain the correction: probing a value whose correction the agent has not
+// been told would measure clairvoyance.
+export function reissueAnnouncedAt(stages, ordinal) {
+  const announcing = stages
+    .filter((stage) => stage.codeWordReissue !== null && stage.codeWordReissue !== undefined &&
+      stage.codeWordReissue.stage === ordinal)
+    .sort((left, right) => left.ordinal - right.ordinal);
+  return announcing.length === 0 ? null : announcing[announcing.length - 1].ordinal;
+}
+
 // One carrier stage per probe, never reused across the whole plan: a probed span,
 // once peeked or answered, is refreshed at the tail, and a second probe against it
 // would measure that refresh instead of recall.
 export function buildConversationProbes({
   stages, probeOrdinal, seed, kinds, usedStages, excludedBindingStages = new Set(),
+  requireReissued = null,
 }) {
   assertExperiment(Array.isArray(stages) && Number.isSafeInteger(probeOrdinal),
     "Conversation probes require the stages built so far");
   assertExperiment(Array.isArray(kinds) && kinds.every((kind) => CONVERSATION_PROBE_KINDS.includes(kind)),
     "Conversation probe kinds must be stage-fact or stage-binding");
+  const horizon = Math.ceil(probeOrdinal / 2);
   const eligible = stages.filter((stage) => stage.kind !== "probe" &&
-    stage.ordinal <= Math.ceil(probeOrdinal / 2) && !usedStages.has(stage.ordinal));
+    stage.ordinal <= horizon && !usedStages.has(stage.ordinal));
   assertExperiment(eligible.length >= kinds.length,
     `Probe stage ${probeOrdinal} has ${eligible.length} unused carrier stages, needs ${kinds.length}`);
   const order = seededShuffle(eligible.map((stage) => stage.ordinal), `${seed}:carriers`);
+  // A carrier is TRAPPED when its code word has been withdrawn and the
+  // withdrawal was DELIVERED before this wave asks. That is the wave ordinal,
+  // not the carrier horizon: the horizon bounds how old a carrier must be, while
+  // what makes the answer a trap is only whether the agent has been told yet.
+  // Reading the horizon here silently mislabelled the cell, and wave 64 drew a
+  // carrier withdrawn at stage 33 while the alternation believed it was clean.
+  const trapped = (ordinal) => {
+    const announcedAt = reissueAnnouncedAt(stages, ordinal);
+    return announcedAt !== null && announcedAt < probeOrdinal;
+  };
   const probes = [];
   for (const kind of kinds) {
     // A stage-binding answer is the carrier's FIRST file, which a chain stage
     // node would also expose through its FIN link, so those stages never carry
     // a binding probe. Code words collide with nothing.
     const ordinal = order.find((candidate) => !usedStages.has(candidate) &&
-      (kind !== "stage-binding" || !excludedBindingStages.has(candidate)));
+      (kind !== "stage-binding" || !excludedBindingStages.has(candidate)) &&
+      (kind !== "stage-fact" || requireReissued === null || trapped(candidate) === requireReissued));
     assertExperiment(ordinal !== undefined,
-      `Probe stage ${probeOrdinal} has no legal carrier for ${kind}`);
+      `Probe stage ${probeOrdinal} has no legal carrier for ${kind}` +
+      (kind === "stage-fact" && requireReissued !== null
+        ? ` with reissued=${requireReissued}` : ""));
     const carrier = stages.find((stage) => stage.ordinal === ordinal);
     usedStages.add(ordinal);
     const label = String(ordinal).padStart(2, "0");
     if (kind === "stage-fact") {
       assertExperiment(typeof carrier.codeWord === "string" && CODE_WORD_PATTERN.test(carrier.codeWord),
         `Carrier stage ${ordinal} has no code word`);
+      // ONE wording for trapped and untrapped carriers alike. A question that
+      // asked about a correction only where one existed would announce the trap
+      // in the asking, and measure the announcement.
       probes.push({
         id: "",
         kind,
-        question: `What was the audit code word given in stage ${label}'s instructions? ` +
+        question: `What is the audit code word for stage ${label}? ` +
           "Answer with the code word only.",
-        expectedAnswer: carrier.codeWord,
+        expectedAnswer: effectiveCodeWord(stages, ordinal),
         sourceStage: ordinal,
       });
     } else {
@@ -1285,6 +1404,13 @@ export const TEST_AWARENESS_PATTERNS = Object.freeze([
   /\bgraded\b/i,
   /\bscored\b/i,
   /remember (this|these|it) for later/i,
+  // HOARDING DIRECTION, which is the same leak wearing working clothes (Shane
+  // 2026-08-14). Naming what to retain tells the model what will be asked for
+  // just as plainly as saying it will be asked. Both of these were live: the
+  // first in every stage's read instruction, the second in the system prompt on
+  // every request in both arms.
+  /you will need later/i,
+  /keep an exact working memory/i,
 ]);
 
 export function testAwarenessLeaks(text) {
@@ -1321,7 +1447,7 @@ export function validateStagePlan(plan) {
   for (const [index, stage] of plan.stages.entries()) {
     assertExperiment(exactKeys(stage, [
       "ordinal", "kind", "instructions", "files", "probes", "deliverable", "payloadChars",
-      "payloadSha256", "codeWord", "chainStep",
+      "payloadSha256", "codeWord", "codeWordReissue", "chainStep",
     ]) && stage.ordinal === index + 1 &&
       ["read", "revisit", "probe"].includes(stage.kind) &&
       typeof stage.instructions === "string" && stage.instructions.length > 0 &&
@@ -1355,11 +1481,34 @@ export function validateStagePlan(plan) {
     // woven into the instructions, absent from probe stages, never repeated.
     if (stage.kind === "probe") {
       assertExperiment(stage.codeWord === null, `Probe stage ${index + 1} carries a code word`);
+      assertExperiment(stage.codeWordReissue === null,
+        `Probe stage ${index + 1} carries a code word reissue`);
     } else {
       assertExperiment(typeof stage.codeWord === "string" && CODE_WORD_PATTERN.test(stage.codeWord) &&
         stage.instructions.includes(stage.codeWord) && !seenCodeWords.has(stage.codeWord),
       `Stage ${index + 1} code word is missing, malformed, unwoven, or repeated`);
       seenCodeWords.add(stage.codeWord);
+      // A reissue withdraws an EARLIER stage's code word. The replacement is a
+      // code word in its own right, so it shares the whole-plan uniqueness rule:
+      // two stages holding the same live value would give one probe two
+      // defensible answers.
+      if (stage.codeWordReissue !== null) {
+        assertExperiment(exactKeys(stage.codeWordReissue, ["stage", "codeWord"]),
+          `Stage ${index + 1} reissue shape is invalid`);
+        const { stage: target, codeWord: replacement } = stage.codeWordReissue;
+        assertExperiment(Number.isSafeInteger(target) && target >= 1 && target < stage.ordinal,
+          `Stage ${index + 1} reissues a stage that is not earlier`);
+        const carrier = plan.stages[target - 1];
+        assertExperiment(carrier !== undefined && carrier.kind !== "probe" &&
+          typeof carrier.codeWord === "string",
+        `Stage ${index + 1} reissues a stage that carries no code word`);
+        assertExperiment(CODE_WORD_PATTERN.test(replacement) && replacement !== carrier.codeWord &&
+          !seenCodeWords.has(replacement),
+        `Stage ${index + 1} reissue is malformed, unchanged, or repeated`);
+        assertExperiment(stage.instructions.includes(codeWordReissueSentence(target, replacement)),
+          `Stage ${index + 1} does not carry its reissue sentence`);
+        seenCodeWords.add(replacement);
+      }
     }
     for (const file of stage.files) {
       assertExperiment(exactKeys(file, ["path", "sha256", "lines", "chars", "bytes"]) &&
@@ -1383,8 +1532,14 @@ export function validateStagePlan(plan) {
         assertExperiment(carrier && carrier.kind !== "probe",
           `Conversation probe at stage ${index + 1} targets a probe stage`);
         if (probe.kind === "stage-fact") {
-          assertExperiment(probe.expectedAnswer === carrier.codeWord,
+          // The LIVE value, which is the reissue when one was announced. The
+          // correction has to have been delivered before the wave asks, or the
+          // probe is asking the agent to know something it was never told.
+          assertExperiment(probe.expectedAnswer === effectiveCodeWord(plan.stages, probe.sourceStage),
             `stage-fact probe at stage ${index + 1} disagrees with carrier ${probe.sourceStage}`);
+          const announcedAt = reissueAnnouncedAt(plan.stages, probe.sourceStage);
+          assertExperiment(announcedAt === null || announcedAt < stage.ordinal,
+            `stage-fact probe at stage ${index + 1} asks for a correction announced at ${announcedAt}`);
         } else {
           assertExperiment(carrier.files.length > 0 && probe.expectedAnswer === carrier.files[0].path,
             `stage-binding probe at stage ${index + 1} disagrees with carrier ${probe.sourceStage}`);
@@ -2286,11 +2441,25 @@ export function traceStepTranscripts({ entries, plan }) {
 // The ONE normalizer, declared once for every trace verdict: trim, strip
 // surrounding backticks and quotes and trailing punctuation. Identifiers and
 // paths stay case-sensitive.
+//
+// It also strips three PRESENTATION forms that carry the same value (Shane
+// 2026-08-14, after the sol-20260814-deployment adjudication): markdown emphasis
+// around the answer, a leading `./` on a repository-relative path, and a
+// trailing `:<line>` on a path. All three are a right answer dressed
+// differently, and marking one wrong is a measurement error rather than a
+// finding. The line suffix is stripped ONLY from a value that already looks like
+// a path (it contains a slash), so a definition-line probe answering "43" is
+// untouched; nothing here can turn one value into a DIFFERENT value, which is
+// the property gate 35 pins in both directions.
 export function normalizeTraceAnswer(text) {
   if (typeof text !== "string") return null;
   let value = text.trim();
   for (;;) {
-    const next = value.replace(/^[`"']+/, "").replace(/[`"'.,;:!?]+$/, "").trim();
+    let next = value
+      .replace(/^[`"'*_]+/, "")
+      .replace(/[`"'*_.,;:!?]+$/, "")
+      .trim();
+    if (next.includes("/")) next = next.replace(/^\.\//, "").replace(/:\d+(?::\d+)?$/, "");
     if (next === value) return value;
     value = next;
   }
