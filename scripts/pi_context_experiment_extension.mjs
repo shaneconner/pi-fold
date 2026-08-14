@@ -505,7 +505,24 @@ export function createPiContextExperimentExtension(config) {
         const record = { ...identity, recordSha256: sha256Json(identity) };
         appendJsonLineFsync(projectionLog, record);
         priorRequestRecordSha256 = record.recordSha256;
-        if (identity.signalAborted) appendFailure(config, "context-aborted", identity.leafId ?? "no-leaf");
+        // A FENCED COMPACTION IS AN ABORT BY CONSTRUCTION, so this arm records one rather
+        // than latching it. Pi's `compact` runs `_disconnectFromAgent()` and `await
+        // abort()` as its FIRST two statements, before it has read a setting or checked
+        // whether it can compact at all, so the live turn dies at every crossing and the
+        // abort is the mechanism working rather than the harness breaking. It is
+        // RECLASSIFIED, never swallowed: it gets its own event, the window is bounded to
+        // the crossing that caused it, and an aborted context anywhere outside that window
+        // latches exactly as it always has.
+        if (identity.signalAborted) {
+          if (fenceState.inFlight) {
+            appendEvent("harness-fence-abort", {
+              crossing: fenceState.crossings,
+              leaf_id: identity.leafId ?? null,
+            });
+          } else {
+            appendFailure(config, "context-aborted", identity.leafId ?? "no-leaf");
+          }
+        }
         const native = ctx.sessionManager.getBranch().find((entry) => entry?.type === "compaction" ||
           (entry?.type === "custom" && [
             PI_FOLD_NATIVE_COMPACTION_DECISION_ENTRY,

@@ -164,6 +164,24 @@ assert.throws(() => matchedFenceShare("hybrid"), /Unknown mode/);
 // The bound is the mode's own accumulated payload, the same quantity gate 59 bounds the
 // compaction trigger against: stages times the floor payload, at four chars per token,
 // against the serving budget the fence is measured on.
+// CROSSING IS NECESSARY AND NOT SUFFICIENT, which the first two smokes did not know.
+// `prepareCompaction` cuts the branch at `keepRecentTokens` and returns undefined when
+// nothing older than that cut is left to summarize, and `compact` disconnects the agent
+// and aborts the live turn BEFORE it discovers that. A fence set under Pi's own floor
+// therefore buys an aborted turn and no compaction at all: rep 3 of sol-20260814-matched
+// crossed at 12,737 tokens against a 7,545 threshold and came straight back with "Nothing
+// to compact (session too small)", one stage into an eight-stage run.
+//
+// Pi's floor is READ from Pi's source rather than restated here, on gate 52's rule: an
+// upgrade that moves the number breaks this gate rather than silently unfencing a mode.
+const piCompactionSource = readFileSync(
+  join(PI_INSTALL_ROOT, "dist", "core", "compaction", "compaction.js"), "utf8");
+const piKeepRecentTokens = Number(/keepRecentTokens:\s*(\d+)/.exec(piCompactionSource)?.[1]);
+assert(Number.isSafeInteger(piKeepRecentTokens) && piKeepRecentTokens > 0,
+  "Pi's compaction keep-recent floor could not be read, so no fence can be bounded against it");
+// Enough has to lie on the far side of the cut that the summary is worth the turn it
+// costs. A quarter of the kept window is the smallest slice that is plainly not noise.
+const compactableFloorTokens = piKeepRecentTokens * 1.25;
 for (const mode of EXPERIMENT_MODES) {
   const plan = EXPERIMENT_MODE_PLANS[mode];
   const share = matchedFenceShare(mode);
@@ -173,6 +191,10 @@ for (const mode of EXPERIMENT_MODES) {
   assert(share * budget < reachableTokens,
     `${mode} fences at ${Math.floor(share * budget)} tokens but its stages accumulate at ` +
     `most ${Math.floor(reachableTokens)}, so the fence can never be crossed in that mode`);
+  assert(share * budget > compactableFloorTokens,
+    `${mode} fences at ${Math.floor(share * budget)} tokens, inside Pi's own ` +
+    `${piKeepRecentTokens}-token keep-recent window, so the crossing would abort the turn ` +
+    "and then refuse to compact");
 }
 checks.everyModeCanReachItsMatchedFence = true;
 assert.throws(() => armRuntimeConfiguration("hybrid"), /Unknown arm/);
@@ -3747,7 +3769,7 @@ try {
 
   const guardSource = worker.slice(
     worker.indexOf("const modelEndedItsTurn = "),
-    worker.indexOf("\n\n// A KILLED WORKER STILL WRITES ITS REPORT."),
+    worker.indexOf("\n\n// A COMPACTION IS AN ABORT,"),
   );
   assert(guardSource.length > 0, "the resume guard was not found where it is pinned");
   const guardWith = (latched) => new Function("latchedFailures",
@@ -3762,8 +3784,8 @@ try {
     "a latched harness failure still resumes, so a broken harness is nudged past instead of reported");
   assert.equal(guardWith(0)(null), false, "a missing terminal state is treated as resumable");
 
-  assert(/while \(!closedBook && !deadlineFired && stagesDelivered\(\) < plan\.stageCount &&\s*modelEndedItsTurn\(terminalState\)\)/.test(worker),
-    "the resume loop is not bounded by the deadline, the plan count and the resume guard together");
+  assert(/while \(!closedBook && !deadlineFired && stagesDelivered\(\) < plan\.stageCount &&\s*\(modelEndedItsTurn\(terminalState\) \|\| fenceCompactedSinceLastPrompt\(\)\)\)/.test(worker),
+    "the resume loop is not bounded by the deadline, the plan count and the resume guards together");
   const resume = worker.slice(worker.indexOf("function resumePrompt("), worker.indexOf("function lastConversationalMessage("));
   assert(resume.length > 0, "the resume prompt was not found where it is pinned");
   assert(/Recover the NEXT_KEY/.test(resume) && !/challenge/i.test(resume),
@@ -3978,6 +4000,97 @@ try {
     "the worker does not check that its compaction trigger reached the session");
 
   checks.theCompactionTriggerClearsTheFence = true;
+}
+
+// GATE 60 - a forced compaction aborts the turn, so the fenced arm is resumed past its own
+// abort and no other arm ever is.
+//
+// Pi's `compact` runs `_disconnectFromAgent()` and `await abort()` as its first two
+// statements, before it reads a setting or checks whether it can compact at all. On the
+// matched-fence arm that is not an edge case, it is every crossing: the turn dies mid tool
+// call and the pull-based workload stops there unless something prompts it again.
+// sol-20260814-matched rep 3 delivered 1 of 8 stages that way, terminal stop reason
+// `toolUse`, which gate 56's guard correctly refuses to resume because nothing about it
+// says the model chose to stop.
+//
+// So the abort is reclassified in exactly two places and nowhere else. The extension
+// records `harness-fence-abort` instead of latching, but only while a crossing is in
+// flight. The worker resumes, but only on evidence that a compaction COMPLETED since its
+// last prompt. Both bounds are the gate: an abort with no completed compaction behind it
+// is an ordinary abort and still ends the run, one completed compaction authorizes exactly
+// one resume, and an arm that is not fenced is never resumed past an abort at all.
+// ---------------------------------------------------------------------------
+{
+  const worker = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
+  const source = worker.slice(
+    worker.indexOf("const eventLogPath = join("),
+    worker.indexOf("\n\n// A KILLED WORKER STILL WRITES ITS REPORT."),
+  );
+  assert(source.length > 0, "the fence resume rule was not found where it is pinned");
+
+  const scratch = mkdtempSync(join(tmpdir(), "pi-fold-gate60-"));
+  try {
+    const eventLine = (kind) => `${JSON.stringify({ version: 1, kind, details: {} })}\n`;
+    const build = (arm, latched) => new Function("join", "existsSync", "readFileSync",
+      "config", "latchedFailures",
+      `${source}; return { fenceCompactedSinceLastPrompt, fenceCompactions,` +
+      " markResumed: () => { fenceCompactionsResumedPast = fenceCompactions(); } };")(
+      join, existsSync, readFileSync, { runDir: scratch, arm }, () => latched);
+
+    // No event log at all: nothing has crossed, so nothing is resumable.
+    const fenced = build("nativefence", 0);
+    assert.equal(fenced.fenceCompactions(), 0, "compactions are counted before any event exists");
+    assert.equal(fenced.fenceCompactedSinceLastPrompt(), false,
+      "a run with no completed compaction is resumable, so an ordinary abort would be nudged past");
+
+    // A crossing that ABORTED and never completed is not a licence to continue: this is
+    // precisely rep 3's state, and the run must still fail on it.
+    const log = join(scratch, "worker-events.jsonl");
+    writeFileSync(log, eventLine("harness-fence-crossing") + eventLine("harness-fence-abort"));
+    assert.equal(fenced.fenceCompactions(), 0, "an abort is counted as a completed compaction");
+    assert.equal(fenced.fenceCompactedSinceLastPrompt(), false,
+      "a crossing that never compacted authorizes a resume");
+
+    // A completed compaction authorizes exactly ONE resume, and the next one needs its own.
+    writeFileSync(log, readFileSync(log, "utf8") + eventLine("harness-fence-compacted"));
+    assert.equal(fenced.fenceCompactions(), 1, "a completed compaction is not counted");
+    assert.equal(fenced.fenceCompactedSinceLastPrompt(), true,
+      "a completed compaction does not authorize the resume the arm cannot continue without");
+    fenced.markResumed();
+    assert.equal(fenced.fenceCompactedSinceLastPrompt(), false,
+      "the same compaction authorizes a second resume, so a stalled fence spins here");
+    writeFileSync(log, readFileSync(log, "utf8") + eventLine("harness-fence-compacted"));
+    assert.equal(fenced.fenceCompactedSinceLastPrompt(), true,
+      "a second completed compaction does not authorize its own resume");
+
+    // A LATCHED FAILURE STILL ENDS THE RUN. Gate 56's rule is not relaxed by this one:
+    // whatever the fence did, a broken harness is reported rather than nudged past.
+    assert.equal(build("nativefence", 1).fenceCompactedSinceLastPrompt(), false,
+      "a latched harness failure is resumed past whenever a compaction happens to have completed");
+
+    // AND NO OTHER ARM IS EVER RESUMED PAST AN ABORT, on the same evidence.
+    for (const arm of EXPERIMENT_ARMS.filter((candidate) => candidate !== "nativefence")) {
+      assert.equal(build(arm, 0).fenceCompactedSinceLastPrompt(), false,
+        `the ${arm} arm is resumed past an abort, which is the failure gate 56 exists to report`);
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+
+  assert(/const reason = modelEndedItsTurn\(terminalState\) \? "model-ended-turn" : "fence-compaction"/
+    .test(worker), "a resume does not record which of the two conditions fired");
+
+  // The extension's half: the reclassification is bounded to a crossing in flight, and the
+  // latch is what happens otherwise. A blanket suppression here would make every aborted
+  // context on this arm invisible, which is the failure this arm would be least able to see.
+  const extension = readFileSync(
+    join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"), "utf8");
+  assert(/if \(identity\.signalAborted\) \{\s*if \(fenceState\.inFlight\) \{\s*appendEvent\("harness-fence-abort"/
+    .test(extension), "an aborted context is not recorded against the crossing that caused it");
+  assert(/\} else \{\s*appendFailure\(config, "context-aborted"/.test(extension),
+    "an aborted context outside a crossing no longer latches");
+
+  checks.aForcedCompactionAbortsTheTurnAndOnlyTheFencedArmResumes = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

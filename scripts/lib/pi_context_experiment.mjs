@@ -66,7 +66,14 @@ export const MATCHED_FENCE_OCCUPANCY_SHARE = 0.937;
 // This is the same shape `compactionTriggerShare` already uses for the same reason, and
 // the bound is the same: the share must sit below what the mode's stages actually
 // accumulate, or the fence is unreachable in that mode by construction.
-export const MATCHED_FENCE_SHARES = Object.freeze({ full: 0.937, smoke: 0.03 });
+//
+// The smoke share is BOUNDED FROM BELOW as well, which the first two smokes were not.
+// Crossing the fence is necessary and not sufficient: Pi keeps `keepRecentTokens` of
+// recent material and summarizes only what lies before the cut, so a fence that fires
+// under that line aborts the turn (which `compact` does first, unconditionally) and then
+// refuses. 0.12 of the serving budget is 30,182 estimated tokens, which leaves roughly
+// 10,000 on the far side of a 20,000-token cut, and the smoke's own floor mass is 48,000.
+export const MATCHED_FENCE_SHARES = Object.freeze({ full: 0.937, smoke: 0.12 });
 
 export function matchedFenceShare(mode) {
   assertExperiment(EXPERIMENT_MODES.includes(mode), `Unknown mode ${mode}`);
@@ -410,8 +417,18 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
     stageIntervalMs: 5_000,
     watchdogMs: 45 * 60 * 1_000,
     heartbeatMs: 5_000,
-    payloadTargetChars: 12_000,
-    payloadFloorChars: 6_000,
+    // FULL-SIZED PAYLOADS, raised from 12,000/6,000 (2026-08-13). Pi refuses to compact a
+    // session that fits inside its own recent-keep window: `prepareCompaction` cuts at
+    // `keepRecentTokens` (20,000 by default) and returns undefined when nothing older than
+    // the cut remains to summarize. Eight stages of a 6,000-char floor is 12,000 estimated
+    // tokens, BELOW that floor, so the old smoke could not produce a compactable session at
+    // any threshold: the matched fence fired at 12,737 tokens in rep 3 and the compaction
+    // came straight back "Nothing to compact (session too small)". A smoke that cannot
+    // reach the state it is smoking is not a smoke. At the floor these eight stages now
+    // accumulate 48,000 estimated tokens, which clears the cut with material left on the
+    // far side of it.
+    payloadTargetChars: 48_000,
+    payloadFloorChars: 24_000,
     // Deliverable cadence must not collide with the probe stages, or a mode plan silently
     // produces zero deliverables and the blind grading leg has nothing to grade.
     probeStages: Object.freeze([4, 8]),
@@ -434,18 +451,20 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
     chainStartAfters: Object.freeze([1]),
     chainEarlyLaw: Object.freeze({ maxStage: 2, minLinks: 1 }),
     // REACHABLE WITHIN THE SMOKE'S OWN MASS, which is the only reason the share is a mode
-    // plan field rather than one constant. Eight stages of 12,000 chars is roughly 24,000
-    // estimated tokens against a 251,520-token serving budget, about a tenth of it, so
-    // the full mode's 0.80 line sits eight times further out than this run can ever
-    // reach: a smoke on that share crosses no boundary, folds nothing, and reports a
-    // healthy managed arm that never exercised the one path it exists to exercise.
-    // The bound is the run's own accumulated payload at the FLOOR, not at the target: a
-    // smoke that draws small stages must still cross. Eight stages of 6,000 floor chars
-    // is 12,000 estimated tokens, so 0.03 puts the trigger at 7,545, crossed around the
-    // third stage at the floor and the second at the 12,000-char target, leaving several
-    // crossings inside the run either way. The numbers differ from a full rep; the PATH
-    // is identical, and the path is what a smoke is for.
-    compactionTriggerShare: 0.03,
+    // plan field rather than one constant: the full mode's 0.80 line sits further out than
+    // eight stages can ever reach, and a smoke on that share crosses no boundary, folds
+    // nothing, and reports a healthy managed arm that never exercised the one path it
+    // exists to exercise. The bound is the run's own accumulated payload at the FLOOR, not
+    // at the target, because a smoke that draws small stages must still cross.
+    //
+    // Raised from 0.03 with the payload floor (2026-08-13). Eight stages of a 24,000-char
+    // floor is 48,000 estimated tokens, so 0.10 puts the trigger at 25,152, crossed around
+    // the third stage at the floor and the second at the 48,000-char target. It also keeps
+    // the ORDERING the full mode has, folding trigger below matched fence (0.80 below
+    // 0.937 there, 0.10 below 0.12 here): a smoke that folded only after native would have
+    // compacted would exercise the two mechanisms in the wrong order. The numbers differ
+    // from a full rep; the PATH is identical, and the path is what a smoke is for.
+    compactionTriggerShare: 0.10,
   }),
 });
 

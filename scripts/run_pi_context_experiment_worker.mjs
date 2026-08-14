@@ -203,6 +203,32 @@ const latchedFailures = () => (existsSync(failurePath)
 const modelEndedItsTurn = (state) => state?.terminalMessage?.stopReason === "stop" &&
   latchedFailures() === 0;
 
+// A COMPACTION IS AN ABORT, so the fenced arm must be prompted again or it stops here.
+//
+// Pi's `compact` disconnects the agent and aborts the live turn as its first two
+// statements, so on this arm every crossing ends the turn mid-tool-call: rep 3 of
+// sol-20260814-matched crossed once at stage 1 and delivered 1 of 8 stages, terminal stop
+// reason `toolUse`, which `modelEndedItsTurn` correctly refuses to resume because nothing
+// about it says the model chose to stop. That refusal is right in general and wrong for
+// the one arm whose mechanism is the abort, so the fenced arm gets its own condition
+// rather than a loosened shared one.
+//
+// The evidence is the extension's own event stream, read from the run directory because
+// the worker and the extension share nothing else. It requires a compaction that actually
+// COMPLETED since the last prompt: an abort with no completed compaction behind it is an
+// ordinary abort and still ends the run, and a compaction that has already been resumed
+// past cannot authorize a second resume, so a stalled fence cannot spin here.
+const eventLogPath = join(config.runDir, "worker-events.jsonl");
+const fenceCompactions = () => (existsSync(eventLogPath)
+  ? readFileSync(eventLogPath, "utf8").split("\n").filter((line) => line.trim().length > 0)
+    .filter((line) => {
+      try { return JSON.parse(line).kind === "harness-fence-compacted"; } catch { return false; }
+    }).length
+  : 0);
+let fenceCompactionsResumedPast = 0;
+const fenceCompactedSinceLastPrompt = () => config.arm === "nativefence" &&
+  fenceCompactions() > fenceCompactionsResumedPast && latchedFailures() === 0;
+
 // A KILLED WORKER STILL WRITES ITS REPORT.
 //
 // The supervisor sends SIGTERM when its own deadline passes, and Node's default handler
@@ -405,9 +431,15 @@ try {
       await session.prompt(prompt, { expandPromptTemplates: false });
       terminalState = await waitForDurableTerminalQuiescence(manager, session);
       while (!closedBook && !deadlineFired && stagesDelivered() < plan.stageCount &&
-        modelEndedItsTurn(terminalState)) {
+        (modelEndedItsTurn(terminalState) || fenceCompactedSinceLastPrompt())) {
+        // Which of the two conditions fired is recorded, because they measure different
+        // things: one is a model that stopped early, the other is the cost of forcing a
+        // native compaction into the middle of a task.
+        const reason = modelEndedItsTurn(terminalState) ? "model-ended-turn" : "fence-compaction";
+        fenceCompactionsResumedPast = fenceCompactions();
         stageNudges.push({
-          afterStage: stagesDelivered(), wallMs: Date.now(), monotonicMs: monotonicMs(),
+          afterStage: stagesDelivered(), reason,
+          wallMs: Date.now(), monotonicMs: monotonicMs(),
         });
         await session.prompt(resumePrompt(stagesDelivered() + 1, plan.stageCount),
           { expandPromptTemplates: false });
