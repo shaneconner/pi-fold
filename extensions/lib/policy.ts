@@ -81,9 +81,12 @@ export const DEFAULT_THRESHOLDS: Readonly<ActiveContextThresholds> = Object.free
   // the whole distance to the trigger. sol-20260814-traps rep 1 ran six commits, each
   // freeing to 0.35 and refilling in two to three stages; at 0.20 the same run shape
   // owes roughly a quarter fewer epochs, which is a quarter fewer full-prefix
-  // rewrites, the dominant self-inflicted cache break. The floor stays well above
-  // the fresh tail and the pinned-mass floor, so the validation laws below bind
-  // exactly as before.
+  // rewrites, the dominant self-inflicted cache break. The floor is a target the
+  // class law outranks, not a guarantee: a session pinned to the 0.25 ceiling
+  // beside the 0.02 fresh tail legally holds 0.27 and lands above this number,
+  // and the epoch receipt reports targetBudgetShare beside actualFreedBudgetShare
+  // so the shortfall is a readable fact per epoch rather than a silent miss. The
+  // validation laws below bind exactly as before.
   minTarget: 0.20,
   freshTail: 0.02,
   consolidateAfter: 10,

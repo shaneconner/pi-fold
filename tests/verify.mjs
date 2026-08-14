@@ -8323,6 +8323,7 @@ async function gateStatusPagesAreBounded() {
 
   // Every detail variant fits the cap, and the marker appears on every truncated page.
   const measured = {};
+  let receiptTrimSeen = 0;
   for (const detail of [undefined, "fold_candidates", "tree", "folds", "objects"]) {
     const result = await toolStatus(runtime, "pi_fold_context", detail);
     const delivered = Buffer.byteLength(result.content[0].text, "utf8");
@@ -8332,8 +8333,20 @@ async function gateStatusPagesAreBounded() {
       `status detail=${detail ?? "default"} truncated without a continuation marker`);
     assert.equal(result.details.continuation.includes("\n"), false,
       "The continuation marker is not one line");
+    // A trimmed receipt row has no page, and the continuation must never point
+    // at one: "full lists stay reachable" beside dropped receipt rows sent the
+    // agent to a page that does not exist.
+    if (result.details.continuation.includes("receipt row(s)")) {
+      receiptTrimSeen += 1;
+      assert(result.details.continuation.includes("the trimmed rows have no page"),
+        `detail=${detail ?? "default"} trimmed receipt rows without saying they have no page`);
+      assert.equal(result.details.continuation.includes("full lists stay reachable"), false,
+        `detail=${detail ?? "default"} claimed full reachability over trimmed receipt rows`);
+    }
     measured[detail ?? "default"] = delivered;
   }
+  assert(receiptTrimSeen > 0,
+    "No page trimmed receipt rows, so the no-page wording was never exercised");
 
   // Paging through the continuation offsets yields every fold id exactly once, for
   // both fold listings; the object listing pages completely the same way.

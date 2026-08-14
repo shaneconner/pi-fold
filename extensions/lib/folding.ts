@@ -1298,8 +1298,9 @@ export function boundStatusPayload(
   // every other diagnostic, but they still page away before any listing row the
   // caller actually asked for: on the detail pages, where none of the diagnostics
   // above exist, they are the mass that made one fold row miss the cap.
-  shrink(lastEpoch, "applied", "applied receipt row(s)", true);
-  shrink(lastEpoch, "absorbed", "absorbed receipt row(s)", true);
+  const receiptRowsDropped =
+    shrink(lastEpoch, "applied", "applied receipt row(s)", true) +
+    shrink(lastEpoch, "absorbed", "absorbed receipt row(s)", true) > 0;
   const rowLabel = (key: string): string => key === "folds" ? "fold row(s)" : key === "objects" ? "object row(s)" : "tree row(s)";
   let continueAt: number | null = null;
   if (detail === "folds" || detail === "objects") {
@@ -1317,9 +1318,17 @@ export function boundStatusPayload(
     else payload.nextOffset = continueAt;
   }
   if (!omitted.length) return payload;
-  const resume = continueAt === null
-    ? "the full lists stay reachable through the paged status details"
+  // A dropped receipt row has no page: the epoch receipt is a record of the last
+  // action, not a listing, and claiming it "stays reachable" pointed the agent at
+  // a page that does not exist (2026-08-14 external review). The span-to-fold
+  // mapping it summarizes stays complete in the folds and tree details, so the
+  // continuation says exactly that instead.
+  const pageable = continueAt === null
+    ? "the fold, object and tree lists stay reachable through the paged status details"
     : `continue at ${JSON.stringify({ action: "status", detail, offset: continueAt })}`;
+  const resume = receiptRowsDropped
+    ? `${pageable}; the epoch receipt keeps only its newest rows and the trimmed rows have no page`
+    : (continueAt === null ? "the full lists stay reachable through the paged status details" : pageable);
   payload.continuation =
     `Status pages are bounded to ${cap} bytes; omitted ${omitted.join(", ")}; ${resume}.`;
   return payload;
