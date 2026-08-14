@@ -76,6 +76,11 @@ import {
   usageSeriesFromLedger,
   outOfBandUsage,
   testAwarenessLeaks,
+  searchSessionHistory,
+  EXPERIMENT_HISTORY_TOOL_NAME,
+  EXPERIMENT_ALLOWED_TOOLS,
+  EXPERIMENT_TOOL_NAME,
+  EXPERIMENT_PIFOLD_EXTRA_TOOLS,
   billedCostFromLedger,
   unansweredRequestsFromLedger,
   LONG_CONTEXT_TIER_PROMPT_TOKENS,
@@ -4383,6 +4388,99 @@ try {
     "the instruction to record what matters was dropped along with the premise");
 
   checks.noInstructionTellsTheModelItIsBeingTested = true;
+}
+
+// GATE 63 - both arms can search their own past, neither is told to, and the search cannot
+// reach anything but this session.
+//
+// The surface was `read` plus the stage tool for both arms and `pi_fold_context` for
+// pi-fold alone, so only one arm had a route back to what it had already seen. That was
+// fair while probe answers were re-derivable from files: luna-20260807's native arm dug
+// through 108 file reads to pi-fold's 39 and both maxed recall. v3 then made the recall
+// targets transcript-only by design, which closed native's only route, and rep 1 of
+// sol-20260814-fenced-full left 10 of 21 probes unanswered with only 1 of its 10 matches
+// riding a compaction summary: the recall was genuine and unaided, and there was nothing
+// left to aid it with.
+// ---------------------------------------------------------------------------
+{
+  assert.deepEqual([...EXPERIMENT_ALLOWED_TOOLS], ["read", EXPERIMENT_TOOL_NAME, EXPERIMENT_HISTORY_TOOL_NAME],
+    "the history tool is not on the surface both arms get");
+  assert(!EXPERIMENT_PIFOLD_EXTRA_TOOLS.includes(EXPERIMENT_HISTORY_TOOL_NAME),
+    "the history tool is an arm-specific extra, so only one arm would carry it");
+
+  const message = (role, text, extra = {}) =>
+    ({ type: "message", message: { role, content: [{ type: "text", text }], ...extra } });
+  const branch = [
+    { type: "custom", customType: "pi-fold-active-context-state", data: { secret: "cw-a92fdc" } },
+    message("user", "Begin the staged repository assignment."),
+    message("toolResult", "stage 02 delivered lib/altsvc.h and the audit code word cw-a92fdc.", { toolName: "repo_stage" }),
+    message("assistant", "Read them; cw-a92fdc noted."),
+    message("toolResult", "stage 08 delivered lib/cf-h1-proxy.c first.", { toolName: "repo_stage" }),
+  ];
+
+  const hit = searchSessionHistory(branch, "cw-a92fdc");
+  assert.equal(hit.totalMatches, 2, "the search does not find what the session actually said");
+  assert.equal(hit.matches[0].position, 2, "a match does not carry where in the session it sits");
+  assert.equal(hit.matches[0].role, "toolResult", "a match does not carry who said it");
+  assert(hit.matches[0].excerpt.includes("cw-a92fdc"), "the excerpt does not contain the match");
+  assert.equal(hit.truncated, false, "a complete result claims to be truncated");
+
+  // THE RUNTIME'S OWN ENTRIES ARE NOT THE SESSION TALKING. Durable state, fold records and
+  // event streams are machinery, and a search that read them would hand one arm its own
+  // bookkeeping as though the conversation had said it. The fixture carries a message
+  // payload ON a custom entry deliberately: an entry type is not a promise about what the
+  // entry contains, so the filter has to be what excludes it rather than the shape.
+  assert.equal(searchSessionHistory([{
+    type: "custom",
+    customType: "pi-fold-active-context-state",
+    message: { role: "assistant", content: [{ type: "text", text: "cw-a92fdc" }] },
+  }], "cw-a92fdc").totalMatches, 0,
+  "the search reads the runtime's custom entries, so an arm can read its own bookkeeping");
+
+  // CASE-INSENSITIVE BOTH WAYS. The query is lowered before matching, so a fixture whose
+  // text is already lower-case proves nothing: the session has to be the mixed-case side.
+  const mixed = [message("assistant", "Alt-Svc origin selection uses struct Curl_peer.")];
+  assert.equal(searchSessionHistory(mixed, "alt-svc").totalMatches, 1,
+    "a lower-case query misses mixed-case text the session actually contains");
+  assert.equal(searchSessionHistory(mixed, "ALT-SVC").totalMatches, 1,
+    "an upper-case query misses text the session actually contains");
+  assert.equal(searchSessionHistory(branch, "CW-A92FDC").totalMatches, 2, "the search is case sensitive");
+  assert.equal(searchSessionHistory(branch, "never-said-this").totalMatches, 0,
+    "the search finds a phrase the session never contained");
+  assert.equal(searchSessionHistory(branch, "   ").totalMatches, 0, "a blank query matches the whole session");
+
+  // A BOUND THAT DROPS MATCHES SILENTLY WOULD LET THIS ANSWER "not found" ABOUT MATERIAL
+  // THAT IS THERE. The total is always reported and truncation is always declared.
+  const many = Array.from({ length: 20 }, (_unused, index) => message("assistant", `hit ${index} marker`));
+  const bounded = searchSessionHistory(many, "marker", { limit: 3 });
+  assert.equal(bounded.totalMatches, 20, "the bound hides how many matches there really were");
+  assert.equal(bounded.matches.length, 3, "the bound did not hold");
+  assert.equal(bounded.truncated, true, "a truncated result does not say so");
+  assert.deepEqual(bounded.matches.map((match) => match.position), [0, 1, 2],
+    "truncation does not keep the earliest matches, so the result depends on where it stopped");
+
+  // NOT ADVERTISED. `promptSnippet` and `promptGuidelines` are the fields that reach the
+  // system prompt, and a tool the agent is TOLD to use measures the telling. The stage tool
+  // sets both, which is what makes their absence here a choice rather than an oversight.
+  const extension = readFileSync(join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"), "utf8");
+  const registration = extension.slice(
+    extension.indexOf("name: EXPERIMENT_HISTORY_TOOL_NAME"),
+    extension.indexOf("name: EXPERIMENT_TOOL_NAME"),
+  );
+  assert(registration.length > 0, "the history tool registration was not found where it is pinned");
+  assert(!/promptSnippet|promptGuidelines/.test(registration),
+    "the history tool advertises itself in the system prompt, so the run measures the telling");
+  assert(/searchSessionHistory\(branch, params\.query\)/.test(registration) &&
+    /ctx\.sessionManager\.getBranch\(\)/.test(registration),
+  "the history tool does not search this session's own branch, which is what makes it a sandbox");
+  assert(/appendEvent\("history-search"/.test(registration),
+    "a history search leaves no record, so the search cost cannot be attributed");
+  // And no instruction surface names it, which is the same rule gate 62 enforces one layer up.
+  const staging = readFileSync(join(PROJECT, "scripts", "stage_pi_context_experiment.mjs"), "utf8");
+  assert(!staging.includes(EXPERIMENT_HISTORY_TOOL_NAME),
+    "a stage instruction names the history tool, which tells the agent to use it");
+
+  checks.bothArmsCanSearchTheirOwnSessionAndNeitherIsToldTo = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

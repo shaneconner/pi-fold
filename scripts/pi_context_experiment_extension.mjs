@@ -32,6 +32,8 @@ import {
   EXPERIMENT_ALLOWED_TOOLS,
   EXPERIMENT_MARKER_ENTRY,
   EXPERIMENT_PIFOLD_EXTRA_TOOLS,
+  EXPERIMENT_HISTORY_TOOL_NAME,
+  searchSessionHistory,
   EXPERIMENT_TOOL_NAME,
   PI_OUTPUT_BUDGET,
   assertExperiment,
@@ -320,6 +322,53 @@ export function createPiContextExperimentExtension(config) {
         assertExperiment(contextToolDefinition,
           "Active-context registration did not expose the context tool for the pifold arm");
       }
+
+      // AVAILABLE TO BOTH ARMS AND ADVERTISED TO NEITHER (Shane 2026-08-14).
+      //
+      // No `promptSnippet` and no `promptGuidelines`, which is the whole point: those two
+      // fields are what reach the system prompt, and a tool the agent is TOLD to use
+      // measures the telling. It appears in the tool list like any other capability, and
+      // whether it occurs to the agent to search its own past is part of what is being
+      // measured rather than something the harness supplies.
+      //
+      // The sandbox is structural rather than a check: the branch is this session's own
+      // path up to the current leaf, so there is no other run to reach and no future to
+      // read. Registered here in the harness and not in the package, on the same rule that
+      // keeps everything experiment-only out of what ships.
+      pi.registerTool({
+        name: EXPERIMENT_HISTORY_TOOL_NAME,
+        label: "Session History",
+        description: "Search this session's own earlier messages for a phrase and return " +
+          "the passages that contain it, with their position in the session.",
+        executionMode: "sequential",
+        parameters: Type.Object({
+          query: Type.String({ minLength: 2, maxLength: 200 }),
+        }, { additionalProperties: false }),
+        async execute(toolCallId, params, _signal, _onUpdate, ctx) {
+          const branch = ctx.sessionManager.getBranch();
+          const found = searchSessionHistory(branch, params.query);
+          appendEvent("history-search", {
+            toolCallId,
+            query: found.query,
+            total_matches: found.totalMatches,
+            returned: found.matches.length,
+            truncated: found.truncated,
+            branch_entries: branch.length,
+          });
+          if (found.totalMatches === 0) {
+            return { content: [{ type: "text", text:
+              `No earlier message in this session contains ${JSON.stringify(found.query)}.` }] };
+          }
+          const header = found.truncated
+            ? `${found.totalMatches} messages contain ${JSON.stringify(found.query)}; ` +
+              `the ${found.matches.length} earliest are below. Narrow the phrase to see others.`
+            : `${found.totalMatches} message(s) contain ${JSON.stringify(found.query)}.`;
+          const body = found.matches.map((match) =>
+            `--- position ${match.position} (${match.role}${match.toolName ? `: ${match.toolName}` : ""})\n` +
+            match.excerpt).join("\n\n");
+          return { content: [{ type: "text", text: `${header}\n\n${body}` }] };
+        },
+      });
 
       pi.registerTool({
         name: EXPERIMENT_TOOL_NAME,

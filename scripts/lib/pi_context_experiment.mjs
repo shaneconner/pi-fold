@@ -363,7 +363,83 @@ export const EXPERIMENT_TERMINAL_STABILIZATION_MS = 2 * 60 * 1_000;
 
 // The model may read the pinned checkout freely: rereading after a stop-the-world event is
 // the behaviour under measurement, so removing the read tool would destroy the metric.
-export const EXPERIMENT_ALLOWED_TOOLS = Object.freeze(["read", EXPERIMENT_TOOL_NAME]);
+// SEARCH OVER WHAT THIS SESSION HAS ALREADY SAID (Shane 2026-08-14).
+//
+// Both arms get it, neither is told to use it. Until now the surface was `read` plus the
+// stage tool for both arms and `pi_fold_context` for pi-fold alone, so only one arm had any
+// route back to its own past. That was fair while probe answers were re-derivable from
+// files: in luna-20260807 native dug through 108 file reads to pi-fold's 39 and both arms
+// maxed recall. v3 then made the recall targets transcript-only by design ("SOF/FIN answers
+// exist only in the transcript"), which closed native's only route and left it nothing,
+// which is why its recall collapsed while its file reads did not rise.
+//
+// Compaction removes material from the context and leaves it in the session file, exactly
+// as folding does, so a search over the session's own record is a capability both mechanisms
+// could really offer. Giving it to both turns the comparison into the one worth publishing:
+// whether a structured brief and an exact expand beat brute search over the raw log.
+export const EXPERIMENT_HISTORY_TOOL_NAME = "session_history";
+export const EXPERIMENT_ALLOWED_TOOLS = Object.freeze(
+  ["read", EXPERIMENT_TOOL_NAME, EXPERIMENT_HISTORY_TOOL_NAME]);
+export const HISTORY_MATCH_LIMIT = 8;
+export const HISTORY_EXCERPT_CHARS = 600;
+
+function messagePlainText(message) {
+  if (typeof message?.content === "string") return message.content;
+  if (!Array.isArray(message?.content)) return "";
+  const parts = [];
+  for (const part of message.content) {
+    if (typeof part === "string") { parts.push(part); continue; }
+    if (typeof part?.text === "string") parts.push(part.text);
+    if (typeof part?.name === "string" && part?.type === "toolCall") {
+      parts.push(`${part.name} ${JSON.stringify(part.arguments ?? {})}`);
+    }
+  }
+  return parts.join("\n");
+}
+
+/**
+ * THE SANDBOX IS THE BRANCH ITSELF.
+ *
+ * `entries` is what the caller passes from `sessionManager.getBranch()`, which is this
+ * session's own path up to the current leaf. It cannot reach another run, because another
+ * run is another session file, and it cannot reach the future, because the branch ends at
+ * now. Only conversational messages are searched: the runtime's own custom entries carry
+ * durable state, fold records and event streams, and those are machinery rather than
+ * anything the session said.
+ *
+ * A bound that silently drops matches would let this tool answer "not found" about material
+ * that is there, so the count of every match is returned beside the ones that fit and the
+ * caller is told to narrow. The bound is stated, never hidden.
+ */
+export function searchSessionHistory(entries, query, options = {}) {
+  assertExperiment(Array.isArray(entries), "History search requires the session branch");
+  const limit = Number.isSafeInteger(options.limit) && options.limit > 0
+    ? options.limit : HISTORY_MATCH_LIMIT;
+  const excerptChars = Number.isSafeInteger(options.excerptChars) && options.excerptChars > 0
+    ? options.excerptChars : HISTORY_EXCERPT_CHARS;
+  const needle = typeof query === "string" ? query.trim().toLowerCase() : "";
+  if (needle.length === 0) return { query: "", totalMatches: 0, matches: [], truncated: false };
+  const matches = [];
+  let totalMatches = 0;
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (entry?.type !== "message") continue;
+    const text = messagePlainText(entry.message);
+    if (text.length === 0) continue;
+    const at = text.toLowerCase().indexOf(needle);
+    if (at < 0) continue;
+    totalMatches += 1;
+    if (matches.length >= limit) continue;
+    const from = Math.max(0, at - Math.floor(excerptChars / 3));
+    matches.push({
+      position: index,
+      role: entry.message?.role ?? null,
+      toolName: entry.message?.toolName ?? null,
+      excerpt: text.slice(from, from + excerptChars),
+    });
+  }
+  return { query: needle, totalMatches, matches, truncated: totalMatches > matches.length };
+}
 export const EXPERIMENT_PIFOLD_EXTRA_TOOLS = Object.freeze(["pi_fold_context"]);
 
 // Pacing exists to keep stage RELEASE external (soak integrity), not to burn wall-clock:
