@@ -1,0 +1,7 @@
+{
+  "frozen": "2026-08-14",
+  "consumer": "the redesigned recall instrument (matched hidden mass, multi-hop joins, reconstruction endpoint)",
+  "contentSeed": "b8bd929d17cb7ecb",
+  "querySeed": "04ce51d9cd78889e",
+  "law": "Both seeds were drawn and committed before sol-20260814-traps rep 4 existed, so no instrument content or query selection can be tuned to that rep's readout. The instrument derives all generated hidden mass from contentSeed and all probe/query selection from querySeed, deterministically; a build that draws fresh randomness instead of reading this file is measuring its author."
+}
