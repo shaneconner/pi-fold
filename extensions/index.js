@@ -1,10 +1,14 @@
 import { registerActiveContext } from "./active-context.ts";
 import { registerEvidenceIngestion } from "./evidence.js";
-import { createSummarizeContextSpan } from "./summarizer.js";
 
 const PUBLIC_OPTIONS = Object.freeze([
-  "thresholds", "summarizer", "providerInputBudget", "blacklistAutoFoldTools", "guidance",
+  "thresholds", "providerInputBudget", "blacklistAutoFoldTools", "guidance",
 ]);
+
+const GENERATOR_DELETED = "the model brief generator is deleted (2026-08-14): across 15 sealed " +
+  "generator runs, 75 percent of its 1,186 upgraded briefs were never consulted or never became " +
+  "visible, and the no-generator build scored the same for less. Every fold carries its " +
+  "deterministic brief; sessions already holding model briefs keep them on load";
 
 const INVERTED_AUTO_FOLD_LIST = "renamed blacklistAutoFoldTools, and the sense is INVERTED: " +
   "every completed tool batch folds unmarked, and the list names the exceptions whose " +
@@ -33,11 +37,11 @@ const REFUSED_OPTIONS = Object.freeze({
   providerTotalWindow: "renamed providerInputBudget, and it is ALREADY NET: pass the tokens " +
     "the deployment may actually fill, not the total window the runtime then subtracts a " +
     "guessed output reservation from",
-  summarizeContextSpan: "choose a brief generator with summarizer (\"session\" or " +
-    "{ provider, model, effort })",
+  summarizer: GENERATOR_DELETED,
+  summarizeContextSpan: GENERATOR_DELETED,
 });
 
-export function registerPiFold(pi, options = {}, loadHostModule) {
+export function registerPiFold(pi, options = {}) {
   for (const name of Object.keys(options)) {
     if (Object.hasOwn(REFUSED_OPTIONS, name)) {
       throw new Error(`${name} is no longer an option: ${REFUSED_OPTIONS[name]}`);
@@ -47,10 +51,8 @@ export function registerPiFold(pi, options = {}, loadHostModule) {
         `${PUBLIC_OPTIONS.join(", ")}`);
     }
   }
-  const { summarizer = "session", ...activeContextOptions } = options;
-  const summarizeContextSpan = createSummarizeContextSpan(summarizer, loadHostModule);
   registerEvidenceIngestion(pi);
-  return registerActiveContext(pi, { ...activeContextOptions, summarizeContextSpan });
+  return registerActiveContext(pi, options);
 }
 
 export default function piFold(pi, options) {

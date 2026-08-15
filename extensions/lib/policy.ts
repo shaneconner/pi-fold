@@ -214,9 +214,6 @@ export const MAX_UNMARKED_CANDIDATES = 3;
 
 export const MAX_FOLD_SPAN_CHARS = 16_000;
 export const MAX_WEDGE_ABSORB_TOKENS = 256;
-export const MAX_BRIEF_UPGRADES_IN_FLIGHT = 2;
-export const MAX_BRIEF_UPGRADE_QUEUE = 4;
-export const MAX_BRIEF_BATCH_SPANS = 10;
 export const PEEK_DEFAULT_MAX_BYTES = 16_000;
 export const PEEK_HEAD_SHARE = 0.6;
 
@@ -247,7 +244,6 @@ export type PendingMark = PendingFoldMark | PendingRefoldMark;
 export const ACTIVE_CONTEXT_POLICY = Object.freeze({
   refoldRatio: 0.85,
   prepareRatio: 0.90,
-  warmRatio: 0.55,
   responseReserve: 16_384,
   minToolChars: 2_000,
   minChapterChars: 4_000,
@@ -256,7 +252,6 @@ export const ACTIVE_CONTEXT_POLICY = Object.freeze({
   maxSourceChars: 200_000,
   maxFoldSourceRefs: 256,
   maxBriefChars: 2_000,
-  briefTimeoutMs: 300_000,
   orientationMessages: 2,
   maxOrientationChars: 12_000,
 });

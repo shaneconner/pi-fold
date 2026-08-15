@@ -2,7 +2,6 @@ import {
   denseOwnArrayValues,
   evidenceSha256,
   objectRefKey,
-  sha256Text,
   sha256Value,
   stableStringify,
 } from "./json.ts";
@@ -18,14 +17,11 @@ import {
 import {
   activeContextStatus,
   automaticPreparationId,
-  boundedOrientation,
   boundStatusPayload,
   briefContractComplaint,
   commitPreparedFold,
-  consolidationSourceText,
   descendantIds,
   encodedFoldSource,
-  generatedBriefs,
   foldCandidatesDetail,
   foldTreeDetail,
   peekFoldSource,
@@ -110,9 +106,6 @@ import {
   servingBudgetTokens,
   ESTIMATED_BYTES_PER_TOKEN,
   entryTypeNamespace,
-  MAX_BRIEF_BATCH_SPANS,
-  MAX_BRIEF_UPGRADE_QUEUE,
-  MAX_BRIEF_UPGRADES_IN_FLIGHT,
   MAX_FOLD_SPAN_CHARS,
   MAX_PINNED_SHARE,
   MAX_WEDGE_ABSORB_TOKENS,
@@ -256,7 +249,6 @@ export function batchedMarkRequests(params: Record<string, unknown>): BatchedMar
 }
 
 export function registerActiveContext(pi: any, options: {
-  summarizeContextSpan?: (request: Record<string, unknown>, ctx: unknown) => Promise<Record<string, unknown>>;
   toolName?: string;
   toolLabel?: string;
   brandNoun?: string;
@@ -374,23 +366,7 @@ export function registerActiveContext(pi: any, options: {
     lastAutomaticAction: null as Record<string, unknown> | null,
     overBudgetReduction: null as Record<string, unknown> | null,
     automaticFailure: null as AutomaticFailureState | null,
-    failedPreparations: new Set<string>(),
     actionQueue: Promise.resolve<unknown>(undefined),
-  };
-
-  const upgrades = {
-    queue: [] as Array<{
-      members: Array<{ foldId: string; sourceSha256: string }>;
-      request: Record<string, unknown>;
-    }>,
-    running: new Map<string, { controller: AbortController; promise: Promise<void> }>(),
-    ready: [] as Array<{ foldId: string; sourceSha256: string; brief: string; provenance: BriefProvenance }>,
-    failed: new Set<string>(),
-    deferred: new Set<string>(),
-    failures: 0,
-    cures: 0,
-    abandoned: [] as Array<{ foldId: string; reason: string }>,
-    lastError: null as string | null,
   };
 
   const measurements = {
@@ -575,79 +551,6 @@ export function registerActiveContext(pi: any, options: {
     return record;
   };
 
-  const observedSummarize = options.summarizeContextSpan
-    ? async (request: Record<string, unknown>, summarizerCtx: unknown): Promise<Record<string, unknown>> => {
-      const startedAt = Date.now();
-      const queuedAt = typeof request.queuedAtMs === "number" ? request.queuedAtMs : null;
-      const spans = Array.isArray(request.spans)
-        ? request.spans as Array<Record<string, unknown>>
-        : null;
-      const sourceText = typeof request.sourceText === "string" ? request.sourceText : "";
-      const groupSpan = (span: Record<string, unknown>): boolean =>
-        Number.isInteger(span.children) && (span.children as number) > 1;
-      const charsOf = (span: Record<string, unknown>): number =>
-        typeof span.sourceText === "string" ? span.sourceText.length : 0;
-      const kindCounts = spans
-        ? {
-          spans: spans.length,
-          group_spans: spans.filter(groupSpan).length,
-          leaf_spans: spans.filter((span) => !groupSpan(span)).length,
-          group_source_chars: spans.filter(groupSpan).reduce((sum, span) => sum + charsOf(span), 0),
-          leaf_source_chars: spans.filter((span) => !groupSpan(span))
-            .reduce((sum, span) => sum + charsOf(span), 0),
-          fold_ids: spans.map((span) => typeof span.candidateId === "string" ? span.candidateId : ""),
-        }
-        : {
-          spans: 1,
-          group_spans: groupSpan(request) ? 1 : 0,
-          leaf_spans: groupSpan(request) ? 0 : 1,
-          group_source_chars: groupSpan(request) ? sourceText.length : 0,
-          leaf_source_chars: groupSpan(request) ? 0 : sourceText.length,
-        };
-      const batchSourceSha256 = (): string => sha256Text(JSON.stringify(
-        (spans ?? []).map((span) => typeof span.sourceText === "string" ? span.sourceText : ""),
-      ));
-      const base = {
-        fold_id: typeof request.candidateId === "string" ? request.candidateId : "",
-        source_chars: spans ? spans.reduce((sum, span) => sum + charsOf(span), 0) : sourceText.length,
-        source_sha256: typeof request.sourceSha256 === "string"
-          ? request.sourceSha256
-          : spans ? batchSourceSha256() : sha256Text(sourceText),
-        ...kindCounts,
-        cure: typeof request.cure === "string" && request.cure.length > 0,
-        ...(queuedAt === null ? {} : { queued_ms: Math.max(0, startedAt - queuedAt) }),
-      };
-      try {
-        const result = await options.summarizeContextSpan!(request, summarizerCtx);
-        const written = Array.isArray(result?.briefs)
-          ? (result.briefs as unknown[]).map((item) => typeof item === "string" ? item.trim() : "")
-          : [typeof result?.brief === "string" ? result.brief.trim() : ""];
-        emit("context.brief", {
-          ...base,
-          outcome: "ok",
-          duration_ms: Date.now() - startedAt,
-          provider: typeof result?.provider === "string" ? result.provider : "",
-          model: typeof result?.model === "string" ? result.model : "",
-          effort: typeof result?.effort === "string" ? result.effort : "",
-          brief_chars: written.reduce((sum, item) => sum + item.length, 0),
-          brief_chars_each: written.map((item) => item.length),
-          brief_sha256: written.length === 1 && written[0] ? sha256Text(written[0]) : "",
-          usage: result?.usage && typeof result.usage === "object" ? clone(result.usage) : null,
-        });
-        return result;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        emit("context.brief", {
-          ...base,
-          outcome: /exceeded \d+ms/.test(message) ? "timeout" : "error",
-          duration_ms: Date.now() - startedAt,
-          error: boundReceiptText(message, 240, "brief generator"),
-        });
-        throw error;
-      }
-    }
-    : undefined;
-
   const PREFIX_MUTATING_KINDS: ReadonlySet<string> = new Set([
     "context.commit", "context.fold", "context.absorb", "context.split", "context.recovery",
   ]);
@@ -811,7 +714,6 @@ export function registerActiveContext(pi: any, options: {
     lifecycle.generation += 1;
     lifecycle.shuttingDown = false;
     cancelPreparation();
-    cancelBriefUpgrades();
     lifecycle.latestSnapshot = null;
     lifecycle.latestSnapshotError = null;
     measurements.latestRatio = null;
@@ -845,7 +747,6 @@ export function registerActiveContext(pi: any, options: {
     ladder.lastAutomaticAction = null;
     ladder.automaticFailure = null;
     advisory.hardFenceNoticeKey = null;
-    ladder.failedPreparations.clear();
     measurements.providerMeasurementReceipts.clear();
     measurements.providerMeasurementRevisionByMessageSha.clear();
     measurements.providerMeasurementByMessageSha.clear();
@@ -1268,10 +1169,7 @@ export function registerActiveContext(pi: any, options: {
     let selection: Record<string, unknown> = { kind: lifecyclePhase };
     try {
       if (persistence.state && snapshot && ratio !== null) {
-        const selected = selectAutomaticRung(snapshot, persistence.state, ratio, {
-          summarizerAvailable: Boolean(options.summarizeContextSpan),
-          failedPreparationIds: ladder.failedPreparations,
-        });
+        const selected = selectAutomaticRung(snapshot, persistence.state, ratio);
         if (selected?.kind === "refold") {
           selection = { kind: "refold", foldId: selected.foldId };
         } else if (selected && "candidate" in selected) {
@@ -1708,12 +1606,9 @@ export function registerActiveContext(pi: any, options: {
 
   const startPreparation = (snapshot: ActiveContextSnapshot, ratio: number | null, ctx: any): void => {
     if (lifecycle.shuttingDown || !persistence.state || ladder.automaticFailure || ratio === null || persistence.state.prepared || ladder.preparing ||
-        ratio < snapshot.policy.warmRatio ||
+        ratio < snapshot.policy.prepareRatio ||
         !measurements.lastProviderMeasurement || !durableProviderMeasurementMatches(measurements.lastProviderMeasurement)) return;
-    const selection = selectAutomaticRung(snapshot, persistence.state, ratio, {
-      summarizerAvailable: Boolean(options.summarizeContextSpan),
-      failedPreparationIds: ladder.failedPreparations,
-    });
+    const selection = selectAutomaticRung(snapshot, persistence.state, ratio);
     ladder.lastSelectionKind = selection && "candidate" in selection ? selection.candidate.kind : null;
     ladder.lastSelectionSourceIds = selection && "candidate" in selection
       ? selection.candidate.sourceRefs.slice(0, 8).map((ref) => ref.entryId)
@@ -1733,11 +1628,6 @@ export function registerActiveContext(pi: any, options: {
       snapshot,
       state: capturedState,
       generation: capturedGeneration,
-      summarize: ladder.failedPreparations.has(id) ? undefined : observedSummarize,
-      onSummarizerFailure: (error) => {
-        ladder.lastPreparationError = error instanceof Error ? error.message : String(error);
-        ladder.failedPreparations.add(id);
-      },
       ctx,
       signal: controller.signal,
     }).then((preparedFold) => {
@@ -1756,7 +1646,6 @@ export function registerActiveContext(pi: any, options: {
       if (controller.signal.aborted ||
           !sessionIdentityStillValid(ctx, snapshot.sessionId, capturedGeneration)) return;
       ladder.lastPreparationError = error instanceof Error ? error.message : String(error);
-      ladder.failedPreparations.add(id);
       suspendAutomatic(
         error,
         "chapter-prepare",
@@ -1895,228 +1784,6 @@ export function registerActiveContext(pi: any, options: {
     instrumentation.mutationsSinceHandoff = 0;
   };
 
-  const queueBriefUpgrades = (
-    snapshot: ActiveContextSnapshot,
-    stateBeforeCommit: ActiveContextState,
-    foldIds: readonly string[],
-  ): void => {
-    if (!observedSummarize || !persistence.state) return;
-    const queued = (id: string): boolean =>
-      upgrades.queue.some((entry) => entry.members.some((member) => member.foldId === id));
-    const pending = (id: string): boolean => upgrades.running.has(id) || queued(id) ||
-      upgrades.ready.some((entry) => entry.foldId === id) ||
-      upgrades.deferred.has(id);
-    const gathered: Array<{
-      foldId: string;
-      sourceSha256: string;
-      refs: EvidenceRef[];
-      span: Record<string, unknown>;
-      chars: number;
-      parent: boolean;
-    }> = [];
-    for (const foldId of [...upgrades.deferred, ...foldIds]) {
-      const full = upgrades.queue.length >= MAX_BRIEF_UPGRADE_QUEUE;
-      if (upgrades.failed.has(foldId) || upgrades.running.has(foldId) || queued(foldId) ||
-          upgrades.ready.some((entry) => entry.foldId === foldId)) continue;
-      const fold = persistence.state.folds.find((item) => item.id === foldId);
-      if (!fold || foldProvenance(fold, persistence.state).kind !== "deterministic") {
-        upgrades.deferred.delete(foldId);
-        continue;
-      }
-      const parent = fold.parts.some((part) => part.kind === "fold");
-      if (parent && (full || childFoldIds(fold).some(pending))) {
-        upgrades.deferred.add(foldId);
-        continue;
-      }
-      if (full) { upgrades.abandoned.push({ foldId, reason: "queue-full" }); continue; }
-      upgrades.deferred.delete(foldId);
-      const refs = parent
-        ? flattenFoldRefs(fold, persistence.state)
-        : fold.parts.every((part) => part.kind === "raw")
-          ? fold.parts.map((part) => (part as { kind: "raw"; ref: EvidenceRef }).ref)
-          : null;
-      if (!refs) continue;
-      try {
-        const sourceText = parent
-          ? consolidationSourceText(snapshot, persistence.state, fold.parts)
-          : encodedFoldSource(snapshot, stateBeforeCommit, fold.parts, fold.kind);
-        const chars = bytes(sourceText);
-        gathered.push({
-          foldId,
-          sourceSha256: fold.sourceSha256,
-          refs,
-          chars,
-          parent,
-          span: {
-            candidateId: fold.id,
-            sourceRefs: clone(refs),
-            sourceText,
-            sourceSha256: sha256Text(sourceText),
-            children: parent ? fold.parts.length : 0,
-          },
-        });
-      } catch (error) {
-        upgrades.failed.add(foldId);
-        upgrades.failures += 1;
-        upgrades.lastError = boundReceiptText(
-          error instanceof Error ? error.message : String(error), 240, "brief upgrade",
-        );
-      }
-    }
-    for (let at = 0; at < gathered.length;) {
-      if (upgrades.queue.length >= MAX_BRIEF_UPGRADE_QUEUE) {
-        for (const item of gathered.slice(at)) {
-          if (item.parent) upgrades.deferred.add(item.foldId);
-          else upgrades.abandoned.push({ foldId: item.foldId, reason: "queue-full" });
-        }
-        break;
-      }
-      const members: typeof gathered = [];
-      let chars = 0;
-      // `!members.length ||` states the rule: a batch may not exceed the source bound, and
-      // one span may be any size because there is nothing to split it into. The gather
-      // above used to drop an oversized span before it got here, silently, which said the
-      // opposite and was unreachable besides: the chapter rung absorbs the tool batch that
-      // would carry an oversized raw span, and a chapter's source is its children's
-      // deterministic briefs. The two bounds that DO bite are elsewhere and both speak:
-      // `prepareFold` refuses an oversized agent span by name, and a parent's source
-      // collapses its widest child until it fits.
-      while (at < gathered.length && members.length < MAX_BRIEF_BATCH_SPANS &&
-             (!members.length || chars + gathered[at].chars <= snapshot.policy.maxSourceChars)) {
-        chars += gathered[at].chars;
-        members.push(gathered[at]);
-        at += 1;
-      }
-      const before = boundedOrientation(snapshot, members[0].refs);
-      const after = boundedOrientation(snapshot, members[members.length - 1].refs);
-      upgrades.queue.push({
-        members: members.map((item) => ({ foldId: item.foldId, sourceSha256: item.sourceSha256 })),
-        request: {
-          spans: members.map((item) => item.span),
-          beforeRefs: clone(before.beforeRefs),
-          beforeText: before.beforeText,
-          beforeSha256: sha256Text(before.beforeText),
-          afterRefs: clone(after.afterRefs),
-          afterText: after.afterText,
-          afterSha256: sha256Text(after.afterText),
-          maxBriefChars: snapshot.policy.maxBriefChars,
-          queuedAtMs: Date.now(),
-        },
-      });
-    }
-  };
-
-  const startBriefUpgrade = (snapshot: ActiveContextSnapshot, ctx: any): boolean => {
-    const summarize = observedSummarize;
-    const inFlight = new Set(upgrades.running.values()).size;
-    if (!summarize || lifecycle.shuttingDown || !upgrades.queue.length ||
-        inFlight >= MAX_BRIEF_UPGRADES_IN_FLIGHT) return false;
-    const entry = upgrades.queue.shift()!;
-    const controller = new AbortController();
-    const slot = { controller, promise: Promise.resolve() };
-    for (const member of entry.members) upgrades.running.set(member.foldId, slot);
-    const capturedSessionId = snapshot.sessionId;
-    const capturedGeneration = lifecycle.generation;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    slot.promise = (async () => {
-      const timed = new Promise<never>((_resolve, reject) => {
-        timeout = setTimeout(() => {
-          controller.abort();
-          reject(new Error(`Brief upgrade exceeded ${snapshot.policy.briefTimeoutMs}ms`));
-        }, snapshot.policy.briefTimeoutMs);
-      });
-      const generated = await Promise.race([
-        generatedBriefs({
-          summarize: (request, callCtx) => summarize({ ...request, signal: controller.signal }, callCtx),
-          request: entry.request,
-          spans: entry.request.spans as Array<Record<string, unknown>>,
-          ctx,
-          maxBriefChars: snapshot.policy.maxBriefChars,
-          toolName: snapshot.toolName,
-        }),
-        timed,
-      ]);
-      if (controller.signal.aborted ||
-          !sessionIdentityStillValid(ctx, capturedSessionId, capturedGeneration)) return;
-      entry.members.forEach((member, at) => {
-        const written = generated.briefs[at];
-        if (!written) {
-          upgrades.failed.add(member.foldId);
-          upgrades.failures += 1;
-          upgrades.lastError = boundReceiptText(
-            `span ${at + 1} of ${entry.members.length}: ${generated.complaints[at] ?? "no brief"}`,
-            240, "brief upgrade",
-          );
-          return;
-        }
-        upgrades.ready.push({
-          foldId: member.foldId,
-          sourceSha256: member.sourceSha256,
-          brief: written.brief,
-          provenance: written.provenance,
-        });
-      });
-      upgrades.cures += generated.cured;
-    })().catch((error) => {
-      if (controller.signal.aborted) return;
-      for (const member of entry.members) upgrades.failed.add(member.foldId);
-      upgrades.failures += 1;
-      upgrades.lastError = boundReceiptText(
-        error instanceof Error ? error.message : String(error), 240, "brief upgrade",
-      );
-    }).finally(() => {
-      clearTimeout(timeout);
-      for (const member of entry.members) {
-        if (upgrades.running.get(member.foldId) === slot) upgrades.running.delete(member.foldId);
-      }
-      if (!lifecycle.shuttingDown && lifecycle.generation === capturedGeneration) {
-        resumeBriefUpgrades(snapshot, ctx);
-      }
-    });
-    return true;
-  };
-
-  const startBriefUpgrades = (snapshot: ActiveContextSnapshot, ctx: any): void => {
-    while (startBriefUpgrade(snapshot, ctx)) continue;
-  };
-
-  const resumeBriefUpgrades = (snapshot: ActiveContextSnapshot, ctx: any): void => {
-    if (upgrades.deferred.size && persistence.state) {
-      queueBriefUpgrades(snapshot, persistence.state, []);
-    }
-    startBriefUpgrades(snapshot, ctx);
-  };
-
-  const cancelBriefUpgrades = (): void => {
-    for (const slot of upgrades.running.values()) slot.controller.abort();
-    upgrades.running.clear();
-    upgrades.queue = [];
-    upgrades.ready = [];
-    upgrades.deferred.clear();
-  };
-
-  const applyBriefUpgrades = (): string[] => {
-    if (!upgrades.ready.length || !persistence.state) return [];
-    const applied: string[] = [];
-    for (const entry of upgrades.ready) {
-      const state = persistence.state;
-      const fold = state.folds.find((item) => item.id === entry.foldId);
-      if (!fold || fold.sourceSha256 !== entry.sourceSha256 ||
-          foldProvenance(fold, state).kind !== "deterministic" ||
-          state.expanded.includes(fold.id) || state.briefs?.[fold.id] !== undefined) continue;
-      persistence.state = {
-        ...state,
-        briefs: {
-          ...(state.briefs ?? {}),
-          [fold.id]: { brief: entry.brief, provenance: clone(entry.provenance) },
-        },
-      };
-      applied.push(fold.id);
-    }
-    upgrades.ready = [];
-    return applied;
-  };
-
   const prepareAndCommitExplicit = async (input: {
     snapshot: ActiveContextSnapshot;
     candidate: FoldCandidate;
@@ -2138,7 +1805,6 @@ export function registerActiveContext(pi: any, options: {
       state: baseState,
       generation: generationAtStart,
       brief: input.brief,
-      summarize: observedSummarize,
       ctx: input.ctx,
       signal: input.signal,
     });
@@ -2324,15 +1990,6 @@ export function registerActiveContext(pi: any, options: {
       };
     }
     persistence.state = result.state;
-    const upgradedFolds = applyBriefUpgrades();
-    const upgradeFailures = upgrades.failures;
-    const upgradeError = upgrades.lastError;
-    const upgradeCures = upgrades.cures;
-    const upgradeAbandoned = upgrades.abandoned;
-    upgrades.failures = 0;
-    upgrades.cures = 0;
-    upgrades.abandoned = [];
-    upgrades.lastError = null;
     const bytesAfter = bytes(projectActiveContext(snapshot, persistence.state));
     const freedBytes = Math.max(0, bytesBefore - bytesAfter);
     const pinHeld = protectedStaleMass(snapshot, result.state);
@@ -2366,17 +2023,6 @@ export function registerActiveContext(pi: any, options: {
       consolidation_marks: consolidationAdded,
       closing_consolidation_marks: closingAdded,
       absorbed_wedges: wedges.absorbed.length,
-      brief_upgrades: upgradedFolds.length,
-      brief_upgrade_ids: upgradedFolds.join(","),
-      brief_upgrade_failures: upgradeFailures,
-      brief_upgrade_cures: upgradeCures,
-      brief_upgrade_error: upgradeError,
-      brief_upgrades_abandoned: upgradeAbandoned.length,
-      brief_upgrades_abandoned_ids: upgradeAbandoned.map((entry) => entry.foldId).join(","),
-      brief_upgrades_abandoned_reasons: upgradeAbandoned.map((entry) => entry.reason).join(","),
-      brief_upgrades_waiting: upgrades.ready.length + upgrades.running.size +
-        upgrades.queue.reduce((total, entry) => total + entry.members.length, 0),
-      brief_upgrade_calls: upgrades.queue.length + new Set(upgrades.running.values()).size,
       freed_bytes: freedBytes,
       freed_tokens: estimatedTokens(freedBytes),
       rewrite_tokens: accounting.rewriteTokens,
@@ -2440,7 +2086,6 @@ export function registerActiveContext(pi: any, options: {
         brief_provenance: fold ? foldProvenance(fold, persistence.state).kind : null,
       });
     }
-    queueBriefUpgrades(snapshot, state, result.applied.map((applied) => applied.foldId));
     for (const wedge of wedges.absorbed) {
       emit("context.absorb", {
         commit_seq: commitEvent.seq,
@@ -2552,11 +2197,7 @@ export function registerActiveContext(pi: any, options: {
     } = {},
   ): Promise<Record<string, unknown> | null> => {
     if (!persistence.state || ladder.automaticFailure || ladder.preparing) return null;
-    const rungSelectionOptions = {
-      toolOnly: rungOptions.toolOnly,
-      summarizerAvailable: Boolean(options.summarizeContextSpan),
-      failedPreparationIds: ladder.failedPreparations,
-    };
+    const rungSelectionOptions = { toolOnly: rungOptions.toolOnly };
     const markLadderSelection = (): Record<string, unknown> | null => {
       if (!persistence.state) return null;
       const decision = selectAutomaticRung(snapshot, persistence.state, ratio, {
@@ -2647,11 +2288,8 @@ export function registerActiveContext(pi: any, options: {
     phase: string,
     operation: () => Promise<Record<string, unknown> | null>,
   ): Promise<Record<string, unknown> | null> => {
-    const queued = ladder.actionQueue.then(async () => {
-      const action = await runAutomaticTransaction(snapshot, ratio, ctx, phase, operation);
-      resumeBriefUpgrades(snapshot, ctx);
-      return action;
-    });
+    const queued = ladder.actionQueue.then(() =>
+      runAutomaticTransaction(snapshot, ratio, ctx, phase, operation));
     ladder.actionQueue = queued.catch(() => undefined);
     return queued;
   };
@@ -2777,7 +2415,6 @@ export function registerActiveContext(pi: any, options: {
   const attributionChanged = async (_event: unknown, ctx: any): Promise<void> => {
     lifecycle.generation += 1;
     cancelPreparation();
-    cancelBriefUpgrades();
     if (persistence.state?.prepared) persistence.state = clearPrepared(persistence.state);
     measurements.latestRatio = null;
     measurements.lastProviderMeasurement = null;
@@ -3504,13 +3141,11 @@ export function registerActiveContext(pi: any, options: {
         },
         ...(detail === "fold_candidates" ? {
           candidates: foldCandidatesDetail(snapshot, persistence.state, measurements.latestRatio, {
-            summarizerAvailable: Boolean(options.summarizeContextSpan),
             generation: lifecycle.generation,
             measurementFresh: Boolean(measurements.lastProviderMeasurement &&
               durableProviderMeasurementMatches(measurements.lastProviderMeasurement)),
             automaticFailure: ladder.automaticFailure !== null,
             preparing: Boolean(ladder.preparing),
-            failedPreparationIds: ladder.failedPreparations,
           }),
         } : {}),
         ...(detail === "tree" ? { tree: foldTreeDetail(snapshot, persistence.state).slice(statusOffset) } : {}),
@@ -3844,7 +3479,6 @@ export function registerActiveContext(pi: any, options: {
             state: staged,
             generation: lifecycle.generation,
             brief: item.brief,
-            summarize: observedSummarize,
             ctx,
             signal,
           })
@@ -4115,7 +3749,6 @@ export function registerActiveContext(pi: any, options: {
     lifecycle.generation += 1;
     lifecycle.shuttingDown = true;
     cancelPreparation();
-    cancelBriefUpgrades();
     persistence.state = null;
     persistence.persisted = null;
     lifecycle.latestSnapshot = null;

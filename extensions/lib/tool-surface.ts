@@ -74,8 +74,8 @@ export function buildActiveContextTool(input: {
                 minLength: 1,
                 maxLength: input.maxBriefChars,
                 description: "Write one for every span you mark. You know why the span mattered and " +
-                  "what you will want back from it; a generator reading the span alone does not. " +
-                  "Leaving it out hands the brief to the summarizer rather than skipping it.",
+                  "what you will want back from it; the deterministic brief that fills the gap " +
+                  "reads the span alone and does not.",
               },
             },
           },

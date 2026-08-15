@@ -150,8 +150,6 @@ export type AutomaticRungSelection =
 
 export interface AutomaticRungSelectionOptions {
   toolOnly?: boolean;
-  summarizerAvailable?: boolean;
-  failedPreparationIds?: ReadonlySet<string>;
   claimed?: ReadonlySet<string>;
   claimedFoldIds?: ReadonlySet<string>;
 }
@@ -187,18 +185,8 @@ export function selectAutomaticRung(
   if (span?.kind === "consolidation") return { kind: "consolidation", candidate: span };
   const chapter = span;
   if (!chapter) return null;
-  const preparationFailed = options.failedPreparationIds?.has(
-    automaticPreparationId(chapter, state),
-  ) ?? false;
-  if (ratio >= hardFenceRatio(snapshot)) {
-    return !options.summarizerAvailable || preparationFailed
-      ? { kind: "chapter", candidate: chapter }
-      : { kind: "chapter-prepare", candidate: chapter };
-  }
-  if ((options.summarizerAvailable && ratio >= snapshot.policy.warmRatio) ||
-      ((!options.summarizerAvailable || preparationFailed) && ratio >= snapshot.policy.prepareRatio)) {
-    return { kind: "chapter-prepare", candidate: chapter };
-  }
+  if (ratio >= hardFenceRatio(snapshot)) return { kind: "chapter", candidate: chapter };
+  if (ratio >= snapshot.policy.prepareRatio) return { kind: "chapter-prepare", candidate: chapter };
   return null;
 }
 
@@ -207,12 +195,10 @@ export function foldCandidatesDetail(
   state: ActiveContextState,
   ratio: number | null,
   options: {
-    summarizerAvailable?: boolean;
     generation?: number;
     measurementFresh?: boolean;
     automaticFailure?: boolean;
     preparing?: boolean;
-    failedPreparationIds?: ReadonlySet<string>;
   } = {},
 ): Record<string, unknown> {
   const measuredRatio = ratio !== null && Number.isFinite(ratio) ? ratio : Number.NaN;
@@ -221,10 +207,7 @@ export function foldCandidatesDetail(
   const staleSpan = selectAutomaticStaleSpan(snapshot, state);
   const consolidation = staleSpan?.kind === "consolidation" ? staleSpan : null;
   const chapter = staleSpan?.kind === "chapter" ? staleSpan : null;
-  const selection = selectAutomaticRung(snapshot, state, measuredRatio, {
-    summarizerAvailable: options.summarizerAvailable,
-    failedPreparationIds: options.failedPreparationIds,
-  });
+  const selection = selectAutomaticRung(snapshot, state, measuredRatio);
   let wouldFireNow: string | null = null;
   let blockedBy: string | null = null;
   if (options.measurementFresh === false) blockedBy = "measurement-stale";
@@ -410,96 +393,6 @@ export function briefContractComplaint(
   return null;
 }
 
-export async function generatedBrief(input: {
-  summarize: (request: Record<string, unknown>, ctx?: unknown) => Promise<Record<string, unknown>>;
-  request: Record<string, unknown>;
-  ctx?: unknown;
-  maxBriefChars: number;
-  toolName: string;
-}): Promise<{ brief: string; provenance: BriefProvenance; cured: boolean }> {
-  let complaint: string | null = null;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const result = await input.summarize(
-      complaint === null ? input.request : { ...input.request, cure: complaint },
-      input.ctx,
-    );
-    const brief = typeof result?.brief === "string" ? result.brief.trim() : "";
-    const provenance = generatorAttribution(result);
-    complaint = briefContractComplaint(brief, input.maxBriefChars, input.toolName);
-    if (complaint === null) return { brief, provenance, cured: attempt > 0 };
-  }
-  throw new Error(`Model context brief usefulness contract drift after one cure: ${complaint}`);
-}
-
-function generatorAttribution(result: Record<string, unknown> | null | undefined): BriefProvenance {
-  const digest = result?.launchContractDigest;
-  if (typeof result?.provider !== "string" || !result.provider ||
-      typeof result?.model !== "string" || !result.model ||
-      typeof result?.effort !== "string" || !result.effort || result.toolCalls !== 0 ||
-      (digest !== undefined && (typeof digest !== "string" || !/^[a-f0-9]{64}$/.test(digest)))) {
-    throw new Error("Model context brief attribution, zero-tool, or digest contract drift");
-  }
-  return {
-    kind: "model",
-    provider: result.provider,
-    model: result.model,
-    effort: result.effort,
-    ...(typeof digest === "string" ? { launchContractDigest: digest } : {}),
-  };
-}
-
-export async function generatedBriefs(input: {
-  summarize: (request: Record<string, unknown>, ctx?: unknown) => Promise<Record<string, unknown>>;
-  request: Record<string, unknown>;
-  spans: Array<Record<string, unknown>>;
-  ctx?: unknown;
-  maxBriefChars: number;
-  toolName: string;
-}): Promise<{
-  briefs: Array<{ brief: string; provenance: BriefProvenance } | null>;
-  cured: number;
-  complaints: Array<string | null>;
-}> {
-  const settled = new Array<{ brief: string; provenance: BriefProvenance } | null>(input.spans.length)
-    .fill(null);
-  let pending = input.spans.map((span, index) => ({ span, index }));
-  let cured = 0;
-  const complaintBySpan = new Array<string | null>(input.spans.length).fill(null);
-  let complaints: string[] = [];
-  for (let attempt = 0; attempt < 2 && pending.length; attempt += 1) {
-    const asked = pending;
-    const result = await input.summarize({
-      ...input.request,
-      spans: asked.map((item) => item.span),
-      ...(complaints.length
-        ? {
-          cure: asked.map((item, at) =>
-            `Brief ${at + 1}: ${complaints[at] ?? "did not meet the stated criteria."}`).join(" "),
-        }
-        : {}),
-    }, input.ctx);
-    const provenance = generatorAttribution(result);
-    const written = Array.isArray(result?.briefs) ? result.briefs : [];
-    const failed: typeof pending = [];
-    const next: string[] = [];
-    for (let at = 0; at < asked.length; at += 1) {
-      const brief = typeof written[at] === "string" ? (written[at] as string).trim() : "";
-      const complaint = briefContractComplaint(brief, input.maxBriefChars, input.toolName);
-      if (complaint === null) {
-        settled[asked[at].index] = { brief, provenance };
-        if (attempt > 0) cured += 1;
-        continue;
-      }
-      failed.push(asked[at]);
-      next.push(complaint);
-      complaintBySpan[asked[at].index] = complaint;
-    }
-    pending = failed;
-    complaints = next;
-  }
-  return { briefs: settled, cured, complaints: complaintBySpan };
-}
-
 export async function prepareFold(input: {
   candidate: FoldCandidate;
   snapshot: ActiveContextSnapshot;
@@ -507,8 +400,6 @@ export async function prepareFold(input: {
   generation: number;
   brief?: string;
   briefProvenance?: "supplied" | "deterministic" | BriefProvenance;
-  summarize?: (request: Record<string, unknown>, ctx?: unknown) => Promise<Record<string, unknown>>;
-  onSummarizerFailure?: (error: unknown) => void;
   ctx?: unknown;
   signal?: AbortSignal;
   now?: () => number;
@@ -549,61 +440,10 @@ export async function prepareFold(input: {
       ? clone(input.briefProvenance)
       : { kind: input.briefProvenance ?? "supplied" };
   } else {
-    let modelBrief: { brief: string; provenance: BriefProvenance } | null = null;
-    if (input.summarize) {
-      const controller = new AbortController();
-      const relayAbort = (): void => controller.abort();
-      input.signal?.addEventListener("abort", relayAbort, { once: true });
-      let timeout: ReturnType<typeof setTimeout> | undefined;
-      try {
-        if (bytes(readableSource) > snapshot.policy.maxSourceChars) {
-          throw new Error("Fold source exceeds the bounded model-summary request");
-        }
-        const timed = new Promise<never>((_resolve, reject) => {
-          timeout = setTimeout(() => {
-            controller.abort();
-            reject(new Error(`Context brief exceeded ${snapshot.policy.briefTimeoutMs}ms`));
-          }, snapshot.policy.briefTimeoutMs);
-        });
-        const generated = await Promise.race([generatedBrief({
-          summarize: input.summarize,
-          request: {
-            candidateId,
-            sourceRefs: clone(candidate.sourceRefs),
-            sourceText: readableSource,
-            sourceSha256: sha256Text(readableSource),
-            children: groupChildren,
-            beforeRefs: clone(orientation.beforeRefs),
-            beforeText: orientation.beforeText,
-            beforeSha256,
-            afterRefs: clone(orientation.afterRefs),
-            afterText: orientation.afterText,
-            afterSha256,
-            maxBriefChars: snapshot.policy.maxBriefChars,
-            signal: controller.signal,
-          },
-          ctx: input.ctx,
-          maxBriefChars: snapshot.policy.maxBriefChars,
-          toolName: snapshot.toolName,
-        }), timed]);
-        modelBrief = { brief: generated.brief, provenance: generated.provenance };
-      } catch (error) {
-        if (input.signal?.aborted) throw error;
-        input.onSummarizerFailure?.(error);
-      } finally {
-        clearTimeout(timeout);
-        input.signal?.removeEventListener("abort", relayAbort);
-      }
-    }
-    if (modelBrief) {
-      brief = modelBrief.brief;
-      provenance = modelBrief.provenance;
-    } else {
-      brief = candidate.kind === "consolidation"
-        ? deterministicConsolidationBrief(candidate, state, snapshot.toolName, snapshot)
-        : deterministicChapterCandidateBrief(snapshot, candidate);
-      provenance = { kind: "deterministic" };
-    }
+    brief = candidate.kind === "consolidation"
+      ? deterministicConsolidationBrief(candidate, state, snapshot.toolName, snapshot)
+      : deterministicChapterCandidateBrief(snapshot, candidate);
+    provenance = { kind: "deterministic" };
   }
 
   const id = foldIdFor(candidate.kind, candidate.parts);

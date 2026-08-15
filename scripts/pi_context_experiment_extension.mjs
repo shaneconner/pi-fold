@@ -22,7 +22,6 @@ import { Type } from "typebox";
 // bytes under test are tracked, so the run seal pins exactly what executed.
 import { registerActiveContext } from "../extensions/active-context.ts";
 import { registerEvidenceIngestion } from "../extensions/evidence.js";
-import { createSummarizeContextSpan } from "../extensions/summarizer.js";
 import {
   PI_FOLD_ACTIVE_CONTEXT_REGISTRATION,
   PI_FOLD_NATIVE_COMPACTION_DECISION_ENTRY,
@@ -110,23 +109,14 @@ function readMarkerIndex(ctx) {
   return -1;
 }
 
-/**
- * The run's brief generator, built from the config descriptor with the package's OWN
- * builder: `extensions/index.js` turns the public `summarizer` option into exactly this,
- * so the arm briefs the way a consumer's deployment briefs instead of through a harness
- * copy that could drift from it. A config with no descriptor registers no generator, and
- * every brief is then the deterministic fallback.
- *
- * Exported so a gate can build it against a fake host module: the generator resolves its
- * model through the pi host, and verification never makes a live provider call.
- */
-export function experimentSummarizeContextSpan(config, loadHostModule) {
-  return config.briefGenerator === undefined
-    ? undefined
-    : createSummarizeContextSpan(config.briefGenerator, loadHostModule);
-}
-
 export function createPiContextExperimentExtension(config) {
+  // The model brief generator is deleted from the package (2026-08-14): every fold
+  // briefs deterministically. A config that still asks for one is refused HERE, at the
+  // only point that ever wired it, before any provider call; sealed manifests that
+  // recorded a generator stay readable through validBriefGenerator and the adjudicator.
+  assertExperiment(config.briefGenerator === undefined,
+    "briefGenerator is deleted: the runtime briefs deterministically as of 2026-08-14, " +
+    "and reproducing a generator campaign needs a checkout that predates the deletion");
   const pifold = config.arm === "pifold";
   // THE MATCHED-TRIGGER FENCE. Only the nativefence arm carries it, and only because Pi's
   // own threshold cannot: `_checkCompaction` runs after agent_end and before prompt
@@ -147,7 +137,6 @@ export function createPiContextExperimentExtension(config) {
   const fenceState = {
     crossings: 0, inFlight: false, lastTokens: null, abandonPending: false,
   };
-  const summarizeContextSpan = experimentSummarizeContextSpan(config);
   const compactionDisposition = nativeCompactionDisposition(config.arm);
   const allowedTools = new Set([
     ...EXPERIMENT_ALLOWED_TOOLS,
@@ -310,10 +299,6 @@ export function createPiContextExperimentExtension(config) {
             // The deployment fact, when the run config carries one: without it the
             // runtime measures every threshold against the per-request descriptor.
             ...(config.providerInputBudget === undefined ? {} : { providerInputBudget: config.providerInputBudget }),
-            // The brief generator, when the run config carries one. Briefs are the fold's
-            // only visible trace, so a run that wired none measured the deterministic
-            // fallback in every fold rather than the mechanism the package ships.
-            ...(summarizeContextSpan === undefined ? {} : { summarizeContextSpan }),
           });
         } finally {
           pi.registerTool = registerTool;

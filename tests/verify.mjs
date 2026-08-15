@@ -17,7 +17,6 @@ const jiti = createJiti(import.meta.url);
 const context = await jiti.import(join(projectRoot, "extensions", "active-context.ts"));
 const json = await jiti.import(join(projectRoot, "extensions", "json.ts"));
 const piFold = await jiti.import(join(projectRoot, "extensions", "index.js"));
-const summarizerFactory = await jiti.import(join(projectRoot, "extensions", "summarizer.js"));
 const evidenceModule = await jiti.import(join(projectRoot, "extensions", "evidence.js"));
 
 // One synthetic deployment identity, written out in full, so every brand-derived string
@@ -96,14 +95,6 @@ const NO_FRESH_TAIL = Object.freeze({ ...context.DEFAULT_THRESHOLDS, freshTail: 
 /** A fresh tail wide enough that the newest turns are unfoldable at fixture scale. */
 const WIDE_FRESH_TAIL = Object.freeze({ ...context.DEFAULT_THRESHOLDS, freshTail: 0.10 });
 
-const MODEL_BRIEF = async () => ({
-  brief: "The exact stale evidence records the completed inspection and its factual result.",
-  provider: "openai-codex",
-  model: "gpt-5.6-luna",
-  effort: "medium",
-  toolCalls: 0,
-  launchContractDigest: "a".repeat(64),
-});
 
 function near(actual, expected, tolerance = 1e-9, label = "number") {
   assert(Math.abs(actual - expected) <= tolerance,
@@ -268,11 +259,11 @@ async function commitCandidate(
   state,
   snapshot,
   candidate,
-  { brief, summarize = MODEL_BRIEF, generation = 1, now = 1 } = {},
+  { brief, generation = 1, now = 1 } = {},
 ) {
   assert(candidate, "Expected an eligible fold candidate");
   const prepared = await context.prepareFold({
-    candidate, snapshot, state, generation, brief, summarize, now: () => now,
+    candidate, snapshot, state, generation, brief, now: () => now,
   });
   assert.equal(context.preparedFoldError({ prepared, snapshot, state, generation }), null);
   return {
@@ -287,17 +278,14 @@ function makeRuntime(built, {
   brandNoun,
   entryTypePrefix,
   commandNames,
-  summarizeContextSpan,
   initialEntries,
   blacklistAutoFoldTools,
   thresholds,
   guidance,
   retiredOptions,
-  summarizer,
   removedOptions,
   registerEvidence = false,
   providerInputBudget,
-  loadHostModule,
   packageRegistration = false,
   sessionFile = join(tmpdir(), "pi-fold-test-session.jsonl"),
   // One injection point for a durable write that FAILS. Persistence is the only place
@@ -419,18 +407,16 @@ function makeRuntime(built, {
     ...(brandNoun ? { brandNoun } : {}),
     ...(entryTypePrefix ? { entryTypePrefix } : {}),
     ...(commandNames ? { commandNames } : {}),
-    ...(summarizeContextSpan ? { summarizeContextSpan } : {}),
     ...(blacklistAutoFoldTools ? { blacklistAutoFoldTools } : {}),
     ...(thresholds ? { thresholds } : {}),
     ...(guidance ? { guidance } : {}),
     ...(retiredOptions ?? {}),
-    ...(summarizer === undefined ? {} : { summarizer }),
     // Deleted options, forwarded verbatim so gate 68 can prove they are REFUSED.
     ...(removedOptions ?? {}),
     ...(providerInputBudget === undefined ? {} : { providerInputBudget }),
   };
   if (packageRegistration) {
-    runtime.registration = piFold.registerPiFold(pi, registrationOptions, loadHostModule);
+    runtime.registration = piFold.registerPiFold(pi, registrationOptions);
   } else {
     // The internal seam. Evidence first, then the runtime, which is the order the
     // package entry uses; a deployment registering the seam directly (the experiment
@@ -1419,7 +1405,6 @@ async function gateLegacyLunaRegression() {
   const originalRecordBytes = json.stableStringify(recordEntry.data);
   const runtime = makeRuntime(built, {
     initialEntries: [...built.entries, recordEntry, checkpointEntry],
-    summarizeContextSpan: MODEL_BRIEF,
   });
   await startRuntime(runtime);
   const loaded = materialized(runtime);
@@ -1435,7 +1420,7 @@ async function gateLegacyLunaRegression() {
     undefined,
     runtime.ctx,
   );
-  assert.equal(response.details.provenance.kind, "model");
+  assert.equal(response.details.provenance.kind, "deterministic");
   assert.equal(runtime.notifications.filter((notice) => /Conflicting durable/.test(notice.message)).length, 0);
   const durableLegacy = runtime.branch.find((entry) => entry.id === "legacy-luna-record");
   assert.equal(json.stableStringify(durableLegacy.data), originalRecordBytes);
@@ -2070,50 +2055,55 @@ async function gateConsolidationCountingRule() {
 }
 
 async function gateQuietWarming() {
+  // The DEFAULT window, because the prepare band needs to exist: the hard fence is
+  // (window - reserve) / window with the reserve capped at 16,384, so at windows of
+  // 163,840 and below the fence sits at or under prepareRatio and a boundary commits
+  // directly with nothing to warm. That is the accepted small-window behaviour; the
+  // warming law is pinned at the geometry that has a band.
+  const WINDOW = 272_000;
   const chapterBuilt = makeFixture({
     turns: 8,
     tools: false,
     chapterChars: 3_500,
-    contextWindow: 100_000,
+    contextWindow: WINDOW,
   });
-  let summaryCalls = 0;
-  const summarize = async (request) => {
-    if (!isBriefUpgradeRequest(request)) summaryCalls += 1;
-    return MODEL_BRIEF();
-  };
-  const warm = makeRuntime(chapterBuilt, { summarizeContextSpan: summarize });
+  // Warming is quiet and DETERMINISTIC: below prepareRatio nothing warms, at
+  // prepareRatio the chapter is prepared ahead of the boundary, and the boundary
+  // commit lands exactly the prepared fold. A preparation is the fold computed
+  // early, not a model call bought early; there is no generator to pay.
+  const warm = makeRuntime(chapterBuilt);
   await startRuntime(warm);
-  await measure(warm, 60_000, 100_000);
+  await measure(warm, Math.round(0.60 * WINDOW), WINDOW);
+  await settle(8);
+  assert.equal(materialized(warm).prepared, undefined,
+    "A preparation started below prepareRatio");
+  await measure(warm, Math.round(0.91 * WINDOW), WINDOW);
   await settle(8);
   const warmedStatus = await toolStatus(warm);
   let warmState = materialized(warm);
-  assert.equal(summaryCalls, 1);
   assert(warmState.prepared, JSON.stringify(warmedStatus.details.automatic));
   assert.equal(warmState.folds.length, 0);
   assert.equal(warmedStatus.details.automatic.preparedFoldId, warmState.prepared.id);
   assert.equal(warmedStatus.details.automatic.lastAutomaticAction, null);
-  const narrowFenceTokens = Math.round(context.hardFenceRatio({ contextWindow: 100_000 }) * 100_000);
+  const narrowFenceTokens = Math.round(context.hardFenceRatio({ contextWindow: WINDOW }) * WINDOW);
   const warmedId = warmState.prepared.id;
-  await measureAndCommit(warm, narrowFenceTokens, 100_000, "warm-fence-commit");
+  await measureAndCommit(warm, narrowFenceTokens, WINDOW, "warm-fence-commit");
   warmState = materialized(warm);
   // The warmed chapter lands through the commit like every other fold. The commit is
   // free to carry more marks than the one that was warmed; what it may not do is leave
-  // the warmed one behind, which is the model call this arm paid for.
+  // the warmed one behind.
   const warmChapters = warmState.folds.filter((fold) => fold.kind === "chapter");
   assert(warmChapters.length >= 1, "The fence commit folded no chapter");
   assert(warmChapters.some((fold) => fold.id === warmedId),
     "The warmed preparation never reached the window");
-  assert.equal(warmChapters.find((fold) => fold.id === warmedId).provenance.kind, "model");
+  assert.equal(warmChapters.find((fold) => fold.id === warmedId).provenance.kind, "deterministic");
 
-  let refusedCalls = 0;
   const toolRuntime = makeRuntime(
     makeFixture({ turns: 8, resultChars: 10_000, contextWindow: 100_000 }),
-    { summarizeContextSpan: async () => { refusedCalls += 1; return MODEL_BRIEF(); } },
   );
   await startRuntime(toolRuntime);
   await measure(toolRuntime, 10_000, 100_000);
   await measure(toolRuntime, 60_000, 100_000);
-  assert.equal(refusedCalls, 0);
   assert.equal(materialized(toolRuntime).prepared, undefined);
   // Below the commit threshold the quiet runtime MARKS rather than folds, so the
   // priority shows in what was marked: the deterministic tool batch, never a warm
@@ -2126,37 +2116,23 @@ async function gateQuietWarming() {
   assert.equal(materialized(toolRuntime).folds[0].kind, "tool-result",
     "The deterministic tool batch lost its priority over a warmed chapter");
 
+  // A boundary arriving with NOTHING warmed still commits: the fence never depends on
+  // a preparation having run.
   const floor = makeRuntime(chapterBuilt);
   await startRuntime(floor);
-  await measure(floor, 60_000, 100_000);
+  await measure(floor, Math.round(0.60 * WINDOW), WINDOW);
   assert.equal(materialized(floor).prepared, undefined);
-  await measureAndCommit(floor, narrowFenceTokens, 100_000, "floor-fence-commit");
+  await measureAndCommit(floor, narrowFenceTokens, WINDOW, "floor-fence-commit");
   const floorState = materialized(floor);
   const floorChapters = floorState.folds.filter((fold) => fold.kind === "chapter");
-  assert(floorChapters.length >= 1, "The no-summarizer fence commit folded no chapter");
+  assert(floorChapters.length >= 1, "The unwarmed fence commit folded no chapter");
   assert(floorChapters.every((fold) => fold.provenance.kind === "deterministic"));
-
-  let fenceCalls = 0;
-  const fence = makeRuntime(chapterBuilt, {
-    summarizeContextSpan: async (request) => {
-      if (!isBriefUpgradeRequest(request)) fenceCalls += 1;
-      return MODEL_BRIEF();
-    },
-  });
-  await startRuntime(fence);
-  const fenceTokens = narrowFenceTokens;
-  await measureAndCommit(fence, fenceTokens, 100_000, "summarizer-fence-commit");
-  const fenceChapter = materialized(fence).folds.find((fold) => fold.kind === "chapter");
-  assert.equal(fenceCalls, 1);
-  assert.equal(fenceChapter?.provenance.kind, "model");
   return {
-    warmedAtRatio: 0.60,
-    warmCalls: summaryCalls,
+    quietBelowPrepareRatio: true,
+    warmedAtRatio: 0.91,
     committedAtFence: true,
-    deterministicPriorityRefusedWarm: refusedCalls === 0,
-    noSummarizerWarmCalls: 0,
-    fenceFloor: "deterministic",
-    summarizerFenceJump: fenceChapter.provenance.kind,
+    warmedProvenance: "deterministic",
+    unwarmedFenceFloor: "deterministic",
   };
 }
 
@@ -2254,27 +2230,17 @@ async function gateNoToolCallRewrite() {
 
   // THE ACCEPTED CONSEQUENCE, pinned so it stays a decision rather than a surprise.
   //
-  // The tool rung has no door of its own any more, so it wins every automatic
-  // selection ahead of chapter preparation. In a TOOL-BEARING session that means warm
-  // model briefs never start and the commit's chapters COMMIT deterministic. The brief
-  // quality that costs is bought back after the fact: the upgrade lane briefs those
-  // folds between boundaries and the model brief rides the next commit (gate 107). So
-  // the count here is preparations, which is what the scheduling claim is about.
-  let toolBearingWarmCalls = 0;
+  // The tool rung has no door of its own, so it wins every automatic selection ahead
+  // of chapter preparation: a TOOL-BEARING session never warms a chapter, and its
+  // commits brief deterministically like everything else.
   const toolBearing = makeRuntime(
     makeFixture({ turns: 8, resultChars: 10_000, contextWindow: 100_000 }),
-    {
-      summarizeContextSpan: async (request) => {
-        if (!isBriefUpgradeRequest(request)) toolBearingWarmCalls += 1;
-        return { brief: "A model brief that a tool-bearing session never asks for." };
-      },
-    },
   );
   await startRuntime(toolBearing);
   await measure(toolBearing, 50_000, 100_000);
   await measure(toolBearing, 60_000, 100_000);
   const toolCommitted = await measureAndCommit(toolBearing, 86_000, 100_000, "tool-commit");
-  assert.equal(toolBearingWarmCalls, 0,
+  assert.equal(materialized(toolBearing).prepared ?? undefined, undefined,
     "A tool-bearing session started a warm preparation the tool rung outranks");
   assert(toolCommitted.folds.length >= 1, "The tool-bearing commit folded nothing");
   assert(toolCommitted.folds.every((fold) => context.foldProvenance(fold, materialized(toolBearing)).kind === "deterministic"),
@@ -2282,42 +2248,29 @@ async function gateNoToolCallRewrite() {
       toolCommitted.folds.map((fold) => fold.provenance.kind))}`);
 
   // THE WARM PATH STILL RUNS, and here is the fixture that keeps it pinned. With no
-  // tool results there is no tool rung to outrank the chapter, so preparation warms,
-  // the model brief is asked for, and the commit carries it.
-  let noToolWarmCalls = 0;
+  // tool results there is no tool rung to outrank the chapter, so at prepareRatio the
+  // chapter is prepared ahead of the boundary and the commit carries exactly it.
   const noTool = makeRuntime(
-    makeFixture({ turns: 8, tools: false, chapterChars: 3_500, contextWindow: 100_000 }),
-    {
-      summarizeContextSpan: async () => {
-        noToolWarmCalls += 1;
-        return {
-          brief: "The exact completed chapter records its factual result and stays recoverable.",
-          provider: "openai-codex",
-          model: "gpt-5.6-luna",
-          effort: "medium",
-          toolCalls: 0,
-        };
-      },
-    },
+    makeFixture({ turns: 8, tools: false, chapterChars: 3_500, contextWindow: 272_000 }),
   );
   await startRuntime(noTool);
-  await measure(noTool, 60_000, 100_000);
+  await measure(noTool, Math.round(0.91 * 272_000), 272_000);
   await settle(8);
-  const noToolCommitted = await measureAndCommit(noTool, 86_000, 100_000, "warm-commit");
-  assert(noToolWarmCalls >= 1, "The warm preparation never started in a session with no tool rung");
+  const noToolPrepared = materialized(noTool).prepared;
+  assert(noToolPrepared, "The warm preparation never started in a session with no tool rung");
+  const noToolFence = Math.round(context.hardFenceRatio({ contextWindow: 272_000 }) * 272_000);
+  const noToolCommitted = await measureAndCommit(noTool, noToolFence, 272_000, "warm-commit");
   assert(noToolCommitted.folds.length >= 1, "The warm commit folded nothing");
-  assert(noToolCommitted.folds.some((fold) => fold.provenance.kind === "model"),
-    `The warm path produced no model brief: ${JSON.stringify(
-      noToolCommitted.folds.map((fold) => fold.provenance.kind))}`);
+  assert(noToolCommitted.folds.some((fold) => fold.id === noToolPrepared.id),
+    "The warm commit left the prepared chapter behind");
   return {
     toolCallListener: "absent",
     blockingToolsOption: "refused",
     revisionMovedByToolCall: false,
-    toolBearingWarmCalls,
+    toolBearingWarmed: false,
     toolBearingBriefs: "deterministic",
-    noToolWarmCalls,
-    noToolModelBriefs: noToolCommitted.folds.filter((fold) =>
-      fold.provenance.kind === "model").length,
+    noToolWarmed: true,
+    noToolCommittedPrepared: true,
   };
 }
 
@@ -2544,339 +2497,6 @@ async function gateEvidenceIngestionIsUnconditional() {
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }
-}
-
-async function gateSummarizerOption() {
-  const measureForModel = async (runtime, tokens, model) => {
-    runtime.usage = { tokens, contextWindow: 100_000 };
-    const message = runtime.appendMessage({
-      ...measuredAssistant(tokens, 100_000, `summarizer-measurement-${tokens}`),
-      provider: model.provider,
-      model: model.id,
-    }, "summarizer-measurement");
-    await runtime.handlers.get("message_end")({ message }, runtime.ctx);
-    await settle();
-  };
-  const sessionModel = { provider: "fake-session", id: "brief-model", reasoning: true };
-  let loaderCalls = 0;
-  let createCalls = 0;
-  let completionCalls = 0;
-  let preparationCompletions = 0;
-  let completionRequest;
-  const loadHostModule = async () => {
-    loaderCalls += 1;
-    return {
-      ModelRuntime: {
-        async create() {
-          createCalls += 1;
-          return {
-            getModel() { return undefined; },
-            async completeSimple(model, request, options) {
-              completionCalls += 1;
-              if (completionCalls > 1) return { role: "assistant", content: [{ type: "text", text: "A later lane's brief." }] };
-              preparationCompletions += 1;
-              completionRequest = structuredClone({ model, request, options: {
-                // Carried only when the caller set one, so the gate below can assert its
-                // ABSENCE rather than its value: a key that is always present with an
-                // undefined value would make "no ceiling was sent" untestable.
-                ...("maxTokens" in options ? { maxTokens: options.maxTokens } : {}),
-                signalIdentical: options.signal instanceof AbortSignal,
-                reasoning: options.reasoning,
-              } });
-              return {
-                role: "assistant",
-                content: [
-                  { type: "thinking", thinking: "not part of the brief" },
-                  { type: "text", text: "The fake session model records " },
-                  { type: "text", text: "the exact bounded chapter." },
-                ],
-              };
-            },
-          };
-        },
-      },
-    };
-  };
-  const built = makeFixture({
-    turns: 8,
-    tools: false,
-    chapterChars: 3_500,
-    contextWindow: 100_000,
-  });
-  const session = makeRuntime(built, { packageRegistration: true, loadHostModule });
-  session.ctx.model = sessionModel;
-  assert.equal(loaderCalls, 0);
-  await startRuntime(session);
-  assert.equal(loaderCalls, 0, "Default registration imported the host before a model brief was requested");
-  const fenceTokens = Math.round(context.hardFenceRatio({ contextWindow: 100_000 }) * 100_000);
-  await measureForModel(session, fenceTokens, sessionModel);
-  await project(session);
-  await settle();
-  await compactBoundary(session);
-  await settle(8);
-  const modelFold = materialized(session).folds.find((fold) => fold.kind === "chapter");
-  assert(modelFold, json.stableStringify({
-    loaderCalls,
-    createCalls,
-    completionCalls,
-    automatic: (await toolStatus(session)).details.automatic,
-    notifications: session.notifications,
-    state: materialized(session),
-  }));
-  assert.equal(modelFold.brief, "The fake session model records the exact bounded chapter.");
-  assert.deepEqual(modelFold.provenance, {
-    kind: "model",
-    provider: sessionModel.provider,
-    model: sessionModel.id,
-    effort: "max",
-  });
-  assert.equal(loaderCalls, 1);
-  assert.equal(createCalls, 1);
-  // One completion per brief. The host fake cannot see which lane asked, and the upgrade
-  // lane briefs the folds this same commit landed deterministic, so the pin is on the
-  // preparation being FIRST and on the total staying inside the upgrade queue bound.
-  assert.equal(preparationCompletions, 1);
-  assert(completionCalls <= 1 + context.MAX_BRIEF_UPGRADE_QUEUE,
-    `The summarizer was called ${completionCalls} times for one brief`);
-  assert.equal(completionRequest.model.provider, sessionModel.provider);
-  assert.equal(completionRequest.model.id, sessionModel.id);
-  assert.equal(completionRequest.request.messages.length, 1);
-  assert.equal(completionRequest.request.messages[0].role, "user");
-  // The prompt the RUNTIME drives carries the same contract the direct call pins below:
-  // the labelled span, both orientation labels, and the two purposes. The runtime supplies
-  // the orientation slices from its own bounded computation, so whether a slice is present
-  // or empty is the runtime's business; the labels are always there to be filled.
-  const runtimeBriefPrompt = completionRequest.request.messages[0].content;
-  for (const clause of [
-    // Read from the policy rather than typed, so the gate pins that the cap REACHES the
-    // model rather than pinning one particular cap.
-    `Write a factual brief of at most ${context.ACTIVE_CONTEXT_POLICY.maxBriefChars} ` +
-      "characters covering the SPAN TO BRIEF below",
-    "expanding or peeking this fold later",
-    "BEFORE THE SPAN (orientation only, do not brief)",
-    "SPAN TO BRIEF:",
-    "AFTER THE SPAN (orientation only, do not brief)",
-    "Use no preamble and no Markdown headers.",
-  ]) {
-    assert(runtimeBriefPrompt.includes(clause),
-      `the runtime-driven brief request lost "${clause}"`);
-  }
-  // NO token ceiling reaches the provider. maxTokens does not ask a model to be brief,
-  // it cuts it off mid-answer, and a reasoning generator draws its thinking from the same
-  // budget: the 2026-08-11 rep lost 22 percent of its calls to "Summarizer returned no
-  // text" that way. Length is bounded by the stated limit, the cure, and the timeout.
-  assert.equal("maxTokens" in completionRequest.options, false,
-    "a token ceiling reached the provider: it truncates the answer instead of shortening it");
-  assert.equal(completionRequest.options.signalIdentical, true);
-  assert.equal(completionRequest.options.reasoning, "max");
-
-  // "deterministic" was a public VALUE through the six-option surface, and it is refused
-  // now: it named the failure path as though it were a third generator to choose between,
-  // when every summarizer failure already falls back to exactly that brief. The refusal
-  // says so rather than reporting a shape error, so a deployment holding the value learns
-  // it lost nothing.
-  for (const alongside of [{}, { providerInputBudget: 90_000 }]) {
-    assert.throws(
-      () => makeRuntime(built, { packageRegistration: true, ...alongside, summarizer: "deterministic" }),
-      /summarizer has no "deterministic" value: the deterministic brief is the automatic fallback/,
-      "summarizer: \"deterministic\" survived as a selectable mode",
-    );
-  }
-  // The GENERATOR is untouched, and the seam that reaches it is the one the experiment
-  // extension uses: register the runtime directly, wire no brief generator, and every
-  // chapter brief is deterministic with no host module in the picture at all.
-  const unwired = makeRuntime(built);
-  await startRuntime(unwired);
-  await measureAndCommit(unwired, fenceTokens, 100_000);
-  assert.equal(
-    materialized(unwired).folds.find((fold) => fold.kind === "chapter")?.provenance.kind,
-    "deterministic",
-  );
-
-  let failureCompletionCalls = 0;
-  const failure = makeRuntime(built, {
-    packageRegistration: true,
-    loadHostModule: async () => ({
-      ModelRuntime: {
-        async create() {
-          return {
-            async completeSimple() {
-              failureCompletionCalls += 1;
-              throw new Error("fake completion failed");
-            },
-          };
-        },
-      },
-    }),
-  });
-  failure.ctx.model = sessionModel;
-  await startRuntime(failure);
-  await measureForModel(failure, fenceTokens, sessionModel);
-  await project(failure);
-  await settle();
-  await compactBoundary(failure);
-  await settle(8);
-  // Both lanes meet the same broken generator: the preparation falls back, and the
-  // upgrade lane finds the deterministic fold and fails on it once too. What the gate
-  // pins is that a failure is a fallback rather than a retry loop.
-  assert(failureCompletionCalls >= 1 && failureCompletionCalls <= 1 + context.MAX_BRIEF_UPGRADE_QUEUE,
-    `A failing summarizer was called ${failureCompletionCalls} times`);
-  const failureState = materialized(failure);
-  const failureChapter = failureState.folds.find((fold) => fold.kind === "chapter");
-  assert.equal(context.foldProvenance(failureChapter, failureState).kind, "deterministic");
-
-  // `summarizeContextSpan` left the PUBLIC surface. It is the runtime's INTERNAL
-  // brief-generator interface, and `summarizer` is the declarative way to choose one, so
-  // the package refuses the name rather than forwarding a callback the summarizer choice
-  // would overwrite. Refused whether or not a summarizer accompanies it.
-  for (const alongside of [{ summarizer: "session" }, {}]) {
-    assert.throws(() => makeRuntime(built, {
-      packageRegistration: true,
-      ...alongside,
-      summarizeContextSpan: MODEL_BRIEF,
-    }), /summarizeContextSpan is no longer an option/);
-  }
-  assert.throws(() => makeRuntime(built, {
-    packageRegistration: true,
-    summarizer: { provider: "fake-session" },
-  }), /nonempty provider and model strings/);
-  assert.throws(() => makeRuntime(built, {
-    packageRegistration: true,
-    summarizer: { model: "brief-model" },
-  }), /nonempty provider and model strings/);
-
-  // The seam itself still works, reached where it now lives: registerActiveContext takes
-  // the generator directly, and a brief it produces is attributed to the model.
-  const escape = makeRuntime(built, { summarizeContextSpan: MODEL_BRIEF });
-  await startRuntime(escape);
-  await measureAndCommit(escape, fenceTokens, 100_000);
-  await settle(8);
-  assert.equal(
-    materialized(escape).folds.find((fold) => fold.kind === "chapter")?.provenance.kind,
-    "model",
-  );
-
-  let registryLoaderCalls = 0;
-  let registryCreateCalls = 0;
-  const registryCompletionOptions = [];
-  const registryPrompts = [];
-  const registryModel = { provider: "fake-registry", id: "explicit-model", reasoning: true };
-  const explicit = summarizerFactory.createSummarizeContextSpan({
-    provider: registryModel.provider,
-    model: registryModel.id,
-    effort: "low",
-  }, async () => {
-    registryLoaderCalls += 1;
-    return {
-      ModelRuntime: {
-        async create() {
-          registryCreateCalls += 1;
-          return {
-            getModel(provider, model) {
-              return provider === registryModel.provider && model === registryModel.id
-                ? registryModel
-                : undefined;
-            },
-            async completeSimple(_model, completion, options) {
-              registryCompletionOptions.push(options);
-              registryPrompts.push(completion.messages[0].content);
-              return { content: [{ type: "text", text: "Explicit registry brief." }] };
-            },
-          };
-        },
-      },
-    };
-  });
-  const request = {
-    sourceText: "Exact source span.",
-    maxBriefChars: 1_200,
-    signal: new AbortController().signal,
-  };
-  const explicitFirst = await explicit(request, { thinkingLevel: "max" });
-  const explicitSecond = await explicit(request, { thinkingLevel: "max" });
-  assert.deepEqual(explicitFirst, {
-    brief: "Explicit registry brief.",
-    provider: registryModel.provider,
-    model: registryModel.id,
-    effort: "low",
-    toolCalls: 0,
-  });
-  assert.deepEqual(explicitSecond, explicitFirst);
-  assert.equal(registryLoaderCalls, 1);
-  assert.equal(registryCreateCalls, 1);
-  assert.equal(registryCompletionOptions.length, 2);
-  assert(registryCompletionOptions.every((options) => options.signal === request.signal));
-  assert(registryCompletionOptions.every((options) => !("maxTokens" in options)),
-    "a token ceiling reached the provider through the registry path");
-  assert(registryCompletionOptions.every((options) => options.reasoning === "low"));
-
-  // The request IS the contract, so it is pinned as one. A brief does two jobs at once:
-  // it summarizes the span, and it states what expanding or peeking that fold would give
-  // back, which is the only basis the agent has for deciding to dig in again. The
-  // orientation slices the runtime computes and hashes into the fold identity are labelled
-  // distinctly, because a model that cannot tell the span from its surroundings briefs the
-  // surroundings. Every clause below would be missing from a thin "summarize this" prompt.
-  await explicit({
-    sourceText: "SPAN BODY: rewrote createSummarizeContextSpan and reran the gate suite.",
-    beforeText: "BEFORE BODY: the operator asked for a model-written brief.",
-    afterText: "AFTER BODY: the suite reported ninety green gates.",
-    maxBriefChars: 1_200,
-    signal: new AbortController().signal,
-  }, { thinkingLevel: "max" });
-  const oriented = registryPrompts.at(-1);
-  assert(oriented.startsWith("Write a factual brief of at most 1200 characters covering the " +
-    "SPAN TO BRIEF below, and nothing else."), oriented);
-  for (const clause of [
-    "it summarizes what the span contains, and it tells an agent what it would get back " +
-    "by expanding or peeking this fold later",
-    "the brief is its only visible trace",
-    "name the concrete things inside it: files, identifiers, decisions, results, errors",
-    "Do not describe the span abstractly.",
-    "their content is not part of what you are briefing",
-    "Use no preamble and no Markdown headers.",
-  ]) {
-    assert(oriented.includes(clause), `the brief request lost "${clause}"`);
-  }
-  const beforeSection = oriented.indexOf(
-    "BEFORE THE SPAN (orientation only, do not brief):\nBEFORE BODY: the operator asked");
-  const spanSection = oriented.indexOf(
-    "SPAN TO BRIEF:\nSPAN BODY: rewrote createSummarizeContextSpan");
-  const afterSection = oriented.indexOf(
-    "AFTER THE SPAN (orientation only, do not brief):\nAFTER BODY: the suite reported");
-  assert(beforeSection > 0 && spanSection > beforeSection && afterSection > spanSection,
-    `the three sections must be distinctly labelled and in conversation order: ${oriented}`);
-
-  // Empty orientation is the runtime's own literal for "no slice on this side". Pasted in
-  // raw it reads as content, so it becomes a stated absence instead.
-  await explicit({
-    sourceText: "SPAN BODY: a span with nothing either side of it.",
-    beforeText: "[]",
-    afterText: "[]",
-    maxBriefChars: 1_200,
-    signal: new AbortController().signal,
-  }, { thinkingLevel: "max" });
-  const unoriented = registryPrompts.at(-1);
-  assert(unoriented.includes("BEFORE THE SPAN (orientation only, do not brief): none.") &&
-    unoriented.includes("AFTER THE SPAN (orientation only, do not brief): none.") &&
-    !unoriented.includes("[]"),
-  `empty orientation must read as an absence, never as content: ${unoriented}`);
-
-  return {
-    default: modelFold.provenance,
-    toolCalls: 0,
-    hostLoads: loaderCalls,
-    runtimeCreates: createCalls,
-    deterministicValue: "refused",
-    unwiredSeamBriefs: "deterministic",
-    failureFallback: "deterministic",
-    publicSurfaceRefusals: 3,
-    malformedObjects: "rejected",
-    customCallback: "internal-seam",
-    explicitRegistryRuntimeCreates: registryCreateCalls,
-    briefRequestSections: ["instruction", "before", "span", "after"],
-    briefRequestPurposes: ["summary", "what-expand-or-peek-returns"],
-    emptyOrientation: "stated-absence",
-  };
 }
 
 async function gatePeekAndFoldIndex() {
@@ -3413,19 +3033,6 @@ async function gateEpochMarkCommit() {
  * fold. Gates that count preparations count them with this, so the upgrade lane adding
  * a caller does not read as a preparation nobody asked for.
  */
-/**
- * An upgrade-lane call is one whose subject is a fold that already exists; a warm
- * preparation names a candidate that does not. Both request shapes are recognised because
- * the lane batches: one call carries many spans, each naming its own committed fold, while
- * `prepareFold` still asks about one candidate at a time.
- */
-function isBriefUpgradeRequest(request) {
-  const upgrades = (id) => typeof id === "string" && id.startsWith("fold_");
-  if (Array.isArray(request?.spans)) {
-    return request.spans.length > 0 && request.spans.every((span) => upgrades(span?.candidateId));
-  }
-  return upgrades(request?.candidateId);
-}
 
 /** Every fold a request names, whichever shape it arrived in. */
 function requestFoldIds(request) {
@@ -9809,12 +9416,11 @@ async function gatePublicOptionSurface() {
   const register = (options) => makeRuntime(built, {
     ...options, packageRegistration: true, retiredOptions: options,
   }).tools;
-  // The whole surface, exercised together: five names, all accepted at once.
+  // The whole surface, exercised together: four names, all accepted at once.
   const surface = makeRuntime(built, {
     packageRegistration: true,
     retiredOptions: {
       thresholds: context.DEFAULT_THRESHOLDS,
-      summarizer: { provider: "openai", model: "gpt-brief", effort: "low" },
       providerInputBudget: 90_000,
       blacklistAutoFoldTools: new Set(["repo_stage"]),
       guidance: { actionResponses: true },
@@ -9854,24 +9460,24 @@ async function gatePublicOptionSurface() {
   assert.throws(() => register({ entryTypePrefix: "acme-active-context" }), /strand every fold already written/);
   // The predicate whose default guaranteed it never ran.
   assert.throws(() => register({ isMcpTool: () => true }), /mcp__server__tool naming convention/);
-  // And the internal brief-generator seam, which `summarizer` is the declarative form of.
-  // The message names the values that remain, so it must no longer offer "deterministic".
+  // The DELETED generator, refused under both its names with the corpus verdict in the
+  // message: a deployment still passing either asked for model briefs, and silence would
+  // read as having them. The message states what holds instead.
   assert.throws(() => register({ summarizeContextSpan: async () => ({ brief: "x" }) }),
-    /choose a brief generator with summarizer \("session" or \{ provider, model, effort \}\)/);
+    /summarizeContextSpan is no longer an option: the model brief generator is deleted/);
+  assert.throws(() => register({ summarizer: "session" }),
+    /summarizer is no longer an option: the model brief generator is deleted \(2026-08-14\)/);
+  assert.throws(() => register({ summarizer: { provider: "openai", model: "gpt-brief", effort: "low" } }),
+    /never consulted or never became visible.*deterministic brief.*keep them on load/s);
   // The MECHANISM that lost its switch. The switch is refused by name and the message says
   // the mechanism is on, not that the name is unknown: a deployment reading "unknown
   // option" would conclude the writes had stopped.
   assert.throws(() => register({ evidenceIngestion: false }),
     /evidenceIngestion is no longer an option: evidence ingestion is always on/);
-  // The refused VALUE, which no name-level check can catch: the option is on the surface
-  // and this one setting of it is not. The message says the deterministic brief is still
-  // the failure fallback, so the caller knows it kept the behavior it wanted.
-  assert.throws(() => register({ summarizer: "deterministic" }),
-    /summarizer has no "deterministic" value: the deterministic brief is the automatic fallback/);
   // A name this package never sold at all is refused with the whole surface named, so a
-  // typo reports the five rather than failing somewhere downstream at runtime.
+  // typo reports the four rather than failing somewhere downstream at runtime.
   assert.throws(() => register({ maxTarget: 0.8 }),
-    /maxTarget is not a pi-fold option: the surface is thresholds, summarizer, providerInputBudget, blacklistAutoFoldTools, guidance/);
+    /maxTarget is not a pi-fold option: the surface is thresholds, providerInputBudget, blacklistAutoFoldTools, guidance/);
   assert.throws(() => register({ foldScheduling: "epoch" }), /foldScheduling is not a pi-fold option/);
   // The seam is not reachable through the door: the runtime still accepts a synthetic
   // brand when registered directly, which is what keeps the neutrality gate honest.
@@ -9882,7 +9488,7 @@ async function gatePublicOptionSurface() {
   assert.throws(() => makeRuntime(built, { retiredOptions: { autoFoldableTools: new Set(["read"]) } }),
     /autoFoldableTools is now blacklistAutoFoldTools, and the sense is INVERTED/);
   return {
-    publicOptions: 5,
+    publicOptions: 4,
     renamesRefusedByOldName: renamed.length,
     identityOptionsRefused: 6,
     unknownNamesRefused: 2,
@@ -10063,342 +9669,6 @@ async function gateGuidanceOption() {
  * a brief the agent wrote. The failure leg is the fifth: a generator that throws leaves
  * the deterministic brief standing and says so on the record.
  */
-async function gateBriefUpgradesRideTheBoundary() {
-  const shape = { turns: 12, resultChars: 10_000, contextWindow: 100_000, toolName: "bash" };
-  const requests = [];
-  const upgradeText = (candidateId) =>
-    `The folded span records the completed bash inspection under ${candidateId} and its factual result.`;
-  const built = makeFixture(shape);
-  const runtime = makeRuntime(built, {
-    summarizeContextSpan: async (request) => {
-      requests.push(request);
-      return briefAnswer(request, upgradeText);
-    },
-  });
-  await startRuntime(runtime);
-
-  // An agent-written brief on a stale span, so this run carries both provenances into
-  // the same commits.
-  const suppliedBrief = "An early completed task stays exactly recoverable behind this fold.";
-  const suppliedMark = await toolCall(runtime, {
-    action: "fold",
-    ids: [built.turnEntries[1][0], built.turnEntries[1].at(-1)],
-    brief: suppliedBrief,
-  });
-  assert.equal(suppliedMark.details.ok, true);
-
-  // BOUNDARY N.
-  await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
-  const afterFirst = materialized(runtime);
-  const deterministic = afterFirst.folds.filter((fold) => fold.provenance.kind === "deterministic");
-  assert(deterministic.length, "The ladder committed no deterministic fold to upgrade");
-  const supplied = afterFirst.folds.filter((fold) => fold.provenance.kind === "supplied");
-  assert.equal(supplied.length, 1, "The agent's supplied brief did not commit as one fold");
-  const target = deterministic[0];
-  const deterministicBrief = target.brief;
-
-  // The generator was handed the request contract, over the fold's own source.
-  await settle();
-  assert(requests.length, "No brief was requested for a fold committed deterministic");
-  const request = requests.find((item) => requestFoldIds(item).includes(target.id));
-  assert(request, `No brief request named the committed fold ${target.id}`);
-  // Orientation, the cap and the signal belong to the CALL; the source belongs to each
-  // span, because one call now briefs the whole commit.
-  for (const field of ["beforeText", "beforeSha256", "afterText", "afterSha256",
-    "maxBriefChars", "signal"]) {
-    assert(request[field] !== undefined, `The upgrade request omitted ${field}`);
-  }
-  const targetSpan = request.spans.find((span) => span.candidateId === target.id);
-  for (const field of ["sourceText", "sourceSha256", "sourceRefs"]) {
-    assert(targetSpan[field] !== undefined, `The upgraded span omitted ${field}`);
-  }
-  assert.equal(targetSpan.sourceSha256, json.sha256Text(targetSpan.sourceText));
-  assert.equal(request.maxBriefChars, context.ACTIVE_CONTEXT_POLICY.maxBriefChars);
-
-  // BETWEEN THE BOUNDARIES: the brief is written and waiting, and not one byte moved.
-  const between = bytesOf((await project(runtime)).messages);
-  await settle();
-  assert.equal(bytesOf((await project(runtime)).messages), between,
-    "A finished brief upgrade rewrote the projection between commits");
-  const midState = materialized(runtime);
-  const midFold = midState.folds.find((fold) => fold.id === target.id);
-  assert.equal(context.foldProvenance(midFold, midState).kind, "deterministic",
-    "The upgrade applied outside a commit boundary");
-  assert.equal(context.foldBrief(midFold, midState), deterministicBrief);
-
-  // BOUNDARY N+1: new turns age in, the epoch commits again, and the upgrade rides it.
-  const aged = makeFixture({ ...shape, turns: 24, sessionId: built.sessionId });
-  for (const entry of aged.entries.slice(built.entries.length)) runtime.branch.push(entry);
-  runtime.messages.length = 0;
-  runtime.messages.push(...aged.messages);
-  const from = runtime.appended.length;
-  await runtimeCommit(runtime, { tokens: 92_000, contextWindow: 100_000, suffix: "second" });
-  const commits = contextEvents(runtime, from).filter((record) =>
-    record.kind === "context.commit" && record.deferred === false);
-  assert(commits.length, "The second boundary never committed");
-  const carrier = commits.find((record) => record.brief_upgrades > 0);
-  assert(carrier, "No commit record reported the upgrade it carried");
-  // The ceiling on one boundary is the work the lane can have outstanding, a queue's worth
-  // waiting plus the calls in flight, because every finished brief lands. In FOLDS, since
-  // that is what applies: each of those calls carries up to a batch width of spans.
-  const outstandingCalls = context.MAX_BRIEF_UPGRADE_QUEUE + context.MAX_BRIEF_UPGRADES_IN_FLIGHT;
-  const outstandingBound = outstandingCalls * context.MAX_BRIEF_BATCH_SPANS;
-  assert(carrier.brief_upgrades <= outstandingBound,
-    "A single boundary applied more upgrades than the lane can have outstanding");
-  // The same bound in the unit the constants are written in, so a lane that quietly started
-  // more calls than it may cannot hide inside a generous fold count.
-  assert(carrier.brief_upgrade_calls <= outstandingCalls,
-    "The lane had more calls queued and in flight than its constants allow");
-  assert(carrier.brief_upgrade_ids.split(",").includes(target.id),
-    "The commit record did not name the fold it upgraded");
-  const afterSecond = materialized(runtime);
-  const upgradedFold = afterSecond.folds.find((fold) => fold.id === target.id);
-  // Read through the presentation lens, because a fold RECORD is immutable: the brief
-  // and its generator live in the override map the agent's own rebrief writes to.
-  const upgradedProvenance = context.foldProvenance(upgradedFold, afterSecond);
-  assert.equal(upgradedProvenance.kind, "model", "The deterministic brief was never upgraded");
-  assert.equal(upgradedProvenance.model, "gpt-5.6-luna");
-  assert.equal(upgradedProvenance.provider, "openai-codex");
-  assert.equal(context.foldBrief(upgradedFold, afterSecond), upgradeText(target.id));
-  assert.notEqual(context.foldBrief(upgradedFold, afterSecond), deterministicBrief);
-  // The record itself never moved, which is what keeps the durable ledger append-only.
-  assert.equal(upgradedFold.brief, deterministicBrief);
-  assert.equal(upgradedFold.provenance.kind, "deterministic");
-
-  // Agent judgment outranks automation: a supplied brief is never sent and never moved.
-  const suppliedAfter = afterSecond.folds.find((fold) => fold.id === supplied[0].id);
-  assert.equal(context.foldProvenance(suppliedAfter, afterSecond).kind, "supplied",
-    "An agent-written brief was upgraded");
-  // Its text may have grown by an absorbed sliver, which is the wedge absorber's note
-  // and not a rewrite of what the agent said; it is never the generator's brief.
-  assert(context.foldBrief(suppliedAfter, afterSecond).startsWith(suppliedBrief),
-    "The agent's own words were rewritten");
-  assert.equal(context.foldBrief(suppliedAfter, afterSecond).includes(upgradeText(supplied[0].id)), false);
-  assert.equal(requests.some((item) => requestFoldIds(item).includes(supplied[0].id)), false,
-    "A supplied brief was sent to the generator");
-
-  // THE FAILURE LEG. The deterministic brief stands, and the stream says why.
-  let attempts = 0;
-  const failing = makeRuntime(makeFixture(shape), {
-    summarizeContextSpan: async () => {
-      attempts += 1;
-      throw new Error("summarizer unavailable for the upgrade lane");
-    },
-  });
-  const failingBuilt = failing.built;
-  await startRuntime(failing);
-  await runtimeCommit(failing, { tokens: 88_000, contextWindow: 100_000 });
-  await settle();
-  const failingAged = makeFixture({ ...shape, turns: 24, sessionId: failingBuilt.sessionId });
-  for (const entry of failingAged.entries.slice(failingBuilt.entries.length)) failing.branch.push(entry);
-  failing.messages.length = 0;
-  failing.messages.push(...failingAged.messages);
-  const failedFrom = failing.appended.length;
-  await runtimeCommit(failing, { tokens: 92_000, contextWindow: 100_000, suffix: "second" });
-  assert(attempts > 0, "The failing generator was never called");
-  const failedCommits = contextEvents(failing, failedFrom).filter((record) =>
-    record.kind === "context.commit" && record.deferred === false);
-  const loud = failedCommits.find((record) => record.brief_upgrade_failures > 0);
-  assert(loud, "A generator failure left no trace on any commit record");
-  assert.equal(typeof loud.brief_upgrade_error, "string");
-  assert(loud.brief_upgrade_error.includes("summarizer unavailable"),
-    "The failure record did not carry the generator's own words");
-  assert.equal(loud.brief_upgrades, 0);
-  const failedState = materialized(failing);
-  assert(failedState.folds.some((fold) => context.foldProvenance(fold, failedState).kind === "deterministic"),
-    "A failed upgrade did not leave the deterministic brief in place");
-
-  // THE DRAIN RATE.
-  //
-  // A slow generator is the ordinary case, not the failure case: the live run of
-  // 2026-08-10 measured 6.9s, 9.4s and 14.3s a call. What the lane must not do is let
-  // that latency, or the gap between ladder passes, decide how many folds carry a model
-  // brief. This leg holds every call open on purpose, so what the lane does with the
-  // time is observable rather than inferred from a race.
-  const held = [];
-  let open = 0;
-  let peakOpen = 0;
-  // Flipped for the window where the test drives no pass at all, so a call that starts
-  // inside it can only have been started by another call finishing.
-  let passesFrozen = false;
-  const slowShape = { turns: 12, resultChars: 10_000, contextWindow: 100_000, toolName: "bash" };
-  let grown = makeFixture(slowShape);
-  const slow = makeRuntime(grown, {
-    summarizeContextSpan: async (request) => {
-      open += 1;
-      peakOpen = Math.max(peakOpen, open);
-      const call = {
-        foldIds: requestFoldIds(request),
-        openAtStart: open,
-        startedWithoutPass: passesFrozen,
-        release: null,
-      };
-      const completion = new Promise((resolve) => { call.release = resolve; });
-      held.push(call);
-      await completion;
-      open -= 1;
-      return briefAnswer(request, upgradeText);
-    },
-  });
-  await startRuntime(slow);
-  const ageAndCommit = async (round) => {
-    const previous = grown.entries.length;
-    grown = makeFixture({ ...slowShape, turns: 12 + 12 * round, sessionId: grown.sessionId });
-    for (const entry of grown.entries.slice(previous)) slow.branch.push(entry);
-    slow.messages.length = 0;
-    slow.messages.push(...grown.messages);
-    const at = slow.appended.length;
-    await runtimeCommit(slow, { tokens: 88_000, contextWindow: 100_000, suffix: `slow-${round}` });
-    await settle();
-    return contextEvents(slow, at).filter((record) =>
-      record.kind === "context.commit" && record.deferred === false);
-  };
-  let slowCommits = [];
-  for (let round = 1; round <= 4; round += 1) slowCommits = [...slowCommits, ...await ageAndCommit(round)];
-  assert(slowCommits.length >= 2, "The slow-generator fixture never reached a second boundary");
-
-  // THE BOUND. More folds were offered to the lane than it may brief at once, and it
-  // started exactly the constant, so the assertion below is not describing an idle lane.
-  assert(held.length > 1, "The lane never held a second generator call open");
-  assert.equal(peakOpen, context.MAX_BRIEF_UPGRADES_IN_FLIGHT,
-    "The lane did not fill, or overran, its in-flight bound");
-  assert.equal(held.length, context.MAX_BRIEF_UPGRADES_IN_FLIGHT,
-    "A call started past the in-flight bound while every earlier call was still open");
-  const backedUp = slowCommits.filter((record) =>
-    record.brief_upgrades_waiting > context.MAX_BRIEF_UPGRADES_IN_FLIGHT);
-  assert(backedUp.length, "Nothing was waiting behind the in-flight calls, so the bound never bound");
-  assert.equal(slowCommits.every((record) => record.brief_upgrades === 0), true,
-    "A brief landed on a boundary while its generator call was still open");
-
-  // WHAT THE JAM COSTS, SAID OUT LOUD. With every call held open the queue fills, and a
-  // leaf that arrives at a full queue is not deferred, it is finished: its source is exact
-  // active evidence at that commit and a placeholder after it, so no later boundary can
-  // brief it. That is the only permanent outcome in this lane and it used to be silent,
-  // invisible to `brief_upgrades_waiting` precisely because a shed leaf is what is no
-  // longer waiting. A slow generator would have shown falling brief quality and no cause.
-  const shed = slowCommits.filter((record) => record.brief_upgrades_abandoned > 0);
-  assert(shed.length,
-    "The lane jammed for four boundaries and no commit reported shedding a single leaf");
-  assert(shed.every((record) =>
-    record.brief_upgrades_abandoned_ids.split(",").filter(Boolean).length ===
-    record.brief_upgrades_abandoned),
-  "A commit reported a shed count its named ids do not account for");
-  // The bucket holds two causes. Everything shed HERE is shed for the jam, and a reason
-  // list that does not line up with the id list names the wrong fold either way.
-  assert(shed.every((record) =>
-    record.brief_upgrades_abandoned_reasons.split(",").filter(Boolean).length ===
-    record.brief_upgrades_abandoned &&
-    record.brief_upgrades_abandoned_reasons.split(",").every((reason) => reason === "queue-full")),
-  "A leaf shed by the jam was reported under another cause, or without one");
-  // The shed leaves are real folds of this session, not a counter running on its own.
-  const shedIds = new Set(shed.flatMap((record) =>
-    record.brief_upgrades_abandoned_ids.split(",").filter(Boolean)));
-  const slowFolds = new Set(materialized(slow).folds.map((fold) => fold.id));
-  assert([...shedIds].every((id) => slowFolds.has(id)),
-    "A commit named a shed fold the session does not hold");
-
-  // ANTI-VACUITY. The second call started while the first was still open, so a lane with
-  // one slot could not have started it, and no call here finished before its release:
-  // under the previous behavior this timeline produces exactly one brief per boundary.
-  assert.equal(held[1].openAtStart, 2,
-    "The second call did not overlap the first, so the fixture proves nothing about concurrency");
-
-  // A FINISHED CALL STARTS THE NEXT ONE. No pass runs inside this window.
-  passesFrozen = true;
-  const beforeRelease = held.length;
-  held[0].release();
-  await settle();
-  assert(held.length > beforeRelease,
-    "A finished call started nothing; the lane still waits for a ladder pass to drain");
-  assert(held.at(-1).startedWithoutPass, "The lane's own drain did not start the last call");
-  for (const call of held) call.release();
-  await settle();
-
-  // THE BOUNDARY CARRIES EVERY BRIEF THAT IS READY, WHICH IS MORE THAN ONE.
-  const drainFrom = slow.appended.length;
-  await ageAndCommit(5);
-  const drained = contextEvents(slow, drainFrom).filter((record) =>
-    record.kind === "context.commit" && record.deferred === false);
-  const drainCarrier = drained.find((record) => record.brief_upgrades > 0);
-  assert(drainCarrier, "No boundary carried the briefs the generator had written");
-  assert(drainCarrier.brief_upgrades > 1,
-    `A boundary carried ${drainCarrier.brief_upgrades} upgrade with more than one ready`);
-  const carried = drainCarrier.brief_upgrade_ids.split(",").filter(Boolean);
-  assert.equal(carried.length, drainCarrier.brief_upgrades);
-  assert(drainCarrier.brief_upgrades <= outstandingBound,
-    "A drained boundary carried more upgrades than the lane can have outstanding");
-  // In CALLS, because one call now carries a whole commit's spans: the claim is that the
-  // boundary's briefs came from more than one call, and that every call past the first was
-  // started by the lane's own concurrency or its own drain rather than by a ladder pass.
-  // Counting folds here would credit a single batch with proving concurrency it never had.
-  const contributingCalls = held.filter((call) => call.foldIds.some((id) => carried.includes(id)));
-  assert(contributingCalls.length > 1,
-    "Every brief the boundary carried came from one call, so concurrency was never exercised");
-  const beyondOneSlot = contributingCalls.filter((call) =>
-    call.openAtStart > 1 || call.startedWithoutPass);
-  assert(beyondOneSlot.length >= contributingCalls.length - 1,
-    "The boundary's extra upgrades came from calls a one-slot lane could also have made");
-  const drainedState = materialized(slow);
-  for (const id of carried) {
-    const fold = drainedState.folds.find((item) => item.id === id);
-    assert(fold, `The commit record named a fold ${id} that is not in state`);
-    const provenance = context.foldProvenance(fold, drainedState);
-    assert.equal(provenance.kind, "model", `The upgrade named for ${id} did not land`);
-    assert.equal(provenance.model, "gpt-5.6-luna");
-    // Still the override map, still an immutable record underneath, at any drain rate.
-    assert.equal(fold.provenance.kind, "deterministic");
-  }
-  // Nothing was held back for a later boundary: what the lane finished, the boundary took.
-  const laterCarriers = drained.filter((record) =>
-    record !== drainCarrier && record.brief_upgrades > 0);
-  assert.equal(laterCarriers.length, 0, "A finished brief waited for a second boundary");
-  // Nothing the lane started may outlive the gate: the drain keeps starting calls, so
-  // the sweep runs until the queue behind it is empty.
-  for (let sweep = 0; sweep < 4; sweep += 1) {
-    for (const call of held) call.release();
-    await settle();
-  }
-
-  return {
-    upgradedFolds: carrier.brief_upgrades,
-    inFlightBound: context.MAX_BRIEF_UPGRADES_IN_FLIGHT,
-    peakInFlight: peakOpen,
-    queueCap: context.MAX_BRIEF_UPGRADE_QUEUE,
-    leavesShedWhileJammed: [...shedIds].length,
-    upgradesOnTheDrainedBoundary: drainCarrier.brief_upgrades,
-    beyondOneSlot: beyondOneSlot.length,
-    projectionStableBetweenBoundaries: true,
-    suppliedUntouched: true,
-    failureIsLoud: loud.brief_upgrade_failures,
-  };
-}
-
-/**
- * A reading of the pending marks takes a VIEW; only a write takes a copy.
- *
- * `markSpanRefs` resolves one mark's span and consults the pending marks to tell a
- * span that is merely deferred from one that is gone. Every reading that walks the
- * marks calls it once per mark: the accounting, the eligibility, the staleness, the
- * current-turn guard, the claimed keys, the absorption. While the read accessor deep
- * cloned, that made each pass quadratic in the mark count over an array that grows
- * with the epoch, and it profiled at 21 percent of a 120-turn session, ahead of every
- * projection, digest and hash in the runtime.
- *
- * The copy was never doing anything: nothing mutates what it hands back. So this pins
- * both halves rather than a stopwatch, which would only measure the machine. The read
- * is the state's own array, by IDENTITY, so a copy reintroduced anywhere fails here.
- * Every reading then runs against a FROZEN array, so a reading that starts mutating
- * throws instead of quietly relying on the copy that used to absorb it. And the write
- * path still takes its copy, so the caller's array cannot reach into committed state.
- *
- * The freeze is DEEP, and it has to be. A shallow freeze catches a reading that pushes,
- * splices or sorts the array, and misses the whole class the accessor change actually
- * opened: a write to `mark.brief`, to `mark.parts`, or to a part's own `ref`. While the
- * accessor cloned, that write landed on a throwaway and was invisible; against a view it
- * lands in committed state. Freezing the marks, their parts and the refs inside them is
- * what makes this gate's claim, that a reading which starts mutating throws, true of the
- * objects and not only of the array holding them.
- */
 function deepFreezeMarks(marks) {
   let frozen = 0;
   const walk = (value) => {
@@ -10569,230 +9839,6 @@ async function gateEvidenceDigestDerivedOncePerObject() {
  * every fold in the batch and is what a provenance join reads. What was lost is the ability
  * to say WHICH BYTES produced a brief, which is exactly the question worth asking when a
  * brief looks wrong.
- */
-async function gateBatchedBriefNamesItsSource() {
-  const shape = { turns: 16, resultChars: 10_000, contextWindow: 100_000, toolName: "bash" };
-  const calls = [];
-  const runtime = makeRuntime(makeFixture(shape), {
-    summarizeContextSpan: async (request) => {
-      calls.push(request);
-      return briefAnswer(request, (id) => `Batched brief naming ${id} and the bash result it folded.`);
-    },
-  });
-  await startRuntime(runtime);
-  await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
-  await settle();
-
-  const briefs = contextEvents(runtime).filter((event) => event.kind === "context.brief");
-  const batched = briefs.filter((event) => event.spans > 1);
-  // ANTI-VACUITY: without a real batch carrying real bytes there is nothing to digest.
-  assert(batched.length > 0, "No batched brief was recorded, so this fixture proves nothing");
-  const EMPTY_SHA256 = createHash("sha256").update("").digest("hex");
-  for (const event of batched) {
-    assert(event.source_chars > 0,
-      "A batched brief reported no source chars, so its digest claim is untestable");
-    assert.notEqual(event.source_sha256, EMPTY_SHA256,
-      `A batched brief over ${event.source_chars} chars digested the EMPTY STRING`);
-    assert(/^[a-f0-9]{64}$/.test(event.source_sha256),
-      `A batched brief carried a malformed source digest: ${event.source_sha256}`);
-    // Attribution is unchanged and still the join key.
-    assert(Array.isArray(event.fold_ids) && event.fold_ids.length === event.spans,
-      "A batched brief did not name one fold per span");
-  }
-  // The digest is of the SPANS, boundaries included: two batches carrying identical bytes
-  // split differently must not collide, or the field cannot identify a call.
-  const digestOf = (texts) => createHash("sha256").update(JSON.stringify(texts)).digest("hex");
-  assert.notEqual(digestOf(["ab", "c"]), digestOf(["a", "bc"]),
-    "Span boundaries are not part of the digest, so differently split batches collide");
-  // And a batch's digest is reproducible from what the call actually carried.
-  const upgrades = calls.filter(isBriefUpgradeRequest).filter((call) => call.spans.length > 1);
-  assert(upgrades.length > 0, "No multi-span upgrade call was observed");
-  const expected = digestOf(upgrades[0].spans.map((span) => span.sourceText));
-  assert(batched.some((event) => event.source_sha256 === expected),
-    "No recorded batched brief digest matched the spans the call carried");
-
-  return {
-    batchedBriefs: batched.length,
-    spansInTheFirst: batched[0].spans,
-    sourceCharsInTheFirst: batched[0].source_chars,
-    digestsTheSpansNotTheEmptyString: true,
-    boundariesIncluded: true,
-  };
-}
-
-async function gateOneCallPerCommit() {
-  const shape = { turns: 16, resultChars: 10_000, contextWindow: 100_000, toolName: "bash" };
-  const calls = [];
-  const built = makeFixture(shape);
-  const runtime = makeRuntime(built, {
-    summarizeContextSpan: async (request) => {
-      calls.push(request);
-      return briefAnswer(request, (id) => `Batched brief naming ${id} and the bash result it folded.`);
-    },
-  });
-  await startRuntime(runtime);
-  await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
-  await settle();
-
-  const upgradeCalls = calls.filter(isBriefUpgradeRequest);
-  const briefedSpans = upgradeCalls.flatMap((call) => call.spans);
-  const committed = materialized(runtime).folds
-    .filter((fold) => fold.provenance.kind === "deterministic")
-    .map((fold) => fold.id);
-  // ANTI-VACUITY. The claim is that a commit's folds cost FEWER calls than folds, so the
-  // fixture has to fold several and the old per-fold behavior has to be what fails here:
-  // it would have produced exactly one call per span.
-  assert(briefedSpans.length > 1,
-    "The commit briefed one span, so this fixture cannot demonstrate batching");
-  assert(upgradeCalls.length < briefedSpans.length,
-    `${briefedSpans.length} spans still took ${upgradeCalls.length} calls: they were not batched`);
-  assert.deepEqual([...briefedSpans.map((span) => span.candidateId)].sort(), [...committed].sort(),
-    "The batches did not carry exactly the folds the commit made deterministic");
-  // Packing is TIGHT: every call but the last is closed by a bound, not by indifference, so
-  // a lane that sent one span per call while claiming to batch fails here.
-  assert.equal(upgradeCalls.length, Math.ceil(briefedSpans.length / context.MAX_BRIEF_BATCH_SPANS),
-    "The commit's spans were split across more calls than the batch width requires");
-  for (const call of upgradeCalls) {
-    // The source budget is the CALL's, the same ceiling one span was always held to, so the
-    // queue's memory bound did not move when the unit changed.
-    const chars = call.spans.reduce((sum, span) => sum + span.sourceText.length, 0);
-    assert(chars <= context.ACTIVE_CONTEXT_POLICY.maxSourceChars,
-      `A batch carried ${chars} source chars, past the ${context.ACTIVE_CONTEXT_POLICY.maxSourceChars} budget`);
-    assert(call.spans.length <= context.MAX_BRIEF_BATCH_SPANS,
-      "A batch carried more spans than the batch width allows");
-    // Orientation is the run's and belongs to no brief, so it is stated once per call
-    // rather than repeated per span.
-    assert.equal(call.sourceText, undefined, "A batched request still carried a single span's source");
-    for (const field of ["beforeText", "afterText", "maxBriefChars"]) {
-      assert(call[field] !== undefined, `The batched request omitted the call-level ${field}`);
-    }
-  }
-  const batch = upgradeCalls[0];
-
-  // POSITION, NOT NAME. Every brief landed on the fold whose span sat at its index.
-  const aged = makeFixture({ ...shape, turns: 32, sessionId: built.sessionId });
-  for (const entry of aged.entries.slice(built.entries.length)) runtime.branch.push(entry);
-  runtime.messages.length = 0;
-  runtime.messages.push(...aged.messages);
-  await runtimeCommit(runtime, { tokens: 92_000, contextWindow: 100_000, suffix: "second" });
-  const applied = materialized(runtime);
-  let landed = 0;
-  for (const span of briefedSpans) {
-    const fold = applied.folds.find((item) => item.id === span.candidateId);
-    if (!fold) continue;
-    const provenance = context.foldProvenance(fold, applied);
-    if (provenance.kind !== "model") continue;
-    landed += 1;
-    assert(context.foldBrief(fold, applied).includes(span.candidateId),
-      `The brief on ${span.candidateId} names a different fold, so the split misattributed it`);
-  }
-  assert(landed > 1, "Fewer than two batched briefs landed, so attribution was never tested");
-
-  // THE CURE IS PER SPAN. The first answer leaves span 0 empty and overruns span 1; the
-  // retry must carry exactly those two, and the untouched spans must not be re-asked.
-  const cureCalls = [];
-  // Narrower than the batching leg on purpose: this leg is about WHICH spans a cure
-  // re-asks, so the commit must land in one batch or "cured once" would be counted per
-  // batch and the selectivity claim would be about neither.
-  const cureShape = { ...shape, turns: 10 };
-  const cureBuilt = makeFixture(cureShape);
-  const curing = makeRuntime(cureBuilt, {
-    summarizeContextSpan: async (request) => {
-      cureCalls.push(request);
-      const isCure = typeof request.cure === "string" && request.cure.length > 0;
-      return briefAnswer(request, (id) => {
-        if (isCure) return `Cured brief for ${id}, within the stated limit.`;
-        const at = request.spans.findIndex((span) => span.candidateId === id);
-        if (at === 0) return "";
-        if (at === 1) return `x${"y".repeat(context.ACTIVE_CONTEXT_POLICY.maxBriefChars * 2)}`;
-        return `First-pass brief for ${id}, within the stated limit.`;
-      });
-    },
-  });
-  await startRuntime(curing);
-  await runtimeCommit(curing, { tokens: 88_000, contextWindow: 100_000 });
-  await settle();
-  const cureUpgrades = cureCalls.filter(isBriefUpgradeRequest);
-  assert.equal(cureUpgrades.length, 2,
-    `The cure fixture made ${cureUpgrades.length} calls; it must be one batch and one cure`);
-  const first = cureUpgrades[0];
-  const retry = cureUpgrades[1];
-  assert(first.spans.length > 2, "The cure fixture needs more than two spans to show selectivity");
-  assert.equal(retry.spans.length, 2,
-    `The cure re-asked ${retry.spans.length} spans instead of the two that missed`);
-  assert.deepEqual(
-    retry.spans.map((span) => span.candidateId),
-    first.spans.slice(0, 2).map((span) => span.candidateId),
-    "The cure re-asked the wrong spans");
-  assert(/Brief 1:/.test(retry.cure) && /Brief 2:/.test(retry.cure),
-    "The cure did not name its complaints per span");
-
-  // AND THE COMPLAINTS COME BACK KEYED TO THE SPAN, not to the subset that was last asked.
-  // The two orders diverge the instant a cure re-asks a subset: here spans 1 and 3 fail and
-  // spans 0 and 2 land, so the retry's list is [1, 3] and a caller reading it positionally
-  // reports span 3's failure under span 1's name. Driven against the function directly,
-  // because the runtime keeps only the last failure and one is not enough to show an order.
-  const spans = [0, 1, 2, 3].map((index) => ({ candidateId: `span-${index}` }));
-  const overLong = `x${"y".repeat(context.ACTIVE_CONTEXT_POLICY.maxBriefChars * 2)}`;
-  const keyed = await context.generatedBriefs({
-    summarize: async (request) => briefAnswer(request, (id) => {
-      // Both failures survive their cure, and they fail DIFFERENTLY, which is the whole
-      // point: one empty and one over the cap cannot be confused for each other.
-      if (id === "span-1") return "";
-      if (id === "span-3") return overLong;
-      return `Good brief for ${id}, within the stated limit.`;
-    }),
-    request: { spans },
-    spans,
-    maxBriefChars: context.ACTIVE_CONTEXT_POLICY.maxBriefChars,
-    toolName: "acme_context",
-  });
-  assert.equal(keyed.complaints.length, spans.length,
-    "The complaints came back shorter than the spans, so they cannot be read by span");
-  assert(keyed.briefs[0] && keyed.briefs[2], "A span that met the contract was reported as failing");
-  assert(!keyed.briefs[1] && !keyed.briefs[3], "A span that failed twice was reported as landing");
-  assert.equal(keyed.complaints[0], null, "A span that landed carries a complaint");
-  assert.equal(keyed.complaints[2], null, "A span that landed carries a complaint");
-  assert(/empty|no brief|blank/i.test(keyed.complaints[1]),
-    `Span 1 failed empty and its complaint reads ${JSON.stringify(keyed.complaints[1])}`);
-  assert(/\b\d{4,}\b/.test(keyed.complaints[3]),
-    `Span 3 failed over the cap and its complaint reads ${JSON.stringify(keyed.complaints[3])}`);
-  // The two are not interchangeable, which is what makes the keying claim mean something.
-  assert.notEqual(keyed.complaints[1], keyed.complaints[3],
-    "Both failures carry the same complaint, so no ordering could be detected either way");
-
-  return {
-    complaintsKeyedBySpan: keyed.complaints.map((entry) => entry === null),
-    callsForOneCommit: upgradeCalls.length,
-    spansBriefed: briefedSpans.length,
-    spansInTheFirstCall: batch.spans.length,
-    batchWidth: context.MAX_BRIEF_BATCH_SPANS,
-    briefsAttributedByPosition: landed,
-    cureCalls: cureUpgrades.length,
-    curedSpans: retry.spans.length,
-    untouchedSpansNotReasked: first.spans.length - retry.spans.length,
-  };
-}
-
-/**
- * A COMMIT THAT VANISHES AT PERSISTENCE ANNOUNCES ITSELF.
- *
- * `persistenceProjection` keeps only folds whose refs still resolve against the snapshot,
- * which is right when evidence has genuinely left the branch. But a write that ARRIVES
- * with new folds and projects down to something byte-equal to what is already durable has
- * had every one of them dropped, and the quiet return also resets in-memory state BACKWARDS
- * to the persisted revision. The marks go back to pending, the same commit is retried on the
- * next boundary, and it vanishes again, forever, with nothing reported.
- *
- * That is not hypothetical. sol-20260812 rep 3 ran a band-top commit at revision 143 that
- * folded 579,489 source chars into 85,463 of placeholder; durable state never passed 134,
- * none of its 11 folds reached a record, occupancy climbed unopposed past its budget and the
- * next request was refused. Nothing in the run said so, because a silent return is not a
- * failure. The same plan on the previous build committed 15 times with no gap at all.
- *
- * The sabotage here is the honest one: the summarizer empties the branch mid-commit, so the
- * folds the epoch is about to persist can no longer resolve. That is exactly the shape of
- * the live failure and it needs no access to internals.
  */
 async function gateVanishedCommitAnnouncesItself() {
   const shape = { turns: 10, resultChars: 12_000, contextWindow: 100_000 };
@@ -11791,154 +10837,6 @@ async function gateIncrementalEvidenceMap() {
  * generator's own call log. That is what proves the wrapper sits on every path rather than
  * on the one path a fixture happened to exercise.
  */
-async function gateGeneratorCallsAreOnTheRecord() {
-  const shape = { turns: 12, resultChars: 10_000, contextWindow: 100_000, toolName: "bash" };
-  const USAGE = { input: 4321, output: 77, totalTokens: 4398, costTotal: 0.0123 };
-  const briefFor = (candidateId) =>
-    `The folded span records the completed bash inspection under ${candidateId} and its factual result.`;
-
-  const observed = [];
-  let mode = "usage";
-  const built = makeFixture(shape);
-  const runtime = makeRuntime(built, {
-    summarizeContextSpan: async (request) => {
-      observed.push(request);
-      return {
-        brief: briefFor(request.candidateId),
-        provider: "openai-codex",
-        model: "gpt-5.6-terra",
-        effort: "medium",
-        toolCalls: 0,
-        ...(mode === "usage" ? { usage: { ...USAGE } } : {}),
-      };
-    },
-  });
-  await startRuntime(runtime);
-  await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
-  await settle();
-
-  const briefed = contextEvents(runtime).filter((record) => record.kind === "context.brief");
-  // ANTI-VACUITY: the lane actually ran, so the equality below is not 0 === 0.
-  assert(observed.length > 0, "The generator was never called, so this gate proves nothing");
-  const laneCalls = observed.length;
-  assert.equal(briefed.length, laneCalls,
-    `${laneCalls} generator calls produced ${briefed.length} records: a call escaped the ledger`);
-
-  const ok = briefed.filter((record) => record.outcome === "ok");
-  assert.equal(ok.length, laneCalls, "A successful generator call was not recorded as ok");
-  const sample = ok[0];
-  // A batch names its folds in `fold_ids`; a single-span call names one in `fold_id`. Every
-  // id the record claims must be an id the generator was actually handed, whichever it is.
-  const recordedIds = Array.isArray(sample.fold_ids) && sample.fold_ids.length
-    ? sample.fold_ids
-    : [sample.fold_id];
-  assert(observed.some((request) => {
-    const given = requestFoldIds(request);
-    return recordedIds.every((id) => given.includes(id));
-  }), "The recorded fold ids match no call the generator was actually given");
-  assert.equal(sample.provider, "openai-codex");
-  assert.equal(sample.model, "gpt-5.6-terra");
-  assert.equal(sample.effort, "medium");
-  assert(sample.source_chars > 0 && /^[a-f0-9]{64}$/.test(sample.source_sha256),
-    "The record does not say what the generator read");
-  assert(sample.brief_chars > 0 && /^[a-f0-9]{64}$/.test(sample.brief_sha256),
-    "The record does not say what the generator wrote");
-  assert(Number.isInteger(sample.duration_ms) && sample.duration_ms >= 0, "No execution duration recorded");
-  assert(Number.isInteger(sample.queued_ms) && sample.queued_ms >= 0,
-    "No queue wait recorded, so a backed-up lane would read as a slow generator");
-  assert.deepEqual(sample.usage, USAGE, "Provider usage was not passed through verbatim");
-
-  // An absent cost and a zero cost are different facts, so the record must not invent one.
-  mode = "no-usage";
-  const quiet = makeFixture(shape);
-  const quietCalls = [];
-  const quietRuntime = makeRuntime(quiet, {
-    summarizeContextSpan: async (request) => {
-      quietCalls.push(request);
-      return {
-        brief: briefFor(request.candidateId),
-        provider: "openai-codex",
-        model: "gpt-5.6-terra",
-        effort: "medium",
-        toolCalls: 0,
-      };
-    },
-  });
-  await startRuntime(quietRuntime);
-  await runtimeCommit(quietRuntime, { tokens: 88_000, contextWindow: 100_000 });
-  await settle();
-  const quietRecords = contextEvents(quietRuntime).filter((record) => record.kind === "context.brief");
-  assert.equal(quietRecords.length, quietCalls.length,
-    "The no-usage fixture dropped a generator call from the ledger");
-  assert(quietRecords.length, "The no-usage fixture produced no generator records");
-  assert(quietRecords.every((record) => record.usage === null),
-    "A generator that reported no usage was recorded as having reported some");
-
-  // A failure is recorded and rethrown: this observes, it decides nothing, and the fold
-  // keeps the deterministic brief it committed with.
-  const failing = makeFixture(shape);
-  const failingRuntime = makeRuntime(failing, {
-    summarizeContextSpan: async () => { throw new Error("generator refused this span"); },
-  });
-  await startRuntime(failingRuntime);
-  await runtimeCommit(failingRuntime, { tokens: 88_000, contextWindow: 100_000 });
-  await settle();
-  const failures = contextEvents(failingRuntime).filter((record) => record.kind === "context.brief");
-  assert(failures.length, "A failing generator produced no record at all");
-  assert(failures.every((record) => record.outcome === "error"), "A generator failure was not recorded as an error");
-  assert(failures.every((record) => String(record.error).includes("generator refused this span")),
-    "The recorded failure does not say what went wrong");
-  assert(materialized(failingRuntime).folds.some((fold) => fold.provenance.kind === "deterministic"),
-    "A recorded failure changed the fallback: the fold no longer keeps its deterministic brief");
-
-  // A timeout is neither a refusal nor a provider fault, and telling them apart decides
-  // whether to raise the bound or change the generator. Driven by the message the timeout
-  // race actually throws, so the classifier is exercised without waiting out briefTimeoutMs.
-  const timedOut = makeFixture(shape);
-  const timedOutRuntime = makeRuntime(timedOut, {
-    summarizeContextSpan: async () => { throw new Error("Brief upgrade exceeded 120000ms"); },
-  });
-  await startRuntime(timedOutRuntime);
-  await runtimeCommit(timedOutRuntime, { tokens: 88_000, contextWindow: 100_000 });
-  await settle();
-  const timeouts = contextEvents(timedOutRuntime).filter((record) => record.kind === "context.brief");
-  assert(timeouts.length, "The timeout fixture produced no generator records");
-  assert(timeouts.every((record) => record.outcome === "timeout"),
-    "A timed-out generator call was recorded as an ordinary error");
-
-  return {
-    generatorCalls: laneCalls,
-    recordsEmitted: briefed.length,
-    usagePassedThrough: true,
-    absentUsageStaysAbsent: true,
-    failureRecordedAndRethrown: true,
-    timeoutDistinctFromError: true,
-  };
-}
-
-/**
- * A parent's brief indexes EVERY child, and a group is briefed from material.
- *
- * The 2026-08-11 rep is the case. A parent's fallback brief concatenated its children's
- * briefs and sliced the result at the cap, so ten children whose briefs may each fill the
- * cap needed ten times the budget and the cut landed inside the first one or two. Every
- * parent in that run came out at exactly 1,200 characters; the bottom rung showed five of
- * ten children and every rung above it showed ONE, because at rung two the first child was
- * itself a capped parent and spent the whole budget alone. A group that cannot say what a
- * member holds cannot be navigated back into, and the agent went to disk instead.
- *
- * Two properties, at both rungs. COVERAGE: the budget is divided, so every child appears
- * whatever its neighbours cost, and a child short enough to fit keeps its whole sentence
- * because the ones that fit hand their remainder to the ones that do not. MATERIAL: the
- * generator reads the group at depth one, its children opened and the grandchildren left
- * as placeholders, so a brief describes the span rather than summarizing summaries; when
- * the opened children do not fit, the LARGEST collapses back to brief-only first, and only
- * as many collapse as the budget forces.
- *
- * The cure is the third: length is a criterion the request states, so a brief that misses
- * it is handed back once with the complaint rather than cut. One cure, and only for a
- * criterion: attribution drift is the harness's own wiring and fails on the first answer.
- */
 async function gateParentBriefCoversEveryChild() {
   const cap = context.ACTIVE_CONTEXT_POLICY.maxBriefChars;
   const snapshotOf = (built, thresholds = NO_FRESH_TAIL, policy) => context.mapActiveContext({
@@ -12079,97 +10977,6 @@ async function gateParentBriefCoversEveryChild() {
   assert(packed.every((entry, at) => entry.child === at + 1),
     "Packing reordered the children: what collapses is chosen by size, what SHOWS stays in span order");
 
-  // THE CURE. A brief over the stated limit is answered with the complaint rather than cut,
-  // exactly once, and the second answer stands on its own.
-  const attribution = { provider: "openai-codex", model: "gpt-5.6-terra", effort: "medium", toolCalls: 0 };
-  const good = `${marker(0)} the curl HTTP/2 stage, its CMakeLists survey, and the failing test it named.`;
-  const asked = [];
-  const cured = await context.generatedBrief({
-    summarize: async (request) => {
-      asked.push(request);
-      return { ...attribution, brief: asked.length === 1 ? "x".repeat(cap + 400) : good };
-    },
-    request: { candidateId: "fold_cure", maxBriefChars: cap },
-    maxBriefChars: cap,
-    toolName: "pi_fold_context",
-  });
-  assert.equal(asked.length, 2, "An over-long brief was accepted or cut instead of being cured");
-  assert.equal(cured.brief, good, "The cured answer was not the one kept");
-  assert.equal(cured.cured, true, "A cured brief did not report that it took two asks");
-  assert.equal(asked[0].cure, undefined, "The first ask carried a complaint about nothing");
-  assert(String(asked[1].cure).includes(String(cap + 400)) && String(asked[1].cure).includes(String(cap)),
-    `The complaint does not say what was wrong: ${asked[1].cure}`);
-  assert.equal(cured.provenance.kind, "model", "A cured brief lost its model provenance");
-
-  // Twice wrong is loud. Nothing is truncated into place, and the failure names the criterion.
-  let stubborn = 0;
-  await assert.rejects(async () => context.generatedBrief({
-    summarize: async () => {
-      stubborn += 1;
-      return { ...attribution, brief: "y".repeat(cap + 1) };
-    },
-    request: { candidateId: "fold_stubborn", maxBriefChars: cap },
-    maxBriefChars: cap,
-    toolName: "pi_fold_context",
-  }), (error) => /cure/.test(error.message) && error.message.includes(String(cap)),
-  "A brief that stayed over the limit was not refused by the criterion it missed");
-  assert.equal(stubborn, 2, "The cure is bounded at one extra ask");
-
-  // Attribution is the harness's own wiring, so it is never handed back to be cured.
-  let unattributed = 0;
-  await assert.rejects(async () => context.generatedBrief({
-    summarize: async () => {
-      unattributed += 1;
-      return { brief: good, provider: "", model: "", effort: "", toolCalls: 0 };
-    },
-    request: { candidateId: "fold_unattributed", maxBriefChars: cap },
-    maxBriefChars: cap,
-    toolName: "pi_fold_context",
-  }), /attribution/, "Attribution drift was treated as something a second ask could mend");
-  assert.equal(unattributed, 1, "Attribution drift bought a retry it must never buy");
-
-  // THE LANE TAKES PARENTS. A group with a child still waiting on its own brief defers to
-  // the next boundary rather than reading the sentence that brief is about to replace, and
-  // when it does run it reads the numbered depth-one payload.
-  const laneRequests = [];
-  const laneThresholds = { ...context.DEFAULT_THRESHOLDS, consolidateAfter: 2 };
-  const laneBuilt = makeFixture({
-    turns: 14, resultChars: 9_000, contextWindow: 100_000, toolName: "bash",
-    thresholds: laneThresholds,
-  });
-  const laneRuntime = makeRuntime(laneBuilt, {
-    thresholds: laneThresholds,
-    summarizeContextSpan: async (request) => {
-      laneRequests.push(request);
-      return { ...attribution, brief: `${marker(laneRequests.length)} briefed span with concrete detail.` };
-    },
-  });
-  await startRuntime(laneRuntime);
-  await runtimeCommit(laneRuntime, { tokens: 88_000, contextWindow: 100_000 });
-  await settle();
-  await runtimeCommit(laneRuntime, { tokens: 92_000, contextWindow: 100_000 });
-  await settle();
-  // A deferred parent waits for a boundary, so the boundaries keep coming: the wait is
-  // the mechanism, and a lane that never drains it would show up right here.
-  await runtimeCommit(laneRuntime, { tokens: 94_000, contextWindow: 100_000 });
-  await settle();
-  // Per SPAN, because the lane batches: a group is one span inside a call that may carry
-  // several, so asking the request whether it is a group would miss every batched parent.
-  const groups = laneRequests.flatMap(requestSpans)
-    .filter((span) => Number.isInteger(span.children) && span.children > 0);
-  const parents = materialized(laneRuntime).folds.filter((fold) => fold.kind === "consolidation");
-  assert(parents.length, "The lane fixture built no parent, so the queueing law is untested here");
-  assert(groups.length, "A parent was built and no group was ever sent to the generator");
-  const laneGroup = JSON.parse(groups[0].sourceText);
-  assert.equal(laneGroup.length, groups[0].children, "The group payload and its stated child count disagree");
-  // Nothing reaches the generator as a bare name. A folded child carries its brief and
-  // either its contents or the note that it was collapsed; absorbed RAW evidence carries
-  // its contents and has no brief to carry, because it is the exact evidence itself.
-  assert(laneGroup.every((entry) => entry.contents || entry.collapsed),
-    "A child reached the generator with neither its contents nor a collapse note");
-  assert(laneGroup.filter((entry) => entry.foldId).every((entry) => entry.brief),
-    "A folded child reached the generator without its brief");
-
   return {
     width,
     childrenCovered: children.length,
@@ -12178,8 +10985,6 @@ async function gateParentBriefCoversEveryChild() {
     rungs,
     openedChildren: opened.length,
     collapsedLargestFirst: collapsed,
-    curedInOneExtraAsk: true,
-    parentsBriefedByGenerator: groups.length,
   };
 }
 
@@ -12257,50 +11062,41 @@ async function gateParentBriefCannotInheritToolName() {
  * No fold goes without a brief, and the agent is asked for it first.
  *
  * A mark is a decision about a span, and the agent making it knows why the span mattered
- * and what it will want back; a generator reading the span alone knows only what the span
- * says. So the request asks the agent for the brief, and the summarizer is the fallback
- * rather than the default. What must never happen is a fold with nothing in its place: the
- * placeholder is all that stands where the bytes were, and an empty one closes the span to
- * whoever comes back for it.
+ * and what it will want back; the deterministic brief reads the span alone and knows only
+ * what it says. So the request asks the agent for the brief, and the deterministic
+ * composition is the fill rather than the default. What must never happen is a fold with
+ * nothing in its place: the placeholder is all that stands where the bytes were, and an
+ * empty one closes the span to whoever comes back for it.
  *
- * Three orders, one property. A supplied brief is kept verbatim and no generator is spent
- * on it. A mark with no brief is filled by the generator, and the receipt says who wrote
- * it. A generator that fails leaves the deterministic brief standing and the fold eligible
- * for the lane, so the gap is filled late rather than never.
+ * Three orders, one property. A supplied brief is kept verbatim and judged on EVERY path,
+ * including the deferred one that skips preparation. A mark with no brief is filled
+ * deterministically, and the mark says who wrote it. And no committed fold ever stands
+ * with an empty placeholder.
  */
 async function gateNoFoldWithoutABrief() {
   const shape = { turns: 10, resultChars: 9_000, contextWindow: 100_000, toolName: "bash" };
-  const written = "The completed bash inspection printed the paths under lib and its exact output stays here.";
-  const attribution = { provider: "openai-codex", model: "gpt-5.6-terra", effort: "medium", toolCalls: 0 };
 
-  // THE SURFACE ASKS. A mark's brief is optional in the schema because the fallback exists,
+  // THE SURFACE ASKS. A mark's brief is optional in the schema because the fill exists,
   // so the request has to carry the expectation the schema cannot.
   const built = makeFixture(shape);
-  const asked = [];
-  const runtime = makeRuntime(built, {
-    summarizeContextSpan: async (request) => {
-      asked.push(request);
-      return { ...attribution, brief: written };
-    },
-  });
+  const runtime = makeRuntime(built);
   await startRuntime(runtime);
   const tool = [...runtime.tools.values()][0];
   const markBrief = tool.parameters.properties.marks.items.properties.brief;
-  assert(typeof markBrief.description === "string" && /summarizer/i.test(markBrief.description),
-    "The mark schema does not tell the agent that leaving the brief out hands it to the summarizer");
+  assert(typeof markBrief.description === "string" && /deterministic brief/i.test(markBrief.description),
+    "The mark schema does not tell the agent that leaving the brief out hands it to the deterministic fill");
 
-  // NO BRIEF: the generator fills it, and the mark says the model wrote it.
+  // NO BRIEF: the deterministic composition fills it, and the mark says so.
   const filled = await toolCall(runtime, { action: "fold", ids: [built.turnEntries[0][2]] });
   assert.equal(filled.details.ok, true, "A mark without a brief was refused instead of filled");
-  assert(asked.length, "A mark arrived without a brief and no generator was asked for one");
   const gapMark = materialized(runtime).pendingMarks.at(-1);
-  assert.equal(gapMark.brief, written, "The generated brief is not the one the mark carries");
-  assert.equal(gapMark.briefProvenance.kind, "model",
-    "A generated brief was recorded as though the agent had written it");
+  assert(typeof gapMark.brief === "string" && gapMark.brief.trim(),
+    "A mark without a brief was left with no brief at all");
+  assert.equal(gapMark.briefProvenance.kind, "deterministic",
+    "A deterministic fill was recorded as though the agent had written it");
 
-  // SUPPLIED: kept verbatim, and no generator call is spent on it.
+  // SUPPLIED: kept verbatim.
   const supplied = "The second inspection is stale; its exact stdout and the failing path stay recoverable.";
-  const spentBefore = asked.length;
   const kept = await toolCall(runtime, {
     action: "fold", ids: [built.turnEntries[1][2]], brief: supplied,
   });
@@ -12308,8 +11104,6 @@ async function gateNoFoldWithoutABrief() {
   const keptMark = materialized(runtime).pendingMarks.at(-1);
   assert.equal(keptMark.brief, supplied, "A supplied brief was rewritten");
   assert.equal(keptMark.briefProvenance.kind, "supplied", "A supplied brief lost its attribution");
-  assert.equal(asked.length, spentBefore,
-    "A generator call was spent on a span the agent had already briefed");
 
   // A BAD SUPPLIED BRIEF IS REFUSED AS A MARK, ON THE PATH THAT SKIPS THE PREPARATION.
   //
@@ -12344,8 +11138,7 @@ async function gateNoFoldWithoutABrief() {
     "The agent corrected the brief the refusal complained about and was refused again");
   await toolCall(runtime, { action: "unprotect", ids: [guarded] });
 
-  // EVERY FOLD, AFTER THE LADDER RUNS. The lane and the fallbacks together leave nothing
-  // standing with an empty placeholder.
+  // EVERY FOLD, AFTER THE LADDER RUNS: nothing stands with an empty placeholder.
   await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
   await settle();
   const folds = materialized(runtime).folds;
@@ -12353,122 +11146,14 @@ async function gateNoFoldWithoutABrief() {
   const empty = folds.filter((fold) => typeof fold.brief !== "string" || !fold.brief.trim());
   assert.deepEqual(empty.map((fold) => fold.id), [], "A committed fold carries no brief at all");
 
-  // A FAILING GENERATOR still leaves a brief: the deterministic one, standing where the
-  // model's would have been, and the fold stays eligible for the lane to fill later.
-  const failingBuilt = makeFixture(shape);
-  const failingRuntime = makeRuntime(failingBuilt, {
-    summarizeContextSpan: async () => { throw new Error("generator refused this span"); },
-  });
-  await startRuntime(failingRuntime);
-  const survived = await toolCall(failingRuntime, {
-    action: "fold", ids: [failingBuilt.turnEntries[0][2]],
-  });
-  assert.equal(survived.details.ok, true, "A generator failure refused the agent's mark");
-  const fallbackMark = materialized(failingRuntime).pendingMarks.at(-1);
-  assert(typeof fallbackMark.brief === "string" && fallbackMark.brief.trim(),
-    "A generator failure left the mark with no brief at all");
-  assert.equal(fallbackMark.briefProvenance.kind, "deterministic",
-    "A failed generator was recorded as the author of the fallback");
-
   return {
     schemaAsksForABrief: true,
-    generatedWhenOmitted: true,
+    filledDeterministicallyWhenOmitted: true,
     suppliedKeptVerbatim: true,
     deferredBadBriefRefusedAtTheMark: true,
     agentCorrectedAndWasAccepted: true,
-    generatorCallsSpent: asked.length,
     committedFolds: folds.length,
     foldsWithoutABrief: empty.length,
-    fallbackSurvivesFailure: true,
-  };
-}
-
-/**
- * No token ceiling is ever sent, and a generator that thinks hard still answers.
- *
- * `maxTokens` does not ask a model for a shorter brief; it stops the model mid-answer. On
- * a reasoning generator the reasoning is drawn from the same budget, so the harder a span
- * is to read the less remains for the brief, until nothing remains and the response
- * carries no text at all. The 2026-08-11 rep ran with 512 and the ledger shows exactly
- * that: 6 of 27 calls (22%) failed with "Summarizer returned no text", every one after
- * 111 to 132 seconds of thinking; brief length correlated NEGATIVELY with call duration
- * at r = -0.575; calls under 20s averaged 1,028 characters and calls over 80s averaged
- * 369. The depth-one group payloads suffered worst, because the largest and most
- * interesting input provokes the most reasoning: two group briefs came back at 96 and 438
- * characters, which reads as weak summarization and was truncation.
- *
- * Three mechanisms bound length instead, and every one of them can explain itself to the
- * model: the limit stated in the request, the cure that hands an over-long brief back with
- * the complaint, and the caller's timeout for a genuine runaway. A token cut is the one
- * mechanism the model cannot see, plan around, or recover from (Shane 2026-08-11).
- */
-async function gateNoTokenCeilingReachesTheProvider() {
-  const seen = [];
-  // A generator that spends most of a small budget thinking, then writes. Under a 512-token
-  // ceiling the thinking alone would consume it and the text would never be reached; the
-  // fixture reproduces that by refusing to answer when a ceiling is present.
-  const loadHostModule = async () => ({
-    ModelRuntime: {
-      async create() {
-        return {
-          getModel: (provider, id) => ({ provider, id, reasoning: true }),
-          async completeSimple(model, request, options) {
-            seen.push(options);
-            const thinking = "reasoned at length about the span".repeat(40);
-            if ("maxTokens" in options) {
-              // What the provider actually did: the budget went to reasoning and the
-              // response arrived with thinking and no text.
-              return { role: "assistant", content: [{ type: "thinking", thinking }] };
-            }
-            return {
-              role: "assistant",
-              content: [
-                { type: "thinking", thinking },
-                {
-                  type: "text",
-                  text: "Read extensions/lib/folding.ts and confirmed projectActiveContext returns " +
-                    "the bounded projection; expanding recovers the exact call sites and the failing assertion.",
-                },
-              ],
-            };
-          },
-        };
-      },
-    },
-  });
-
-  const summarize = summarizerFactory.createSummarizeContextSpan(
-    { provider: "openai-codex", model: "gpt-5.6-terra", effort: "medium" },
-    loadHostModule,
-  );
-  const result = await summarize({
-    candidateId: "fold_ceiling",
-    sourceText: "the exact bytes of one completed inspection",
-    maxBriefChars: context.ACTIVE_CONTEXT_POLICY.maxBriefChars,
-  });
-  assert(seen.length, "the generator never reached the provider");
-  assert(seen.every((options) => !("maxTokens" in options)),
-    "a token ceiling was sent: it truncates the answer rather than shortening it");
-  assert(context.usefulBrief(result.brief, context.ACTIVE_CONTEXT_POLICY.maxBriefChars, "pi_fold_context"),
-    "a generator that thought at length did not produce a usable brief");
-
-  // ANTI-VACUITY: the fixture genuinely fails when a ceiling IS present, so the assertion
-  // above is about the runtime's behaviour and not about a fixture that always answers.
-  const ceilinged = { ...seen[0], maxTokens: 512 };
-  const runtime = await (await loadHostModule()).ModelRuntime.create();
-  const starved = await runtime.completeSimple({}, {}, ceilinged);
-  assert(!starved.content.some((part) => part.type === "text"),
-    "the fixture answers even under a ceiling, so this gate would pass without the fix");
-
-  // Reasoning still reaches the provider: deleting the ceiling must not delete the effort.
-  assert(seen.every((options) => options.reasoning === "medium"),
-    "the configured effort stopped reaching the provider");
-
-  return {
-    calls: seen.length,
-    ceilingSent: false,
-    reasoningStillSent: true,
-    briefUsableAfterLongThinking: true,
   };
 }
 
@@ -13402,17 +12087,10 @@ async function gateOpeningProseSurvivesDeterministicFolding() {
     `----- END lib/file-${turn}.c -----`,
   ].join("\n");
 
-  // The generator is wired but NEVER settles, so every fold in this run is
-  // committed with, and stays on, its deterministic brief.
-  let pending = 0;
+  // There is no generator: every fold is committed with, and stays on, its
+  // deterministic brief.
   const runtime = makeRuntime(
     makeFixture({ turns: 8, resultText: stageResult, contextWindow: 100_000 }),
-    {
-      summarizeContextSpan: () => {
-        pending += 1;
-        return new Promise(() => {});
-      },
-    },
   );
   await startRuntime(runtime);
   await measure(runtime, 92_000, 100_000);
@@ -13429,17 +12107,15 @@ async function gateOpeningProseSurvivesDeterministicFolding() {
   // existence anywhere in the run.
   assert(text.includes(CODE_WORD),
     "a fact stated in the result's opening prose did not survive the fold it was committed with");
-  // And it is the DETERMINISTIC brief carrying it, not a generator result.
-  assert(pending > 0, "no brief upgrade was ever requested, so the race is not being modelled");
-  assert(state.folds.every((fold) => (fold.brief_provenance?.kind ?? "deterministic") !== "model"),
-    "a model brief landed, so this does not prove the deterministic carrier");
+  // And it is the DETERMINISTIC brief carrying it.
+  assert(state.folds.every((fold) => fold.provenance.kind === "deterministic"),
+    "a non-deterministic brief landed, so this does not prove the deterministic carrier");
 
   // Anti-vacuity, both directions. The header alone is not what is being matched,
   // and a run whose results carry no prose still folds without inventing one.
   assert(text.includes("STAGE 0"), "the header vanished, so the head is not being read at all");
   const bare = makeRuntime(
     makeFixture({ turns: 8, resultChars: 9_000, contextWindow: 100_000 }),
-    { summarizeContextSpan: () => new Promise(() => {}) },
   );
   await startRuntime(bare);
   await measure(bare, 92_000, 100_000);
@@ -13456,7 +12132,6 @@ async function gateOpeningProseSurvivesDeterministicFolding() {
   }
   return {
     folds: state.folds.length,
-    upgradesRequested: pending,
     proseFactInProjection: true,
     longestBrief: Math.max(...state.folds.map((fold) => fold.brief.length)),
   };
@@ -13484,19 +12159,16 @@ async function gateOpeningProseSurvivesDeterministicFolding() {
 // (the denser geometry this fixture produces); only a chapter or
 // consolidation child's claim is skipped, because those briefs already select
 // their own assistant lines. A note as its own subject is what the division
-// seats whole; the same words inside a truncated child subject are not. The
-// generator is held unresolved for the whole run, exactly as in gate 134:
-// what a fold is COMMITTED with must carry the fact.
+// seats whole; the same words inside a truncated child subject are not. There
+// is no generator: what a fold is COMMITTED with must carry the fact.
 // ---------------------------------------------------------------------------
 async function gateAgentNotesSurviveConsolidation() {
   const TRACE_FACT = "trace-a-02: lib/amigaos-fixture.c";
   const noteFor = (turn) => turn === 3
     ? `${TRACE_FACT}\nRecorded for the dependency appendix.`
     : `Completed task ${turn} and noted its outcome.`;
-  let pending = 0;
   const runtime = makeRuntime(
     makeFixture({ turns: 14, resultChars: 6_000, contextWindow: 100_000, assistantText: noteFor }),
-    { summarizeContextSpan: () => { pending += 1; return new Promise(() => {}); } },
   );
   await startRuntime(runtime);
   await measure(runtime, 92_000, 100_000);
@@ -13528,7 +12200,6 @@ async function gateAgentNotesSurviveConsolidation() {
   // note as an agent-noted clause the moment the batch folds.
   const shallow = makeRuntime(
     makeFixture({ turns: 8, resultChars: 6_000, contextWindow: 100_000, assistantText: noteFor }),
-    { summarizeContextSpan: () => new Promise(() => {}) },
   );
   await startRuntime(shallow);
   await measure(shallow, 92_000, 100_000);
@@ -13553,7 +12224,6 @@ async function gateAgentNotesSurviveConsolidation() {
     : `Stage ${turn - 1} done, pulling on.`;
   const pulled = makeRuntime(
     makeFixture({ turns: 12, resultChars: 6_000, contextWindow: 100_000, pull: true, pullText: pullNote }),
-    { summarizeContextSpan: () => new Promise(() => {}) },
   );
   await startRuntime(pulled);
   await measure(pulled, 92_000, 100_000);
@@ -13565,15 +12235,13 @@ async function gateAgentNotesSurviveConsolidation() {
     "the pull-shaped session lost the note that shares a message with the next call");
   assert(JSON.stringify((await project(pulled)).messages).includes(TRACE_FACT),
     "the pull-shaped projection dropped the recorded fact");
-  assert(pending > 0, "no brief upgrade was ever requested, so the race is not being modelled");
-  assert(state.folds.every((fold) => (fold.brief_provenance?.kind ?? "deterministic") !== "model"),
-    "a model brief landed, so this does not prove the deterministic carrier");
+  assert(state.folds.every((fold) => fold.provenance.kind === "deterministic"),
+    "a non-deterministic brief landed, so this does not prove the deterministic carrier");
 
   // Anti-vacuity: a run whose assistant turns never state the fact must not
   // grow it.
   const bare = makeRuntime(
     makeFixture({ turns: 14, resultChars: 6_000, contextWindow: 100_000 }),
-    { summarizeContextSpan: () => new Promise(() => {}) },
   );
   await startRuntime(bare);
   await measure(bare, 92_000, 100_000);
@@ -13637,7 +12305,12 @@ const gates = [
   [20, "Neutral default branding", gateNeutralDefaultBranding],
   [21, "Deployment branding reproduction", gateDeploymentBrandingReproduction],
   [22, "Evidence ingestion is unconditional", gateEvidenceIngestionIsUnconditional],
-  [23, "Summarizer option", gateSummarizerOption],
+  // 23 is retired with the model brief generator (2026-08-14): it pinned the
+  // dual-purpose brief prompt as a request contract, and the prompt is deleted.
+  // 107 (the upgrade lane), 114 (generator call records), 118 (batched briefing)
+  // and 126 (batch source attribution) retire with it; the corpus audit found 75
+  // percent of 1,186 upgraded briefs never consulted or never visible. Numbers
+  // stay spent so the history stays readable.
   [25, "Peek and fold index", gatePeekAndFoldIndex],
   [32, "Epoch mark/commit lifecycle", gateEpochMarkCommit],
   [34, "Epoch quota top-up", gateEpochQuotaTopUp],
@@ -13698,18 +12371,17 @@ const gates = [
   [105, "Every completed tool batch folds unmarked", gateEveryToolBatchFoldsUnmarked],
   [103, "Guidance is one boolean, default on", gateGuidanceOption],
   [106, "The boundary commits with no turn ever closed", gateOpenTurnCommits],
-  [107, "Model briefs upgrade on the commit boundary", gateBriefUpgradesRideTheBoundary],
   [108, "A folded head never limits reach", gateProjectedStaleBasis],
   [109, "A mark naming a fold that is gone or held is answered", gateDanglingChildMarks],
   [110, "Occupancy is anchored to what the provider counted", gateAnchoredOccupancy],
   [111, "The calibration hazard the anchor narrows but does not remove", gateCalibrationHazard],
   [112, "A span already inside a fold is refused by name", gateOwnedSpanRefusal],
   [113, "Entry evidence is derived once, never rebuilt", gateIncrementalEvidenceMap],
-  [114, "Every generator call is on the record", gateGeneratorCallsAreOnTheRecord],
   [115, "A parent brief covers every child", gateParentBriefCoversEveryChild],
   [116, "No fold goes without a brief", gateNoFoldWithoutABrief],
-  [117, "No token ceiling reaches the provider", gateNoTokenCeilingReachesTheProvider],
-  [118, "A commit's spans are briefed in one call", gateOneCallPerCommit],
+  // 117 retires with the generator too: it pinned the generator wire carrying no
+  // maxTokens, and the package now makes zero provider calls of any kind. The law
+  // itself stands in harness gate 52, which reads Pi's own derived ceiling.
   [120, "A mark reading takes a view; only a write copies", gateMarkReadsTakeAView],
   [121, "An evidence digest is derived once per message object", gateEvidenceDigestDerivedOncePerObject],
   [122, "A commit that vanishes at persistence announces itself", gateVanishedCommitAnnouncesItself],
@@ -13723,7 +12395,6 @@ const gates = [
   // notices, and the output wall's early crossing. The runtime commits at the
   // compaction boundary now, and a boundary Pi fires has nothing to announce in
   // advance. Their numbers stay spent for the same reason 124's does.
-  [126, "A batched brief names the bytes it was made from", gateBatchedBriefNamesItsSource],
   [127, "A delta carries only what changed", gateDeltaCarriesOnlyBriefChanges],
   [129, "A retired state field is refused by name", gateRetiredStateFieldsAreRefusedByName],
   [130, "A boundary waives the guard rather than no-op", gateBoundaryWaivesTheGuardRatherThanNoOp],

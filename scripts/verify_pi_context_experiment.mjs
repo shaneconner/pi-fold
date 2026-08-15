@@ -891,14 +891,16 @@ assert(extension.includes("const pifold = config.arm === \"pifold\"") &&
   extension.includes("registerActiveContext(pi, {") &&
   extension.includes("if (pifold) {"),
 "the extension must register the active-context runtime only for the pifold arm");
-// The registration is the arm, and a brief generator is part of it: the package writes
-// fold briefs with a model and keeps the deterministic brief as the failure fallback, so
-// an arm registered without a generator measures the fallback and calls it the mechanism.
-assert(extension.includes("createSummarizeContextSpan(config.briefGenerator, loadHostModule)") &&
-  extension.includes("{ summarizeContextSpan }"),
-"the extension must build the run's brief generator from the config descriptor and register it");
-assert(!extension.includes("no summarizer is configured"),
-  "the extension still says it wires no summarizer");
+// The model brief generator is DELETED from the package (2026-08-14): every fold briefs
+// deterministically, and a config still asking for one must be refused at the only point
+// that ever wired it, before any provider call, rather than silently measuring a build
+// that cannot honour it. Sealed manifests that recorded a generator stay readable.
+assert(extension.includes("config.briefGenerator === undefined") &&
+  /briefGenerator is deleted/.test(extension),
+"the extension must refuse a config that still asks for the deleted brief generator");
+assert(!extension.includes("createSummarizeContextSpan") &&
+  !extension.includes("summarizeContextSpan"),
+"the extension still wires the deleted brief generator");
 // The guidance profile is RETIRED. It shaped the milestone and live-advisory copy, and
 // both carriers are deleted, so a run that recorded a profile would be attesting to a
 // condition that changed nothing. The key stays readable for reps 15-21; no producer
@@ -2928,10 +2930,13 @@ try {
     "the supervisor still pins a campaign generator, so the no-generator condition never runs");
   assert(!/EXPERIMENT_BRIEF_GENERATOR,/.test(supervisor),
     "the supervisor still imports the retired generator pin");
-  assert(worker.includes("{ briefGenerator: config.briefGenerator }"),
-    "the worker must seal the run's brief generator into the manifest");
-  assert(extension.includes("{ summarizeContextSpan }"),
-    "the extension must pass the generator into the active-context registration");
+  // The generator is DELETED from the package (2026-08-14). No new manifest may carry
+  // the field, so the worker no longer seals it, and the extension refuses a config
+  // that still asks; the adjudicator keeps echoing what sealed runs recorded.
+  assert(!worker.includes("briefGenerator: config.briefGenerator }"),
+    "the worker still seals a brief generator the package cannot wire");
+  assert(extension.includes("config.briefGenerator === undefined"),
+    "the extension no longer refuses a config that asks for the deleted generator");
   assert(adjudicator.includes("briefGenerator: config.briefGenerator ?? null"),
     "the adjudicator must echo the run's brief generator into the evidence");
   // The intended regime and the observed one are different facts, and the evidence
@@ -3094,57 +3099,26 @@ try {
   assert([...persistence.ACTIVE_FOLD_KEYS].includes("provenance"),
     "the sealed fold record no longer carries its brief provenance");
 
-  const { experimentSummarizeContextSpan } = await jiti.import(
+  // The refusal, driven rather than pattern-matched: a config that still asks for a
+  // generator dies at extension creation, before any provider call, with the deletion
+  // named; a config that asks for none constructs.
+  const { createPiContextExperimentExtension } = await jiti.import(
     join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"));
-  assert.equal(experimentSummarizeContextSpan({ arm: "pifold" }), undefined,
-    "a run config with no descriptor must register no generator and fall back deterministically");
-  // Driven against a FAKE host module: verification resolves no model and calls no
-  // provider. What is under test is that the harness reaches the PACKAGE's builder, so the
-  // arm briefs the way a consumer's deployment briefs.
-  // Read off the pin rather than restated: a fixture that names the model itself goes
-  // stale the day the pin moves, which is exactly what happened when luna was replaced.
-  const briefModel = {
-    provider: EXPERIMENT_BRIEF_GENERATOR.provider,
-    id: EXPERIMENT_BRIEF_GENERATOR.model,
-    reasoning: true,
-  };
-  const prompts = [];
-  const generate = experimentSummarizeContextSpan(
-    { arm: "pifold", briefGenerator: EXPERIMENT_BRIEF_GENERATOR },
-    async () => ({
-      ModelRuntime: {
-        async create() {
-          return {
-            getModel(provider, model) {
-              return provider === briefModel.provider && model === briefModel.id ? briefModel : undefined;
-            },
-            async completeSimple(_model, completion) {
-              prompts.push(completion.messages[0].content);
-              return { content: [{ type: "text", text: "Stage 12 released the nonce." }] };
-            },
-          };
-        },
-      },
+  assert.throws(
+    () => createPiContextExperimentExtension({
+      arm: "pifold", briefGenerator: EXPERIMENT_BRIEF_GENERATOR,
     }),
-  );
-  assert.equal(typeof generate, "function");
-  assert.deepEqual(await generate({
-    sourceText: "STAGE BODY: the stage tool returned NEXT_KEY and four files.",
-    beforeText: "[]",
-    afterText: "[]",
-    maxBriefChars: 1_200,
-    signal: new AbortController().signal,
-  }, {}), {
-    brief: "Stage 12 released the nonce.",
-    provider: briefModel.provider,
-    model: briefModel.id,
-    effort: EXPERIMENT_BRIEF_GENERATOR.effort,
-    toolCalls: 0,
-  });
-  assert(prompts.length === 1 && prompts[0].includes("SPAN TO BRIEF:") &&
-    prompts[0].includes("expanding or peeking this fold later"),
-  "the arm must brief through the package's own request contract, not a harness copy");
-  checks.briefGeneratorThreadedFromCampaignPinToRegistration = true;
+    /briefGenerator is deleted: the runtime briefs deterministically as of 2026-08-14/,
+    "a config carrying the deleted generator was not refused by name at extension creation");
+  // The accept path stops at a LATER complaint, never this one: the same call minus the
+  // descriptor must get past the refusal (the run-directory fields other gates supply are
+  // absent here, so construction fails downstream, and that failure naming the generator
+  // would mean the refusal fires on configs that ask for nothing).
+  assert.throws(
+    () => createPiContextExperimentExtension({ arm: "pifold" }),
+    (error) => !/briefGenerator/.test(String(error)),
+    "a generator-free config was refused as though it carried the deleted generator");
+  checks.briefGeneratorRefusedAtRegistration = true;
 }
 
 // ---------------------------------------------------------------------------
