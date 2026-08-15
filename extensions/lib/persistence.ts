@@ -22,7 +22,6 @@ import {
   EXPAND_LEASE_GENERATIONS,
   MAX_EXPAND_LEASES,
   MAX_PENDING_MARKS,
-  SURFACING_MAX_LEDGER_RECORDS,
 } from "./policy.ts";
 import type {
   ActiveContextCheckpointV2,
@@ -40,7 +39,6 @@ import type {
   MarkOrigin,
   PendingMark,
   PreparedFold,
-  SurfacingRecord,
 } from "./policy.ts";
 
 export const ACTIVE_FOLD_KEYS = [
@@ -54,8 +52,6 @@ export const PREPARED_FOLD_KEYS = [
 export const ACTIVE_STATE_KEYS = ["version", "sessionId", "revision", "folds", "expanded", "protected"] as const;
 export const FOLD_RECORD_REF_KEYS = ["id", "sha256"] as const;
 export const FOLD_RECORD_ENTRY_KEYS = ["version", "sessionId", "foldId", "recordSha256", "fold"] as const;
-export const SURFACING_RECORD_KEYS = ["id", "surfaced", "taken", "ordinal", "outcome"] as const;
-export const SURFACING_OUTCOMES = Object.freeze(["shown", "acted", "used", "ignored"] as const);
 export const PENDING_FOLD_MARK_KEYS = [
   "mark", "id", "kind", "parts", "brief", "briefProvenance", "origin", "ordinal",
 ] as const;
@@ -77,26 +73,6 @@ export const MAX_ACTIVE_PROTECTED = 1_024;
 
 export function validTokensSinceToolFold(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) >= 0;
-}
-
-export function validSurfacingRecord(value: unknown): value is SurfacingRecord {
-  if (!exactRecord(value, SURFACING_RECORD_KEYS)) return false;
-  const surfaced = ownValue(value, "surfaced");
-  const taken = ownValue(value, "taken");
-  return typeof ownValue(value, "id") === "string" && Boolean(ownValue(value, "id")) &&
-    Number.isSafeInteger(surfaced) && Number(surfaced) > 0 &&
-    Number.isSafeInteger(taken) && Number(taken) >= 0 && Number(taken) <= Number(surfaced) &&
-    Number.isSafeInteger(ownValue(value, "ordinal")) && Number(ownValue(value, "ordinal")) >= 0 &&
-    SURFACING_OUTCOMES.includes(ownValue(value, "outcome") as SurfacingRecord["outcome"]);
-}
-
-export function parseSurfacingLog(value: unknown): SurfacingRecord[] {
-  const records = denseOwnArrayValues(value);
-  if (!records || records.length > SURFACING_MAX_LEDGER_RECORDS || !records.every(validSurfacingRecord) ||
-      new Set(records.map((record) => (record as SurfacingRecord).id)).size !== records.length) {
-    throw new Error("Invalid active-context surfacing ledger");
-  }
-  return clone(records) as SurfacingRecord[];
 }
 
 export function pendingMarkKey(mark: Pick<PendingMark, "mark" | "id">): string {
@@ -346,7 +322,6 @@ export function parseActiveContextState(
   const hasTokensSinceToolFold = recordLike &&
     Object.prototype.hasOwnProperty.call(value, "tokensSinceToolFold");
   const hasLeases = recordLike && Object.prototype.hasOwnProperty.call(value, "leases");
-  const hasSurfacing = recordLike && Object.prototype.hasOwnProperty.call(value, "surfacing");
   const hasPendingMarks = recordLike && Object.prototype.hasOwnProperty.call(value, "pendingMarks");
   const hasPinnedPeeks = recordLike && Object.prototype.hasOwnProperty.call(value, "pinnedPeeks");
   const hasBriefs = recordLike && Object.prototype.hasOwnProperty.call(value, "briefs");
@@ -357,7 +332,6 @@ export function parseActiveContextState(
     ...(hasAdvisory ? ["advisory"] : []),
     ...(hasTokensSinceToolFold ? ["tokensSinceToolFold"] : []),
     ...(hasLeases ? ["leases"] : []),
-    ...(hasSurfacing ? ["surfacing"] : []),
     ...(hasPendingMarks ? ["pendingMarks"] : []),
     ...(hasPinnedPeeks ? ["pinnedPeeks"] : []),
     ...(hasBriefs ? ["briefs"] : []),
@@ -390,7 +364,6 @@ export function parseActiveContextState(
     throw new Error("Invalid active-context tool-fold cadence");
   }
   const leases = hasLeases ? parseLeases(ownValue(value, "leases"), ids) : {};
-  const surfacing = hasSurfacing ? parseSurfacingLog(ownValue(value, "surfacing")) : [];
   const marks = hasPendingMarks ? parsePendingMarks(ownValue(value, "pendingMarks")) : [];
   if (marks.some((mark) => mark.mark === "refold" && !ids.has(mark.id))) {
     throw new Error("Invalid active-context pending marks");
@@ -408,7 +381,6 @@ export function parseActiveContextState(
       ? Number(ownValue(value, "tokensSinceToolFold"))
       : 0,
     leases,
-    ...(surfacing.length ? { surfacing } : {}),
     ...(marks.length ? { pendingMarks: marks } : {}),
     ...(Object.keys(briefs).length ? { briefs } : {}),
     ...(hasAdvisory
@@ -487,7 +459,6 @@ export function sameStateProjection(left: ActiveContextState, right: ActiveConte
     const normalizedState = { ...clone(value), revision: 0 } as Partial<ActiveContextState>;
     if (normalizedState.tokensSinceToolFold === 0) delete normalizedState.tokensSinceToolFold;
     if (normalizedState.leases && Object.keys(normalizedState.leases).length === 0) delete normalizedState.leases;
-    if (normalizedState.surfacing && normalizedState.surfacing.length === 0) delete normalizedState.surfacing;
     if (normalizedState.pendingMarks && normalizedState.pendingMarks.length === 0) delete normalizedState.pendingMarks;
     if (normalizedState.briefs && !Object.keys(normalizedState.briefs).length) delete normalizedState.briefs;
     return normalizedState;
@@ -530,7 +501,6 @@ export function validateV2ProjectionFields(
   advisoryValue: unknown,
   tokensSinceToolFoldValue: unknown,
   leasesValue: unknown,
-  surfacingValue?: unknown,
   pendingMarksValue?: unknown,
   briefsValue?: unknown,
   riderValue?: unknown,
@@ -542,7 +512,6 @@ export function validateV2ProjectionFields(
   rider?: NonNullable<ActiveContextState["rider"]>;
   tokensSinceToolFold: number;
   leases: Record<string, number>;
-  surfacing: SurfacingRecord[];
   pendingMarks: PendingMark[];
   briefs: Record<string, string>;
 } {
@@ -565,7 +534,6 @@ export function validateV2ProjectionFields(
     throw new Error("Invalid active-context v2 tool-fold cadence");
   }
   const leases = leasesValue === undefined ? {} : parseLeases(leasesValue);
-  const surfacing = surfacingValue === undefined ? [] : parseSurfacingLog(surfacingValue);
   const pendingMarks = pendingMarksValue === undefined ? [] : parsePendingMarks(pendingMarksValue);
   const briefs = briefsValue === undefined ? {} : parseBriefOverrides(briefsValue);
   return {
@@ -580,7 +548,6 @@ export function validateV2ProjectionFields(
     }),
     tokensSinceToolFold: tokensSinceToolFoldValue === undefined ? 0 : Number(tokensSinceToolFoldValue),
     leases,
-    surfacing,
     pendingMarks,
     briefs,
   };
@@ -594,8 +561,6 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     Object.prototype.hasOwnProperty.call(value, "tokensSinceToolFold"));
   const hasLeases = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "leases"));
-  const hasSurfacing = Boolean(value && typeof value === "object" &&
-    Object.prototype.hasOwnProperty.call(value, "surfacing"));
   const hasPendingMarks = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "pendingMarks"));
   const hasAddPendingMarks = Boolean(value && typeof value === "object" &&
@@ -617,7 +582,6 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     ...(hasAdvisory ? ["advisory"] : []),
     ...(hasTokensSinceToolFold ? ["tokensSinceToolFold"] : []),
     ...(hasLeases ? ["leases"] : []),
-    ...(hasSurfacing ? ["surfacing"] : []),
     ...(hasPendingMarks ? ["pendingMarks"] : []),
     ...(hasAddPendingMarks ? ["addPendingMarks"] : []),
     ...(hasPendingMarkOrder ? ["pendingMarkOrder"] : []),
@@ -640,7 +604,7 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
   validateV2ProjectionFields(
     ownValue(value, "expanded"), ownValue(value, "protected"), ownValue(value, "prepared"),
     ownValue(value, "advisory"), ownValue(value, "tokensSinceToolFold"), ownValue(value, "leases"),
-    ownValue(value, "surfacing"), ownValue(value, "pendingMarks"), ownValue(value, "briefs"),
+    ownValue(value, "pendingMarks"), ownValue(value, "briefs"),
     ownValue(value, "rider"),
   );
   if (checkpoint) {
@@ -736,7 +700,7 @@ export function stateFromFoldRefs(
   wire: Pick<
     ActiveContextCheckpointV2,
     "sessionId" | "revision" | "expanded" | "protected" | "prepared" | "advisory" |
-      "tokensSinceToolFold" | "leases" | "surfacing" | "pendingMarks" | "briefs" | "rider"
+      "tokensSinceToolFold" | "leases" | "pendingMarks" | "briefs" | "rider"
   >,
   refs: FoldRecordRef[],
   records: Map<string, FoldRecordEntry>,
@@ -756,7 +720,6 @@ export function stateFromFoldRefs(
     protected: clone(wire.protected),
     tokensSinceToolFold: wire.tokensSinceToolFold ?? 0,
     leases: clone(wire.leases ?? {}),
-    ...(wire.surfacing?.length ? { surfacing: clone(wire.surfacing) } : {}),
     ...(wire.pendingMarks?.length ? { pendingMarks: clone(wire.pendingMarks) } : {}),
     ...(wire.briefs && Object.keys(wire.briefs).length ? { briefs: clone(wire.briefs) } : {}),
     ...(wire.advisory === undefined ? {} : { advisory: clone(wire.advisory) }),
@@ -1000,7 +963,6 @@ export function makeStateCheckpoint(state: ActiveContextState): ActiveContextChe
     prepared: state.prepared ? clone(state.prepared) : null,
     tokensSinceToolFold: state.tokensSinceToolFold,
     leases: clone(state.leases),
-    ...(state.surfacing?.length ? { surfacing: clone(state.surfacing) } : {}),
     ...(state.pendingMarks?.length ? { pendingMarks: clone(state.pendingMarks) } : {}),
     ...(state.briefs && Object.keys(state.briefs).length ? { briefs: clone(state.briefs) } : {}),
     ...(state.advisory ? { advisory: clone(state.advisory) } : {}),
@@ -1052,9 +1014,9 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
   });
   const marksTravel = previousMarks.length > 0 || nextMarks.length > 0;
   // The rest travel whole and stay that way. Measured on the same run, the two that were
-  // worth a diff were 20.0 MB of the 21.6 MB ledger; what is left is `notices` at 0.93 MB,
-  // `rider` at 0.32, `surfacing` at 0.13 and `lastCall` at 0.03, all bounded objects with
-  // their own caps rather than collections that grow with the epoch. A diff for a capped
+  // worth a diff were 20.0 MB of the 21.6 MB ledger; what remained were bounded objects
+  // with their own caps rather than collections that grow with the epoch (the largest,
+  // the since-retired `notices`, was 0.93 MB). A diff for a capped
   // value is a second encoding to keep honest for a few hundred kilobytes a session, and
   // the reader's own compatibility rule is the part that is easy to get wrong: this build
   // shipped one such bug and the gate caught it.
@@ -1072,7 +1034,6 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
     prepared: next.prepared ? clone(next.prepared) : null,
     tokensSinceToolFold: next.tokensSinceToolFold,
     leases: clone(next.leases),
-    ...(next.surfacing?.length ? { surfacing: clone(next.surfacing) } : {}),
     ...(marksTravel ? { pendingMarkOrder: nextMarks.map(pendingMarkKey) } : {}),
     ...(addPendingMarks.length ? { addPendingMarks: clone(addPendingMarks) } : {}),
     ...(Object.keys(addBriefs).length ? { addBriefs } : {}),
@@ -1111,7 +1072,7 @@ export const MAX_RIDER_TEXT_BYTES = 4_096;
  * policy in the other direction -- an older exact-record reader rejects newer fields, and
  * a bump is explicit -- and this is that same policy read from the newer side.
  */
-const RETIRED_STATE_FIELDS: readonly string[] = Object.freeze(["lastCall", "notices"]);
+const RETIRED_STATE_FIELDS: readonly string[] = Object.freeze(["lastCall", "notices", "surfacing"]);
 
 export function refuseRetiredStateFields(value: unknown): void {
   if (!value || typeof value !== "object") return;
@@ -1120,8 +1081,8 @@ export function refuseRetiredStateFields(value: unknown): void {
   if (!carried.length) return;
   throw new Error(
     `Active-context state carries the retired field(s) ${carried.join(", ")}: it was written ` +
-    "by a build whose occupancy thermostat announced a pending commit. Nothing writes or " +
-    "reads them now, and this build will not load a state it cannot reproduce.",
+    "by a build that still carried the subsystem behind it. Nothing writes or reads them " +
+    "now, and this build will not load a state it cannot reproduce.",
   );
 }
 

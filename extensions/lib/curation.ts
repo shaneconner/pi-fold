@@ -1,4 +1,3 @@
-import { boundedUtf8 } from "./canonical.ts";
 import { boundReceiptText } from "./measurement.ts";
 import {
   contextBrand,
@@ -6,7 +5,6 @@ import {
   CONTEXT_RECEIPT_BLOCK_BYTES,
   DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
   MAX_CONTEXT_RECEIPTS,
-  MAX_SURFACING_LINE_BYTES,
 } from "./policy.ts";
 
 export function markAwarenessText(input: {
@@ -42,7 +40,6 @@ export function contextRiderText(input: {
   anchors: string[];
   pinnedShare: number;
   maxPinnedShare: number;
-  suggestion?: string | null;
 }): string {
   const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
   const anchors = input.anchors.length
@@ -50,7 +47,7 @@ export function contextRiderText(input: {
     : "none";
   const pinnedPercent = Math.round(input.pinnedShare * 100);
   const capPercent = Math.round(input.maxPinnedShare * 100);
-  return joinSurfacing(boundReceiptText(
+  return boundReceiptText(
     [
       `[${brand} notice] A fold commit just landed; the next one will batch every pending mark ` +
         "into one rewrite, and marks are free until then.",
@@ -68,12 +65,7 @@ export function contextRiderText(input: {
     ].join("\n"),
     2_048,
     `[${brand} notice] Post-commit curation details are unavailable this pass.`,
-  ), input.suggestion);
-}
-
-export function joinSurfacing(text: string, suggestion?: string | null): string {
-  if (!suggestion) return text;
-  return `${text}\n${boundedUtf8(suggestion, MAX_SURFACING_LINE_BYTES)}`;
+  );
 }
 
 export interface ContextReceipt {

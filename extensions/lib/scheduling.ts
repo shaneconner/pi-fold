@@ -76,13 +76,11 @@ export function withPendingMarks(
 ): ActiveContextState {
   const next = marks.length ? parsePendingMarks(clone(marks) as PendingMark[]) : [];
   const head = { ...state };
-  delete head.surfacing;
   delete head.pendingMarks;
   delete head.advisory;
   delete head.prepared;
   return {
     ...head,
-    ...(state.surfacing?.length ? { surfacing: clone(state.surfacing) } : {}),
     ...(next.length ? { pendingMarks: next } : {}),
     ...(state.advisory ? { advisory: clone(state.advisory) } : {}),
     ...(state.prepared ? { prepared: clone(state.prepared) } : {}),

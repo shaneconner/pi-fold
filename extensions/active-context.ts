@@ -120,11 +120,6 @@ import {
   PEEK_MIN_SLICE_BYTES,
   PEEK_READ_ONLY_CONTEXT_ACTIONS,
   AUTO_FOLD_BLACKLIST_DEFAULT,
-  SURFACING_BRIEF_HIT,
-  SURFACING_CONTENT_HIT,
-  SURFACING_DIVERGENCE_MARGIN,
-  SURFACING_OUTCOME_WINDOW_ORDINALS,
-  SURFACING_SLATE_SIZE,
   USER_RESCUE_MAX_SOURCE_CHARS,
 } from "./lib/policy.ts";
 import type {
@@ -186,15 +181,6 @@ import {
 } from "./lib/selection.ts";
 import type { SpanCorrection } from "./lib/selection.ts";
 import {
-  issueSurfacing,
-  noteSurfacingAction,
-  resolveSurfacing,
-  selectSurfacingSlate,
-  surfacingLedger,
-  surfacingSilenced,
-  surfacingSlateText,
-} from "./lib/surfacing.ts";
-import {
   compareProjections,
   emptyLedger,
   ledgerSummary,
@@ -235,7 +221,6 @@ export * from "./lib/policy.ts";
 export * from "./lib/rollback.ts";
 export * from "./lib/scheduling.ts";
 export * from "./lib/selection.ts";
-export * from "./lib/surfacing.ts";
 export * from "./lib/transcript.ts";
 
 export interface BatchedMarkRequest {
@@ -347,7 +332,6 @@ export function registerActiveContext(pi: any, options: {
   const foldRecordEntryType = `${entryTypePrefix}-fold-record`;
   const milestoneProjectionType = `${entryTypePrefix}-milestone`;
   const advisoryProjectionType = `${entryTypePrefix}-advisory`;
-  const surfacingProjectionType = `${entryTypePrefix}-surfacing`;
   const receiptProjectionType = `${entryTypePrefix}-receipts`;
   const riderProjectionType = `${entryTypePrefix}-rider`;
   const curationProjectionType = `${entryTypePrefix}-curation`;
@@ -1838,7 +1822,7 @@ export function registerActiveContext(pi: any, options: {
     const body = projectActiveContext(snapshot, persistence.state!).filter((message) => {
       const customType = ownValue(message, "customType");
       return customType !== milestoneProjectionType && customType !== advisoryProjectionType &&
-        customType !== surfacingProjectionType && customType !== receiptProjectionType &&
+        customType !== receiptProjectionType &&
         customType !== riderProjectionType && customType !== curationProjectionType;
     });
     const held = freeze.body?.length ?? 0;
@@ -2416,7 +2400,6 @@ export function registerActiveContext(pi: any, options: {
       const riderText = contextRiderText({
         toolName,
         brandNoun,
-        suggestion: deliverSurfacing(snapshot, "rider"),
         pendingAgentMarks: postAccounting.agentMarks,
         eligibleMarks: postAccounting.eligibleMarks,
         freedTokens: postAccounting.freedTokens,
@@ -2558,83 +2541,6 @@ export function registerActiveContext(pi: any, options: {
       protectedBytes: Number(epoch?.protectedStaleBytes ?? 0),
       note: null,
     }));
-  };
-
-  const statusSurfacing = (snapshot: ActiveContextSnapshot): Record<string, unknown> => {
-    const ledger = persistence.state ? surfacingLedger(persistence.state) : [];
-    if (!persistence.state) return { slate: [], line: null, ledger, silenced: [] };
-    const selection = selectSurfacingSlate({
-      state: persistence.state,
-      snapshot,
-      toolName,
-      ordinal: markOrdinal(snapshot),
-    });
-    return {
-      slate: selection.slate.map((suggestion) => ({
-        id: suggestion.id,
-        route: suggestion.route,
-        contentScore: suggestion.contentScore,
-        briefScore: suggestion.briefScore,
-        margin: suggestion.margin,
-        slot: suggestion.slot,
-      })),
-      line: surfacingSlateText({ slate: selection.slate, queryTerms: selection.queryTerms, brandNoun }),
-      considered: selection.considered,
-      divergent: selection.divergent,
-      suppressed: selection.suppressed,
-      intentTerms: selection.queryTerms.size,
-      contentHit: SURFACING_CONTENT_HIT,
-      briefHit: SURFACING_BRIEF_HIT,
-      divergenceMargin: SURFACING_DIVERGENCE_MARGIN,
-      slateSize: SURFACING_SLATE_SIZE,
-      silenced: [...surfacingSilenced(ledger)],
-      ledger,
-    };
-  };
-
-  const deliverSurfacing = (snapshot: ActiveContextSnapshot, carrier: string): string | null => {
-    if (!persistence.state) return null;
-    const ordinal = markOrdinal(snapshot);
-    const resolved = resolveSurfacing({ state: persistence.state, snapshot, ordinal });
-    persistence.state = resolved.state;
-    for (const transition of resolved.transitions) {
-      emit("context.outcome", {
-        fold_id: transition.id,
-        from_outcome: transition.from,
-        outcome: transition.to,
-        outcome_ordinal: transition.ordinal,
-        window_ordinals: SURFACING_OUTCOME_WINDOW_ORDINALS,
-      });
-    }
-    const selection = selectSurfacingSlate({ state: persistence.state, snapshot, toolName, ordinal });
-    const suggestion = selection.slate[0];
-    if (!suggestion) return null;
-    const text = surfacingSlateText({
-      slate: selection.slate,
-      queryTerms: selection.queryTerms,
-      brandNoun,
-    });
-    if (!text) return null;
-    persistence.state = issueSurfacing(persistence.state, suggestion.id, ordinal);
-    emit("context.suggestion", {
-      carrier,
-      fold_id: suggestion.id,
-      content_score: suggestion.contentScore,
-      brief_score: suggestion.briefScore,
-      margin: suggestion.margin,
-      content_hit: SURFACING_CONTENT_HIT,
-      brief_hit: SURFACING_BRIEF_HIT,
-      divergence_margin: SURFACING_DIVERGENCE_MARGIN,
-      slot: suggestion.slot,
-      slate_size: SURFACING_SLATE_SIZE,
-      fold_depth: suggestion.depth,
-      considered: selection.considered,
-      divergent: selection.divergent,
-      suppressed: selection.suppressed,
-      intent_terms: selection.queryTerms.size,
-      chars: text.length,
-    });
-    return text;
   };
 
   const applyAutomaticRung = async (
@@ -3510,7 +3416,6 @@ export function registerActiveContext(pi: any, options: {
         available: true,
         automatic: {
           pressureRatio: measurements.latestRatio,
-          surfacing: statusSurfacing(snapshot),
           refoldRatio: snapshot.policy.refoldRatio,
           chapterPrepareRatio: snapshot.policy.prepareRatio,
           hardFenceRatio: hardFenceRatio(snapshot),
@@ -3611,10 +3516,6 @@ export function registerActiveContext(pi: any, options: {
         ...(detail === "tree" ? { tree: foldTreeDetail(snapshot, persistence.state).slice(statusOffset) } : {}),
       }, typeof detail === "string" ? detail : null, statusOffset));
     }
-    const noteSurfacingAccept = (id: string): void => {
-      if (!persistence.state) return;
-      persistence.state = noteSurfacingAction(persistence.state, id, markOrdinal(snapshot));
-    };
     if (action === "peek") {
       const id = String(params.id ?? "").trim();
       if (!id) throw new Error("peek requires id");
@@ -3644,7 +3545,6 @@ export function registerActiveContext(pi: any, options: {
         offset,
         toolName,
       }));
-      noteSurfacingAccept(id);
       return payload;
     }
     if (action === "rebrief") {
@@ -3667,7 +3567,7 @@ export function registerActiveContext(pi: any, options: {
         brief,
         previousBrief: previous,
         durableRevision: persistence.state.revision,
-        activation: "the fold's placeholder, index rows and suggestions now carry your brief; " +
+        activation: "the fold's placeholder and index rows now carry your brief; " +
           "the exact source and its fold record are untouched.",
       });
     }
@@ -3792,7 +3692,6 @@ export function registerActiveContext(pi: any, options: {
           requestedBytes: Math.max(0, expanding.sourceChars - expanding.placeholderChars),
           children: childFoldIds(expanding),
         });
-        noteSurfacingAccept(id);
       }
       let next = setFoldProjectionState(persistence.state, id, action === "expand" ? "expanded" : "folded");
       if (action === "expand") next = withExpandLease(next, id);

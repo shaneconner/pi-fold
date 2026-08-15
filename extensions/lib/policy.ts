@@ -43,25 +43,6 @@ export const DEFAULT_CONTEXT_WINDOW = 272_000;
 export const EXPAND_LEASE_GENERATIONS = 8;
 export const MAX_EXPAND_LEASES = 64;
 
-export const SURFACING_BM25_K1 = 1.5;
-export const SURFACING_BM25_B = 0.75;
-export const SURFACING_CONTENT_HIT = 0.25;
-export const SURFACING_BRIEF_HIT = 0.15;
-export const SURFACING_DIVERGENCE_MARGIN = 0.10;
-export const SURFACING_SLATE_SIZE = 1;
-export const SURFACING_OUTCOME_WINDOW_ORDINALS = 12;
-export const SURFACING_IGNORE_LIMIT = 2;
-export const SURFACING_PROVENANCE_TERMS = 3;
-export const SURFACING_INTENT_CHARS = 1_200;
-export const SURFACING_INTENT_ARGUMENT_CHARS = 120;
-export const SURFACING_INTENT_RECENCY_SHARE = 0.5;
-export const SURFACING_INTENT_ARGUMENT_KEYS: readonly string[] = Object.freeze([
-  "path", "file_path", "query", "pattern", "command", "brief", "id",
-]);
-export const SURFACING_MAX_CONTENT_CHARS = 20_000;
-export const SURFACING_MAX_LEDGER_RECORDS = 256;
-export const SURFACING_HOOK_CHARS = 160;
-
 export const COMMIT_RECLAIM_FLOOR_SHARE = 0.02;
 
 export const MAX_PINNED_SHARE = 0.25;
@@ -189,7 +170,7 @@ export const ESTIMATED_PLACEHOLDER_OVERHEAD_BYTES = 240;
 
 export const PEEK_MIN_SLICE_BYTES = 1_024;
 
-export const STATUS_DIET_SUGGESTIONS = 5;
+export const STATUS_DIET_INDEX_ROWS = 5;
 
 export interface ActiveContextGuidance {
   actionResponses: boolean;
@@ -223,7 +204,6 @@ export function resolveGuidance(value: unknown): ActiveContextGuidance {
   }
   return Object.freeze(resolved);
 }
-export const MAX_SURFACING_LINE_BYTES = 384;
 
 export const MAX_CONTEXT_RECEIPTS = 3;
 export const CONTEXT_RECEIPT_BLOCK_BYTES = 900;
@@ -325,39 +305,6 @@ export interface PreparedFold {
   fold: ActiveFold;
 }
 
-export type SurfacingOutcome = "shown" | "acted" | "used" | "ignored";
-
-export interface SurfacingRecord {
-  id: string;
-  surfaced: number;
-  taken: number;
-  ordinal: number;
-  outcome: SurfacingOutcome;
-}
-
-export interface SurfacingTransition {
-  id: string;
-  from: SurfacingOutcome;
-  to: SurfacingOutcome;
-  ordinal: number;
-}
-
-export interface SurfacingCandidate {
-  id: string;
-  brief: string;
-  content: string;
-  route: string;
-  position: number;
-  depth: number;
-}
-
-export interface SurfacingSuggestion extends SurfacingCandidate {
-  contentScore: number;
-  briefScore: number;
-  margin: number;
-  slot: number;
-}
-
 export interface ActiveContextState {
   version: 1;
   sessionId: string;
@@ -367,7 +314,6 @@ export interface ActiveContextState {
   protected: EvidenceRef[];
   tokensSinceToolFold: number;
   leases: Record<string, number>;
-  surfacing?: SurfacingRecord[];
   pendingMarks?: PendingMark[];
   pinnedPeeks?: never;
   briefs?: Record<string, BriefOverride>;
@@ -404,7 +350,6 @@ export interface ActiveContextCheckpointV2 {
   prepared: PreparedFold | null;
   tokensSinceToolFold?: number;
   leases?: Record<string, number>;
-  surfacing?: SurfacingRecord[];
   pendingMarks?: PendingMark[];
   briefs?: Record<string, BriefOverride>;
   advisory?: NonNullable<ActiveContextState["advisory"]>;
@@ -428,7 +373,6 @@ export interface ActiveContextDeltaV2 {
   prepared: PreparedFold | null;
   tokensSinceToolFold?: number;
   leases?: Record<string, number>;
-  surfacing?: SurfacingRecord[];
   // `pendingMarks` and `briefs` on a delta are the WHOLE value: what every delta written
   // before 2026-08-13 carries, and what sealed sessions replay. New deltas carry the change
   // instead. The marks carry an ORDER as well as a membership, so the change is the marks

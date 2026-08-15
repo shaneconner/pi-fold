@@ -3019,159 +3019,6 @@ async function gatePeekAndFoldIndex() {
 }
 
 /**
- * The surfacing fixture, built so both channels can be steered independently.
- *
- * Three folds. GOLD holds the answer in its stored content and says nothing about it in
- * its brief: the content-hit brief-miss case this mechanism exists for. VISIBLE holds
- * the same subject AND names it in the brief, so the agent can already see it from the
- * placeholder and surfacing it would repeat the window back to itself. OFF-TOPIC is
- * neither. The intent query names the subject the way an agent would.
- */
-const SURFACING_INTENT =
-  "Reconcile the tachyon ledger dispute: which replay settled the disputed reconciler entry?";
-const SURFACING_SUBJECT =
-  "the tachyon reconciler settled every disputed ledger entry by replaying it";
-const SURFACING_FOLD_BRIEFS = [
-  // GOLD: a true, factual brief that happens to name none of the subject's terms.
-  "Completed unit from the middle of the run; source remains exactly recoverable.",
-  // VISIBLE: the brief says exactly what the fold holds.
-  `Notes on ${SURFACING_SUBJECT}, the disputed reconciler entry and its replay.`,
-  // OFF-TOPIC.
-  "Completed unit about unrelated packaging chores.",
-];
-
-async function surfacingForest() {
-  const built = makeFixture({
-    turns: 7,
-    tools: false,
-    policy: { minChapterChars: 1 },
-    thresholds: NO_FRESH_TAIL,
-    contextWindow: 100_000,
-    turnText: (turn) => turn <= 1
-      ? `Working through ${SURFACING_SUBJECT}; the disputed reconciler entry replayed cleanly.`
-      : "Packaging chores and unrelated bookkeeping.",
-  });
-  let state = context.emptyActiveContextState(built.sessionId);
-  const ids = [];
-  for (let turn = 0; turn < SURFACING_FOLD_BRIEFS.length; turn += 1) {
-    const candidate = context.manualFoldCandidate(
-      built.snapshot,
-      state,
-      [built.turnEntries[turn][0], built.turnEntries[turn].at(-1)],
-    );
-    const committed = await commitCandidate(state, built.snapshot, candidate, {
-      brief: SURFACING_FOLD_BRIEFS[turn],
-      now: turn + 1,
-    });
-    state = committed.state;
-    ids.push(committed.prepared.fold.id);
-  }
-  // The QUERY is stated, not inherited: `messages` feeds the intent extractor and
-  // `mapped` feeds the channels, so a fixture can steer one without touching the other.
-  const snapshot = {
-    ...built.snapshot,
-    messages: [{ role: "user", content: [{ type: "text", text: SURFACING_INTENT }] }],
-  };
-  return { ...built, state, snapshot, gold: ids[0], visible: ids[1], offTopic: ids[2] };
-}
-
-/**
- * TWO CHANNELS, AND THE DIVERGENCE THAT TRIGGERS.
- *
- * The selector reads a fold twice: the brief the agent can already see, and the source
- * the placeholder is hiding. A suggestion is earned by the GAP, not by the score: a
- * fold whose brief already names what it holds is discoverable without help, so it is
- * not surfaced even when its content hits hardest. Everything is deterministic, so the
- * same forest against the same intent yields the same slate every pass.
- */
-async function gateSurfacingChannels() {
-  const source = await readFile(join(projectRoot, "extensions", "lib", "surfacing.ts"), "utf8");
-  assert.equal(/Date\.now|Math\.random|new Date/.test(source), false,
-    "The selector must be seedless: no wall clock and no randomness");
-
-  const forest = await surfacingForest();
-  const candidates = context.surfacingCandidates({
-    state: forest.state, snapshot: forest.snapshot, toolName: "pi_fold_context",
-  });
-  assert.equal(candidates.length, 3);
-  assert(candidates.every((candidate) => candidate.brief && candidate.content &&
-    candidate.route.includes('"action":"peek"')));
-
-  const queryTerms = context.distinctSurfacingTokens(context.surfacingIntentText(forest.snapshot));
-  const index = context.buildSurfacingIndex(candidates.flatMap((candidate) => [
-    { key: context.surfacingDocumentKey("brief", candidate.id), tokens: context.surfacingTokens(candidate.brief) },
-    { key: context.surfacingDocumentKey("content", candidate.id), tokens: context.surfacingTokens(candidate.content) },
-  ]));
-  const ceiling = context.surfacingScoreCeiling(index, queryTerms);
-  const scoreOf = (id) => ({
-    content: context.normalizedBm25(index, context.surfacingDocumentKey("content", id), queryTerms, ceiling),
-    brief: context.normalizedBm25(index, context.surfacingDocumentKey("brief", id), queryTerms, ceiling),
-  });
-  const gold = scoreOf(forest.gold);
-  const visible = scoreOf(forest.visible);
-  const offTopic = scoreOf(forest.offTopic);
-  // Both channels are one scale, so the margin is a number rather than a coincidence.
-  assert(gold.content >= context.SURFACING_CONTENT_HIT, "The gold fold's content did not hit");
-  assert(gold.brief < context.SURFACING_BRIEF_HIT, "The gold fold's brief already said it");
-  assert(visible.content >= context.SURFACING_CONTENT_HIT, "The visible fold's content did not hit");
-  assert(visible.brief >= context.SURFACING_BRIEF_HIT, "The visible fold's brief did not read as a hit");
-  assert(offTopic.content < context.SURFACING_CONTENT_HIT, "An off-topic fold cleared the content floor");
-
-  const selection = context.selectSurfacingSlate({
-    state: forest.state, snapshot: forest.snapshot, toolName: "pi_fold_context", ordinal: 40,
-  });
-  assert.equal(selection.considered, 3);
-  assert.deepEqual(selection.slate.map((suggestion) => suggestion.id), [forest.gold]);
-  // The whole point, stated as an assertion: a brief-hit fold is NOT surfaced even
-  // though its content hit, and the fold nobody could see from its placeholder is.
-  assert.equal(selection.slate.some((suggestion) => suggestion.id === forest.visible), false,
-    "A fold whose brief already names its content was surfaced anyway");
-  assert.equal(selection.slate[0].margin,
-    context.roundedScore(gold.content - gold.brief));
-  assert(selection.slate[0].margin >= context.SURFACING_DIVERGENCE_MARGIN);
-
-  const repeated = context.selectSurfacingSlate({
-    state: forest.state, snapshot: forest.snapshot, toolName: "pi_fold_context", ordinal: 40,
-  });
-  assert.equal(json.stableStringify(repeated.slate), json.stableStringify(selection.slate));
-
-  // Intent is the query, and it is intent ONLY: a tool RESULT that screams the subject
-  // must not pull the query toward itself, or every retrieval number is that defect.
-  const noisy = {
-    ...forest.snapshot,
-    messages: [...forest.snapshot.messages, {
-      role: "toolResult",
-      toolCallId: "call-noise",
-      toolName: "read",
-      content: [{ type: "text", text: `${SURFACING_SUBJECT} `.repeat(200) }],
-      isError: false,
-    }],
-  };
-  assert.equal(context.surfacingIntentText(noisy).includes("tachyon"), true,
-    "The user's own ask left the query");
-  assert.equal(context.surfacingIntentText({ messages: [noisy.messages.at(-1)] }), "",
-    "A tool result reached the intent query");
-  // A tool CALL is intent: the name plus its first meaningful argument.
-  assert.equal(context.surfacingIntentText({
-    messages: [{
-      role: "assistant",
-      content: [{ type: "toolCall", id: "c", name: "read", arguments: { path: "reconciler.md" } }],
-      stopReason: "toolUse",
-    }],
-  }), "read reconciler.md");
-  return {
-    candidates: candidates.length,
-    goldScores: [gold.content, gold.brief],
-    visibleScores: [visible.content, visible.brief],
-    offTopicContent: offTopic.content,
-    slate: selection.slate.map((suggestion) => suggestion.id),
-    briefHitSuppressed: true,
-    deterministic: true,
-    intentOnly: true,
-  };
-}
-
-/**
  * SILENCE IS THE DEFAULT, AND THE BUDGET IS PRECISION.
  *
  * One suggestion per delivery point, whatever else diverges, and the line it renders
@@ -3179,65 +3026,6 @@ async function gateSurfacingChannels() {
  * The per-request ephemeral carrier stays dead: it cost 21.9% of every input token in
  * rep 21, and no amount of better ranking changes what a moving tail costs.
  */
-async function gateSurfacingSlateBounds() {
-  assert.equal(context.SURFACING_SLATE_SIZE, 1);
-  assert(context.SURFACING_BRIEF_HIT < context.SURFACING_CONTENT_HIT,
-    "A brief hit at or above the content floor would surface nothing at all");
-  assert(context.SURFACING_DIVERGENCE_MARGIN <= context.SURFACING_CONTENT_HIT - context.SURFACING_BRIEF_HIT ||
-    context.SURFACING_DIVERGENCE_MARGIN > 0);
-
-  const forest = await surfacingForest();
-  // Two divergent folds, one delivery point, one suggestion.
-  const rebriefed = { ...forest.state, briefs: { [forest.visible]: SURFACING_FOLD_BRIEFS[0] } };
-  const wide = context.selectSurfacingSlate({
-    state: rebriefed, snapshot: forest.snapshot, toolName: "pi_fold_context", ordinal: 40,
-  });
-  assert.equal(wide.divergent, 2, "Both content-hit folds should have cleared the trigger");
-  assert.equal(wide.slate.length, context.SURFACING_SLATE_SIZE);
-
-  const line = context.surfacingSlateText({
-    slate: wide.slate, queryTerms: wide.queryTerms, brandNoun: "Acme",
-  });
-  assert(line.includes(wide.slate[0].id) && line.includes('"action":"peek"'));
-  assert(Buffer.byteLength(line, "utf8") <= context.MAX_SURFACING_LINE_BYTES,
-    "The surfacing line exceeded its own bound");
-  const huge = context.surfacingSlateText({
-    slate: [{ ...wide.slate[0], content: "reconciler ".repeat(4_000) }],
-    queryTerms: wide.queryTerms,
-    brandNoun: "Acme",
-  });
-  assert(Buffer.byteLength(huge, "utf8") <= context.MAX_SURFACING_LINE_BYTES);
-  assert.equal(context.surfacingSlateText({ slate: [], queryTerms: wide.queryTerms }), null);
-
-  // The carrier bound and the line bound compose; neither eats the other. The rider is
-  // the only carrier left: the last call retired with the thermostat that armed it.
-  const rider = context.contextRiderText({
-    toolName: "pi_fold_context", brandNoun: "Acme", pendingAgentMarks: 2, eligibleMarks: 1,
-    freedTokens: 900, eligibleFreedTokens: 400, anchors: ["a", "b", "c"],
-    pinnedShare: 0.1, maxPinnedShare: 0.25, suggestion: line,
-  });
-  assert(rider.endsWith(line), "The slate line did not survive the carrier's own bound");
-  assert.equal(context.lastCallText, undefined, "The last-call carrier survived its thermostat");
-  assert.equal(context.thresholdNoticeText, undefined, "The threshold notice survived its thermostat");
-  assert.equal(context.MAX_LAST_CALL_TEXT_BYTES, undefined,
-    "The last call's byte bound outlived the carrier it bounded");
-  assert.equal(context.contextRiderText({
-    toolName: "pi_fold_context", brandNoun: "Acme", pendingAgentMarks: 0, eligibleMarks: 0,
-    freedTokens: 0, eligibleFreedTokens: 0, anchors: [], pinnedShare: 0, maxPinnedShare: 0.25,
-  }).includes("surfacing"), false, "A silent pass still spent carrier bytes on surfacing");
-
-  assert.equal(context.surfacingText, undefined, "The per-request surfacing carrier survived");
-  assert.equal(context.DEFAULT_SURFACING_ENABLED, undefined, "The carrier's enable flag survived");
-  return {
-    slateSize: context.SURFACING_SLATE_SIZE,
-    divergentCandidates: wide.divergent,
-    lineBytes: Buffer.byteLength(line, "utf8"),
-    lineBound: context.MAX_SURFACING_LINE_BYTES,
-    carrierBytes: { rider: rider.length },
-    silentPassCostsNothing: true,
-    perRequestCarrier: "deleted",
-  };
-}
 
 /**
  * THE SUPPRESSION LIFECYCLE.
@@ -3246,104 +3034,6 @@ async function gateSurfacingSlateBounds() {
  * then never again. The cooldown IS the outcome window, so nothing is re-offered before
  * its last offer has an answer, and the answer is graded acted, used or ignored.
  */
-async function gateSurfacingSuppression() {
-  const forest = await surfacingForest();
-  const ordinal = 40;
-  const first = context.issueSurfacing(forest.state, forest.gold, ordinal);
-  assert.deepEqual(first.surfacing, [{
-    id: forest.gold, surfaced: 1, taken: 0, ordinal, outcome: "shown",
-  }]);
-  // Cooldown: inside the window the same fold is not offered again, whatever it scores.
-  assert.equal(context.surfacingSuppressed(first.surfacing, ordinal + 1).has(forest.gold), true);
-  assert.equal(context.selectSurfacingSlate({
-    state: first, snapshot: forest.snapshot, toolName: "pi_fold_context", ordinal: ordinal + 1,
-  }).slate.length, 0);
-  assert.equal(context.surfacingSuppressed(first.surfacing,
-    ordinal + context.SURFACING_OUTCOME_WINDOW_ORDINALS).has(forest.gold), false);
-
-  // Window closed with no action: IGNORED, and the offer is spent.
-  const closed = ordinal + context.SURFACING_OUTCOME_WINDOW_ORDINALS + 1;
-  const ignoredOnce = context.resolveSurfacing({ state: first, snapshot: forest.snapshot, ordinal: closed });
-  assert.deepEqual(ignoredOnce.transitions,
-    [{ id: forest.gold, from: "shown", to: "ignored", ordinal: closed }]);
-  assert.equal(ignoredOnce.state.surfacing[0].outcome, "ignored");
-  const second = context.selectSurfacingSlate({
-    state: ignoredOnce.state, snapshot: forest.snapshot, toolName: "pi_fold_context", ordinal: closed,
-  });
-  assert.deepEqual(second.slate.map((suggestion) => suggestion.id), [forest.gold],
-    "One ignore should not be a life sentence");
-
-  // Ignored TWICE and the fold leaves the candidate set permanently: no cooldown to
-  // wait out, no score high enough. memex's decline rule, and it wants zero takes.
-  const reissued = context.issueSurfacing(ignoredOnce.state, forest.gold, closed);
-  assert.equal(reissued.surfacing[0].surfaced, context.SURFACING_IGNORE_LIMIT);
-  const twice = context.resolveSurfacing({
-    state: reissued, snapshot: forest.snapshot,
-    ordinal: closed + context.SURFACING_OUTCOME_WINDOW_ORDINALS + 1,
-  });
-  assert.equal(twice.state.surfacing[0].outcome, "ignored");
-  assert.deepEqual([...context.surfacingSilenced(twice.state.surfacing)], [forest.gold]);
-  for (const later of [closed + 100, closed + 10_000]) {
-    assert.equal(context.selectSurfacingSlate({
-      state: twice.state, snapshot: forest.snapshot, toolName: "pi_fold_context", ordinal: later,
-    }).slate.length, 0, "A twice-ignored fold was resurfaced");
-  }
-
-  // ACTED resets the streak; a take proves the fold can be useful, so it is never
-  // silenced on the strength of the ignores that came before.
-  const acted = context.noteSurfacingAction(first, forest.gold, ordinal + 2);
-  assert.deepEqual(acted.surfacing, [{
-    id: forest.gold, surfaced: 1, taken: 1, ordinal: ordinal + 2, outcome: "acted",
-  }]);
-  assert.equal(context.surfacingSilenced(acted.surfacing).size, 0);
-  assert.equal(context.noteSurfacingAction(acted, forest.gold, ordinal + 3), acted,
-    "A second action on an already-graded offer moved the ledger");
-  assert.equal(context.noteSurfacingAction(first, forest.gold,
-    ordinal + context.SURFACING_OUTCOME_WINDOW_ORDINALS + 1), first,
-    "An action after the window closed was still counted as a take");
-
-  // USED, by provenance: content-only terms the brief never carried, showing up in what
-  // the agent said next. Brief terms prove nothing, because they were already visible.
-  const usedSnapshot = {
-    ...forest.snapshot,
-    messages: [...forest.messages, {
-      role: "assistant",
-      content: [{ type: "text", text: `The ${SURFACING_SUBJECT}, so the dispute is settled.` }],
-      stopReason: "stop",
-    }],
-  };
-  const used = context.resolveSurfacing({
-    state: acted, snapshot: usedSnapshot,
-    ordinal: ordinal + 2 + context.SURFACING_OUTCOME_WINDOW_ORDINALS + 1,
-  });
-  assert.equal(used.state.surfacing[0].outcome, "used");
-  assert.deepEqual(used.transitions.map((transition) => transition.to), ["used"]);
-  const unused = context.resolveSurfacing({
-    state: acted, snapshot: forest.snapshot,
-    ordinal: ordinal + 2 + context.SURFACING_OUTCOME_WINDOW_ORDINALS + 1,
-  });
-  assert.equal(unused.state.surfacing[0].outcome, "acted", "An unused retrieval was graded used");
-
-  // Eligibility, unchanged: an expanded fold is already visible and a pinned one is
-  // where the agent wants it. Neither is ever a candidate.
-  const expanded = context.setFoldProjectionState(forest.state, forest.gold, "expanded");
-  assert.equal(context.surfacingCandidates({
-    state: expanded, snapshot: forest.snapshot, toolName: "pi_fold_context",
-  }).some((candidate) => candidate.id === forest.gold), false);
-  const pinned = context.protectEvidence(forest.snapshot, forest.state, [forest.gold], true);
-  assert.equal(context.surfacingCandidates({
-    state: pinned, snapshot: forest.snapshot, toolName: "pi_fold_context",
-  }).some((candidate) => candidate.id === forest.gold), false);
-  return {
-    cooldownIsTheOutcomeWindow: context.SURFACING_OUTCOME_WINDOW_ORDINALS,
-    ignoreLimit: context.SURFACING_IGNORE_LIMIT,
-    silencedForever: [...context.surfacingSilenced(twice.state.surfacing)].length,
-    labels: ["shown", "acted", "used", "ignored"],
-    provenanceTerms: context.SURFACING_PROVENANCE_TERMS,
-    expandedNeverSuggested: true,
-    protectedNeverSuggested: true,
-  };
-}
 
 /**
  * No tracked file may name a person's home directory.
@@ -4838,44 +4528,6 @@ async function gateEpochInlineRungs() {
     stepsToRefold: kinds.length,
     refoldRungReached: true,
     refoldMarkMapped: true,
-  };
-}
-
-/**
- * `withSurfacingLedger` must rebuild the record in canonical key order. Assigning
- * `.surfacing` onto a spread of a state that had no surfacing key lands it after
- * pendingMarks/advisory/prepared, and the stable-stringify digest then drifts from
- * the parsed replay of the same state.
- */
-async function gateSurfacingKeyOrder() {
-  const built = makeFixture({ turns: 10, resultChars: 10_000, contextWindow: 100_000 });
-  const snapshot = epochSnapshot(built);
-  const empty = context.emptyActiveContextState(built.sessionId);
-  const marks = context.topUpMarks({ snapshot, state: empty, ordinal: 3, targetShare: 1 }).slice(0, 2);
-  const withMarks = context.withPendingMarks(empty, marks);
-  assert.equal(Object.hasOwn(withMarks, "surfacing"), false, "The fixture already carries a surfacing key");
-  const record = { id: marks[0].id, surfaced: 1, taken: 0, ordinal: 3, outcome: "shown" };
-  const logged = context.withSurfacingLedger(withMarks, [record]);
-  assert.deepEqual(Object.keys(logged).filter((key) => key === "surfacing" || key === "pendingMarks"),
-    ["surfacing", "pendingMarks"], "withSurfacingLedger appended surfacing after pendingMarks");
-  assert.deepEqual(
-    Object.keys(logged),
-    Object.keys(context.parseActiveContextState(logged, built.sessionId)),
-    "withSurfacingLedger produced a non-canonical key order",
-  );
-  assert.equal(
-    context.semanticStateSha256(logged),
-    context.semanticStateSha256(context.parseActiveContextState(logged, built.sessionId)),
-    "A surfacing write drifted the replay digest",
-  );
-  assert.deepEqual(logged.pendingMarks, withMarks.pendingMarks);
-  const cleared = context.withSurfacingLedger(logged, []);
-  assert.equal(cleared.surfacing, undefined);
-  assert.equal(context.semanticStateSha256(cleared), context.semanticStateSha256(withMarks));
-  return {
-    canonicalKeyOrder: Object.keys(logged).join(","),
-    digestStable: true,
-    clearedRoundTrip: true,
   };
 }
 
@@ -7348,6 +7000,21 @@ async function gateLeverCollapse() {
     "SURFACING_DEPTH_WEIGHT", "SURFACING_MAX_DEPTH", "SURFACING_MAX_TEXT_CHARS",
     "SURFACING_SOURCE_ID", "SURFACING_MAX_LOG_RECORDS", "SURFACING_RECENT_TASK_SPANS",
     "SURFACING_MAX_TASK_CHARS", "scoreSurfacingCandidate",
+    // The two-channel BM25 selector and its ledger went 2026-08-14: the corpus held 86
+    // surfacings with 7 taken, all seven on earlier builds, and a subsystem whose job is
+    // to tell the model to reload what a brief omitted argues with the brief it rides on.
+    // Recovery is pull-on-demand through peek/expand alone.
+    "selectSurfacingSlate", "surfacingSlateText", "issueSurfacing", "noteSurfacingAction",
+    "resolveSurfacing", "surfacingLedger", "surfacingSilenced", "surfacingCandidates",
+    "buildSurfacingIndex", "bm25Score", "normalizedBm25", "surfacingIntentText",
+    "surfacingHook", "surfacingProvenanceHit", "surfacingSuppressed", "withSurfacingLedger",
+    "surfacingTokens", "distinctSurfacingTokens", "surfacingDocumentKey", "surfacingIdf",
+    "surfacingScoreCeiling", "foldContentText", "toolCallIntent", "roundedScore",
+    "validSurfacingRecord", "parseSurfacingLog", "SURFACING_MAX_LEDGER_RECORDS",
+    "SURFACING_CONTENT_HIT", "SURFACING_BRIEF_HIT", "SURFACING_DIVERGENCE_MARGIN",
+    "SURFACING_SLATE_SIZE", "SURFACING_OUTCOME_WINDOW_ORDINALS", "SURFACING_IGNORE_LIMIT",
+    "SURFACING_PROVENANCE_TERMS", "SURFACING_INTENT_CHARS", "SURFACING_BM25_K1",
+    "SURFACING_BM25_B", "MAX_SURFACING_LINE_BYTES", "STATUS_DIET_SUGGESTIONS",
   ]) {
     assert.equal(context[name], undefined, `${name} survived the collapse`);
   }
@@ -7377,11 +7044,6 @@ async function gateLeverCollapse() {
     "The advisory shape checks went with the ceiling");
   assert.equal(context.validAdvisoryState({ highWater: 0.4, delivered: { nonsense: 2 } }), false,
     "An unknown milestone parsed as valid advisory state");
-  // And the surfacing SELECTOR outlives the carrier that rendered it: it returns at the
-  // commit boundary, now scoring both channels, with its suppression ledger.
-  assert.equal(typeof context.selectSurfacingSlate, "function");
-  assert.equal(typeof context.surfacingSlateText, "function");
-  assert.equal(context.SURFACING_MAX_LEDGER_RECORDS, 256);
   // The pressure rung no live reader consulted. The band's maxTarget is the trigger.
   assert.equal(context.ACTIVE_CONTEXT_POLICY.warningRatio, undefined);
 
@@ -7393,8 +7055,8 @@ async function gateLeverCollapse() {
   const status = (await toolStatus(plain)).details.automatic;
   assert.equal(Object.hasOwn(status, "warningRatio"), false,
     "The status block still reports a warning rung");
-  assert.equal(Object.hasOwn(status.surfacing, "sources"), false,
-    "The status block still reports an external suggestion-source registry");
+  assert.equal(Object.hasOwn(status, "surfacing"), false,
+    "The status block still reports the deleted surfacing subsystem");
   assert.equal(status.instrumentation.enabled, true, "Projection instrumentation is not unconditional");
   assert.equal((await toolStatus(plain)).details.index, "diet", "The status index diet is not unconditional");
   const properties = [...plain.tools.values()][0].parameters.properties;
@@ -7448,7 +7110,7 @@ async function gateLeverCollapse() {
     survivingConstants: 0,
     deadCarriersDeleted: 19,
     advisoryStateFieldKept: true,
-    surfacingSelectorKept: true,
+    surfacingDeleted: true,
     unconditionalInstrumentation: true,
     unconditionalDiet: true,
     unconditionalPeekLifetime: true,
@@ -7522,7 +7184,7 @@ async function gateQuietRuntimeStormReplay() {
   assert.equal(
     crossing.messages.some((message) =>
       typeof message?.customType === "string" &&
-      /-(curation|advisory|milestone|surfacing)$/.test(message.customType)),
+      /-(curation|advisory|milestone)$/.test(message.customType)),
     false,
     "Crossing the curation threshold rendered a carrier",
   );
@@ -8071,7 +7733,7 @@ async function gateFrozenSurface() {
   assert.equal(
     seeded.messages.some((message) =>
       typeof message?.customType === "string" &&
-      /-(curation|advisory|milestone|surfacing)$/.test(message.customType)),
+      /-(curation|advisory|milestone)$/.test(message.customType)),
     false,
     "A pre-commit guidance carrier reached the projection",
   );
@@ -8823,7 +8485,7 @@ async function gateProjectionIsAppendOnly() {
   const projection = await project(runtime);
   const carriers = projection.messages.filter((message) =>
     typeof message?.customType === "string" &&
-    /-(curation|advisory|milestone|surfacing)$/.test(message.customType));
+    /-(curation|advisory|milestone)$/.test(message.customType));
   assert.deepEqual(carriers.map((message) => message.customType), [],
     "A pre-commit guidance carrier reached the projection");
 
@@ -10389,37 +10051,6 @@ async function gateGuidanceOption() {
  * suppression counter, because `status` is a read-only context action and the tool-batch
  * safety scan is built on read-only actions not writing durable state.
  */
-async function gateSurfacingDeliveryRidesTheBoundary() {
-  const source = await readFile(join(projectRoot, "extensions", "active-context.ts"), "utf8");
-  const carriers = [...source.matchAll(/deliverSurfacing\(snapshot, "([a-z]+)"\)/g)].map((match) => match[1]);
-  assert.deepEqual(carriers.sort(), ["rider"],
-    "The slate is delivered somewhere other than the commit-boundary carrier");
-  assert.equal(/customType: surfacingProjectionType/.test(source), false,
-    "A surfacing carrier of its own reappeared in the projection");
-
-  const runtime = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
-  await measure(runtime, 40_000, 100_000);
-  const suggestions = () => contextEvents(runtime).filter((record) => record.kind === "context.suggestion");
-  const before = suggestions().length;
-  const status = (await toolStatus(runtime)).details.automatic.surfacing;
-  for (const key of ["slate", "line", "ledger", "silenced", "considered", "divergent", "slateSize"]) {
-    assert(Object.hasOwn(status, key), `The status surfacing block is missing ${key}`);
-  }
-  assert.equal(status.slateSize, context.SURFACING_SLATE_SIZE);
-  assert(status.slate.length <= context.SURFACING_SLATE_SIZE);
-  const ledgerBefore = json.stableStringify(materialized(runtime).surfacing ?? []);
-  await toolStatus(runtime);
-  assert.equal(json.stableStringify(materialized(runtime).surfacing ?? []), ledgerBefore,
-    "Asking for status moved the suppression ledger");
-  assert.equal(suggestions().length, before, "Asking for status issued a suggestion");
-  return {
-    pushCarriers: carriers,
-    ownCarrier: "none",
-    statusIsARead: true,
-    statusSlate: status.slate.length,
-    slateSize: status.slateSize,
-  };
-}
 
 /**
  * THE BRIEF UPGRADE RIDES THE COMMIT BOUNDARY.
@@ -13237,6 +12868,9 @@ async function gateRetiredStateFieldsAreRefusedByName() {
   const retired = {
     lastCall: { exposure: 4, ordinal: 2, contextCalls: 0, agentMarks: 0, text: "[pi-fold last call] ..." },
     notices: { fired: [0.25], ring: [{ share: 0.25, ordinal: 1, text: "[pi-fold notice] ..." }] },
+    // The surfacing ledger went with its subsystem 2026-08-14, so any session that
+    // ever issued a suggestion carries this field and refuses here by name.
+    surfacing: [{ id: "fold_0000000000000000", surfaced: 1, taken: 0, ordinal: 3, outcome: "shown" }],
   };
   const refusals = {};
   for (const [field, payload] of Object.entries(retired)) {
@@ -13275,8 +12909,8 @@ async function gateRetiredStateFieldsAreRefusedByName() {
       [...built.entries, stateEntry(built.sessionId, { ...empty, ...retired })],
       built.sessionId,
     ),
-    /retired field\(s\) lastCall, notices/,
-    "A state carrying both retired fields named only one of them",
+    /retired field\(s\) lastCall, notices, surfacing/,
+    "A state carrying every retired field named only some of them",
   );
   // And the refusal is not a blanket rejection of unknown keys wearing a friendlier
   // message: a field that was never in the schema still fails the plain key check.
@@ -14005,9 +13639,6 @@ const gates = [
   [22, "Evidence ingestion is unconditional", gateEvidenceIngestionIsUnconditional],
   [23, "Summarizer option", gateSummarizerOption],
   [25, "Peek and fold index", gatePeekAndFoldIndex],
-  [26, "Two surfacing channels, one divergence trigger", gateSurfacingChannels],
-  [27, "One suggestion per delivery point, bounded", gateSurfacingSlateBounds],
-  [28, "Surfacing suppression lifecycle", gateSurfacingSuppression],
   [32, "Epoch mark/commit lifecycle", gateEpochMarkCommit],
   [34, "Epoch quota top-up", gateEpochQuotaTopUp],
   [35, "Mark always means mark", gateMarkAlwaysMeansMark],
@@ -14015,7 +13646,6 @@ const gates = [
   [38, "Scheduling wire round-trip", gateSchedulingWireRoundTrip],
   [39, "Epoch mark accumulation", gateMarkAccumulation],
   [40, "The refold rung is reachable through a mark", gateEpochInlineRungs],
-  [41, "Surfacing key-order digest stability", gateSurfacingKeyOrder],
   [45, "Truthful capacity & admission control", gateTruthfulCapacityAdmission],
   [46, "Retained pending marks", gateRetainedPendingMarks],
   [48, "Status index diet", gateStatusIndexDiet],
@@ -14067,7 +13697,6 @@ const gates = [
   [102, "The public option surface", gatePublicOptionSurface],
   [105, "Every completed tool batch folds unmarked", gateEveryToolBatchFoldsUnmarked],
   [103, "Guidance is one boolean, default on", gateGuidanceOption],
-  [104, "The slate rides the rider, and nothing else", gateSurfacingDeliveryRidesTheBoundary],
   [106, "The boundary commits with no turn ever closed", gateOpenTurnCommits],
   [107, "Model briefs upgrade on the commit boundary", gateBriefUpgradesRideTheBoundary],
   [108, "A folded head never limits reach", gateProjectedStaleBasis],

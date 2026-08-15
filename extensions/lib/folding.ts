@@ -53,7 +53,7 @@ import {
   MAX_FOLD_SPAN_CHARS,
   PEEK_DEFAULT_MAX_BYTES,
   PEEK_HEAD_SHARE,
-  STATUS_DIET_SUGGESTIONS,
+  STATUS_DIET_INDEX_ROWS,
   zoneBytes,
 } from "./policy.ts";
 import type {
@@ -1167,7 +1167,7 @@ export function activeContextStatus(
   offset = 0,
   limit = 40,
   maximumChapterSourceRefs = Number.MAX_SAFE_INTEGER,
-  statusOptions: { diet?: boolean; suggestions?: number } = {},
+  statusOptions: { diet?: boolean; indexRows?: number } = {},
 ): Record<string, unknown> {
   const roots = orderedRoots(state, snapshot).map((item) => item.fold.id);
   const ordered = orderedFoldTree(state, snapshot);
@@ -1196,7 +1196,7 @@ export function activeContextStatus(
       .sort((left, right) =>
         Number(right.reclaimableBytes) - Number(left.reclaimableBytes) ||
         String(left.id).localeCompare(String(right.id)))
-      .slice(0, statusOptions.suggestions ?? STATUS_DIET_SUGGESTIONS)
+      .slice(0, statusOptions.indexRows ?? STATUS_DIET_INDEX_ROWS)
     : null;
   const sourceMap = statusOptions.diet ? foldSourceMap(state, snapshot) : null;
   return {
@@ -1284,13 +1284,11 @@ export function boundStatusPayload(
   };
   const automatic = ownValue(payload, "automatic");
   const instrumentation = isPlainRecord(automatic) ? ownValue(automatic, "instrumentation") : undefined;
-  const surfacing = isPlainRecord(automatic) ? ownValue(automatic, "surfacing") : undefined;
   const lastAction = isPlainRecord(automatic) ? ownValue(automatic, "lastAutomaticAction") : undefined;
   const lastEpoch = isPlainRecord(lastAction) ? ownValue(lastAction, "epoch") : undefined;
   shrink(instrumentation, "projectionRecords", "projection record(s)", true);
   shrink(instrumentation, "cacheObservations", "cache observation(s)", true);
   shrink(instrumentation, "events", "context event(s)", true);
-  shrink(surfacing, "log", "surfacing log row(s)", true);
   if (shrink(payload, "sourceMap", "source map row(s)") > 0) payload.sourceMapTruncated = true;
   shrink(payload, "topFolds", "top fold row(s)");
   // The last epoch's receipt lists grow with commit depth (a 0.20 minTarget epoch
