@@ -154,15 +154,15 @@ export function toolCallArguments(snapshot: ActiveContextSnapshot, assistantInde
 
 export const IDENTIFIED_BRIEF_ARGUMENT_CHARS = 240;
 export const IDENTIFIED_BRIEF_VALUE_CHARS = 96;
-// The bound on a COMPOSED stage-identified brief. The head keeps the result's
-// leading paragraph and gets exactly what remains of this after the parts that
-// identify the fold (call signatures, tail anchor, fixed text), so the paragraph
-// takes every character the contract can give it. Set 100 below the 1,200 the
-// brief is held to (gate 51) because one later append exists: commit-time gap
-// absorption adds its one sentence to a decided brief (scheduling.ts), and a
-// brief composed to the line would be pushed over by it. Gate 134 pins the
-// paragraph surviving.
-export const IDENTIFIED_BRIEF_CHARS = 1_100;
+// A composed stage-identified brief is held to the ONE policy cap, maxBriefChars
+// (Shane 2026-08-14: "2k brief is more appropriate"). The head keeps the
+// result's leading paragraph and gets exactly what remains of the cap after the
+// parts that identify the fold (call signatures, tail anchor, fixed text), so
+// the paragraph takes every character the contract can give it. The 1,100
+// sub-cap this replaced held 100 below a separate 1,200 supplied maximum as
+// headroom for commit-time gap absorption's appended sentence; the absorption
+// eligibility law (gate 136) removed that hazard, and both smaller numbers went
+// with it. Gate 134 pins the paragraph surviving.
 // The head bound for a result with NO terminated opening paragraph: its first
 // line, exactly the pre-paragraph behaviour.
 export const IDENTIFIED_BRIEF_HEAD_CHARS = 160;
@@ -282,7 +282,7 @@ export function stageIdentifiedToolBrief(input: {
   // A present label costs its own wrapper on top of the fixed parts: the
   // ` · opens "` prefix and closing quote are 11 characters that assemble("")
   // does not count, because an empty label drops the whole term.
-  const headAllowance = Math.max(0, IDENTIFIED_BRIEF_CHARS - assemble("", "").length - 11);
+  const headAllowance = Math.max(0, ACTIVE_CONTEXT_POLICY.maxBriefChars - assemble("", "").length - 11);
   const paragraph = leadingParagraph(messages[0]);
   const label = paragraph !== null
     ? factualValue(paragraph, headAllowance)
@@ -292,9 +292,9 @@ export function stageIdentifiedToolBrief(input: {
     );
   // The notes wrapper costs 18 characters the empty form does not count, the
   // same accounting as the label's 11.
-  const notesAllowance = Math.max(0, IDENTIFIED_BRIEF_CHARS - assemble(label, "").length - 18);
+  const notesAllowance = Math.max(0, ACTIVE_CONTEXT_POLICY.maxBriefChars - assemble(label, "").length - 18);
   const noted = noteTexts.length ? factualValue(noteTexts.join(" · "), notesAllowance) : "";
-  const bounded = oneLine(assemble(label, noted), IDENTIFIED_BRIEF_CHARS);
+  const bounded = oneLine(assemble(label, noted), ACTIVE_CONTEXT_POLICY.maxBriefChars);
   return usefulBrief(bounded, ACTIVE_CONTEXT_POLICY.maxBriefChars, snapshot.toolName) ? bounded : null;
 }
 

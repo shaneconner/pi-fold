@@ -1462,7 +1462,8 @@ async function gatePoisonedFloorRegression() {
   );
   assert.equal(response.details.kind, "chapter");
   assert.equal(response.details.provenance.kind, "deterministic");
-  assert(response.details.brief.length > 20 && response.details.brief.length <= 1_200);
+  assert(response.details.brief.length > 20 &&
+    response.details.brief.length <= context.ACTIVE_CONTEXT_POLICY.maxBriefChars);
   assert(!/pi_fold_context/i.test(response.details.brief));
   // The floor under test is a BRIEF floor, and a brief is fixed at the decision. Under
   // the epoch that decision is a mark, so the floor is read there first and then read
@@ -4186,8 +4187,10 @@ async function gateStageIdentifiedBriefs() {
   assert.equal(new Set(identifiedBriefs).size, identified.length,
     "Two stage-identified briefs are identical");
   for (const brief of identifiedBriefs) {
-    assert(brief.length <= 1_200, `A stage-identified brief exceeded the hard cap: ${brief.length}`);
-    assert(context.usefulBrief(brief, 1_200, "pi_fold_context"), "A stage-identified brief is not factual");
+    assert(brief.length <= context.ACTIVE_CONTEXT_POLICY.maxBriefChars,
+      `A stage-identified brief exceeded the one policy cap: ${brief.length}`);
+    assert(context.usefulBrief(brief, context.ACTIVE_CONTEXT_POLICY.maxBriefChars, "pi_fold_context"),
+      "A stage-identified brief is not factual");
     assert(/stage=\d+/.test(brief), `A stage-identified brief lost its arguments: ${brief}`);
     assert(/NEXT_KEY=stage-\d+-7f3a/.test(brief), `A stage-identified brief lost its tail anchor: ${brief}`);
   }
@@ -12321,10 +12324,11 @@ async function gateBriefTruncationIsExplicit() {
   // the public tool brief. Identical fixtures except the argument value: the
   // over-length path forces exactly one cut, and the short control proves the
   // brief carries no marker anywhere when nothing was cut.
-  const briefFor = (path) => {
+  const briefFor = (path, resultText = null) => {
     const built = makeFixture({
       turns: 2, resultChars: 120, contextWindow: 272_000,
       readArguments: () => ({ path }),
+      resultText,
       policy: { minToolChars: 100 },
       thresholds: NO_FRESH_TAIL,
     });
@@ -12336,14 +12340,26 @@ async function gateBriefTruncationIsExplicit() {
   const longPath = `stage/${"segment/".repeat(60)}leaf.txt`;
   const cutBrief = briefFor(longPath);
   assert(cutBrief.includes("..."), "an over-length argument was cut without a marker");
-  assert(cutBrief.length <= context.IDENTIFIED_BRIEF_CHARS,
-    "the marked brief escaped the identified-brief bound");
+  assert(cutBrief.length <= context.ACTIVE_CONTEXT_POLICY.maxBriefChars,
+    "the marked brief escaped the one policy cap");
   assert(context.usefulBrief(cutBrief, undefined, "pi_fold_context"),
     "the marked brief stopped being useful");
   const wholeBrief = briefFor("stage/leaf.txt");
   assert(!wholeBrief.includes("..."),
     "a brief with nothing cut carries a marker anyway, so the marker means nothing");
   assert(wholeBrief.includes("stage/leaf.txt"), "the whole argument did not survive whole");
+  // ONE cap (Shane 2026-08-14: "2k brief is more appropriate"). The deleted
+  // 1,100 sub-cap held the composed identified brief below a line the policy
+  // never drew, so a long opening paragraph now seats past it, whole and
+  // unmarked, inside the one policy cap: under the sub-cap this brief was
+  // impossible.
+  const wideBrief = briefFor("stage/leaf.txt",
+    (turn) => `Stage ${turn} finding: ${"w".repeat(1_500)}\n\nbulk body follows here.`);
+  assert(wideBrief.length > 1_100,
+    "a long paragraph stayed under the deleted sub-cap, so a second bound still binds");
+  assert(wideBrief.length <= context.ACTIVE_CONTEXT_POLICY.maxBriefChars,
+    "the wide brief escaped the one policy cap");
+  assert(!wideBrief.includes("..."), "a paragraph with room to seat whole was cut anyway");
 
   // The wedge law, on gate 65's geometry: two marks, one short turn wedged
   // between them, the LATER mark's brief sized against the policy cap. The
@@ -12409,6 +12425,7 @@ async function gateBriefTruncationIsExplicit() {
     markerBoundedChars: bounded.length,
     cutBriefChars: cutBrief.length,
     wholeBriefMarkers: 0,
+    wideBriefChars: wideBrief.length,
     absorbSuffixChars: suffix.length,
     exactFitBriefChars: fitGrown.brief.length,
     pastFitAbsorbed: past.absorbed.length,
