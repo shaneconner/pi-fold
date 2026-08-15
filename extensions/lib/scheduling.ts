@@ -645,10 +645,16 @@ export function absorbWedgeMarks(input: {
       if (!chapterRangeIsUnitAligned(snapshot, gapStart, interval.end)) continue;
       const parts = partsForRange(snapshot, state, gapStart, interval.end, new Set<FoldKind>(["tool-result"]));
       if (!parts) continue;
+      // ELIGIBILITY, not truncation (Shane 2026-08-14): the grown fold's brief
+      // must name what it absorbed, and a brief already near the policy cap has
+      // no room for that sentence. Slicing dropped exactly the words that made
+      // the absorption honest, so a wedge whose truthful suffix does not fit is
+      // simply not absorbed; the gap stays raw for a later commit.
+      const absorbSuffix = ` It also holds ${gapRefs.length} short adjacent entry(s) absorbed at commit.`;
+      if (mark.brief.length + absorbSuffix.length > snapshot.policy.maxBriefChars) continue;
       const grown = foldMarkFor({
         candidate: { kind: "chapter", parts, sourceRefs: candidateSourceRefs(parts, state) },
-        brief: `${mark.brief} It also holds ${gapRefs.length} short adjacent entry(s) absorbed at commit.`
-          .slice(0, snapshot.policy.maxBriefChars),
+        brief: `${mark.brief}${absorbSuffix}`,
         briefProvenance: mark.briefProvenance,
         origin: mark.origin,
         ordinal: mark.ordinal,

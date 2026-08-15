@@ -342,12 +342,12 @@ export function automaticToolBrief(snapshot: ActiveContextSnapshot, candidate: F
     throw new Error("Automatic tool brief crossed a validated assistant batch");
   }
   const first = calls[0];
-  const factualValue = (value: string, maximum: number): string => value
-    .replace(new RegExp(snapshot.toolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "active-context service")
-    .replace(/[\u0000-\u001f\u007f]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, maximum);
+  const factualValue = (value: string, maximum: number): string => oneLine(
+    value
+      .replace(new RegExp(snapshot.toolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "active-context service")
+      .replace(/[\u0000-\u001f\u007f]+/g, " "),
+    maximum,
+  );
   const factualBriefValue = (value: string): string => factualValue(value, 120);
   const factualToolName = (name: string): string => name.toLowerCase() === snapshot.toolName.toLowerCase()
     ? "active-context status inspection"
@@ -387,6 +387,11 @@ function assistantNoteText(message: unknown): string {
   return kept.join(" ");
 }
 
+// THE one bounding primitive (Shane 2026-08-14). Every deterministic brief cut
+// runs through here so a bound always leaves its mark: "..." means exactly
+// "content continues in the exact source", and a reader never mistakes a cut
+// value for a complete one. oneLine collapses whitespace then delegates;
+// factualValue sanitizes then delegates through oneLine. No other site slices.
 function boundedSubject(text: string, budget: number): string {
   if (text.length <= budget) return text;
   let kept = text.slice(0, Math.max(0, budget - 3)).trimEnd();
@@ -1129,12 +1134,7 @@ export function manualFoldCandidate(
 }
 
 export function oneLine(value: string, maximum: number): string {
-  const text = value.replace(/\s+/g, " ").trim();
-  if (text.length <= maximum) return text;
-  let bounded = text.slice(0, maximum).trimEnd();
-  const finalCode = bounded.charCodeAt(bounded.length - 1);
-  if (finalCode >= 0xd800 && finalCode <= 0xdbff) bounded = bounded.slice(0, -1);
-  return bounded;
+  return boundedSubject(value.replace(/\s+/g, " ").trim(), maximum);
 }
 
 export function deterministicChapterBrief(

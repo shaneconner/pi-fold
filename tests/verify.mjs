@@ -12283,6 +12283,138 @@ async function gateAgentNotesSurviveConsolidation() {
   };
 }
 
+// GATE 136 - a deterministic brief's cut is stated, never silent
+//
+// Sol's 2026-08-14 review generalized what Codex found at two sites to the class:
+// factualValue and oneLine both ended in a bare slice while between them bounding
+// call arguments, signatures, opening prose, joined agent notes, chapter asks and
+// tool summaries, so a reader could not tell a cut value from a complete one. One
+// primitive now owns every cut and leaves one marker with one meaning, content
+// continues in the exact source. Commit-time wedge absorption was the same defect
+// with higher stakes: it appended its bookkeeping sentence and then sliced at the
+// policy cap, so a brief near the cap silently lost the sentence naming its
+// absorbed entries. That repair is ELIGIBILITY, not truncation: a wedge whose
+// truthful suffix does not fit is not absorbed at all, because the proposed fold
+// cannot satisfy its brief contract; the gap stays raw for a later commit.
+async function gateBriefTruncationIsExplicit() {
+  // The primitive through its exported delegate. An over-bound value carries the
+  // marker inside its bound; a within-bound value is returned whole with no
+  // marker, so the marker can never be decoration.
+  const long = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo";
+  const bounded = context.oneLine(long, 40);
+  assert(bounded.endsWith("..."), "an over-bound oneLine value does not state its cut");
+  assert(bounded.length <= 40, "the marker pushed oneLine past its bound");
+  assert(bounded.startsWith("alpha bravo"), "the bound did not keep the head");
+  assert.equal(context.oneLine("short value", 40), "short value",
+    "a within-bound value gained a marker it did not earn");
+  // Surrogate safety survives the delegation: a cut landing inside an astral
+  // pair drops the dangling high surrogate rather than emitting it. The pair is
+  // built from its code point so no literal astral byte rides in this file.
+  const astral = `${"x".repeat(36)}${String.fromCodePoint(0x1f600)}tail of the value`;
+  const cut = context.oneLine(astral, 40);
+  assert(cut.endsWith("..."), "an astral cut does not state itself");
+  const beforeMarker = cut.charCodeAt(cut.length - 4);
+  assert(!(beforeMarker >= 0xd800 && beforeMarker <= 0xdbff),
+    "the cut emitted a dangling high surrogate before its marker");
+
+  // factualValue reaches the same primitive after sanitization, driven through
+  // the public tool brief. Identical fixtures except the argument value: the
+  // over-length path forces exactly one cut, and the short control proves the
+  // brief carries no marker anywhere when nothing was cut.
+  const briefFor = (path) => {
+    const built = makeFixture({
+      turns: 2, resultChars: 120, contextWindow: 272_000,
+      readArguments: () => ({ path }),
+      policy: { minToolChars: 100 },
+      thresholds: NO_FRESH_TAIL,
+    });
+    const empty = context.emptyActiveContextState(built.sessionId);
+    const [candidate] = context.selectAutomaticToolBatch(built.snapshot, empty);
+    assert(candidate, "the fixture offered no completed tool batch");
+    return context.automaticToolBrief(built.snapshot, candidate);
+  };
+  const longPath = `stage/${"segment/".repeat(60)}leaf.txt`;
+  const cutBrief = briefFor(longPath);
+  assert(cutBrief.includes("..."), "an over-length argument was cut without a marker");
+  assert(cutBrief.length <= context.IDENTIFIED_BRIEF_CHARS,
+    "the marked brief escaped the identified-brief bound");
+  assert(context.usefulBrief(cutBrief, undefined, "pi_fold_context"),
+    "the marked brief stopped being useful");
+  const wholeBrief = briefFor("stage/leaf.txt");
+  assert(!wholeBrief.includes("..."),
+    "a brief with nothing cut carries a marker anyway, so the marker means nothing");
+  assert(wholeBrief.includes("stage/leaf.txt"), "the whole argument did not survive whole");
+
+  // The wedge law, on gate 65's geometry: two marks, one short turn wedged
+  // between them, the LATER mark's brief sized against the policy cap. The
+  // suffix length is learned from a real absorption first, so the boundary
+  // asserts sit at the exact fit and one past it rather than at a guess.
+  const wedgeFixture = () => makeFixture({
+    turns: 20, tools: false, chapterChars: 40, contextWindow: 100_000,
+    policy: { minChapterChars: 1 },
+    thresholds: NO_FRESH_TAIL,
+  });
+  const built = wedgeFixture();
+  const span = (turn) => [built.turnEntries[turn][0], built.turnEntries[turn].at(-1)];
+  const empty = context.emptyActiveContextState(built.sessionId);
+  const stateWith = (lateBrief) => {
+    let state = empty;
+    for (const [turn, brief] of [[0, "Completed early work stays exactly recoverable."], [2, lateBrief]]) {
+      state = context.addPendingMark(state, context.foldMarkFor({
+        candidate: context.manualFoldCandidate(built.snapshot, empty, span(turn)),
+        brief,
+        briefProvenance: { kind: "deterministic" },
+        origin: "agent",
+        ordinal: 1,
+      })).state;
+    }
+    return state;
+  };
+  const shortLate = "Completed late work stays exactly recoverable.";
+  const absorbed = context.absorbWedgeMarks({
+    snapshot: built.snapshot, state: stateWith(shortLate), charsPerToken: 4,
+  });
+  assert.equal(absorbed.absorbed.length, 1, "the short-brief control did not absorb its wedge");
+  const suffix = ` It also holds ${absorbed.absorbed[0].entries} short adjacent entry(s) absorbed at commit.`;
+  const grown = context.pendingMarks(absorbed.state)
+    .find((mark) => mark.id === absorbed.absorbed[0].intoMarkId);
+  assert.equal(grown.brief, `${shortLate}${suffix}`,
+    "the absorbing brief does not carry the whole truthful suffix");
+  const cap = built.snapshot.policy.maxBriefChars;
+  const pad = (length) => `Completed late work stays exactly recoverable. ${"fact ".repeat(cap)}`
+    .slice(0, length);
+  // Exact fit absorbs: eligibility is the contract being satisfiable, not a margin.
+  const exactFit = pad(cap - suffix.length);
+  const atFit = context.absorbWedgeMarks({
+    snapshot: built.snapshot, state: stateWith(exactFit), charsPerToken: 4,
+  });
+  assert.equal(atFit.absorbed.length, 1, "an exact-fit brief was refused its absorption");
+  const fitGrown = context.pendingMarks(atFit.state)
+    .find((mark) => mark.id === atFit.absorbed[0].intoMarkId);
+  assert.equal(fitGrown.brief.length, cap, "the exact fit did not land exactly at the cap");
+  assert(fitGrown.brief.endsWith(suffix), "the exact-fit brief lost its suffix");
+  // One character past the fit is ineligible: nothing absorbed, the mark's own
+  // brief untouched, and no sliced sentence anywhere.
+  const overFit = pad(cap - suffix.length + 1);
+  const past = context.absorbWedgeMarks({
+    snapshot: built.snapshot, state: stateWith(overFit), charsPerToken: 4,
+  });
+  assert.deepEqual(past.absorbed, [],
+    "a wedge whose truthful suffix does not fit was absorbed anyway");
+  const survivor = context.pendingMarks(past.state)
+    .find((mark) => mark.brief === overFit);
+  assert(survivor, "the ineligible mark's own brief did not survive untouched");
+
+  return {
+    markerBoundedChars: bounded.length,
+    cutBriefChars: cutBrief.length,
+    wholeBriefMarkers: 0,
+    absorbSuffixChars: suffix.length,
+    exactFitBriefChars: fitGrown.brief.length,
+    pastFitAbsorbed: past.absorbed.length,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -12405,6 +12537,7 @@ const gates = [
   [133, "A projection fingerprint is computed on demand", gateProjectionFingerprintsAreComputedOnDemand],
   [134, "Opening prose survives deterministic folding", gateOpeningProseSurvivesDeterministicFolding],
   [135, "Agent notes survive consolidation", gateAgentNotesSurviveConsolidation],
+  [136, "A brief's cut is stated, never silent", gateBriefTruncationIsExplicit],
 ];
 
 const gateFilter = (process.env.GATES ?? "")
