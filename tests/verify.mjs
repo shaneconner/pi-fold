@@ -12164,6 +12164,16 @@ async function gateOpeningProseSurvivesDeterministicFolding() {
 // their own assistant lines. A note as its own subject is what the division
 // seats whole; the same words inside a truncated child subject are not. There
 // is no generator: what a fold is COMMITTED with must carry the fact.
+//
+// THE LAW, narrowed to what finite briefs honestly satisfy (Shane 2026-08-14):
+// an assistant message's LEADING paragraph is a first-class brief subject, and
+// no assistant-note omission is silent. It is NOT "every note is named": the
+// note bound cuts at 160, the division caps a seated subject's share, and the
+// count-slice bounds how many subjects seat at all, so a brief legally omits.
+// What is universal is the statement: the lead counts every note the walk
+// found, the tail counts every subject the slice dropped, and a cut inside a
+// seated subject leaves gate 136's marker. Later paragraphs of a multi-
+// paragraph message are outside the law: the leading paragraph is the note.
 // ---------------------------------------------------------------------------
 async function gateAgentNotesSurviveConsolidation() {
   const TRACE_FACT = "trace-a-02: lib/amigaos-fixture.c";
@@ -12278,11 +12288,65 @@ async function gateAgentNotesSurviveConsolidation() {
       `a brief ran to ${fold.brief.length} chars, past the ${context.ACTIVE_CONTEXT_POLICY.maxBriefChars} contract`);
   }
 
+  // THE OVER-BOUND FIXTURE: more subjects than the count-slice can seat, so
+  // real notes drop, and the drop must be STATED, twice over. The lead counts
+  // every note the walk found, the tail counts exactly what the slice dropped,
+  // and seated plus dropped covers the counted whole; the dropped note itself
+  // is provably absent, so the statement is doing work rather than decorating
+  // a brief that seated everything. Notes seat after children in span order,
+  // so the slice drops the latest notes first: the last landmark is the probe.
+  const wideTurns = 90;
+  const wide = makeFixture({
+    turns: wideTurns, tools: false, chapterChars: 40, contextWindow: 100_000,
+    policy: { minChapterChars: 1 },
+    thresholds: NO_FRESH_TAIL,
+    assistantText: (turn) => `Landmark ${turn}: value-${turn} recorded.`,
+  });
+  let wideState = context.emptyActiveContextState(wide.sessionId);
+  const wideChapters = [];
+  for (let start = 0; start < wideTurns; start += 4) {
+    const end = Math.min(start + 3, wideTurns - 1);
+    const committed = await commitCandidate(
+      wideState, wide.snapshot,
+      context.manualFoldCandidate(wide.snapshot, wideState,
+        wide.turnEntries.slice(start, end + 1).flat()),
+      { brief: `Chapters ${start} through ${end} of the landmark ledger stay recoverable.` },
+    );
+    wideState = committed.state;
+    wideChapters.push(wideState.folds.at(-1).id);
+  }
+  const wideBrief = context.deterministicConsolidationBrief(
+    { kind: "consolidation", parts: wideChapters.map((foldId) => ({ kind: "fold", foldId })) },
+    wideState, "pi_fold_context", wide.snapshot,
+  );
+  const wideLead = /covering (\d+) folds and (\d+) agent notes: /.exec(wideBrief);
+  assert(wideLead, "the over-bound parent lost its counting lead");
+  assert.equal(Number(wideLead[1]), wideChapters.length,
+    "the lead does not count every child fold");
+  assert.equal(Number(wideLead[2]), wideTurns,
+    "the lead does not count every note the walk found, so an unseated note goes uncounted");
+  const wideTail = / \| (\d+) more in this group\.$/.exec(wideBrief);
+  assert(wideTail, "an over-bound division dropped subjects without stating the count");
+  const wideDropped = Number(wideTail[1]);
+  assert(wideDropped > 0, "the fixture failed to overrun the count-slice, so the tail proves nothing");
+  const wideSeated = wideBrief
+    .slice(wideBrief.indexOf(": ") + 2, wideBrief.length - wideTail[0].length)
+    .split(" | ").length;
+  assert.equal(wideSeated + wideDropped, Number(wideLead[1]) + Number(wideLead[2]),
+    "seated subjects plus the stated drop do not cover the counted whole");
+  assert(!wideBrief.includes(`value-${wideTurns - 1}`),
+    "the last note seated after all, so no omission was exercised");
+  assert(wideBrief.length <= context.ACTIVE_CONTEXT_POLICY.maxBriefChars,
+    "the over-bound brief escaped the one policy cap");
+
   return {
     parents: parents.length,
     carrierNotes: Number(/and (\d+) agent notes/.exec(String(carrier.brief))?.[1]),
     briefChars: String(carrier.brief).length,
     closerBriefChars: String(closer.brief).length,
+    overBoundSubjects: Number(wideLead[1]) + Number(wideLead[2]),
+    overBoundSeated: wideSeated,
+    overBoundDropped: wideDropped,
   };
 }
 
@@ -12553,7 +12617,7 @@ const gates = [
 
   [133, "A projection fingerprint is computed on demand", gateProjectionFingerprintsAreComputedOnDemand],
   [134, "Opening prose survives deterministic folding", gateOpeningProseSurvivesDeterministicFolding],
-  [135, "Agent notes survive consolidation", gateAgentNotesSurviveConsolidation],
+  [135, "Agent notes survive; omission is stated", gateAgentNotesSurviveConsolidation],
   [136, "A brief's cut is stated, never silent", gateBriefTruncationIsExplicit],
 ];
 
