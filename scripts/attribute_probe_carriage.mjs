@@ -28,6 +28,7 @@ const { createJiti } = await import(pathToFileURL(join(PROJECT, "node_modules", 
 const runtime = await createJiti(import.meta.url).import(join(PROJECT, "extensions", "active-context.ts"));
 const attribution = await import(pathToFileURL(join(PROJECT, "scripts", "lib", "pi_context_attribution.mjs")));
 const identity = await import(pathToFileURL(join(PROJECT, "scripts", "lib", "pi_fold_identity.mjs")));
+const experiment = await import(pathToFileURL(join(PROJECT, "scripts", "lib", "pi_context_experiment.mjs")));
 
 const readJsonl = (path) => readFileSync(path, "utf8").split("\n").filter(Boolean).flatMap((line) => {
   try { return [JSON.parse(line)]; } catch { return []; }
@@ -114,6 +115,82 @@ for (const runName of readdirSync(join(campaignDir, "runs")).sort()) {
         unreadable: String(error.message).split("\n")[0] };
       process.stdout.write(`${JSON.stringify(note)}\n`);
       const key = `${evidence.arm}-rep${evidence.repetition} ${verdictRow.verdict} state-unreadable`;
+      rollup.set(key, (rollup.get(key) ?? 0) + 1);
+    }
+  }
+  // THE END BLOCK'S HIDDENNESS CERTIFICATION (task #79 build 3): every withheld
+  // query's expected value attributed at the request that answered the end
+  // block, so a value that was VISIBLE at answer time is reported beside the
+  // verdict rather than letting a match read as recall. Runs sealed before the
+  // instrument carry no endBlock and are skipped: there is nothing to certify.
+  if (evidence.endBlock?.rows) {
+    const runConfig = JSON.parse(readFileSync(join(runDir, "run-config.json"), "utf8"));
+    const plan = JSON.parse(readFileSync(runConfig.planPath, "utf8"));
+    const questions = experiment.endBlockQuestions(plan.ledger, runConfig.querySeed);
+    const verdictOf = new Map(evidence.endBlock.rows.map((row) => [row.id, row]));
+    // One answering request for the whole block: the first end-block id that
+    // resolves locates it, and every value is attributed at that request.
+    let blockRequest = null;
+    for (const item of questions) {
+      blockRequest = attribution.requestForAnswer({
+        entries, requests, answerText: `${item.id}:`,
+      });
+      if (blockRequest) break;
+    }
+    const attributeValue = (fact) => {
+      try {
+        const reading = attribution.attributeFactInSession({
+          runtime, entries, sessionId, leafId: blockRequest.request.leafId, fact,
+          stateEntryType: identity.PI_FOLD_STATE_ENTRY,
+          foldRecordEntryType: identity.PI_FOLD_FOLD_RECORD_ENTRY,
+        });
+        return reading.classification === "absent" && reading.offBranchEntryIds
+          ? "absent-off-branch" : reading.classification;
+      } catch (error) {
+        if (!/retired field/.test(String(error?.message ?? error))) throw error;
+        return "state-unreadable";
+      }
+    };
+    for (const item of questions) {
+      const verdictRow = verdictOf.get(item.id) ?? null;
+      if (item.kind === "table") {
+        for (const entry of plan.ledger.table) {
+          const rowVerdict = verdictRow?.rows?.find((row) => row.row === entry.row) ?? null;
+          const row = {
+            runId: runName, arm: evidence.arm, repetition: evidence.repetition,
+            endBlockId: `${item.id}#${String(entry.row).padStart(2, "0")}`, kind: "table-row",
+            verdict: rowVerdict === null ? null
+              : rowVerdict.match ? "match" : rowVerdict.answered ? "mismatch" : "unanswered",
+            ...(blockRequest ? {
+              ordinal: blockRequest.request.ordinal,
+              valueCarriage: attributeValue(entry.value),
+            } : { ordinal: null, valueCarriage: "no-answer-found" }),
+          };
+          process.stdout.write(`${JSON.stringify(row)}\n`);
+          const key = `${evidence.arm}-rep${evidence.repetition} end:table-row ` +
+            `${row.verdict} ${row.valueCarriage}`;
+          rollup.set(key, (rollup.get(key) ?? 0) + 1);
+        }
+        continue;
+      }
+      const verdict = verdictRow === null ? null
+        : item.kind === "checksum" ? verdictRow.verdict
+        : verdictRow.recallOfRecord === null ? "unanswered"
+        : verdictRow.recallOfRecord ? "recall-of-record" : "not-own-record";
+      const row = {
+        runId: runName, arm: evidence.arm, repetition: evidence.repetition,
+        endBlockId: item.id, kind: item.kind, verdict,
+        ...(blockRequest ? {
+          ordinal: blockRequest.request.ordinal,
+          valueCarriage: attributeValue(item.expectedAnswer),
+          withdrawnCarriage: item.withdrawnAnswer === null
+            ? null : attributeValue(item.withdrawnAnswer),
+        } : { ordinal: null, valueCarriage: "no-answer-found", withdrawnCarriage: null }),
+      };
+      process.stdout.write(`${JSON.stringify(row)}\n`);
+      const key = `${evidence.arm}-rep${evidence.repetition} end:${item.kind} ` +
+        `${row.verdict} ${row.valueCarriage}` +
+        (row.withdrawnCarriage ? ` withdrawn:${row.withdrawnCarriage}` : "");
       rollup.set(key, (rollup.get(key) ?? 0) + 1);
     }
   }

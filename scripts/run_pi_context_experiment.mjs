@@ -375,6 +375,15 @@ async function run() {
 
   const plan = validateStagePlan(readJson(resolve(planPath)));
   const modePlan = EXPERIMENT_MODE_PLANS[plan.mode];
+  // THE FROZEN QUERY SEED, read from the same sealed file the stager reads the
+  // content seed from and from nowhere else: the worker builds the withheld end
+  // block from (plan.ledger, querySeed) alone, so both arms of a campaign ask
+  // byte-identical questions and no flag can re-roll them.
+  const hiddenMassSeeds = closedBook
+    ? null
+    : readJson(join(PROJECT, "docs", "fold_vs_compaction", "hidden-mass-seeds.json"));
+  assertExperiment(closedBook || /^[0-9a-f]{16,64}$/.test(hiddenMassSeeds.querySeed ?? ""),
+    "hidden-mass-seeds.json carries no querySeed");
   const gitStart = gitAttestation({ requireClean: true });
   const sourceHashes = experimentSourceHashes();
   const dependencies = dependencyHashes();
@@ -422,6 +431,7 @@ async function run() {
         // so the extension can gate stage progression on recorded results while
         // grading stays post-hoc against the plan the supervisor keeps.
         ledgerTasks: plan.ledger.joins.map((join) => ({ id: join.id, stage: join.taskStage })),
+        querySeed: hiddenMassSeeds.querySeed,
       }),
     transport: EXPERIMENT_TRANSPORT,
     repetition,

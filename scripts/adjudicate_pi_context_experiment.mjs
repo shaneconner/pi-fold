@@ -28,6 +28,8 @@ import {
   buildIncludeResolver,
   closedBookPrompt,
   closedBookQuestions,
+  endBlockPrompt,
+  endBlockVerdicts,
   closedBookTranscript,
   computeRereadTax,
   contextEventMetrics,
@@ -333,10 +335,11 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     ? manifest.sessionType === EXPERIMENT_CLOSED_BOOK_LABEL &&
       manifest.questionsSha256 === sha256Json(closedBookQuestions(plan))
     : manifest.guidance === config.guidance &&
-      manifest.target.checkoutSha256 === config.targetTreeSha256,
+      manifest.target.checkoutSha256 === config.targetTreeSha256 &&
+      manifest.endBlockSha256 === sha256Text(endBlockPrompt(plan.ledger, config.querySeed)),
   closedBook
     ? "Closed-book manifest does not pin this plan's question list"
-    : "Run manifest guidance/checkout pins drifted from the run config");
+    : "Run manifest guidance/checkout/end-block pins drifted from the run config");
   // Re-derive the corpus fingerprint from the plan, so the manifest pin is checked against
   // the plan rather than trusted from the run that wrote it.
   assertExperiment(corpusManifestSha256(plan.stages.flatMap((stage) => stage.files)) ===
@@ -567,6 +570,14 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   // wave 32 with zero recovery calls and lost both of its probes there.
   const waveRecovery = probeWaveRecovery({ entries: runEntries, transcripts: probes });
   const echoes = echoVerdicts({ plan, transcripts: probes });
+  // The withheld end block, graded three ways: record correctness fixed at
+  // record time (the ledger tool's event against the plan), recall fidelity
+  // against the agent's OWN record, and what the answers cost in recovery,
+  // with the reconstruction table row-exact and the withdrawn-value trap cell
+  // stated beside the verdict.
+  const endBlock = endBlockVerdicts({
+    entries: runEntries, ledger: plan.ledger, querySeed: config.querySeed, events: workerEvents,
+  });
 
   // Audit traces: every chain step graded absolutely (against the harness walk)
   // and against the agent's own predecessor. INC self-evaluation reads the run's
@@ -716,6 +727,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     probeVerdicts,
     waveRecovery,
     echoes,
+    endBlock,
     auditTraces,
     provenance,
     probes,

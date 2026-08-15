@@ -30,6 +30,7 @@ import {
   compactionReserveTokens,
   compactionTriggerShare,
   corpusManifestSha256,
+  endBlockPrompt,
   isWindowOverflow,
   receiptLens,
   validateExperimentManifest,
@@ -451,6 +452,18 @@ try {
           { expandPromptTemplates: false });
         terminalState = await waitForDurableTerminalQuiescence(manager, session);
       }
+      // THE WITHHELD END BLOCK (task #79 build 3): asked only after the whole
+      // workload was delivered and the model ended its turn cleanly, so no
+      // pre-phase surface ever carried the questions. Built from the plan's
+      // ledger and the frozen query seed alone, byte-identical across arms;
+      // the manifest below pins the exact bytes. A run that finished dirty
+      // skips it and fails its own terminal assertions instead.
+      if (!closedBook && !deadlineFired && stagesDelivered() === plan.stageCount &&
+        modelEndedItsTurn(terminalState)) {
+        await session.prompt(endBlockPrompt(plan.ledger, config.querySeed),
+          { expandPromptTemplates: false });
+        terminalState = await waitForDurableTerminalQuiescence(manager, session);
+      }
     } catch (error) {
       const text = error instanceof Error ? `${error.message}` : String(error);
       // The unmanaged arm is expected to end at the wall. That is its measurement, not a
@@ -659,6 +672,9 @@ try {
       watchdogMs: config.watchdogMs,
       heartbeatMs: config.heartbeatMs,
     },
+    // The withheld end block's exact bytes, pinned the way the closed-book leg
+    // pins its question list: the sealed session states what it was asked.
+    endBlockSha256: sha256Text(endBlockPrompt(plan.ledger, config.querySeed)),
     createdWallMs: config.createdWallMs,
   });
   writeJsonExclusive(join(config.runDir, "run-manifest.json"), manifest);

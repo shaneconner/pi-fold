@@ -2205,7 +2205,7 @@ export function validateExperimentManifest(manifest) {
   assertExperiment(keysWithin(manifest, [
     "version", "runId", "campaignId", "arm", "mode", "ordinal", "repetition",
     "seed", "model", "runtime", "target", "plan", "pacing", "createdWallMs",
-  ], ["sessionType", "guidance", "foldScheduling", "foldPeekResults", "guidedCuration", "providerTotalWindow", "providerInputBudget", "briefGenerator", "transport", "reliabilityLevers"]),
+  ], ["sessionType", "guidance", "foldScheduling", "foldPeekResults", "guidedCuration", "providerTotalWindow", "providerInputBudget", "briefGenerator", "transport", "reliabilityLevers", "endBlockSha256"]),
   "Invalid experiment manifest shape");
   assertExperiment(manifest.sessionType === undefined || manifest.sessionType === "arm",
     "Arm manifest carries a foreign session type");
@@ -2233,6 +2233,12 @@ export function validateExperimentManifest(manifest) {
   assertExperiment(manifest.transport === undefined || EXPERIMENT_TRANSPORTS.includes(manifest.transport),
     "Manifest transport is not a known Pi transport");
   assertExperiment(manifest.version === EXPERIMENT_PROTOCOL_VERSION, "Manifest protocol version drifted");
+  // Required at v4, listed optional above only so a pre-bump manifest fails on
+  // the version by name rather than on a shape it predates: the sealed session
+  // must state exactly which end block it was asked, the same law the
+  // closed-book question hash carries.
+  assertExperiment(HEX_64.test(manifest.endBlockSha256 ?? ""),
+    "Arm manifest requires the end-block prompt hash");
   assertExperiment(EXPERIMENT_ARMS.includes(manifest.arm), "Manifest arm is not one of the three arms");
   assertExperiment(EXPERIMENT_MODES.includes(manifest.mode), "Manifest mode is invalid");
   assertExperiment(manifest.guidance === undefined ||
@@ -2309,7 +2315,7 @@ export const EXPERIMENT_RUN_CONFIG_KEYS = Object.freeze([
 export const EXPERIMENT_RUN_CONFIG_OPTIONAL_KEYS = Object.freeze([
   "sessionType", "guidance", "foldScheduling", "foldPeekResults", "guidedCuration",
   "providerTotalWindow", "providerInputBudget", "briefGenerator", "transport", "reliabilityLevers",
-  "ledgerTasks",
+  "ledgerTasks", "querySeed",
 ]);
 
 export function validateExperimentRunConfig(value) {
@@ -2345,6 +2351,12 @@ export function validateExperimentRunConfig(value) {
         typeof task.id === "string" && task.id.length > 0 &&
         Number.isSafeInteger(task.stage) && task.stage >= 1 && task.stage <= value.stageCount)),
   "An arm run config must carry the plan's ledger task schedule");
+  // The frozen query seed, so the worker builds the withheld end block from the
+  // plan's ledger and this seed alone: byte-identical across arms by
+  // construction. Closed-book exclusion lives with the other no-referent keys.
+  assertExperiment(value.sessionType === EXPERIMENT_CLOSED_BOOK_LABEL ||
+    (typeof value.querySeed === "string" && /^[0-9a-f]{16,64}$/.test(value.querySeed)),
+  "An arm run config must carry the frozen query seed");
   assertExperiment(value.sessionType === undefined ||
     EXPERIMENT_SESSION_TYPES.includes(value.sessionType),
   "Run config session type is invalid");
@@ -2357,7 +2369,8 @@ export function validateExperimentRunConfig(value) {
   assertExperiment(value.sessionType !== EXPERIMENT_CLOSED_BOOK_LABEL ||
     (value.foldScheduling === undefined && value.foldPeekResults === undefined &&
       value.guidance === undefined && value.guidedCuration === undefined &&
-      value.briefGenerator === undefined && value.ledgerTasks === undefined),
+      value.briefGenerator === undefined && value.ledgerTasks === undefined &&
+      value.querySeed === undefined),
   "Closed-book run config carries arm-condition keys with no referent");
   // A generator belongs to the arm that registers the runtime and writes briefs; on any
   // other arm the descriptor would be a fact about nothing.
@@ -2623,58 +2636,72 @@ function scanAssistantMessages(entries, start, end, matches) {
 // was and how much digging the wave actually took. A wave answered with no
 // recovery calls right after a reset is a different measurement from one that
 // took six searches, and the two should never be summed without saying so.
-export function probeWaveRecovery({ entries, transcripts }) {
-  assertExperiment(Array.isArray(entries), "Wave recovery requires the session branch");
-  assertExperiment(Array.isArray(transcripts), "Wave recovery requires the probe transcripts");
-  // A reset is whatever ended the arm's ability to read the material directly:
-  // a compaction entry for native, a committed fold epoch for pifold.
+// A reset is whatever ended the arm's ability to read the material directly:
+// a compaction entry for native, a committed fold epoch for pifold.
+export function contextResets(entries) {
   const resets = [];
   entries.forEach((entry, index) => {
     if (entry?.type === "compaction") resets.push({ index, kind: "compaction" });
-    else if (typeof entry?.customType === "string" &&
+    else if (typeof (entry?.customType) === "string" &&
       entry.customType.endsWith(CONTEXT_EVENT_SUFFIX) &&
       entry?.data?.kind === "context.commit") resets.push({ index, kind: "commit" });
   });
+  return resets;
+}
+
+// What one answer window cost: recovery calls between the asking entry and the
+// answering entry, and how far back the last reset was. Shared by the per-wave
+// lens and the end-block lens so the two can never count differently.
+export function recoveryWindow(entries, resets, from, to) {
+  const end = to === null || to === undefined ? entries.length : to;
+  let historySearches = 0;
+  let contextToolCalls = 0;
+  let fileReads = 0;
+  for (let index = from + 1; index < end; index += 1) {
+    const message = entries[index]?.message;
+    if (message?.role !== "toolResult") continue;
+    if (message.toolName === EXPERIMENT_HISTORY_TOOL_NAME) historySearches += 1;
+    else if (message.toolName === "read") fileReads += 1;
+    else if (message.toolName === EXPERIMENT_TOOL_NAME ||
+      message.toolName === EXPERIMENT_LEDGER_TOOL_NAME) continue;
+    // Anything else is the arm's own context tool (peek, status, expand), which
+    // only the pifold arm has. Counted by what it IS rather than named peek,
+    // since one tool carries every verb.
+    else if (typeof message.toolName === "string" && message.toolName.length > 0) {
+      contextToolCalls += 1;
+    }
+  }
+  const priorResets = resets.filter((reset) => reset.index < from);
+  const last = priorResets.length === 0 ? null : priorResets[priorResets.length - 1];
+  return {
+    historySearches,
+    contextToolCalls,
+    fileReads,
+    recoveryCalls: historySearches + contextToolCalls + fileReads,
+    lastResetKind: last === null ? null : last.kind,
+    // No reset yet means the arm still held the WHOLE run raw, which is the
+    // strongest form of the free wave and is reported as such rather than as a
+    // large number that reads like distance.
+    entriesSinceReset: last === null ? null : from - last.index,
+  };
+}
+
+export function probeWaveRecovery({ entries, transcripts }) {
+  assertExperiment(Array.isArray(entries), "Wave recovery requires the session branch");
+  assertExperiment(Array.isArray(transcripts), "Wave recovery requires the probe transcripts");
+  const resets = contextResets(entries);
   return transcripts.map((wave) => {
     const from = wave.resultEntryIndex;
-    const to = wave.answerEntryIndex;
     if (from === null || from === undefined) {
       return {
         stage: wave.stage, delivered: false, historySearches: 0, contextToolCalls: 0,
         fileReads: 0, recoveryCalls: 0, lastResetKind: null, entriesSinceReset: null,
       };
     }
-    const end = to === null || to === undefined ? entries.length : to;
-    let historySearches = 0;
-    let contextToolCalls = 0;
-    let fileReads = 0;
-    for (let index = from + 1; index < end; index += 1) {
-      const message = entries[index]?.message;
-      if (message?.role !== "toolResult") continue;
-      if (message.toolName === EXPERIMENT_HISTORY_TOOL_NAME) historySearches += 1;
-      else if (message.toolName === "read") fileReads += 1;
-      else if (message.toolName === EXPERIMENT_TOOL_NAME) continue;
-      // Anything else is the arm's own context tool (peek, status, expand), which
-      // only the pifold arm has. Counted by what it IS rather than named peek,
-      // since one tool carries every verb.
-      else if (typeof message.toolName === "string" && message.toolName.length > 0) {
-        contextToolCalls += 1;
-      }
-    }
-    const priorResets = resets.filter((reset) => reset.index < from);
-    const last = priorResets.length === 0 ? null : priorResets[priorResets.length - 1];
     return {
       stage: wave.stage,
       delivered: true,
-      historySearches,
-      contextToolCalls,
-      fileReads,
-      recoveryCalls: historySearches + contextToolCalls + fileReads,
-      lastResetKind: last === null ? null : last.kind,
-      // No reset yet means the arm still held the WHOLE run raw, which is the
-      // strongest form of the free wave and is reported as such rather than as a
-      // large number that reads like distance.
-      entriesSinceReset: last === null ? null : from - last.index,
+      ...recoveryWindow(entries, resets, from, wave.answerEntryIndex),
     };
   });
 }
@@ -2784,6 +2811,224 @@ export function closedBookTranscript({ entries, plan }) {
       };
     }),
   }));
+}
+
+// ---------------------------------------------------------------------------
+// THE WITHHELD END BLOCK (task #79 build 3 of 3). One final asking surface,
+// built at RUN time from (plan.ledger, querySeed) and never entering the plan
+// or any stage payload, so no pre-phase surface can leak what will be asked.
+// The querySeed is frozen beside the contentSeed in hidden-mass-seeds.json and
+// travels supervisor -> run config -> worker, so both arms of a campaign build
+// byte-identical prompts by construction. Every ledger fact is asked: the seed
+// governs ORDER, which is the least tunable selection there is, and ids are
+// assigned AFTER the shuffle so position reveals nothing about channel. The
+// checksum question is ONE WORDING for corrected and uncorrected subjects
+// alike, because a question that acknowledged a correction only where one
+// exists would announce the trap in the asking (the gate 65 law). The join
+// question asks what the agent RECORDED, not what the answer is: fidelity to
+// the agent's own record is the recall measurement, and correctness of the
+// record was fixed at record time. The reconstruction demand rides last so its
+// sixteen lines cannot push individual answers out of the answering message.
+// ---------------------------------------------------------------------------
+export function endBlockQuestions(ledger, querySeed) {
+  assertExperiment(ledger && Array.isArray(ledger.singles) && Array.isArray(ledger.joins) &&
+    Array.isArray(ledger.corrections), "End block requires the plan's ledger");
+  assertExperiment(typeof querySeed === "string" && /^[0-9a-f]{16,64}$/.test(querySeed),
+    "End block requires a 16-64 hex query seed");
+  const checksumOf = (subject) => ({
+    kind: "checksum",
+    subject,
+    question: `What is the checksum the audit ledger records for ${subject}? ` +
+      "Answer with the value only.",
+    expectedAnswer: effectiveLedgerChecksum(ledger, subject),
+    withdrawnAnswer: ledger.corrections.find((correction) =>
+      correction.subject === subject)?.first ?? null,
+  });
+  const joinOf = (join) => ({
+    kind: "join",
+    taskId: join.id,
+    question: `Ledger task ${join.id} asked you to record the ` +
+      `${LEDGER_JOIN_HOPS[join.links.length - 1].noun} reached from ${join.links[0].subject}. ` +
+      "What value did you record for it? Answer with the value only.",
+    expectedAnswer: join.expectedAnswer,
+    withdrawnAnswer: null,
+  });
+  const unordered = [
+    ...ledger.singles.map((single) => checksumOf(single.subject)),
+    ...ledger.corrections.map((correction) => checksumOf(correction.subject)),
+    ...ledger.joins.map(joinOf),
+  ];
+  const order = seededShuffle(unordered.map((_, index) => index), `${querySeed}:end-block`);
+  const questions = order.map((position, index) => ({
+    id: `end-${String(index + 1).padStart(2, "0")}`,
+    ...unordered[position],
+  }));
+  questions.push({
+    id: "end-table",
+    kind: "table",
+    question: `Reconstruct the audit ledger table in full: all ${ledger.tableSize} rows, ` +
+      "each on its own line in the exact form `row NN: <value>`.",
+    expectedAnswer: null,
+    withdrawnAnswer: null,
+  });
+  return questions;
+}
+
+export function endBlockPrompt(ledger, querySeed) {
+  const questions = endBlockQuestions(ledger, querySeed);
+  return [
+    [
+      "Before we close out the assignment, can you give me a few final items for the",
+      "record? Put each answer on its own line as `<item-id>: <answer>`, then say in one",
+      "sentence where each one came from. If you are not sure of one, say so rather than",
+      "guessing.",
+    ].join(" "),
+    "",
+    ...questions.map((item) => `- ${item.id}: ${item.question}`),
+  ].join("\n");
+}
+
+// One normalizer for every ledger-value comparison: the lens taught that a
+// carriage or grading claim that misses a format is a false absence, so the
+// grader and the certifying sweep share this exact reading.
+export function normalizeLedgerValue(text) {
+  return String(text ?? "").trim().toLowerCase();
+}
+
+const END_TABLE_ROW_PATTERN = /^\s*[-*]?\s*(?:`\s*)?row\s*0*(\d+)\s*[:\-]\s*(.+)$/gim;
+
+function entryUserText(entry) {
+  if (entry?.type !== "message" || entry?.message?.role !== "user") return "";
+  const content = entry.message.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.filter((part) => part?.type === "text")
+    .map((part) => part.text ?? "").join("\n");
+}
+
+// The end block's answer surface: the FIRST assistant message after the prompt
+// that answers any item, parsed with the probe parser, plus the reconstruction
+// rows read from the same message. A session that never carries the exact
+// prompt bytes reads as not delivered rather than being fuzzily matched: the
+// manifest pins the same bytes, so a drifted prompt is a sealed contradiction,
+// never a silent parse miss.
+export function endBlockTranscript({ entries, ledger, querySeed }) {
+  const questions = endBlockQuestions(ledger, querySeed);
+  const prompt = endBlockPrompt(ledger, querySeed);
+  const promptEntryIndex = entries.findIndex((entry) =>
+    entryUserText(entry).trim() === prompt.trim());
+  if (promptEntryIndex < 0) {
+    return {
+      delivered: false, promptEntryIndex: null, answerEntryIndex: null, rawText: "",
+      answers: questions.map((item) => ({
+        id: item.id, kind: item.kind, answerText: null, parsed: false,
+      })),
+      tableRows: [],
+    };
+  }
+  const found = scanAssistantMessages(entries, promptEntryIndex + 1, entries.length, (text) =>
+    questions.some((item) => probeAnswerPattern(item.id).test(text)));
+  const rawText = found.text;
+  const tableRows = [];
+  const seenRows = new Set();
+  for (const match of rawText.matchAll(END_TABLE_ROW_PATTERN)) {
+    const row = Number(match[1]);
+    // First statement wins, exactly as the probe parser takes the first match:
+    // a later restatement is not a second chance.
+    if (seenRows.has(row)) continue;
+    seenRows.add(row);
+    tableRows.push({ row, value: match[2].trim() });
+  }
+  return {
+    delivered: true,
+    promptEntryIndex,
+    answerEntryIndex: found.index >= 0 ? found.index : null,
+    rawText,
+    answers: questions.map((item) => {
+      const match = probeAnswerPattern(item.id).exec(rawText);
+      return {
+        id: item.id,
+        kind: item.kind,
+        answerText: match ? match[1].trim() : null,
+        parsed: Boolean(match),
+      };
+    }),
+    tableRows,
+  };
+}
+
+// The three-way grading split the rep 4 correction forced. Record correctness
+// was fixed at RECORD time (the ledger tool's event against the plan's own
+// answer); recall fidelity is the end-block answer against the agent's OWN
+// record, right or wrong, because faithfully restating your own error is
+// unfakeable event recall while independently restating the truth is
+// re-derivation evidence (the echo law, gate 38); and what the answers COST is
+// the recovery window, counted by the same shared reading the per-wave lens
+// uses. The trap cell is stated beside the verdict: a checksum answered with
+// the withdrawn value is an earliest-first reading caught in the act.
+export function endBlockVerdicts({ entries, ledger, querySeed, events }) {
+  assertExperiment(Array.isArray(entries), "End-block verdicts require the session branch");
+  assertExperiment(Array.isArray(events), "End-block verdicts require the worker events");
+  const questions = endBlockQuestions(ledger, querySeed);
+  const transcript = endBlockTranscript({ entries, ledger, querySeed });
+  const answerOf = new Map(transcript.answers.map((answer) => [answer.id, answer]));
+  const recordOf = new Map(events
+    .filter((event) => event?.kind === "ledger-record")
+    .map((event) => [event.details?.id, event.details?.value]));
+  const rows = questions.map((item) => {
+    const answer = answerOf.get(item.id) ?? { answerText: null, parsed: false };
+    if (item.kind === "checksum") {
+      const normalized = normalizeLedgerValue(answer.answerText);
+      return {
+        id: item.id,
+        kind: item.kind,
+        subject: item.subject,
+        corrected: item.withdrawnAnswer !== null,
+        answerText: answer.answerText,
+        verdict: !answer.parsed ? "unanswered"
+          : normalized === normalizeLedgerValue(item.expectedAnswer) ? "match" : "mismatch",
+        withdrawnMatch: item.withdrawnAnswer !== null && answer.parsed &&
+          normalized === normalizeLedgerValue(item.withdrawnAnswer),
+      };
+    }
+    if (item.kind === "join") {
+      const recorded = recordOf.has(item.taskId) ? recordOf.get(item.taskId) : null;
+      const normalized = normalizeLedgerValue(answer.answerText);
+      return {
+        id: item.id,
+        kind: item.kind,
+        taskId: item.taskId,
+        answerText: answer.answerText,
+        recordedValue: recorded,
+        recordCorrect: recorded === null ? null
+          : normalizeLedgerValue(recorded) === normalizeLedgerValue(item.expectedAnswer),
+        recallOfRecord: recorded === null || !answer.parsed ? null
+          : normalized === normalizeLedgerValue(recorded),
+        truthMatch: !answer.parsed ? null
+          : normalized === normalizeLedgerValue(item.expectedAnswer),
+      };
+    }
+    const rowOf = new Map(transcript.tableRows.map((entry) => [entry.row, entry.value]));
+    const table = ledger.table.map((entry) => ({
+      row: entry.row,
+      answered: rowOf.has(entry.row),
+      match: rowOf.has(entry.row) &&
+        normalizeLedgerValue(rowOf.get(entry.row)) === normalizeLedgerValue(entry.value),
+    }));
+    return {
+      id: item.id,
+      kind: item.kind,
+      rowsTotal: ledger.table.length,
+      rowsAnswered: table.filter((entry) => entry.answered).length,
+      rowsCorrect: table.filter((entry) => entry.match).length,
+      rows: table,
+    };
+  });
+  const recovery = transcript.delivered
+    ? recoveryWindow(entries, contextResets(entries),
+      transcript.promptEntryIndex, transcript.answerEntryIndex)
+    : null;
+  return { delivered: transcript.delivered, rows, recovery };
 }
 
 // Trace steps grade like probes but continuously: each chain step is a

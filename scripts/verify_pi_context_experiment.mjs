@@ -51,6 +51,9 @@ import {
   codeWordReissueSentence,
   effectiveCodeWord,
   effectiveLedgerChecksum,
+  endBlockPrompt,
+  endBlockQuestions,
+  endBlockVerdicts,
   EXPERIMENT_LEDGER_TOOL_NAME,
   LEDGER_TOKEN_PATTERN,
   LEDGER_UNKNOWN_VALUE,
@@ -712,6 +715,7 @@ const manifest = {
     watchdogMs: EXPERIMENT_MODE_PLANS.smoke.watchdogMs,
     heartbeatMs: EXPERIMENT_MODE_PLANS.smoke.heartbeatMs,
   },
+  endBlockSha256: "4".repeat(64),
   createdWallMs: 1_800_000_000_000,
 };
 validateExperimentManifest(manifest);
@@ -785,6 +789,7 @@ const runConfig = {
   targetTreeSha256: "3".repeat(64),
   model: { provider: "openai-codex", id: "gpt-5.6-sol", effort: "xhigh" },
   ledgerTasks: [{ id: "lt-01", stage: 3 }],
+  querySeed: "04ce51d9cd78889e",
 };
 validateExperimentRunConfig(runConfig);
 assert.throws(() => validateExperimentRunConfig({ ...runConfig, repoDir: "/tmp/elsewhere/repo" }),
@@ -2600,7 +2605,7 @@ try {
   assert.throws(() => validateExperimentManifest({ ...manifest, sessionType: "floor" }),
     /foreign session type/);
 
-  const closedRunConfig = (({ guidance: _g, ledgerTasks: _l, ...rest }) => rest)({
+  const closedRunConfig = (({ guidance: _g, ledgerTasks: _l, querySeed: _q, ...rest }) => rest)({
     ...runConfig, sessionType: EXPERIMENT_CLOSED_BOOK_LABEL, arm: EXPERIMENT_CLOSED_BOOK_LABEL,
   });
   validateExperimentRunConfig(closedRunConfig);
@@ -5207,6 +5212,171 @@ try {
     "ledgerTasks: plan.ledger.joins.map((join) => ({ id: join.id, stage: join.taskStage }))"),
   "the supervisor must forward the task schedule as ids and stages only");
   checks.theSeededLedgerWeavesThreeChannelsAndGatesProgressionOnRecords = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 71 - the withheld end block: one asking surface built at run time from
+// (plan.ledger, querySeed), byte-identical across arms, absent from every
+// pre-phase surface, and graded three ways.
+//
+// Task #79 build 3 of 3. The querySeed is frozen beside the contentSeed and
+// governs ORDER only: every ledger fact is asked, ids are assigned after the
+// shuffle so position reveals nothing, and the checksum question is ONE wording
+// for corrected and uncorrected subjects alike (a question that acknowledged a
+// correction only where one existed would announce the trap in the asking).
+// Grading splits record correctness (fixed at record time, the ledger tool's
+// event against the plan), recall fidelity against the agent's OWN record
+// (faithfully restating your own error is unfakeable event recall; restating
+// the truth instead is re-derivation evidence), and what the answers cost in
+// recovery, with the reconstruction table graded row-exact and the
+// withdrawn-value trap cell stated beside the verdict.
+// ---------------------------------------------------------------------------
+{
+  const gateLedger = buildLedger({ mode: "full", contentSeed: "feedfacefeedface" });
+  const gateSeed = "abcdef0123456789";
+  // Purity: same inputs, byte-identical prompt; a different seed reorders the
+  // SAME question set, because order is the only thing the seed may choose.
+  const questions = endBlockQuestions(gateLedger, gateSeed);
+  assert.equal(endBlockPrompt(gateLedger, gateSeed), endBlockPrompt(gateLedger, gateSeed),
+    "same ledger and seed must produce byte-identical prompts");
+  const reordered = endBlockQuestions(gateLedger, "1111111111111111");
+  assert.deepEqual([...questions.map((item) => item.question)].sort(),
+    [...reordered.map((item) => item.question)].sort(),
+    "the seed governs order, never selection: every ledger fact is always asked");
+  assert.notEqual(JSON.stringify(questions.map((item) => item.question)),
+    JSON.stringify(reordered.map((item) => item.question)),
+    "a different seed shuffles the order");
+  assert.equal(questions.filter((item) => item.kind === "checksum").length,
+    gateLedger.singles.length + gateLedger.corrections.length);
+  assert.equal(questions.filter((item) => item.kind === "join").length, gateLedger.joins.length);
+  assert.equal(questions.at(-1).id, "end-table");
+  assert.deepEqual(questions.slice(0, -1).map((item) => item.id),
+    questions.slice(0, -1).map((_, index) => `end-${String(index + 1).padStart(2, "0")}`),
+    "ids are positional after the shuffle, so an id reveals nothing about channel");
+  // One-wording law: corrected and uncorrected checksum questions differ only
+  // in their subject token.
+  const correctedQuestion = questions.find((item) =>
+    item.kind === "checksum" && item.withdrawnAnswer !== null);
+  const uncorrectedQuestion = questions.find((item) =>
+    item.kind === "checksum" && item.withdrawnAnswer === null);
+  assert.equal(correctedQuestion.question.replaceAll(correctedQuestion.subject, "X"),
+    uncorrectedQuestion.question.replaceAll(uncorrectedQuestion.subject, "X"),
+    "one wording for trapped and untrapped subjects, or the asking measures the announcement");
+  // No test premise, and the questions exist in NO pre-phase surface: they are
+  // built at run time and the plan never carries them.
+  assert.deepEqual(testAwarenessLeaks(endBlockPrompt(gateLedger, gateSeed)), []);
+  for (const item of endBlockQuestions(plan.ledger, gateSeed)) {
+    for (const stage of plan.stages) {
+      assert(!stage.instructions.includes(item.question),
+        `stage ${stage.ordinal} carries an end-block question before the end`);
+    }
+  }
+  // Grading cells, driven end to end through the transcript parser. The four
+  // joins cover the whole split: faithful-to-a-wrong-record (the unfakeable
+  // recall cell), truth-instead-of-record (re-derivation), no record at all,
+  // and faithful-to-a-right-record. Checksums cover the trap cell, a clean
+  // match, case normalization, and unanswered. The table mixes bare and padded
+  // row numbers, one wrong row and one missing row.
+  const byKind = (kind) => questions.filter((item) => item.kind === kind);
+  const joinItems = byKind("join");
+  const joinTruth = (item) => gateLedger.joins.find((join) => join.id === item.taskId);
+  const checksumItems = byKind("checksum");
+  const trapItem = checksumItems.find((item) => item.withdrawnAnswer !== null);
+  const cleanCorrectedItem = checksumItems.find((item) =>
+    item.withdrawnAnswer !== null && item !== trapItem);
+  const plainItems = checksumItems.filter((item) => item.withdrawnAnswer === null);
+  const answerLines = [
+    `${trapItem.id}: ${trapItem.withdrawnAnswer}`,
+    `${cleanCorrectedItem.id}: ${cleanCorrectedItem.expectedAnswer}`,
+    `${plainItems[0].id}: ${plainItems[0].expectedAnswer.toUpperCase()}`,
+    // plainItems[1] deliberately unanswered.
+    `${joinItems[0].id}: lv-wrong1`,
+    `${joinItems[1].id}: ${joinTruth(joinItems[1]).expectedAnswer}`,
+    `${joinItems[2].id}: lv-orphan`,
+    `${joinItems[3].id}: ${joinTruth(joinItems[3]).expectedAnswer}`,
+    "end-table: reconstructed below.",
+    ...gateLedger.table
+      .filter((entry) => entry.row !== 6)
+      .map((entry) => entry.row === 5
+        ? `row ${String(entry.row).padStart(2, "0")}: lv-000bad`
+        : entry.row === 3
+          ? `row ${entry.row}: ${entry.value}`
+          : `row ${String(entry.row).padStart(2, "0")}: ${entry.value}`),
+  ].join("\n");
+  const gateEntries = [
+    { type: "message", message: { role: "user", content: endBlockPrompt(gateLedger, gateSeed) } },
+    { type: "message", message: { role: "toolResult", toolName: "read", content: [] } },
+    { type: "message", message: { role: "toolResult", toolName: EXPERIMENT_LEDGER_TOOL_NAME, content: [] } },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: answerLines }] } },
+  ];
+  const gateEvents = [
+    { kind: "ledger-record", details: { id: joinItems[0].taskId, value: "lv-wrong1" } },
+    { kind: "ledger-record", details: { id: joinItems[1].taskId, value: "lv-wrong2" } },
+    // joinItems[2] has NO record event.
+    { kind: "ledger-record", details: { id: joinItems[3].taskId, value: joinTruth(joinItems[3]).expectedAnswer } },
+  ];
+  const verdicts = endBlockVerdicts({
+    entries: gateEntries, ledger: gateLedger, querySeed: gateSeed, events: gateEvents,
+  });
+  assert.equal(verdicts.delivered, true);
+  const rowOf = (id) => verdicts.rows.find((row) => row.id === id);
+  assert.deepEqual([rowOf(trapItem.id).verdict, rowOf(trapItem.id).withdrawnMatch],
+    ["mismatch", true],
+    "the withdrawn value is the trap cell, stated beside the verdict rather than inside it");
+  assert.deepEqual([rowOf(cleanCorrectedItem.id).verdict, rowOf(cleanCorrectedItem.id).withdrawnMatch],
+    ["match", false]);
+  assert.equal(rowOf(plainItems[0].id).verdict, "match",
+    "value comparison is normalized: an uppercased token still matches");
+  assert.equal(rowOf(plainItems[1].id).verdict, "unanswered");
+  const faithfulWrong = rowOf(joinItems[0].id);
+  assert.deepEqual([faithfulWrong.recordCorrect, faithfulWrong.recallOfRecord, faithfulWrong.truthMatch],
+    [false, true, false],
+    "faithful recall of a wrong record is the unfakeable event-recall cell");
+  const rederived = rowOf(joinItems[1].id);
+  assert.deepEqual([rederived.recordCorrect, rederived.recallOfRecord, rederived.truthMatch],
+    [false, false, true],
+    "the truth instead of the record is re-derivation, never recall");
+  const orphan = rowOf(joinItems[2].id);
+  assert.deepEqual([orphan.recordedValue, orphan.recordCorrect, orphan.recallOfRecord],
+    [null, null, null], "a missing record grades as null, never as a silent false");
+  const faithfulRight = rowOf(joinItems[3].id);
+  assert.deepEqual([faithfulRight.recordCorrect, faithfulRight.recallOfRecord, faithfulRight.truthMatch],
+    [true, true, true]);
+  const table = rowOf("end-table");
+  assert.deepEqual([table.rowsTotal, table.rowsAnswered, table.rowsCorrect], [16, 15, 14],
+    "row-exact: a bare row number parses, a padded one parses, a wrong value and a missing row each cost one");
+  assert.deepEqual(table.rows.filter((row) => !row.match).map((row) => row.row), [5, 6]);
+  // The recovery window counts the read and never the ledger tool: recording is
+  // workload traffic, not recovery.
+  assert.deepEqual([verdicts.recovery.fileReads, verdicts.recovery.contextToolCalls,
+    verdicts.recovery.recoveryCalls], [1, 0, 1]);
+  // A session that never carries the prompt reads as not delivered, loudly,
+  // rather than being fuzzily matched.
+  const undelivered = endBlockVerdicts({
+    entries: [], ledger: gateLedger, querySeed: gateSeed, events: [],
+  });
+  assert.equal(undelivered.delivered, false);
+  assert.equal(undelivered.recovery, null);
+  // The wiring pins: the worker asks only after the whole workload delivered
+  // cleanly and pins the exact bytes in its manifest; the adjudicator recomputes
+  // the pin and grades through the shared lens; the supervisor reads the frozen
+  // querySeed from the sealed seeds file.
+  assert(worker.includes("endBlockPrompt(plan.ledger, config.querySeed)"),
+    "the worker must build the end block from the plan's ledger and the frozen seed");
+  assert(worker.includes("endBlockSha256: sha256Text(endBlockPrompt(plan.ledger, config.querySeed))"),
+    "the worker manifest must pin the end block's exact bytes");
+  assert(/stagesDelivered\(\) === plan\.stageCount &&\n\s*modelEndedItsTurn\(terminalState\)\) \{\n\s*await session\.prompt\(endBlockPrompt/.test(worker),
+    "the end block is asked only after the whole workload was delivered cleanly");
+  assert(adjudicator.includes(
+    "manifest.endBlockSha256 === sha256Text(endBlockPrompt(plan.ledger, config.querySeed))"),
+  "the adjudicator must recompute the end-block pin rather than trust it");
+  assert(adjudicator.includes("endBlockVerdicts({"),
+    "the adjudicator must grade the end block through the shared lens");
+  const supervisor71 = source("scripts/run_pi_context_experiment.mjs");
+  assert(supervisor71.includes('"hidden-mass-seeds.json"') &&
+    supervisor71.includes("querySeed: hiddenMassSeeds.querySeed"),
+  "the supervisor must read the frozen query seed from the sealed seeds file");
+  checks.theWithheldEndBlockAsksEverythingAndGradesThreeWays = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
