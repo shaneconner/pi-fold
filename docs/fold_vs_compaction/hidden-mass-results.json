@@ -1611,10 +1611,13 @@
     }
   ],
   "sourceHashes": {
-    "extractorSha256": "27352e3e24bbc280832237642c779020b10b8a867d3c3cbb0c261ef167227c01",
+    "extractorSha256": "8469fabf353f1337403a7820465a5b5f83fbdb142e83e2c4f1eb56d62d2b2dc0",
     "carriageScriptSha256": "e5acb08a18e11f9f5460df658381b6fee0c9cba2e2158fa4cbeb42a0b8703804",
     "attributionHelperSha256": "4f618faee9f2dd3b305c287d5d1e202360f38d6b7f579c5091a4da1535930402",
+    "foldIdentitySha256": "7052817353d4ccdc054d6307e3167cdf9eec7aa7dd2a6c83d73c993deb330c1d",
+    "experimentContractSha256": "3b0d06bd3858ba62b80cb82029bfbfcec7564503058a7cb1c65a5e23f948ef05",
+    "attestationHelperSha256": "97be466d24512c9ddc41203c43b74763025c541d4ccc08e8abf3499734438bbb",
     "runtimeTreeSha256": "86241bc31ebec33115b388bfb5c07b4cd5889743e0aa547bb341f612d5c18ff1"
   },
-  "extractSha256": "31dd193d38924a371d5a0c94c0674e7430391ee549a1a7b4f661d33f423bcd82"
+  "extractSha256": "8aa3e7290496e2b7e2e8f3b6c8a100072071e4244d7ddb10d1c0d709abb38f45"
 }

@@ -5080,6 +5080,16 @@ try {
   assert.equal(releaseResult.sourceHashes.attributionHelperSha256,
     sha256Text(readFileSync(join(PROJECT, "scripts", "lib", "pi_context_attribution.mjs"), "utf8")),
   "the result does not bind the helper that classified its carriage rows");
+  assert.equal(releaseResult.sourceHashes.foldIdentitySha256,
+    sha256Text(readFileSync(join(PROJECT, "scripts", "lib", "pi_fold_identity.mjs"), "utf8")),
+  "the result does not bind the entry identity used to reconstruct fold state");
+  assert.equal(releaseResult.sourceHashes.experimentContractSha256,
+    sha256Text(readFileSync(join(PROJECT, "scripts", "lib", "pi_context_experiment.mjs"), "utf8")),
+  "the result does not bind the contract that constructs end-block questions");
+  assert.equal(releaseResult.sourceHashes.attestationHelperSha256,
+    sha256Text(readFileSync(
+      join(PROJECT, "scripts", "lib", "pi_context_soak_attestation.mjs"), "utf8")),
+  "the result does not bind the helper that defines its source and self hashes");
   assert.equal(releaseResult.sourceHashes.runtimeTreeSha256,
     directoryTreeSha256(join(PROJECT, "extensions")),
   "the result does not bind the runtime tree that reconstructed its fold state and projection");

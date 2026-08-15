@@ -21,6 +21,9 @@ const PROJECT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SCRIPT = fileURLToPath(import.meta.url);
 const CARRIAGE_SCRIPT = join(PROJECT, "scripts", "attribute_probe_carriage.mjs");
 const ATTRIBUTION_HELPER = join(PROJECT, "scripts", "lib", "pi_context_attribution.mjs");
+const FOLD_IDENTITY = join(PROJECT, "scripts", "lib", "pi_fold_identity.mjs");
+const EXPERIMENT_CONTRACT = join(PROJECT, "scripts", "lib", "pi_context_experiment.mjs");
+const ATTESTATION_HELPER = join(PROJECT, "scripts", "lib", "pi_context_soak_attestation.mjs");
 const RUNTIME_TREE = join(PROJECT, "extensions");
 const campaignDir = process.argv[2];
 if (!campaignDir) {
@@ -382,6 +385,9 @@ const payload = {
     extractorSha256: sha256File(SCRIPT),
     carriageScriptSha256: sha256File(CARRIAGE_SCRIPT),
     attributionHelperSha256: sha256File(ATTRIBUTION_HELPER),
+    foldIdentitySha256: sha256File(FOLD_IDENTITY),
+    experimentContractSha256: sha256File(EXPERIMENT_CONTRACT),
+    attestationHelperSha256: sha256File(ATTESTATION_HELPER),
     runtimeTreeSha256: directoryTreeSha256(RUNTIME_TREE),
   },
 };
