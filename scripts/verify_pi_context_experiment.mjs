@@ -5381,6 +5381,67 @@ try {
   checks.theWithheldEndBlockAsksEverythingAndGradesThreeWays = true;
 }
 
+// GATE 72 - a resume that buys no progress fails the run by name, before the bill does.
+//
+// Gate 56 built the nudge and named the watchdog its only cadence bound; nothing bounded
+// how many nudges a run could spend at one stage. sol-20260815-hidden native rep 1 is the
+// proof: Pi's compaction summarized away stage 39's NEXT_KEY, the model correctly reported
+// the key unrecoverable on every pass, and the worker re-prompted the same dead question
+// every nine seconds for 4.3 hours, 1,761 provider responses and $127.68 for zero stages,
+// until an outside SIGTERM ended it. The pifold arm recovered from the same loss class at
+// stage 57 of an earlier rep in ONE resume (peeked the fold, finished), so the bound is
+// three whole turns at one undelivered stage: generous against every observed recovery,
+// and three nudges' spend against a dead run instead of a wall clock's.
+//
+// Delivery is the only progress signal that cannot be faked, so the streak is defined on
+// stagesDelivered() alone and is reason-blind: a fence-compaction resume that lands
+// nothing three turns running is the same dead run. The latch entry is written BEFORE the
+// throw so the cause survives even a report that never lands (gate 55's lesson), and the
+// thrown error carries the same name so the worker report and gate 53's reader agree.
+// ---------------------------------------------------------------------------
+{
+  const worker = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
+
+  // The streak function, driven as a function per gate 56's pattern.
+  const streakSource = worker.slice(
+    worker.indexOf("const RESUME_TURNS_PER_STAGE"),
+    worker.indexOf("\n\n// A KILLED WORKER STILL WRITES ITS REPORT."),
+  );
+  assert(streakSource.length > 0, "the resume progress bound was not found where it is pinned");
+  const { limit, streak } = new Function(
+    `${streakSource}; return { limit: RESUME_TURNS_PER_STAGE, streak: resumesWithoutProgress };`)();
+  assert.equal(limit, 3, "the bound is not the three turns the defect record fixed it at");
+  const nudge = (afterStage) => ({ afterStage });
+  assert.equal(streak([], 39), 0, "an empty nudge history claims a streak");
+  assert.equal(streak([nudge(12), nudge(12), nudge(12)], 12), 3,
+    "three same-stage nudges do not count as three");
+  // Progress resets the streak: nudges spent at EARLIER stages never count against the
+  // stage now owed, however many there were.
+  assert.equal(streak([nudge(12), nudge(12), nudge(12), nudge(13)], 13), 1,
+    "a delivery does not reset the streak, so an honest recovery inherits a dead run's debt");
+  assert.equal(streak([nudge(12), nudge(12), nudge(12)], 13), 0,
+    "nudges at an earlier stage count against the stage now owed");
+  assert.equal(streak([nudge(12), nudge(13), nudge(13)], 13), 2,
+    "the streak is not the trailing run of same-stage nudges");
+
+  // The wiring: the bound is checked inside the resume loop, before the nudge is recorded
+  // and before the prompt is sent, and the refusal both latches and throws the same name.
+  const loopStart = worker.indexOf("while (!closedBook && !deadlineFired && stagesDelivered() < plan.stageCount");
+  const boundCheck = worker.indexOf("resumesWithoutProgress(stageNudges, delivered) >= RESUME_TURNS_PER_STAGE");
+  const latchWrite = worker.indexOf('phase: "worker-resume-bound"');
+  const boundThrow = worker.indexOf("throw new Error(detail)");
+  const nudgePush = worker.indexOf("stageNudges.push(");
+  const resumeSend = worker.indexOf("await session.prompt(resumePrompt(");
+  assert(loopStart >= 0 && boundCheck > loopStart && boundCheck < nudgePush && nudgePush < resumeSend,
+    "the bound does not run inside the resume loop before the nudge and the prompt");
+  assert(latchWrite > boundCheck && boundThrow > latchWrite && boundThrow < nudgePush,
+    "the refusal does not latch before it throws, inside the guarded branch");
+  assert(/resume-loop-without-progress: stage \$\{delivered \+ 1\} of/.test(worker),
+    "the failure does not name itself and the stage it is owed");
+
+  checks.aResumeThatBuysNoProgressFailsByName = true;
+}
+
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
 assert.deepEqual([...EXPERIMENT_MODES], ["smoke", "full"]);
 assert(plan, "stage plan fixture did not survive gate 4");

@@ -236,6 +236,23 @@ let fenceCompactionsResumedPast = 0;
 const fenceCompactedSinceLastPrompt = () => config.arm === "nativefence" &&
   fenceCompactions() > fenceCompactionsResumedPast && latchedFailures() === 0;
 
+// A RESUME BUYS ONE FULL TURN, and delivery is the only progress signal that cannot be
+// faked. sol-20260815-hidden native rep 1 lost stage 39's NEXT_KEY to a compaction,
+// reported it unrecoverable on every pass, and was re-prompted every nine seconds for
+// 4.3 hours: 1,761 provider responses, $127.68, zero stages, ended only by an outside
+// SIGTERM. Three consecutive resumes at the same undelivered stage now fail the run by
+// name instead, whatever ended each turn, because three whole turns that land nothing
+// is a dead run on every arm.
+const RESUME_TURNS_PER_STAGE = 3;
+const resumesWithoutProgress = (nudges, delivered) => {
+  let streak = 0;
+  for (let index = nudges.length - 1; index >= 0; index -= 1) {
+    if (nudges[index].afterStage !== delivered) break;
+    streak += 1;
+  }
+  return streak;
+};
+
 // A KILLED WORKER STILL WRITES ITS REPORT.
 //
 // The supervisor sends SIGTERM when its own deadline passes, and Node's default handler
@@ -442,13 +459,30 @@ try {
         // Which of the two conditions fired is recorded, because they measure different
         // things: one is a model that stopped early, the other is the cost of forcing a
         // native compaction into the middle of a task.
+        const delivered = stagesDelivered();
+        if (resumesWithoutProgress(stageNudges, delivered) >= RESUME_TURNS_PER_STAGE) {
+          const detail = `resume-loop-without-progress: stage ${delivered + 1} of ` +
+            `${plan.stageCount} still undelivered after ${RESUME_TURNS_PER_STAGE} resume ` +
+            `prompt(s) that bought no progress`;
+          try {
+            const fd = openSync(failurePath, "a", 0o600);
+            try {
+              writeSync(fd, `${JSON.stringify({
+                version: 1, runId: config.runId, phase: "worker-resume-bound", detail,
+                wallMs: Date.now(), monotonicMs: monotonicMs(),
+              })}\n`);
+              fsyncSync(fd);
+            } finally { closeSync(fd); }
+          } catch { /* The throw below carries the same name into the report. */ }
+          throw new Error(detail);
+        }
         const reason = modelEndedItsTurn(terminalState) ? "model-ended-turn" : "fence-compaction";
         fenceCompactionsResumedPast = fenceCompactions();
         stageNudges.push({
-          afterStage: stagesDelivered(), reason,
+          afterStage: delivered, reason,
           wallMs: Date.now(), monotonicMs: monotonicMs(),
         });
-        await session.prompt(resumePrompt(stagesDelivered() + 1, plan.stageCount),
+        await session.prompt(resumePrompt(delivered + 1, plan.stageCount),
           { expandPromptTemplates: false });
         terminalState = await waitForDurableTerminalQuiescence(manager, session);
       }
