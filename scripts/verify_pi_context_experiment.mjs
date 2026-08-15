@@ -4817,6 +4817,93 @@ try {
   checks.aReadOutsideTheCheckoutIsRefusedByResolution = true;
 }
 
+// Gate 69 (2026-08-15): a fact's carriage is attributed at the answering request.
+//
+// The hidden-mass instrument stands on one primitive: for a fact string and a
+// provider request, say whether the fact rode the projection raw, rode it inside
+// a visible brief, sat one peek away, or was absent, with an absence that exists
+// on a dead branch named as the off-branch entries a native discard leaves. The
+// lens earned its gate on its first sealed sweep: rep 4's log entry claimed
+// three missed bindings were "recorded in channels briefs do not claim", and the
+// lens showed they were never recorded at all, in any format, in any channel.
+// The classification half is pure and driven here across every class; the
+// loader half composes the runtime's own materializeStatePersistence, exercised
+// on the no-state branch shape a native session presents, so an arm with no
+// fold records classifies raw-versus-absent through the same reading.
+{
+  const attribution = await import(
+    pathToFileURL(join(PROJECT, "scripts", "lib", "pi_context_attribution.mjs")).href);
+  const entry = (id, parentId, message) => ({ type: "message", id, parentId, message, timestamp: 1 });
+  const entries = [
+    entry("e1", null, { role: "user", content: [{ type: "text", text: "the ask" }] }),
+    entry("e2", "e1", { role: "toolResult", content: [{ type: "text", text: "covered fact cov-123" }] }),
+    entry("e3", "e2", { role: "toolResult", content: [{ type: "text", text: "expanded fact exp-456" }] }),
+    entry("e4", "e3", {
+      role: "assistant",
+      content: [
+        { type: "text", text: "raw fact raw-789" },
+        { type: "toolCall", id: "c1", name: "submit", arguments: { row: "arg-fact-000" } },
+      ],
+    }),
+    { type: "custom", id: "x1", parentId: "e4", customType: "interleaved-record", data: {}, timestamp: 1 },
+    entry("e5", "x1", { role: "assistant", content: [{ type: "text", text: "probe-1: answered" }] }),
+    entry("e6", "e2", { role: "toolResult", content: [{ type: "text", text: "discarded fact dead-999" }] }),
+  ];
+  const branch = attribution.branchTo(entries, "e5");
+  assert.deepEqual(branch.map((item) => item.id), ["e1", "e2", "e3", "e4", "x1", "e5"],
+    "the branch walk does not follow the parent chain through interleaved records");
+  const view = {
+    branch,
+    visibleBriefs: [{ foldId: "F1", brief: "root brief carrying bf-111" }],
+    recoverableBriefs: [{ foldId: "F2", brief: "hidden child brief carrying cf-222" }],
+    coveredEntryIds: new Set(["e2", "e3"]),
+    expandedEntryIds: new Set(["e3"]),
+  };
+  const classify = (fact) => attribution.classifyFactCarriage(view, fact).classification;
+  assert.equal(classify("cov-123"), "recoverable", "a folded source did not classify recoverable");
+  assert.equal(classify("exp-456"), "visible-raw", "an expanded fold's source did not classify raw");
+  assert.equal(classify("raw-789"), "visible-raw", "plain assistant text did not classify raw");
+  assert.equal(classify("arg-fact-000"), "visible-raw",
+    "a tool call argument did not count as projection bytes, which is the channel rep 4 recorded in");
+  assert.equal(classify("bf-111"), "visible-brief", "a visible root brief did not classify visible-brief");
+  assert.equal(classify("cf-222"), "recoverable",
+    "a hidden child brief classified as visible, so consolidation would hide nothing");
+  assert.equal(classify("zz-none"), "absent", "an unstated fact did not classify absent");
+  const detail = attribution.classifyFactCarriage(view, "cov-123");
+  assert.deepEqual(detail.recoverableSourceEntryIds, ["e2"], "the recoverable carrier is not named");
+  // The loader half on the native shape: no state records, so the runtime
+  // materializes an empty forest and everything on the branch reads raw, while
+  // a fact only on the dead fork is absent WITH its off-branch entries named.
+  const jitiPath = join(PROJECT, "node_modules", "jiti", "lib", "jiti.mjs");
+  assert(existsSync(jitiPath), "could not resolve package-local jiti for the attribution loader");
+  const { createJiti } = await import(pathToFileURL(jitiPath));
+  const runtimeForLens = await createJiti(import.meta.url)
+    .import(join(PROJECT, "extensions", "active-context.ts"));
+  const nativeReading = (fact) => attribution.attributeFactInSession({
+    runtime: runtimeForLens, entries, sessionId: "attribution-fixture", leafId: "e5", fact,
+    stateEntryType: "acme-active-context-state", foldRecordEntryType: "acme-active-context-fold-record",
+  });
+  assert.equal(nativeReading("raw-789").classification, "visible-raw",
+    "the no-state branch did not read raw through the runtime loader");
+  const discarded = nativeReading("dead-999");
+  assert.equal(discarded.classification, "absent");
+  assert.deepEqual(discarded.offBranchEntryIds, ["e6"],
+    "a dead-branch fact did not name its off-branch entries, so a discard reads as never-stated");
+  assert.equal(nativeReading("zz-none").offBranchEntryIds, undefined,
+    "a never-stated fact grew off-branch entries it does not have");
+  // The answer-to-request join walks ancestors to the request leaf, through the
+  // interleaved record that sits between the leaf and the response.
+  const joined = attribution.requestForAnswer({
+    entries, requests: [{ leafId: "e4", ordinal: 7 }], answerText: "probe-1:",
+  });
+  assert.equal(joined?.request.ordinal, 7, "the answering request was not found through its leaf");
+  assert.equal(joined?.answerEntryId, "e5");
+  assert.equal(attribution.requestForAnswer({
+    entries, requests: [{ leafId: "e4", ordinal: 7 }], answerText: "no such answer",
+  }), null, "a missing answer did not return null");
+  checks.aFactsCarriageIsAttributedAtTheAnsweringRequest = true;
+}
+
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
 assert.deepEqual([...EXPERIMENT_MODES], ["smoke", "full"]);
 assert(plan, "stage plan fixture did not survive gate 4");
