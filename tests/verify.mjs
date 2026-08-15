@@ -136,6 +136,13 @@ function makeFixture({
   // an agent-recorded fact lives ONLY in that message and must survive the
   // consolidation that absorbs the turn as a gap.
   assistantText = null,
+  // Pull-shaped session: ONE user prompt, then every turn is a single
+  // assistant message carrying pullText(turn) beside the NEXT tool call, and
+  // its result. This is the real worker geometry (rep 3: 36 of 37 assistant
+  // messages carry text and the next call together); there is no standalone
+  // closing assistant for a note to live in.
+  pull = false,
+  pullText = null,
   policy = {},
   thresholds,
   contextWindow = 272_000,
@@ -156,6 +163,45 @@ function makeFixture({
   for (let turn = 0; turn < turns; turn += 1) {
     const ids = [];
     const named = mentionToolName ? " Ask pi_fold_context for the exact candidate." : "";
+    if (pull) {
+      if (turn === 0) {
+        ids.push(add({
+          role: "user",
+          content: [{ type: "text", text: "Task: pull every stage and record findings as you go." }],
+          timestamp: sequence,
+        }));
+      }
+      const note = pullText && turn > 0 ? pullText(turn) : null;
+      ids.push(add({
+        role: "assistant",
+        content: [
+          ...(note ? [{ type: "text", text: note }] : []),
+          {
+            type: "toolCall",
+            id: `call-${turn}`,
+            name: toolName,
+            arguments: readArguments ? readArguments(turn) : { path: `file-${turn}.txt` },
+          },
+        ],
+        stopReason: "toolUse",
+        timestamp: sequence,
+      }));
+      ids.push(add({
+        role: "toolResult",
+        toolCallId: `call-${turn}`,
+        toolName,
+        content: [{
+          type: "text",
+          text: resultText
+            ? resultText(turn)
+            : `Result ${turn}: ${"r".repeat(resultChars)}${resultTail ? ` ${resultTail(turn)}` : ""}`,
+        }],
+        isError: false,
+        timestamp: sequence,
+      }));
+      turnEntries.push(ids);
+      continue;
+    }
     ids.push(add({
       role: "user",
       content: [{
@@ -13861,6 +13907,30 @@ async function gateAgentNotesSurviveConsolidation() {
   assert(shallowState.folds.some((fold) => fold.kind === "tool-result" &&
     /agent noted "/.test(String(fold.brief))),
     "no tool-result fold appends its closing note, so the batch path is unproven");
+
+  // The real worker geometry. Rep 3 of sol-20260814-traps carried text and
+  // the next tool call in the same assistant message 36 times out of 37, so a
+  // walk that breaks on a tool-calling assistant BEFORE reading it collects
+  // nothing all session: the sealed session holds zero agent-noted clauses.
+  // The note about batch 3 rides in the message that opens batch 4, and batch
+  // 3's brief is the one that must carry it.
+  const pullNote = (turn) => turn === 4
+    ? `${TRACE_FACT}\nRecorded while pulling the next stage.`
+    : `Stage ${turn - 1} done, pulling on.`;
+  const pulled = makeRuntime(
+    makeFixture({ turns: 12, resultChars: 6_000, contextWindow: 100_000, pull: true, pullText: pullNote }),
+    { summarizeContextSpan: () => new Promise(() => {}) },
+  );
+  await startRuntime(pulled);
+  await measure(pulled, 92_000, 100_000);
+  await compactBoundary(pulled);
+  const pulledState = materialized(pulled);
+  const pulledCarrier = pulledState.folds.find((fold) =>
+    String(fold.brief).includes(TRACE_FACT) && String(fold.brief).includes("agent noted \""));
+  assert(pulledCarrier,
+    "the pull-shaped session lost the note that shares a message with the next call");
+  assert(JSON.stringify((await project(pulled)).messages).includes(TRACE_FACT),
+    "the pull-shaped projection dropped the recorded fact");
   assert(pending > 0, "no brief upgrade was ever requested, so the race is not being modelled");
   assert(state.folds.every((fold) => (fold.brief_provenance?.kind ?? "deterministic") !== "model"),
     "a model brief landed, so this does not prove the deterministic carrier");

@@ -244,23 +244,28 @@ export function stageIdentifiedToolBrief(input: {
   };
   const tail = identifiedResultTail(messages.at(-1), factualValue);
   // THE AGENT'S OWN CLOSING NOTES (Shane 2026-08-14). The batch the fold absorbs
-  // runs past its results: the assistant messages between the last result and
-  // the next user turn are the agent recording what it just derived, and
+  // runs past its results: the assistant text between the last result and the
+  // next batch's work is the agent recording what it just derived, and
   // sol-20260814-traps rep 2 lost trace-a-02 and trace-d-05 because those lines
-  // lived nowhere else. Each such message contributes its leading paragraph.
-  // The walk stops at the first user turn, tool result, or tool-calling
-  // assistant, because any of those begins work this fold does not absorb.
+  // lived nowhere else. Each assistant message contributes its leading
+  // paragraph, INCLUDING the one that also opens the next batch: in a
+  // pull-shaped session the agent closes batch N and calls batch N+1 in one
+  // message (36 of rep 3's 37 assistant messages carry text and the next call
+  // together), so the text is collected before the tool-calling break, and
+  // ownership stays with batch N because batch N+1's own walk starts after
+  // its own results. The walk stops at the first user turn or tool result,
+  // and after consuming one tool-calling assistant.
   const resultIndices = refs.map((ref) => exactMapped(snapshot, ref)?.index ?? -1);
   const noteTexts: string[] = [];
   for (let index = Math.max(...resultIndices) + 1; index < snapshot.mapped.length; index += 1) {
     const message = snapshot.mapped[index]?.message;
     const role = messageRole(message);
     if (role !== "assistant") break;
+    const paragraphText = assistantNoteText(message);
+    if (paragraphText) noteTexts.push(paragraphText);
     const callsTools = (denseOwnArrayValues(ownValue(message, "content")) ?? [])
       .some((part) => ownValue(part, "type") === "toolCall");
     if (callsTools) break;
-    const paragraphText = assistantNoteText(message);
-    if (paragraphText) noteTexts.push(paragraphText);
   }
   // Compose the identifying parts FIRST, then hand the paragraph what is left of
   // the bound. A fixed head allowance either starves the paragraph or outgrows
