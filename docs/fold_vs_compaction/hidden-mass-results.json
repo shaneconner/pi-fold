@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "campaignLabel": "sol-20260815-hidden",
   "protocolVersion": 4,
   "planSha256": "eb488827c46ddf630f79b582f0b75070c54e73a65cdf4045002a6fc785e572db",
@@ -60,13 +60,19 @@
       "rows": 102,
       "expectedRows": 102,
       "matchingOrdinaryAnswersAbsentOffBranch": 2,
-      "ordinaryMismatchesWithVisibleBrief": 2
+      "ordinaryMismatchesWithVisibleBrief": 1,
+      "ordinaryMismatchesRecoverable": 1,
+      "endBlockValueCarriage": {
+        "recoverable": 7,
+        "visible-raw": 53
+      }
     }
   },
   "claimLimits": [
     "Two assigned attempts per arm do not estimate a population failure rate.",
     "Neither native attempt reached the withheld end block, so there is no direct cross-arm end-block score.",
-    "Both pi-fold end blocks were recovery-assisted; carriage is classified after those recovery calls and at the answering request.",
+    "Both pi-fold end-block turns used context recovery calls; at the answering requests 53 expected values were visible raw and seven were recoverable but not visible.",
+    "The seven recoverable end-block values were answered correctly, but this result does not identify how their bytes reached the answer.",
     "Native repetition 1 is excluded from cost comparison because the unbounded resume defect produced 1,761 provider responses.",
     "The result covers one model, one frozen plan, and one repository workload."
   ],
@@ -193,7 +199,7 @@
           "visible-raw": 14
         },
         "endBlockValueClassifications": {
-          "visible-brief": 7,
+          "recoverable": 7,
           "visible-raw": 23
         },
         "withdrawnClassifications": {
@@ -530,7 +536,8 @@
         "probeValueClassifications": {
           "absent-off-branch": 1,
           "numeric-not-attributed": 3,
-          "visible-brief": 3,
+          "recoverable": 1,
+          "visible-brief": 2,
           "visible-raw": 14
         },
         "endBlockValueClassifications": {
@@ -849,7 +856,7 @@
       "kind": "checksum",
       "verdict": "match",
       "ordinal": 444,
-      "valueCarriage": "visible-brief",
+      "valueCarriage": "recoverable",
       "withdrawnCarriage": "visible-raw"
     },
     {
@@ -860,7 +867,7 @@
       "kind": "checksum",
       "verdict": "match",
       "ordinal": 444,
-      "valueCarriage": "visible-brief",
+      "valueCarriage": "recoverable",
       "withdrawnCarriage": "visible-raw"
     },
     {
@@ -871,7 +878,7 @@
       "kind": "checksum",
       "verdict": "match",
       "ordinal": 444,
-      "valueCarriage": "visible-brief",
+      "valueCarriage": "recoverable",
       "withdrawnCarriage": null
     },
     {
@@ -882,7 +889,7 @@
       "kind": "checksum",
       "verdict": "match",
       "ordinal": 444,
-      "valueCarriage": "visible-brief",
+      "valueCarriage": "recoverable",
       "withdrawnCarriage": "visible-raw"
     },
     {
@@ -904,7 +911,7 @@
       "kind": "checksum",
       "verdict": "match",
       "ordinal": 444,
-      "valueCarriage": "visible-brief",
+      "valueCarriage": "recoverable",
       "withdrawnCarriage": "visible-raw"
     },
     {
@@ -1066,7 +1073,7 @@
       "kind": "table-row",
       "verdict": "match",
       "ordinal": 444,
-      "valueCarriage": "visible-brief"
+      "valueCarriage": "recoverable"
     },
     {
       "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
@@ -1076,7 +1083,7 @@
       "kind": "table-row",
       "verdict": "match",
       "ordinal": 444,
-      "valueCarriage": "visible-brief"
+      "valueCarriage": "recoverable"
     },
     {
       "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
@@ -1215,7 +1222,7 @@
       "probeId": "probe-48-04",
       "verdict": "mismatch",
       "ordinal": 260,
-      "valueCarriage": "visible-brief",
+      "valueCarriage": "recoverable",
       "bindingCarriage": null
     },
     {
@@ -1604,8 +1611,10 @@
     }
   ],
   "sourceHashes": {
-    "extractorSha256": "7fa32d0228b6b7d262bed7ff1a5b035eacafd8db2989febaaebe3ddb9cc2b9e8",
-    "carriageScriptSha256": "58fbeb380f29326d6cc0a48368f106373246cc7b63bd4e649d907debf1d4c173"
+    "extractorSha256": "27352e3e24bbc280832237642c779020b10b8a867d3c3cbb0c261ef167227c01",
+    "carriageScriptSha256": "e5acb08a18e11f9f5460df658381b6fee0c9cba2e2158fa4cbeb42a0b8703804",
+    "attributionHelperSha256": "4f618faee9f2dd3b305c287d5d1e202360f38d6b7f579c5091a4da1535930402",
+    "runtimeTreeSha256": "86241bc31ebec33115b388bfb5c07b4cd5889743e0aa547bb341f612d5c18ff1"
   },
-  "extractSha256": "30c04ee94792b40b5aef5d2edf5f2b41cd8ca57b2e1de531f512c4b8ce9b0e6a"
+  "extractSha256": "31dd193d38924a371d5a0c94c0674e7430391ee549a1a7b4f661d33f423bcd82"
 }

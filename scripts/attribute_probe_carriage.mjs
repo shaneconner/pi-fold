@@ -183,6 +183,7 @@ async function runAttributionBatch(runName, startText) {
         runtime, branch, sessionId,
         stateEntryType: identity.PI_FOLD_STATE_ENTRY,
         foldRecordEntryType: identity.PI_FOLD_FOLD_RECORD_ENTRY,
+        providerInputBudget: runConfig.providerInputBudget,
       });
       cachedLeafId = leafId;
     }

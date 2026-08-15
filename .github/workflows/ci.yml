@@ -28,3 +28,6 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Verify experiment harness
+        run: node scripts/verify_pi_context_experiment.mjs

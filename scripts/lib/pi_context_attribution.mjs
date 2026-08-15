@@ -75,37 +75,72 @@ export function branchTo(entries, leafId) {
   return branch;
 }
 
-// The view a classification reads: computed once per (session, leaf) and reused
-// across every fact probed at that moment.
-export function carriageView({ runtime, branch, sessionId, stateEntryType, foldRecordEntryType }) {
-  const { state } = runtime.materializeStatePersistence(
-    branch, sessionId, stateEntryType, foldRecordEntryType);
-  const owners = runtime.directFoldOwners(state.folds);
+// Walk the same fold forest the runtime projects. A revealed parent does not
+// reveal a collapsed child: renderFoldParts routes that child back through
+// renderFold, so the child's brief is visible and its source stays recoverable.
+// Protection can reveal either level independently, and a rebrief override is
+// the visible brief because foldBrief is the runtime's one accessor.
+export function projectionCarriers({ runtime, state, snapshot }) {
+  const byId = new Map(state.folds.map((fold) => [fold.id, fold]));
   const expanded = new Set(state.expanded ?? []);
-  const roots = state.folds.filter((fold) => !owners.has(fold.id));
-  const visibleBriefs = [];
-  const recoverableBriefs = [];
+  const visibleBriefIds = new Set();
+  const visibleSourceEntryIds = new Set();
   const coveredEntryIds = new Set();
-  const expandedEntryIds = new Set();
-  for (const fold of state.folds) {
-    const isVisibleRoot = !owners.has(fold.id) && !expanded.has(fold.id);
-    (isVisibleRoot ? visibleBriefs : recoverableBriefs)
-      .push({ foldId: fold.id, brief: String(fold.brief ?? "") });
-  }
+  const roots = state.folds.filter((fold) => fold.parentId === null);
+  const walk = (fold) => {
+    const refs = runtime.flattenFoldRefs(fold, state);
+    const revealed = expanded.has(fold.id) || (fold.kind === "tool-result"
+      ? runtime.toolRefsProtected(refs, state, snapshot)
+      : runtime.refsProtected(refs, state, snapshot));
+    if (!revealed) {
+      visibleBriefIds.add(fold.id);
+      return;
+    }
+    for (const part of fold.parts) {
+      if (part.kind === "raw") visibleSourceEntryIds.add(part.ref.entryId);
+      else {
+        const child = byId.get(part.foldId);
+        if (!child) throw new Error(`attribution fold ${fold.id} is missing child ${part.foldId}`);
+        walk(child);
+      }
+    }
+  };
   for (const root of roots) {
     for (const ref of runtime.flattenFoldRefs(root, state)) coveredEntryIds.add(ref.entryId);
+    walk(root);
   }
-  for (const foldId of expanded) {
-    const fold = state.folds.find((item) => item.id === foldId);
-    if (!fold) continue;
-    for (const ref of runtime.flattenFoldRefs(fold, state)) expandedEntryIds.add(ref.entryId);
-  }
+  const brief = (fold) => ({ foldId: fold.id, brief: String(runtime.foldBrief(fold, state) ?? "") });
+  return {
+    visibleBriefs: state.folds.filter((fold) => visibleBriefIds.has(fold.id)).map(brief),
+    recoverableBriefs: state.folds.filter((fold) => !visibleBriefIds.has(fold.id)).map(brief),
+    coveredEntryIds,
+    visibleSourceEntryIds,
+  };
+}
+
+// The view a classification reads: computed once per (session, leaf) and reused
+// across every fact probed at that moment. The snapshot is rebuilt from the
+// exact branch with the runtime's own mapper before the runtime's projection
+// carriers are walked, so expansion, protection and evidence identity share
+// the implementation that built the provider request.
+export function carriageView({
+  runtime, branch, sessionId, stateEntryType, foldRecordEntryType, providerInputBudget,
+}) {
+  const { state } = runtime.materializeStatePersistence(
+    branch, sessionId, stateEntryType, foldRecordEntryType);
+  const eventMessages = branch.flatMap((entry) => runtime.sessionEntryMessages(entry));
+  const declaredBudget = typeof providerInputBudget === "number" &&
+    Number.isFinite(providerInputBudget) && providerInputBudget > 0;
+  const snapshot = runtime.mapActiveContext({
+    sessionId,
+    eventMessages,
+    contextEntries: branch,
+    ...(declaredBudget ? { contextWindow: providerInputBudget, netBudget: true } : {}),
+  });
+  const carriers = projectionCarriers({ runtime, state, snapshot });
   return {
     branch,
-    visibleBriefs,
-    recoverableBriefs,
-    coveredEntryIds,
-    expandedEntryIds,
+    ...carriers,
     folds: state.folds.length,
     revision: state.revision,
   };
@@ -118,7 +153,7 @@ export function classifyFactCarriage(view, fact) {
   for (const entry of view.branch) {
     if (entry?.type !== "message") continue;
     if (!entryText(entry).includes(fact)) continue;
-    const hidden = view.coveredEntryIds.has(entry.id) && !view.expandedEntryIds.has(entry.id);
+    const hidden = view.coveredEntryIds.has(entry.id) && !view.visibleSourceEntryIds.has(entry.id);
     (hidden ? recoverableSourceEntryIds : visibleRawEntryIds).push(entry.id);
   }
   const visibleBriefFoldIds = view.visibleBriefs
@@ -157,10 +192,12 @@ export function attributeFactInView({ view, entries, fact }) {
 // native compaction leaves behind, and naming the entries keeps the claim
 // checkable instead of inferred.
 export function attributeFactInSession({
-  runtime, entries, sessionId, leafId, fact, stateEntryType, foldRecordEntryType,
+  runtime, entries, sessionId, leafId, fact, stateEntryType, foldRecordEntryType, providerInputBudget,
 }) {
   const branch = branchTo(entries, leafId);
-  const view = carriageView({ runtime, branch, sessionId, stateEntryType, foldRecordEntryType });
+  const view = carriageView({
+    runtime, branch, sessionId, stateEntryType, foldRecordEntryType, providerInputBudget,
+  });
   return attributeFactInView({ view, entries, fact });
 }
 

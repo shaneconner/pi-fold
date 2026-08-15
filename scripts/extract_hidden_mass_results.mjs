@@ -15,11 +15,13 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { branchTo } from "./lib/pi_context_attribution.mjs";
-import { sha256Json } from "./lib/pi_context_soak_attestation.mjs";
+import { directoryTreeSha256, sha256Json } from "./lib/pi_context_soak_attestation.mjs";
 
 const PROJECT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SCRIPT = fileURLToPath(import.meta.url);
 const CARRIAGE_SCRIPT = join(PROJECT, "scripts", "attribute_probe_carriage.mjs");
+const ATTRIBUTION_HELPER = join(PROJECT, "scripts", "lib", "pi_context_attribution.mjs");
+const RUNTIME_TREE = join(PROJECT, "extensions");
 const campaignDir = process.argv[2];
 if (!campaignDir) {
   process.stderr.write("usage: node scripts/extract_hidden_mass_results.mjs <campaign-dir>\n");
@@ -316,9 +318,10 @@ const endBlockCells = pifold.reduce((total, run) => total +
   run.endBlock.checksums.matches + run.endBlock.joins.recallOfRecord +
   run.endBlock.reconstruction.matches, 0);
 const probeRows = carriageRows.filter((row) => row.probeId);
+const endBlockRows = carriageRows.filter((row) => row.endBlockId);
 
 const payload = {
-  version: 1,
+  version: 2,
   campaignLabel: basename(campaignDir),
   protocolVersion: plan.version,
   planSha256: plan.planSha256,
@@ -360,12 +363,16 @@ const payload = {
         row.verdict === "match" && row.valueCarriage === "absent-off-branch").length,
       ordinaryMismatchesWithVisibleBrief: probeRows.filter((row) =>
         row.verdict === "mismatch" && row.valueCarriage === "visible-brief").length,
+      ordinaryMismatchesRecoverable: probeRows.filter((row) =>
+        row.verdict === "mismatch" && row.valueCarriage === "recoverable").length,
+      endBlockValueCarriage: countBy(endBlockRows, "valueCarriage"),
     },
   },
   claimLimits: [
     "Two assigned attempts per arm do not estimate a population failure rate.",
     "Neither native attempt reached the withheld end block, so there is no direct cross-arm end-block score.",
-    "Both pi-fold end blocks were recovery-assisted; carriage is classified after those recovery calls and at the answering request.",
+    "Both pi-fold end-block turns used context recovery calls; at the answering requests 53 expected values were visible raw and seven were recoverable but not visible.",
+    "The seven recoverable end-block values were answered correctly, but this result does not identify how their bytes reached the answer.",
     "Native repetition 1 is excluded from cost comparison because the unbounded resume defect produced 1,761 provider responses.",
     "The result covers one model, one frozen plan, and one repository workload.",
   ],
@@ -374,6 +381,8 @@ const payload = {
   sourceHashes: {
     extractorSha256: sha256File(SCRIPT),
     carriageScriptSha256: sha256File(CARRIAGE_SCRIPT),
+    attributionHelperSha256: sha256File(ATTRIBUTION_HELPER),
+    runtimeTreeSha256: directoryTreeSha256(RUNTIME_TREE),
   },
 };
 assertResult(payload.findings.certification.rows === payload.findings.certification.expectedRows,

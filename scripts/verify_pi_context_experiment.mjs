@@ -4885,7 +4885,7 @@ try {
     visibleBriefs: [{ foldId: "F1", brief: "root brief carrying bf-111" }],
     recoverableBriefs: [{ foldId: "F2", brief: "hidden child brief carrying cf-222" }],
     coveredEntryIds: new Set(["e2", "e3"]),
-    expandedEntryIds: new Set(["e3"]),
+    visibleSourceEntryIds: new Set(["e3"]),
   };
   const classify = (fact) => attribution.classifyFactCarriage(view, fact).classification;
   assert.equal(classify("cov-123"), "recoverable", "a folded source did not classify recoverable");
@@ -4909,6 +4909,92 @@ try {
   const { createJiti } = await import(pathToFileURL(jitiPath));
   const runtimeForLens = await createJiti(import.meta.url)
     .import(join(PROJECT, "extensions", "active-context.ts"));
+  // The nested projection is the case a flat expanded-ref set gets wrong. An
+  // expanded parent renders the collapsed CHILD PLACEHOLDER, not the child's
+  // raw source. Pin the runtime's rendered bytes first so the attribution
+  // assertions below cannot pass by inventing a different projection law.
+  const nestedSnapshotBase = runtimeForLens.mapActiveContext({
+    sessionId: "attribution-fixture",
+    eventMessages: branch.flatMap((item) => runtimeForLens.sessionEntryMessages(item)),
+    contextEntries: branch,
+    contextWindow: 100_000,
+    netBudget: true,
+  });
+  const nestedSnapshot = {
+    ...nestedSnapshotBase,
+    protectedIndices: new Set(),
+    toolProtectedIndices: new Set(),
+  };
+  const nestedRef = nestedSnapshot.mapped.find((item) => item.ref?.entryId === "e2")?.ref;
+  assert(nestedRef, "the nested attribution fixture did not map its source entry");
+  const childFold = {
+    id: "fold_attribution_child",
+    kind: "chapter",
+    parentId: "fold_attribution_parent",
+    parts: [{ kind: "raw", ref: nestedRef }],
+    brief: "Nested child brief carries nested-brief-333.",
+    provenance: { kind: "deterministic" },
+    sourceSha256: nestedRef.sha256,
+    sourceChars: 100,
+    placeholderChars: 50,
+    createdAt: 1,
+  };
+  const parentFold = {
+    id: "fold_attribution_parent",
+    kind: "consolidation",
+    parentId: null,
+    parts: [{ kind: "fold", foldId: childFold.id }],
+    brief: "Parent brief carries parent-brief-444.",
+    provenance: { kind: "deterministic" },
+    sourceSha256: nestedRef.sha256,
+    sourceChars: 100,
+    placeholderChars: 50,
+    createdAt: 2,
+  };
+  const nestedState = {
+    ...runtimeForLens.emptyActiveContextState("attribution-fixture"),
+    folds: [childFold, parentFold],
+    expanded: [parentFold.id],
+  };
+  const nestedProjection = JSON.stringify(
+    runtimeForLens.renderFold(parentFold, nestedState, nestedSnapshot));
+  assert(nestedProjection.includes("nested-brief-333"),
+    "the runtime did not render the collapsed child's brief under an expanded parent");
+  assert(!nestedProjection.includes("covered fact cov-123"),
+    "the runtime revealed a collapsed child's raw source under an expanded parent");
+  const nestedCarriers = attribution.projectionCarriers({
+    runtime: runtimeForLens, state: nestedState, snapshot: nestedSnapshot,
+  });
+  const nestedView = { branch, ...nestedCarriers };
+  assert.equal(attribution.classifyFactCarriage(nestedView, "nested-brief-333").classification,
+    "visible-brief", "a collapsed child under an expanded parent did not classify as a visible brief");
+  assert.equal(attribution.classifyFactCarriage(nestedView, "cov-123").classification,
+    "recoverable", "an expanded parent incorrectly made its collapsed child's source visible raw");
+  // Collapse the parent and only its own brief remains visible. This catches a
+  // second flat-walk failure: directFoldOwners maps evidence refs, not child
+  // fold ids, so it cannot be used to decide which folds are roots.
+  const collapsedCarriers = attribution.projectionCarriers({
+    runtime: runtimeForLens,
+    state: { ...nestedState, expanded: [] },
+    snapshot: nestedSnapshot,
+  });
+  assert.deepEqual(collapsedCarriers.visibleBriefs.map((item) => item.foldId), [parentFold.id],
+    "a collapsed parent's hidden child brief was classified as root-visible");
+  assert(collapsedCarriers.recoverableBriefs.some((item) => item.foldId === childFold.id),
+    "a child behind its parent was not kept recoverable");
+  // Protection is the other runtime reveal path. It must expose the protected
+  // child's source through both levels rather than leaving the lens behind the
+  // provider projection.
+  const protectedState = { ...nestedState, protected: [structuredClone(nestedRef)] };
+  const protectedProjection = JSON.stringify(
+    runtimeForLens.renderFold(parentFold, protectedState, nestedSnapshot));
+  assert(protectedProjection.includes("covered fact cov-123"),
+    "the runtime did not reveal explicitly protected nested source");
+  const protectedCarriers = attribution.projectionCarriers({
+    runtime: runtimeForLens, state: protectedState, snapshot: nestedSnapshot,
+  });
+  assert(protectedCarriers.visibleSourceEntryIds.has("e2"),
+    "the attribution lens did not follow the runtime's protected-source reveal");
   const nativeReading = (fact) => attribution.attributeFactInSession({
     runtime: runtimeForLens, entries, sessionId: "attribution-fixture", leafId: "e5", fact,
     stateEntryType: "acme-active-context-state", foldRecordEntryType: "acme-active-context-fold-record",
@@ -4947,6 +5033,8 @@ try {
     "the campaign sweep does not release one child before starting the next");
   assert(/if \(leafId !== cachedLeafId\)/.test(driver),
     "one batch rebuilds the same answering leaf for every fact");
+  assert(/providerInputBudget: runConfig\.providerInputBudget/.test(driver),
+    "the carriage snapshot does not use the run's declared serving budget");
   assert(driver.indexOf("const { createJiti }") > driver.indexOf("async function runAttributionBatch"),
     "the parent loads the transcript runtime before it delegates a bounded batch");
   // The release extract is the paper-facing source of numbers. It is complete,
@@ -4957,6 +5045,8 @@ try {
   const { extractSha256, ...resultBody } = releaseResult;
   assert.equal(extractSha256, sha256Json(resultBody),
     "the hidden-mass release result changed without regenerating its self-hash");
+  assert.equal(releaseResult.version, 2,
+    "the corrected nested-carriage semantics did not bump the portable result schema");
   assert.equal(releaseResult.planSha256,
     "eb488827c46ddf630f79b582f0b75070c54e73a65cdf4045002a6fc785e572db");
   assert.deepEqual(releaseResult.findings.completion, {
@@ -4972,6 +5062,11 @@ try {
   assert.deepEqual(releaseResult.findings.withheldEndBlock,
     { pifold: { matches: 60, total: 60, completedRuns: 2 }, native: null });
   assert.equal(releaseResult.findings.certification.rows, 102);
+  assert.equal(releaseResult.findings.certification.ordinaryMismatchesWithVisibleBrief, 1);
+  assert.equal(releaseResult.findings.certification.ordinaryMismatchesRecoverable, 1);
+  assert.deepEqual(releaseResult.findings.certification.endBlockValueCarriage,
+    { recoverable: 7, "visible-raw": 53 },
+  "the corrected carrier walk did not preserve the seven non-visible end-block matches");
   assert.equal(releaseResult.carriageRows.length, 102,
     "the portable result thinned the completed carriage sweep");
   assert.equal(new Set(releaseResult.carriageRows.map((row) =>
@@ -4982,6 +5077,12 @@ try {
   "the result was not regenerated by the current extractor");
   assert.equal(releaseResult.sourceHashes.carriageScriptSha256, sha256Text(driver),
     "the result was not certified by the current carriage sweep");
+  assert.equal(releaseResult.sourceHashes.attributionHelperSha256,
+    sha256Text(readFileSync(join(PROJECT, "scripts", "lib", "pi_context_attribution.mjs"), "utf8")),
+  "the result does not bind the helper that classified its carriage rows");
+  assert.equal(releaseResult.sourceHashes.runtimeTreeSha256,
+    directoryTreeSha256(join(PROJECT, "extensions")),
+  "the result does not bind the runtime tree that reconstructed its fold state and projection");
   assert(!/\/(?:home|tmp)\//.test(JSON.stringify(releaseResult)),
     "the portable result leaks a machine-local path");
   assert(!Object.hasOwn(releaseResult.design.model, "maxTokens"),
@@ -4990,6 +5091,9 @@ try {
     "the release result omits the missing-native-end-block claim boundary");
   assert(releaseResult.claimLimits.some((line) => /do not estimate a population failure rate/.test(line)),
     "the release result turns two attempts into a population estimate");
+  assert(releaseResult.claimLimits.some((line) =>
+    /seven were recoverable but not visible/.test(line)),
+  "the release result hides the corrected non-visible end-block carriers");
   checks.aFactsCarriageIsAttributedAtTheAnsweringRequest = true;
 }
 
