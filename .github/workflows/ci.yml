@@ -23,6 +23,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install measured Pi runtime
+        run: |
+          pi_version="$(node -p "require('./package-lock.json').packages['node_modules/@earendil-works/pi-coding-agent'].version")"
+          npm install --global --prefix "$HOME/.npm-global" \
+            "@earendil-works/pi-coding-agent@$pi_version" --ignore-scripts --no-audit --no-fund
+
       - name: Lint
         run: npm run lint
 
