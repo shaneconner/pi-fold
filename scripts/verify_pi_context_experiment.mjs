@@ -44,11 +44,20 @@ import {
   armRuntimeConfiguration,
   assertBlindPacket,
   buildConversationProbes,
+  buildLedger,
   buildProbes,
   definitionSubject,
   codeWordSentence,
   codeWordReissueSentence,
   effectiveCodeWord,
+  effectiveLedgerChecksum,
+  EXPERIMENT_LEDGER_TOOL_NAME,
+  LEDGER_TOKEN_PATTERN,
+  LEDGER_UNKNOWN_VALUE,
+  ledgerSentencesForStage,
+  ledgerTaskSentence,
+  ledgerTokensOf,
+  plantedWordCollisions,
   reissueAnnouncedAt,
   stageCodeWordReissues,
   computeRereadTax,
@@ -130,6 +139,7 @@ import {
   sha256Json,
   sha256Text,
   verifySourceHashes,
+  writeJsonPublished,
 } from "./lib/pi_context_soak_attestation.mjs";
 
 const PROJECT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -432,13 +442,20 @@ try {
   writeFileSync(join(fixture, "bulk-b.rs"), `${bulk}z`);
   const bulkFacts = ["bulk-a.rs", "bulk-b.rs"].map((name) => fileFacts(fixture, join(fixture, name)));
   const fixtureWord = (ordinal) => `cw-${String(ordinal).padStart(6, "0")}`;
+  // The seeded ledger every v4 plan carries. The fixture derives its own from a
+  // fixture seed exactly as the stager derives the real one from the frozen
+  // seed, so the validator's re-derivation law is exercised, not bypassed.
+  const fixtureLedger = buildLedger({ mode: "smoke", contentSeed: "aabbccdd00112233" });
   const stageOf = (ordinal, kind, files, stageProbes, deliverable, chainStep = null,
     codeWordReissue = null) => {
     const codeWord = kind === "probe" ? null : fixtureWord(ordinal);
-    // Weave order mirrors the stager: base, then the audit step, code word LAST,
-    // then any withdrawal of an earlier stage's word.
+    // Weave order mirrors the stager: base, then the audit step, then the
+    // ledger block, code word LAST, then any withdrawal of an earlier stage's word.
     let instructions = `stage ${ordinal} instructions`;
     if (chainStep !== null) instructions = `${instructions} ${auditStepSentence(chainStep)}`;
+    for (const sentence of ledgerSentencesForStage(fixtureLedger, ordinal)) {
+      instructions = `${instructions} ${sentence}`;
+    }
     if (codeWord !== null) instructions = `${instructions} ${codeWordSentence(ordinal, codeWord)}`;
     if (codeWordReissue !== null) {
       instructions = `${instructions} ` +
@@ -572,6 +589,7 @@ try {
         fixtureStepByStage.get(ordinal) ?? null);
     }),
     chains: [fixtureChain],
+    ledger: fixtureLedger,
     probeCount: 0,
     deliverableCount: 0,
     planSha256: "0".repeat(64),
@@ -766,6 +784,7 @@ const runConfig = {
   targetCommit: repo.commit,
   targetTreeSha256: "3".repeat(64),
   model: { provider: "openai-codex", id: "gpt-5.6-sol", effort: "xhigh" },
+  ledgerTasks: [{ id: "lt-01", stage: 3 }],
 };
 validateExperimentRunConfig(runConfig);
 assert.throws(() => validateExperimentRunConfig({ ...runConfig, repoDir: "/tmp/elsewhere/repo" }),
@@ -1886,11 +1905,11 @@ try {
     "the stager must generate one seeded code word per stage");
   assert(staging.includes("codeWordSentence(ordinal, codeWord)"),
     "the stager must weave the code word into the stage instructions");
-  assert(staging.includes("collectCheckoutDefinitions(checkoutDir,\n        [...codeWords, ...reissueWords])") &&
+  assert(staging.includes("collectCheckoutDefinitions(checkoutDir,\n        [...codeWords, ...reissueWords, ...ledgerTokensOf(ledger)])") &&
     staging.includes("uniqueIdentifierIndex(checkoutDefinitions.entries)") &&
     staging.includes("checkoutPaths: checkoutDefinitions.paths"),
-  "symbol uniqueness, code-word collisions, and include resolution must be judged " +
-  "over the whole checkout");
+  "symbol uniqueness, planted-word collisions (code words AND ledger tokens), and include " +
+  "resolution must be judged over the whole checkout");
   assert(staging.includes("const codeWord = isProbe ? null : codeWords[ordinal - 1];"),
     "probe stages must carry no code word");
   assert(staging.includes("usedCarrierStages"),
@@ -2581,7 +2600,7 @@ try {
   assert.throws(() => validateExperimentManifest({ ...manifest, sessionType: "floor" }),
     /foreign session type/);
 
-  const closedRunConfig = (({ guidance: _g, ...rest }) => rest)({
+  const closedRunConfig = (({ guidance: _g, ledgerTasks: _l, ...rest }) => rest)({
     ...runConfig, sessionType: EXPERIMENT_CLOSED_BOOK_LABEL, arm: EXPERIMENT_CLOSED_BOOK_LABEL,
   });
   validateExperimentRunConfig(closedRunConfig);
@@ -4462,8 +4481,12 @@ try {
 // lens reads it out of sealed transcripts, where the searches really happened.
 // ---------------------------------------------------------------------------
 {
-  assert.deepEqual([...EXPERIMENT_ALLOWED_TOOLS], ["read", EXPERIMENT_TOOL_NAME],
-    "the primary surface is read plus the stage tool, and nothing else");
+  // The ledger tool is arm-SYMMETRIC: both arms carry the identical workload
+  // surface, so its presence changes nothing about this gate's law that no arm
+  // holds a recovery mechanism the other lacks.
+  assert.deepEqual([...EXPERIMENT_ALLOWED_TOOLS],
+    ["read", EXPERIMENT_TOOL_NAME, EXPERIMENT_LEDGER_TOOL_NAME],
+    "the primary surface is read, the stage tool and the ledger tool, and nothing else");
   assert(!EXPERIMENT_PIFOLD_EXTRA_TOOLS.includes(EXPERIMENT_HISTORY_TOOL_NAME),
     "the history tool came back as an arm-specific extra");
   assert.equal(EXPERIMENT_HISTORY_TOOL_NAME, "session_history",
@@ -4902,6 +4925,288 @@ try {
     entries, requests: [{ leafId: "e4", ordinal: 7 }], answerText: "no such answer",
   }), null, "a missing answer did not return null");
   checks.aFactsCarriageIsAttributedAtTheAnsweringRequest = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 70 - the seeded ledger: transcript-only facts in three channels, and the
+// derive-and-record channel ending in a tool call the workload enforces.
+//
+// Task #79 build 2 of 3 (ratified 2026-08-15). The audit traces' values are
+// stages and paths, and rep 4 of sol-20260814-traps re-derived them at probe
+// time, so the derived class stopped measuring recall; its three missed
+// bindings were never recorded anywhere because a record-it instruction is
+// silently skippable. The ledger's values are seeded tokens planted nowhere in
+// the checkout (the read fence and the closed-book floor pin the transcript as
+// the only source), the whole ledger is a pure function of (mode, contentSeed)
+// with the seed frozen in docs/fold_vs_compaction/hidden-mass-seeds.json before
+// rep 4's readout, and each join's task must be RECORDED through the ledger
+// tool before the next stage is deliverable: the echo makes the record a tool
+// result, no verdict rides back, and correctness is graded post-hoc against
+// the plan the supervisor keeps.
+// ---------------------------------------------------------------------------
+{
+  // The ledger is its seed's own derivation, byte for byte, and nothing else's.
+  const gateSeed = "feedfacefeedface";
+  const smokeLedger = buildLedger({ mode: "smoke", contentSeed: gateSeed });
+  assert.equal(JSON.stringify(smokeLedger),
+    JSON.stringify(buildLedger({ mode: "smoke", contentSeed: gateSeed })),
+    "same seed, byte-identical ledger");
+  assert.notEqual(JSON.stringify(smokeLedger),
+    JSON.stringify(buildLedger({ mode: "smoke", contentSeed: "0123456789abcdef" })),
+    "a different seed rolls different values");
+  const fullLedger = buildLedger({ mode: "full", contentSeed: gateSeed });
+  const fullTokens = ledgerTokensOf(fullLedger);
+  assert(fullTokens.every((token) => LEDGER_TOKEN_PATTERN.test(token)),
+    "every planted value wears the ledger token shape");
+  assert.equal(new Set(fullTokens).size, fullTokens.length,
+    "no token serves two roles");
+  // Full-mode geometry: everything in the first half on payload stages, the
+  // table one row per designated stage in stage order, joins three hops with
+  // the mode's gap, corrections original-early correction-late.
+  const fullModePlan = EXPERIMENT_MODE_PLANS.full;
+  const firstHalfPayload = (stage) => stage >= 1 && stage <= fullModePlan.stageCount / 2 &&
+    !fullModePlan.probeStages.includes(stage);
+  const everyStageOf = (ledger) => [
+    ...ledger.table.map((entry) => entry.stage),
+    ...ledger.singles.map((single) => single.stage),
+    ...ledger.joins.flatMap((join) => [...join.links.map((link) => link.stage), join.taskStage]),
+    ...ledger.corrections.flatMap((correction) => [correction.stage, correction.correctionStage]),
+  ];
+  assert(everyStageOf(fullLedger).every(firstHalfPayload),
+    "every ledger row lands on a first-half payload stage");
+  assert.equal(fullLedger.table.length, 16, "sixteen reconstruction rows in full mode");
+  assert.deepEqual(fullLedger.table.map((entry) => entry.row),
+    Array.from({ length: 16 }, (_, index) => index + 1));
+  assert(fullLedger.table.every((entry, index) => index === 0 ||
+    entry.stage > fullLedger.table[index - 1].stage),
+  "table rows ride strictly increasing stages, so row order is stage order");
+  assert.equal(fullLedger.joins.length, 4);
+  for (const join of fullLedger.joins) {
+    assert.equal(join.links.length, 3, "full-mode joins walk three hops");
+    const stages = [...join.links.map((link) => link.stage), join.taskStage];
+    assert(stages.every((stage, index) => index === 0 ||
+      stage - stages[index - 1] >= fullModePlan.ledger.minGap),
+    "join rows and the task keep the mode's minimum gap");
+    assert(join.links.every((link, index) => index === 0 ||
+      link.subject === join.links[index - 1].value),
+    "each hop consumes the previous hop's value");
+    assert.equal(join.expectedAnswer, join.links.at(-1).value);
+  }
+  for (const correction of fullLedger.corrections) {
+    assert(correction.correctionStage - correction.stage >= fullModePlan.ledger.minGap,
+      "a correction sits at least the mode's gap after its original");
+  }
+  // The live checksum is the correction where one exists, and an unknown
+  // subject refuses rather than answering.
+  const corrected = fullLedger.corrections[0];
+  assert.equal(effectiveLedgerChecksum(fullLedger, corrected.subject), corrected.value);
+  const single = fullLedger.singles[0];
+  assert.equal(effectiveLedgerChecksum(fullLedger, single.subject), single.value);
+  assert.throws(() => effectiveLedgerChecksum(fullLedger, "lv-nowhere"), /No ledger checksum/);
+  // The trap shape: original and correction answer the same text query, so
+  // order is the only separator (gate 65's law on transcript-only facts).
+  const queryPhrase = `the checksum recorded for ${corrected.subject} is`;
+  for (const stage of [corrected.stage, corrected.correctionStage]) {
+    const carrier = ledgerSentencesForStage(fullLedger, stage)
+      .filter((sentence) => sentence.includes(queryPhrase));
+    assert.equal(carrier.length, 1,
+      `stage ${stage} must carry exactly one sentence answering the checksum query`);
+  }
+  // No woven sentence tells the model it is being tested, the task names the
+  // tool, the task id, the anchor and the unknown escape, and the only token a
+  // task sentence carries is its anchor: never the answer, never a hop value.
+  for (let stage = 1; stage <= fullModePlan.stageCount; stage += 1) {
+    for (const sentence of ledgerSentencesForStage(fullLedger, stage)) {
+      assert.deepEqual(testAwarenessLeaks(sentence), [], sentence);
+    }
+  }
+  const taskJoin = fullLedger.joins[0];
+  const taskSentence = ledgerTaskSentence(taskJoin);
+  assert(taskSentence.includes(EXPERIMENT_LEDGER_TOOL_NAME) &&
+    taskSentence.includes(taskJoin.id) && taskSentence.includes(LEDGER_UNKNOWN_VALUE),
+  "the task sentence names the tool, the task id and the unknown escape");
+  const taskTokens = taskSentence.match(/lv-[0-9a-f]{6}/g) ?? [];
+  assert(taskTokens.length > 0 &&
+    taskTokens.every((token) => token === taskJoin.links[0].subject),
+  "a task sentence names its anchor and no other token");
+  // Plan laws, each probed against the shared fixture: a tampered value dies on
+  // re-derivation, an unwoven sentence and a re-stated fact and a leaked token
+  // each die by their own names.
+  const rehash70 = (mutated) => {
+    mutated.planSha256 = stagePlanSha256(mutated);
+    return mutated;
+  };
+  const bent = structuredClone(plan);
+  bent.ledger.table[0].value = "lv-000000";
+  assert.throws(() => validateStagePlan(rehash70(bent)), /not its own content seed's derivation/);
+  const wovenStages = plan.stages
+    .map((stage) => ({ ordinal: stage.ordinal, sentences: ledgerSentencesForStage(plan.ledger, stage.ordinal) }))
+    .filter((entry) => entry.sentences.length > 0);
+  assert(wovenStages.length > 0, "the fixture plan must actually weave ledger sentences");
+  const wovenOrdinal = wovenStages[0].ordinal;
+  const wovenSentence = wovenStages[0].sentences[0];
+  const unwovenPlan = structuredClone(plan);
+  unwovenPlan.stages[wovenOrdinal - 1].instructions =
+    unwovenPlan.stages[wovenOrdinal - 1].instructions.replace(` ${wovenSentence}`, "");
+  assert.throws(() => validateStagePlan(rehash70(unwovenPlan)), /does not carry its ledger sentence/);
+  const restated = structuredClone(plan);
+  restated.stages[7].instructions += ` ${wovenSentence}`;
+  assert.throws(() => validateStagePlan(rehash70(restated)), /appears 2 times/);
+  const leakedToken = structuredClone(plan);
+  leakedToken.stages[7].instructions += ` ${plan.ledger.table[0].value}`;
+  assert.throws(() => validateStagePlan(rehash70(leakedToken)), /appears outside its own sentences/);
+  // The run-visible plan keeps the geometry and loses every value and the seed
+  // that would regenerate them.
+  const visiblePlan = stagePlanForRun(plan);
+  const visibleLedgerText = JSON.stringify(visiblePlan.ledger);
+  assert(!visibleLedgerText.includes(plan.ledger.contentSeed),
+    "the run-visible plan carries the seed that regenerates every value");
+  for (const token of ledgerTokensOf(plan.ledger)) {
+    assert(!visibleLedgerText.includes(token), "the run-visible plan carries a ledger value");
+  }
+  assert.deepEqual(visiblePlan.ledger.joins.map((join) => ({ id: join.id, taskStage: join.taskStage })),
+    plan.ledger.joins.map((join) => ({ id: join.id, taskStage: join.taskStage })),
+  "the run-visible plan keeps the task geometry the extension gates on");
+  // The stager's collision scan sees ledger tokens exactly as it sees code words.
+  assert.deepEqual(plantedWordCollisions(
+    `int x; /* ${fullTokens[0]} */ cw-aaaaaa`, [fullTokens[0], "cw-bbbbbb"]), [fullTokens[0]]);
+  assert.deepEqual(plantedWordCollisions("clean text", fullTokens), []);
+  // Run-config laws: an arm config carries the schedule or refuses, a
+  // closed-book config carrying one refuses as a no-referent key.
+  assert.throws(() => validateExperimentRunConfig(
+    (({ ledgerTasks: _tasks, ...rest }) => rest)(runConfig)),
+  /must carry the plan's ledger task schedule/);
+  assert.throws(() => validateExperimentRunConfig({ ...runConfig, ledgerTasks: [] }),
+    /must carry the plan's ledger task schedule/);
+  assert.throws(() => validateExperimentRunConfig({
+    ...runConfig, ledgerTasks: [{ id: "lt-01", stage: 99 }],
+  }), /must carry the plan's ledger task schedule/);
+  assert.throws(() => validateExperimentRunConfig((({ guidance: _g, ...rest }) => rest)({
+    ...runConfig, sessionType: EXPERIMENT_CLOSED_BOOK_LABEL, arm: EXPERIMENT_CLOSED_BOOK_LABEL,
+  })), /arm-condition keys with no referent/);
+  // The endpoint, driven end to end through the real extension and the real IPC
+  // dance: an unassigned id gets one answer whether future or fictional, the
+  // gate refuses the next stage with the exact repair and the key unconsumed,
+  // the echo restates the record verbatim, a duplicate names the standing
+  // record, and the artifacts carry the record and the refusal with no latch.
+  const jitiPath70 = join(PROJECT, "node_modules", "jiti", "lib", "jiti.mjs");
+  assert(existsSync(jitiPath70), "could not resolve package-local jiti to drive the extension");
+  const typeboxPath70 = join(PI_INSTALL_ROOT, "node_modules", "typebox", "build", "index.mjs");
+  assert(existsSync(typeboxPath70), `the pi install does not carry typebox at ${typeboxPath70}`);
+  const { createJiti: createJiti70 } = await import(pathToFileURL(jitiPath70));
+  const { createPiContextExperimentExtension } = await createJiti70(import.meta.url, {
+    alias: { typebox: typeboxPath70 },
+  }).import(join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"));
+  const runDir = mkdtempSync(join(tmpdir(), "pi-fold-ledger-gate-"));
+  mkdirSync(join(runDir, "ipc", "requests"), { recursive: true });
+  mkdirSync(join(runDir, "ipc", "responses"), { recursive: true });
+  const keyOne = "1".repeat(64);
+  const keyTwo = "2".repeat(64);
+  const tools = new Map();
+  const mockPi = {
+    on() {},
+    registerTool(definition) { tools.set(definition.name, definition); },
+    registerCommand() {},
+    sendMessage() {},
+    async appendEntry() {},
+  };
+  createPiContextExperimentExtension({
+    version: EXPERIMENT_PROTOCOL_VERSION,
+    runId: "ledger-gate",
+    runDir,
+    campaignId: "gate-70",
+    arm: "native",
+    mode: "smoke",
+    firstChallenge: keyOne,
+    stageCount: EXPERIMENT_MODE_PLANS.smoke.stageCount,
+    watchdogMs: 10_000,
+    ledgerTasks: [{ id: "lt-01", stage: 1 }],
+  }).factory(mockPi);
+  const stageTool = tools.get(EXPERIMENT_TOOL_NAME);
+  const ledgerTool = tools.get(EXPERIMENT_LEDGER_TOOL_NAME);
+  assert(stageTool && ledgerTool, "both workload tools must register on every arm");
+  const earlyRecord = await ledgerTool.execute("t-early", { id: "lt-01", value: "lv-aaaaaa" });
+  assert(earlyRecord.isError &&
+    /No ledger task with id lt-01 has been assigned/.test(earlyRecord.content[0].text));
+  const fictionalRecord = await ledgerTool.execute("t-fictional", { id: "lt-99", value: "x" });
+  assert(fictionalRecord.isError);
+  assert.equal(earlyRecord.content[0].text.replace("lt-01", "lt-99"),
+    fictionalRecord.content[0].text,
+    "one refusal for future and fictional ids, so a guess can never confirm a task exists");
+  const serveStage = async (stage, key, nextKey, toolCallId) => {
+    const requestPath = join(runDir, "ipc", "requests", `stage-${String(stage).padStart(2, "0")}.json`);
+    const responsePath = join(runDir, "ipc", "responses", `stage-${String(stage).padStart(2, "0")}.json`);
+    const pending = stageTool.execute(toolCallId, { key });
+    const deadline = Date.now() + 5_000;
+    while (!existsSync(requestPath)) {
+      assert(Date.now() < deadline, `the stage tool never wrote its stage ${stage} request`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const request = JSON.parse(readFileSync(requestPath, "utf8"));
+    const content = `stage ${stage} content`;
+    const responseBase = {
+      version: 1,
+      runId: "ledger-gate",
+      stage,
+      challengeSha256: request.challengeSha256,
+      requestSha256: request.requestSha256,
+      content,
+      contentSha256: sha256Text(content),
+      payloadSha256: "0".repeat(64),
+      nextChallenge: nextKey,
+      nextChallengeSha256: sha256Text(nextKey),
+      releasedWallMs: Date.now(),
+      releasedMonotonicMs: 1,
+    };
+    const responseSha256 = sha256Json(responseBase);
+    writeJsonPublished(responsePath,
+      { ...responseBase, paceRecordSha256: "0".repeat(64), responseSha256 });
+    return pending;
+  };
+  const stageOne = await serveStage(1, keyOne, keyTwo, "t-stage-1");
+  assert(!stageOne.isError, "stage 1 has no assigned tasks and must deliver");
+  const gatedFetch = await stageTool.execute("t-stage-2-gated", { key: keyTwo });
+  assert(gatedFetch.isError &&
+    /ledger task\(s\) lt-01/.test(gatedFetch.content[0].text) &&
+    gatedFetch.content[0].text.includes(EXPERIMENT_LEDGER_TOOL_NAME) &&
+    /call again with the same key/.test(gatedFetch.content[0].text),
+  "the gate names the owed task, the tool and the repair");
+  const recorded = await ledgerTool.execute("t-record", { id: "lt-01", value: "lv-123456" });
+  assert(!recorded.isError);
+  assert.equal(recorded.content[0].text, "Recorded ledger task lt-01: lv-123456",
+    "the echo restates the record verbatim");
+  const duplicate = await ledgerTool.execute("t-duplicate", { id: "lt-01", value: "lv-999999" });
+  assert(duplicate.isError && /already recorded as lv-123456/.test(duplicate.content[0].text),
+    "a second record is refused naming the standing one");
+  const stageTwo = await serveStage(2, keyTwo, "3".repeat(64), "t-stage-2");
+  assert(!stageTwo.isError, "the gate must release on the SAME key once the record exists");
+  const gateEvents = readFileSync(join(runDir, "worker-events.jsonl"), "utf8")
+    .split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  const recordEvent = gateEvents.find((event) => event.kind === "ledger-record");
+  assert(recordEvent && recordEvent.details.id === "lt-01" &&
+    recordEvent.details.value === "lv-123456" && recordEvent.details.afterStage === 1,
+  "the record lands in the hash-chained event ledger with its value");
+  const refusalEvent = gateEvents.find((event) => event.kind === "ledger-gate-refusal");
+  assert(refusalEvent && refusalEvent.details.owed.includes("lt-01") &&
+    refusalEvent.details.stage === 2, "the refusal lands as its own event");
+  assert(!existsSync(join(runDir, "failure-latch.jsonl")) ||
+    readFileSync(join(runDir, "failure-latch.jsonl"), "utf8").trim() === "",
+  "a correctable refusal latches nothing");
+  rmSync(runDir, { recursive: true, force: true });
+  // The frozen-seed law at the stager, and the supervisor forwarding ids and
+  // stages only: expected values never reach the run config.
+  const staging70 = readFileSync(join(PROJECT, "scripts", "stage_pi_context_experiment.mjs"), "utf8");
+  assert(staging70.includes('"hidden-mass-seeds.json"'),
+    "the stager must read the frozen seed file");
+  assert(!staging70.includes("--content-seed"),
+    "the content seed is frozen in the file, never a flag");
+  assert(staging70.includes("ledgerSentencesForStage(ledger, ordinal)"),
+    "the stager must weave through the shared helper the validator re-derives");
+  const supervisor70 = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment.mjs"), "utf8");
+  assert(supervisor70.includes(
+    "ledgerTasks: plan.ledger.joins.map((join) => ({ id: join.id, stage: join.taskStage }))"),
+  "the supervisor must forward the task schedule as ids and stages only");
+  checks.theSeededLedgerWeavesThreeChannelsAndGatesProgressionOnRecords = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

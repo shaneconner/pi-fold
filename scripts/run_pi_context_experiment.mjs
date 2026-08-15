@@ -417,6 +417,11 @@ async function run() {
         // now (package gate 134), and this run measures the no-generator condition
         // the reviews recommend making permanent. See EXPERIMENT_BRIEF_GENERATOR's
         // retirement note in the library.
+        //
+        // The ledger task schedule: ids and stages only, never expected values,
+        // so the extension can gate stage progression on recorded results while
+        // grading stays post-hoc against the plan the supervisor keeps.
+        ledgerTasks: plan.ledger.joins.map((join) => ({ id: join.id, stage: join.taskStage })),
       }),
     transport: EXPERIMENT_TRANSPORT,
     repetition,

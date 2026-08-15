@@ -10,7 +10,8 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   EXPERIMENT_DEFAULT_REPO,
   EXPERIMENT_MODES,
@@ -28,9 +29,13 @@ import {
   buildDerivationControlProbes,
   buildEchoProbes,
   buildIncludeResolver,
+  buildLedger,
   buildProbes,
   codeWordSentence,
   codeWordReissueSentence,
+  ledgerSentencesForStage,
+  ledgerTokensOf,
+  plantedWordCollisions,
   stageCodeWordReissues,
   corpusManifestSha256,
   extractDefinitions,
@@ -48,6 +53,12 @@ import { freshChallenge, sha256Text, writeJsonExclusive } from "./lib/pi_context
 
 const MIN_FILE_LINES = 60;
 const MAX_FILE_LINES = 2_500;
+
+// THE FROZEN CONTENT SEED. Sealed 2026-08-14, before rep 4's readout, so the
+// hidden-mass instrument cannot have been tuned to observed behavior. The file
+// is the ONLY source: a flag here would be a knob for re-rolling the mass.
+const HIDDEN_MASS_SEEDS_PATH = join(dirname(dirname(fileURLToPath(import.meta.url))),
+  "docs", "fold_vs_compaction", "hidden-mass-seeds.json");
 
 function argumentValue(name, fallback = null) {
   const index = process.argv.indexOf(name);
@@ -116,13 +127,13 @@ function collectSourceFiles(repo, checkoutDir) {
 // symbol-file probes claim THE defining file, so uniqueness has to hold over the whole
 // checkout, not just the collected source roots: a vendored or test copy of a symbol
 // would give the probe a second defensible answer. Every text file in the tree votes.
-// The same walk asserts no staged code word already exists anywhere in the checkout,
-// since arms can read the checkout and a collision would make a conversation probe
-// answerable from disk.
+// The same walk asserts no planted word (code word or ledger token) already exists
+// anywhere in the checkout, since arms can read the checkout and a collision would
+// make a conversation fact answerable from disk.
 const MAX_DEFINITION_SCAN_BYTES = 2_000_000;
 
-function collectCheckoutDefinitions(checkoutDir, codeWords) {
-  const codeWordSet = new Set(codeWords);
+function collectCheckoutDefinitions(checkoutDir, plantedWords) {
+  const plantedSet = new Set(plantedWords);
   const entries = [];
   // EVERY file votes in include resolution (paths), because that is the universe
   // the agent resolves a quoted include against; only text files small enough to
@@ -143,9 +154,11 @@ function collectCheckoutDefinitions(checkoutDir, codeWords) {
       const raw = readFileSync(path);
       if (raw.subarray(0, 8192).includes(0)) continue;
       const text = raw.toString("utf8");
-      const collision = (text.match(/cw-[0-9a-f]{6}/g) ?? []).find((word) => codeWordSet.has(word));
+      const collision = plantedWordCollisions(text, plantedSet)[0];
       assertExperiment(!collision,
-        `Code word ${collision} already exists in ${relative(checkoutDir, path)}; restage with a different seed`);
+        `Planted word ${collision} already exists in ${relative(checkoutDir, path)}: a code ` +
+        "word collision restages with a new seed; a ledger collision means the frozen " +
+        "content seed cannot stage this checkout");
       entries.push({ path: relative(checkoutDir, path), definitions: extractDefinitions(text) });
     }
   };
@@ -203,7 +216,7 @@ function deliverableInstruction(ordinal, referencesStages) {
 }
 
 function buildPlan({
-  repo, mode, seed, facts, codeWords, reissueWords, uniqueIdentifiers, checkoutPaths,
+  repo, mode, seed, facts, codeWords, reissueWords, ledger, uniqueIdentifiers, checkoutPaths,
 }) {
   const modePlan = EXPERIMENT_MODE_PLANS[mode];
   assertExperiment(codeWords.length === modePlan.stageCount,
@@ -439,9 +452,14 @@ function buildPlan({
     }
 
     // Weave order is a law: base instructions, then the audit step (task state the
-    // next step consumes), then the code word sentence LAST.
+    // next step consumes), then the ledger block in ledgerSentencesForStage's own
+    // canonical order, then the code word sentence LAST with its withdrawal after
+    // it, so the two code-word notes still read in the order they were issued.
     const chainStep = chainStepByStage.get(ordinal) ?? null;
     if (chainStep !== null) instructions = `${instructions} ${auditStepSentence(chainStep)}`;
+    for (const sentence of ledgerSentencesForStage(ledger, ordinal)) {
+      instructions = `${instructions} ${sentence}`;
+    }
     if (codeWord !== null) instructions = `${instructions} ${codeWordSentence(ordinal, codeWord)}`;
     // The withdrawal rides LAST, after this stage's own code word, so the two
     // audit notes read in the order they were issued.
@@ -500,6 +518,7 @@ function buildPlan({
     },
     stages,
     chains,
+    ledger,
     probeCount: stages.reduce((total, stage) => total + stage.probes.length, 0),
     deliverableCount: stages.filter((stage) => stage.deliverable).length,
     planSha256: "0".repeat(64),
@@ -526,6 +545,13 @@ try {
   const mirrorDir = join(campaignDir, "repo.git");
   cloneAtCommit(repo, mirrorDir, checkoutDir);
   const facts = collectSourceFiles(repo, checkoutDir).map((path) => fileFacts(checkoutDir, path));
+  // The ledger rides the frozen content seed, never the campaign seed: the same
+  // hidden mass appears in every campaign this checkout stages, and the seed
+  // redraw loop below can never re-roll it.
+  const hiddenMassSeeds = JSON.parse(readFileSync(HIDDEN_MASS_SEEDS_PATH, "utf8"));
+  assertExperiment(/^[0-9a-f]{16,64}$/.test(hiddenMassSeeds.contentSeed ?? ""),
+    `${HIDDEN_MASS_SEEDS_PATH} carries no contentSeed`);
+  const ledger = buildLedger({ mode, contentSeed: hiddenMassSeeds.contentSeed });
   // Chain construction and the code-word collision scan both refuse on bad seeds
   // (roughly half of smoke seeds are chain-unconstructible on the real corpus). An
   // undrawn seed is redrawn up to a bound and every refusal is recorded; a pinned
@@ -537,12 +563,13 @@ try {
     try {
       const codeWords = stageCodeWords(seed, EXPERIMENT_MODE_PLANS[mode].stageCount);
       const reissueWords = stageCodeWordReissues(seed, EXPERIMENT_MODE_PLANS[mode].stageCount);
-      // Both sets face the collision scan: a reissued word that already exists in
-      // the checkout is answerable from disk exactly as an original would be.
+      // Every planted set faces the collision scan: a reissued word or a ledger
+      // token that already exists in the checkout is answerable from disk
+      // exactly as an original code word would be.
       const checkoutDefinitions = collectCheckoutDefinitions(checkoutDir,
-        [...codeWords, ...reissueWords]);
+        [...codeWords, ...reissueWords, ...ledgerTokensOf(ledger)]);
       plan = buildPlan({
-        repo, mode, seed, facts, codeWords, reissueWords,
+        repo, mode, seed, facts, codeWords, reissueWords, ledger,
         uniqueIdentifiers: uniqueIdentifierIndex(checkoutDefinitions.entries),
         checkoutPaths: checkoutDefinitions.paths,
       });

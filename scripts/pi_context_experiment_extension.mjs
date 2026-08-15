@@ -29,6 +29,7 @@ import {
 } from "./lib/pi_fold_identity.mjs";
 import {
   EXPERIMENT_ALLOWED_TOOLS,
+  EXPERIMENT_LEDGER_TOOL_NAME,
   EXPERIMENT_MARKER_ENTRY,
   EXPERIMENT_PIFOLD_EXTRA_TOOLS,
   readEscapesCheckout,
@@ -154,6 +155,15 @@ export function createPiContextExperimentExtension(config) {
   // Wrong-key calls are recoverable behavior with a red line: see the stale-key block.
   const STALE_KEY_MISS_BUDGET = 8;
   let staleKeyMisses = 0;
+  // The ledger's derive-and-record channel: tasks assigned by delivered stages,
+  // results recorded through the ledger tool, stage progression gated on every
+  // assigned task holding a record. Refusals are correctable and recorded, with
+  // a generous bound so a loop that never records still fails by name rather
+  // than by watchdog.
+  const ledgerTasks = config.ledgerTasks ?? [];
+  const ledgerRecords = new Map();
+  const LEDGER_GATE_BUDGET = 24;
+  let ledgerGateRefusals = 0;
   // Native-arm overflow errors are compaction breaths, bounded so a stuck loop latches.
   const OVERFLOW_BREATH_BUDGET = 12;
   let overflowBreaths = 0;
@@ -361,6 +371,35 @@ export function createPiContextExperimentExtension(config) {
               "the most recent completed stage (it may be inside a folded or compacted " +
               "span) and call again." }], isError: true };
           }
+          // THE DERIVE-AND-RECORD CHANNEL ENDS IN A TOOL CALL THE WORKLOAD
+          // ENFORCES (task #79 build 2). A bare record-it instruction is
+          // silently skippable: rep 4 of sol-20260814-traps skipped all three
+          // probed bindings and nothing recorded them anywhere, so the channel
+          // measured re-derivation instead of recall. A fetch that arrives with
+          // an assigned task unrecorded is refused with the exact repair and
+          // the key unconsumed. ANY recorded value satisfies the gate (the task
+          // text offers `unknown`), so correctness stays a grading question and
+          // the gate cannot wedge a run that cannot derive.
+          const owedTasks = ledgerTasks.filter((task) =>
+            task.stage < expectedStage && !ledgerRecords.has(task.id));
+          if (owedTasks.length > 0) {
+            ledgerGateRefusals += 1;
+            appendEvent("ledger-gate-refusal", {
+              toolCallId,
+              stage: expectedStage,
+              owed: owedTasks.map((task) => task.id),
+              refusals: ledgerGateRefusals,
+            });
+            if (ledgerGateRefusals > LEDGER_GATE_BUDGET) {
+              appendFailure(config, "ledger-gate-loop", `${toolCallId}:${expectedStage}`);
+              return { content: [{ type: "text", text: "The stage cannot be delivered." }], isError: true };
+            }
+            return { content: [{ type: "text", text:
+              `Stage ${expectedStage} is not deliverable yet: ledger task(s) ` +
+              `${owedTasks.map((task) => task.id).join(", ")} from the completed stages ` +
+              `have no recorded result. Record each with the ${EXPERIMENT_LEDGER_TOOL_NAME} ` +
+              "tool, then call again with the same key." }], isError: true };
+          }
           inFlight = true;
           usedToolCallIds.add(toolCallId);
           const requestIdentity = {
@@ -438,6 +477,54 @@ export function createPiContextExperimentExtension(config) {
           } finally {
             inFlight = false;
           }
+        },
+      });
+
+      // The submission endpoint for the derive-and-record channel. The echo IS
+      // the record: the result restates the id and value verbatim, so the
+      // transcript carries the agent's own recorded derivation as a tool
+      // result, the channel this workload's briefs and summaries demonstrably
+      // carry. No verdict rides back: correctness is graded against the plan
+      // after the run, an in-run verdict would prompt re-derivation the
+      // instrument would then measure as recovery, and the expected values
+      // never reach the run config at all. An unassigned id gets one answer
+      // whether it is future or fictional, so the refusal can never confirm a
+      // guessed task exists.
+      pi.registerTool({
+        name: EXPERIMENT_LEDGER_TOOL_NAME,
+        label: "Ledger Record",
+        description: "Record the result of an assigned ledger task for the current assignment.",
+        promptSnippet: "Record each assigned ledger task's result once.",
+        promptGuidelines: ["Use the task id given by the stage that assigned the task."],
+        executionMode: "sequential",
+        parameters: Type.Object({
+          id: Type.String({ minLength: 1, maxLength: 64 }),
+          value: Type.String({ minLength: 1, maxLength: 256 }),
+        }, { additionalProperties: false }),
+        async execute(toolCallId, params) {
+          const assigned = ledgerTasks.find((task) => task.id === params.id &&
+            task.stage < expectedStage);
+          if (!assigned) {
+            appendEvent("ledger-record-refused", {
+              toolCallId, id: params.id, stage: expectedStage, cause: "unassigned",
+            });
+            return { content: [{ type: "text", text:
+              `No ledger task with id ${params.id} has been assigned.` }], isError: true };
+          }
+          if (ledgerRecords.has(params.id)) {
+            appendEvent("ledger-record-refused", {
+              toolCallId, id: params.id, stage: expectedStage, cause: "already-recorded",
+            });
+            return { content: [{ type: "text", text:
+              `Ledger task ${params.id} is already recorded as ` +
+              `${ledgerRecords.get(params.id)}.` }], isError: true };
+          }
+          ledgerRecords.set(params.id, params.value);
+          appendEvent("ledger-record", {
+            toolCallId, id: params.id, value: params.value, afterStage: expectedStage - 1,
+          });
+          return { content: [{ type: "text", text:
+            `Recorded ledger task ${params.id}: ${params.value}` }] };
         },
       });
 

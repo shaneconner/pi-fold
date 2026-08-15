@@ -25,7 +25,11 @@ import {
 // Version 2 (2026-08-09) added the recall-first conversation probes (stage-fact,
 // stage-binding) with per-stage audit code words. Earlier-version plans and
 // manifests are a different protocol and do not revalidate under this code.
-export const EXPERIMENT_PROTOCOL_VERSION = 3;
+// v4 (2026-08-15): the seeded ledger joined the plan (task #79 build 2 of 3). The
+// version pin is a refusal to half-read: sealed v3 campaigns stay adjudicable from
+// checkouts that predate the ledger, exactly as generator campaigns stay
+// reproducible from checkouts that predate the generator deletion.
+export const EXPERIMENT_PROTOCOL_VERSION = 4;
 
 // (a) pifold: active-context runtime ON, native auto-compaction OFF.
 // (b) native: pi-fold OFF, Pi native auto-compaction ON.
@@ -368,7 +372,13 @@ export const EXPERIMENT_TERMINAL_STABILIZATION_MS = 2 * 60 * 1_000;
 // and the checkout for both. The tool NAME stays exported because the wave
 // recovery lens reads it out of sealed transcripts, where it really occurred.
 export const EXPERIMENT_HISTORY_TOOL_NAME = "session_history";
-export const EXPERIMENT_ALLOWED_TOOLS = Object.freeze(["read", EXPERIMENT_TOOL_NAME]);
+// The submission endpoint for the ledger's derive-and-record channel; see the
+// seeded-ledger section below. Registered for every arm, because the workload
+// must be identical across arms for the pairing to be a pairing.
+export const EXPERIMENT_LEDGER_TOOL_NAME = "ledger_record";
+export const EXPERIMENT_ALLOWED_TOOLS = Object.freeze([
+  "read", EXPERIMENT_TOOL_NAME, EXPERIMENT_LEDGER_TOOL_NAME,
+]);
 
 // READ CONTAINMENT (Shane 2026-08-14). Pi's read tool resolves any path against
 // cwd with no guard of its own, and the corpus sweep found what that permits: 10
@@ -462,6 +472,15 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
     chainLength: 6,
     chainStartAfters: Object.freeze([1, 8, 16, 24]),
     chainEarlyLaw: Object.freeze({ maxStage: 8, minLinks: 3 }),
+    // THE SEEDED LEDGER's geometry (see the ledger section below). Sixteen table
+    // rows spread one per designated payload stage across the first half are the
+    // reconstruction instrument; joins walk three relation hops so a derived
+    // answer needs rows from three separated stages; minGap keeps a join's
+    // consecutive rows, and a correction from its original, at least three
+    // payload stages apart, the same span separation the code word reissues use.
+    ledger: Object.freeze({
+      tableSize: 16, singles: 6, joins: 4, joinLength: 3, corrections: 4, minGap: 3,
+    }),
     // Where the retired thermostat committed. See compactionReserveTokens.
     compactionTriggerShare: 0.80,
   }),
@@ -513,6 +532,13 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
     chainLength: 3,
     chainStartAfters: Object.freeze([1]),
     chainEarlyLaw: Object.freeze({ maxStage: 2, minLinks: 1 }),
+    // Small enough to weave into smoke's three first-half payload stages,
+    // complete enough that the builder, every sentence renderer, the weave, the
+    // validator's re-derivation and the gating tool all run before a full
+    // campaign depends on them.
+    ledger: Object.freeze({
+      tableSize: 3, singles: 1, joins: 1, joinLength: 2, corrections: 1, minGap: 1,
+    }),
     // REACHABLE WITHIN THE SMOKE'S OWN MASS, which is the only reason the share is a mode
     // plan field rather than one constant: the full mode's 0.80 line sits further out than
     // eight stages can ever reach, and a smoke on that share crosses no boundary, folds
@@ -883,6 +909,263 @@ export function reissueAnnouncedAt(stages, ordinal) {
       stage.codeWordReissue.stage === ordinal)
     .sort((left, right) => left.ordinal - right.ordinal);
   return announcing.length === 0 ? null : announcing[announcing.length - 1].ordinal;
+}
+
+// ---------------------------------------------------------------------------
+// THE SEEDED LEDGER (task #79 build 2 of 3, ratified 2026-08-15). Facts that
+// exist ONLY in the conversation: every value is a seeded token planted nowhere
+// in the checkout, so the read fence (gate 67) and the closed-book floor pin
+// the transcript as the one place an answer can come from. The audit traces
+// cannot do this: their values are stages and paths, and rep 4 of
+// sol-20260814-traps re-derived them at probe time, so the derived class
+// stopped measuring recall. Three channels, one per way a fact lives in a
+// transcript:
+//   - the reconstruction table and the checksum singles are STATED once in a
+//     stage result and never repeated;
+//   - each join is DERIVED: its hop rows are stated stages apart and a task
+//     sentence tells the agent to record the walked result through the ledger
+//     tool, whose echo makes the record a TOOL RESULT the transcript carries
+//     authoritatively. A bare record-it instruction is silently skippable (rep
+//     4 skipped all three probed bindings and nothing recorded them anywhere),
+//     so the stage tool refuses the next fetch until every assigned task has a
+//     recorded result; any value satisfies the gate, correctness is graded
+//     after the run, and no verdict rides back to contaminate behavior.
+//   - a correction restates a single's checksum in the same sentence shape, so
+//     any earliest-first reading answers with the withdrawn value: gate 65's
+//     supersession law applied to transcript-only facts.
+// The whole ledger is a pure function of (mode, contentSeed). The frozen seed
+// in docs/fold_vs_compaction/hidden-mass-seeds.json was sealed before rep 4's
+// readout, so the instrument cannot have been tuned to observed behavior, and
+// the validator re-derives every row from the plan's own recorded seed, so a
+// tampered value is refused by construction.
+// ---------------------------------------------------------------------------
+export const LEDGER_TOKEN_PATTERN = /^lv-[0-9a-f]{6}$/;
+// Every word either instrument plants in a conversation. The stager scans the
+// whole checkout for these shapes so a planted fact is never answerable from
+// disk; one pattern covers code words and ledger tokens alike.
+export const PLANTED_WORD_PATTERN = /(?:cw|lv)-[0-9a-f]{6}/g;
+export const LEDGER_UNKNOWN_VALUE = "unknown";
+
+export function plantedWordCollisions(text, plantedWords) {
+  const planted = plantedWords instanceof Set ? plantedWords : new Set(plantedWords);
+  return (text.match(PLANTED_WORD_PATTERN) ?? []).filter((word) => planted.has(word));
+}
+
+export function ledgerTokens(contentSeed, count) {
+  const draws = seededSequence(`${contentSeed}:ledger-tokens`, count);
+  const tokens = draws.map((value) => `lv-${value.toString(16).padStart(8, "0").slice(0, 6)}`);
+  assertExperiment(new Set(tokens).size === tokens.length,
+    "Ledger tokens collided; the frozen content seed cannot stage this geometry");
+  return tokens;
+}
+
+// One relation ladder for every join: hop i binds its subject to its value by
+// the hop's own relation, the task's walk clause names the hops in the same
+// words, and the task asks for the LAST hop's noun. Two and three hops are the
+// only lengths any mode uses; the shared ladder is what makes them one chain.
+const LEDGER_JOIN_HOPS = Object.freeze([
+  Object.freeze({
+    noun: "relay",
+    sentence: (subject, value) => `Audit ledger: the relay assigned to ${subject} is ${value}.`,
+    walk: (subject) => `${subject}'s assigned relay`,
+  }),
+  Object.freeze({
+    noun: "collector",
+    sentence: (subject, value) => `Audit ledger: the collector behind relay ${subject} is ${value}.`,
+    walk: () => "that relay's collector",
+  }),
+  Object.freeze({
+    noun: "endpoint",
+    sentence: (subject, value) =>
+      `Audit ledger: the endpoint registered for collector ${subject} is ${value}.`,
+    walk: () => "that collector's registered endpoint",
+  }),
+]);
+
+export function ledgerTableSentence(row, tableSize, value) {
+  return `Audit ledger, table row ${String(row).padStart(2, "0")} of ${tableSize}: ${value}.`;
+}
+
+export function ledgerChecksumSentence(subject, value) {
+  return `Audit ledger: the checksum recorded for ${subject} is ${value}.`;
+}
+
+// The correction deliberately repeats the checksum sentence's own phrasing, so
+// the original and its correction answer the same text query and ORDER is the
+// only thing that separates them (the gate 65 law, on transcript-only facts).
+export function ledgerCorrectionSentence(subject, value) {
+  return `Audit ledger: the checksum recorded for ${subject} was entered in error; ` +
+    `the checksum recorded for ${subject} is ${value}.`;
+}
+
+export function ledgerJoinLinkSentence(hopIndex, subject, value) {
+  assertExperiment(hopIndex >= 0 && hopIndex < LEDGER_JOIN_HOPS.length,
+    "Ledger join hop index is outside the relation ladder");
+  return LEDGER_JOIN_HOPS[hopIndex].sentence(subject, value);
+}
+
+export function ledgerTaskSentence(join) {
+  const hops = LEDGER_JOIN_HOPS.slice(0, join.links.length);
+  assertExperiment(hops.length === join.links.length, "Ledger join is longer than the relation ladder");
+  const anchor = join.links[0].subject;
+  const walk = hops.map((hop, index) => hop.walk(index === 0 ? anchor : null)).join(", then ");
+  return `Ledger task ${join.id}: from the audit ledger rows already delivered, determine the ` +
+    `${hops.at(-1).noun} reached from ${anchor} by following ${walk}, and record your result ` +
+    `by calling the ${EXPERIMENT_LEDGER_TOOL_NAME} tool with task id ${join.id} before ` +
+    `requesting the next stage. If it is not determinable from the rows you have, record it ` +
+    `as ${LEDGER_UNKNOWN_VALUE}.`;
+}
+
+// The live checksum for a subject: the correction when one exists, the stated
+// value otherwise. Every reader of a checksum answer goes through this, so the
+// plan and the grader cannot disagree about which value stands.
+export function effectiveLedgerChecksum(ledger, subject) {
+  const corrected = ledger.corrections.find((correction) => correction.subject === subject);
+  if (corrected) return corrected.value;
+  const single = ledger.singles.find((candidate) => candidate.subject === subject);
+  assertExperiment(single !== undefined, `No ledger checksum is recorded for ${subject}`);
+  return single.value;
+}
+
+export function ledgerTokensOf(ledger) {
+  return [
+    ...ledger.table.map((entry) => entry.value),
+    ...ledger.singles.flatMap((single) => [single.subject, single.value]),
+    ...ledger.joins.flatMap((join) =>
+      [join.links[0].subject, ...join.links.map((link) => link.value)]),
+    ...ledger.corrections.flatMap((correction) =>
+      [correction.subject, correction.first, correction.value]),
+  ];
+}
+
+export function buildLedger({ mode, contentSeed }) {
+  assertExperiment(EXPERIMENT_MODES.includes(mode), "Ledger requires a known mode");
+  assertExperiment(typeof contentSeed === "string" && /^[0-9a-f]{16,64}$/.test(contentSeed),
+    "Ledger requires a 16-64 hex content seed");
+  const modePlan = EXPERIMENT_MODE_PLANS[mode];
+  const geometry = modePlan.ledger;
+  // Every row lands in the FIRST HALF, so everything the withheld end block can
+  // ask about is at least half the run old at answer time: the lag window is
+  // the hidden mass.
+  const firstHalf = modePlan.stageCount / 2;
+  const payloadStages = [];
+  for (let ordinal = 1; ordinal <= firstHalf; ordinal += 1) {
+    if (!modePlan.probeStages.includes(ordinal)) payloadStages.push(ordinal);
+  }
+  const width = payloadStages.length;
+  const need = geometry.tableSize + geometry.singles * 2 +
+    geometry.joins * (geometry.joinLength + 1) + geometry.corrections * 3;
+  const pool = ledgerTokens(contentSeed, need);
+  let cursor = 0;
+  const take = () => pool[cursor++];
+
+  // The table spreads one row per designated stage across the whole half: even
+  // positions over the payload stages, first and last always included.
+  const spreadPositions = geometry.tableSize === 1
+    ? [0]
+    : Array.from({ length: geometry.tableSize }, (_, index) =>
+      Math.round(index * (width - 1) / (geometry.tableSize - 1)));
+  assertExperiment(new Set(spreadPositions).size === geometry.tableSize,
+    "Ledger table spread collapsed two rows onto one stage");
+  const table = spreadPositions.map((position, index) => ({
+    row: index + 1, stage: payloadStages[position], value: take(),
+  }));
+
+  const singlePositions = seededShuffle(payloadStages.map((_, index) => index),
+    `${contentSeed}:ledger-singles`).slice(0, geometry.singles);
+  const singles = singlePositions.map((position, index) => ({
+    id: `ls-${String(index + 1).padStart(2, "0")}`,
+    stage: payloadStages[position],
+    subject: take(),
+    value: take(),
+  }));
+
+  // Joins ride an arithmetic ladder: join j's hop i sits at payload position
+  // j + i * stride and its task one stride after the last hop, so hops are
+  // always stride payload stages apart and the joins interleave without ever
+  // sharing a position.
+  const stride = Math.floor(width / (geometry.joinLength + 1));
+  assertExperiment(stride >= geometry.minGap,
+    "Ledger join stride is narrower than the mode's minimum gap");
+  const joins = [];
+  for (let joinIndex = 0; joinIndex < geometry.joins; joinIndex += 1) {
+    let subject = take();
+    const links = [];
+    for (let hop = 0; hop < geometry.joinLength; hop += 1) {
+      const value = take();
+      links.push({ stage: payloadStages[joinIndex + hop * stride], subject, value });
+      subject = value;
+    }
+    const taskStage = payloadStages[joinIndex + geometry.joinLength * stride];
+    assertExperiment(links.every((link, index) => index === 0 ||
+      link.stage - links[index - 1].stage >= geometry.minGap) &&
+      taskStage - links.at(-1).stage >= geometry.minGap,
+    "Ledger join rows violate the minimum gap");
+    joins.push({
+      id: `lt-${String(joinIndex + 1).padStart(2, "0")}`,
+      taskStage,
+      expectedAnswer: links.at(-1).value,
+      links,
+    });
+  }
+
+  // A correction's original sits early and its correction late: position c from
+  // the front, position c from the back, so the trap has the longest lag the
+  // half can give it.
+  const corrections = Array.from({ length: geometry.corrections }, (_, index) => ({
+    id: `lc-${String(index + 1).padStart(2, "0")}`,
+    stage: payloadStages[index],
+    correctionStage: payloadStages[width - 1 - index],
+    subject: take(),
+    first: take(),
+    value: take(),
+  }));
+  assertExperiment(corrections.every((correction) =>
+    correction.correctionStage - correction.stage >= geometry.minGap),
+  "Ledger corrections violate the minimum gap");
+  assertExperiment(cursor === need, "Ledger token pool and geometry disagree");
+  return { contentSeed, tableSize: geometry.tableSize, table, singles, joins, corrections };
+}
+
+// Every ledger sentence a stage's instructions carry, in one canonical order:
+// the stager weaves exactly this list and the validator re-derives it, so the
+// two can never disagree about what a stage was supposed to say. Statements
+// first, then contradictions, then work: table row, checksum singles,
+// correction originals (they read as singles), join hop rows, corrections,
+// tasks.
+export function ledgerSentencesForStage(ledger, ordinal) {
+  const sentences = [];
+  for (const entry of ledger.table) {
+    if (entry.stage === ordinal) {
+      sentences.push(ledgerTableSentence(entry.row, ledger.tableSize, entry.value));
+    }
+  }
+  for (const single of ledger.singles) {
+    if (single.stage === ordinal) {
+      sentences.push(ledgerChecksumSentence(single.subject, single.value));
+    }
+  }
+  for (const correction of ledger.corrections) {
+    if (correction.stage === ordinal) {
+      sentences.push(ledgerChecksumSentence(correction.subject, correction.first));
+    }
+  }
+  for (const join of ledger.joins) {
+    for (const [hop, link] of join.links.entries()) {
+      if (link.stage === ordinal) {
+        sentences.push(ledgerJoinLinkSentence(hop, link.subject, link.value));
+      }
+    }
+  }
+  for (const correction of ledger.corrections) {
+    if (correction.correctionStage === ordinal) {
+      sentences.push(ledgerCorrectionSentence(correction.subject, correction.value));
+    }
+  }
+  for (const join of ledger.joins) {
+    if (join.taskStage === ordinal) sentences.push(ledgerTaskSentence(join));
+  }
+  return sentences;
 }
 
 // One carrier stage per probe, never reused across the whole plan: a probed span,
@@ -1394,7 +1677,8 @@ export function testAwarenessLeaks(text) {
 export function validateStagePlan(plan) {
   assertExperiment(exactKeys(plan, [
     "version", "mode", "repo", "seed", "stageCount", "stageIntervalMs", "watchdogMs",
-    "heartbeatMs", "corpus", "stages", "chains", "probeCount", "deliverableCount", "planSha256",
+    "heartbeatMs", "corpus", "stages", "chains", "ledger", "probeCount", "deliverableCount",
+    "planSha256",
   ]), "Invalid stage plan shape");
   assertExperiment(plan.version === EXPERIMENT_PROTOCOL_VERSION, "Stage plan protocol version drifted");
   assertExperiment(EXPERIMENT_MODES.includes(plan.mode), "Invalid stage plan mode");
@@ -1771,6 +2055,43 @@ export function validateStagePlan(plan) {
       }
     }
   }
+  // -------------------------------------------------------------------------
+  // Ledger laws. The whole ledger is a pure function of (mode, contentSeed), so
+  // the strongest check is re-derivation: a plan whose ledger differs in any
+  // byte from what its own recorded seed generates is refused, which covers
+  // values, ids, geometry and spacing in one law. The weave and occurrence laws
+  // then pin what the INSTRUCTIONS carry: every sentence woven at its own
+  // stage, every sentence exactly once across every instruction surface, and
+  // every seeded token appearing nowhere outside its own sentences.
+  // -------------------------------------------------------------------------
+  assertExperiment(plan.ledger !== null && typeof plan.ledger === "object" &&
+    typeof plan.ledger.contentSeed === "string", "Stage plan carries no ledger");
+  const rederivedLedger = buildLedger({ mode: plan.mode, contentSeed: plan.ledger.contentSeed });
+  assertExperiment(JSON.stringify(plan.ledger) === JSON.stringify(rederivedLedger),
+    "Stage plan ledger is not its own content seed's derivation");
+  const occurrences = (haystack, needle) => haystack.split(needle).length - 1;
+  const allSurfaceText = surfaces.map((surface) => surface.text).join("\n");
+  const ledgerSentences = [];
+  for (const stage of plan.stages) {
+    const sentences = ledgerSentencesForStage(plan.ledger, stage.ordinal);
+    if (stage.kind === "probe") {
+      assertExperiment(sentences.length === 0, `Probe stage ${stage.ordinal} was dealt ledger rows`);
+    }
+    for (const sentence of sentences) {
+      assertExperiment(stage.instructions.includes(sentence),
+        `Stage ${stage.ordinal} does not carry its ledger sentence: ${sentence}`);
+      ledgerSentences.push(sentence);
+    }
+  }
+  for (const sentence of ledgerSentences) {
+    assertExperiment(occurrences(allSurfaceText, sentence) === 1,
+      `Ledger sentence appears ${occurrences(allSurfaceText, sentence)} times: ${sentence}`);
+  }
+  const ledgerText = ledgerSentences.join("\n");
+  for (const token of new Set(ledgerTokensOf(plan.ledger))) {
+    assertExperiment(occurrences(allSurfaceText, token) === occurrences(ledgerText, token),
+      `Ledger token ${token} appears outside its own sentences`);
+  }
   assertExperiment(plan.planSha256 === stagePlanSha256(plan), "Stage plan hash does not cover its own body");
   return plan;
 }
@@ -1806,6 +2127,19 @@ export function stagePlanForRun(plan) {
       links: chain.links.map((link) => Object.fromEntries(
         Object.entries(link).filter(([key]) => !HIDDEN_TRACE_LINK_KEYS.includes(key)))),
     })),
+    // The ledger's every value regenerates from its seed, so the run-visible
+    // plan keeps only the geometry: which stages carry rows and where each task
+    // sits. The woven sentences are the delivery; the plan is not a second copy.
+    ledger: {
+      tableSize: plan.ledger.tableSize,
+      table: plan.ledger.table.map(({ row, stage }) => ({ row, stage })),
+      singles: plan.ledger.singles.map(({ id, stage }) => ({ id, stage })),
+      joins: plan.ledger.joins.map(({ id, taskStage, links }) => ({
+        id, taskStage, links: links.map(({ stage }) => ({ stage })),
+      })),
+      corrections: plan.ledger.corrections.map(({ id, stage, correctionStage }) =>
+        ({ id, stage, correctionStage })),
+    },
   };
 }
 
@@ -1975,6 +2309,7 @@ export const EXPERIMENT_RUN_CONFIG_KEYS = Object.freeze([
 export const EXPERIMENT_RUN_CONFIG_OPTIONAL_KEYS = Object.freeze([
   "sessionType", "guidance", "foldScheduling", "foldPeekResults", "guidedCuration",
   "providerTotalWindow", "providerInputBudget", "briefGenerator", "transport", "reliabilityLevers",
+  "ledgerTasks",
 ]);
 
 export function validateExperimentRunConfig(value) {
@@ -1998,6 +2333,18 @@ export function validateExperimentRunConfig(value) {
   assertExperiment(value.transport === undefined || EXPERIMENT_TRANSPORTS.includes(value.transport),
     "Run config transport is not a known Pi transport");
   assertExperiment(value.version === EXPERIMENT_PROTOCOL_VERSION, "Run config protocol version drifted");
+  // The ledger task schedule is what the extension gates stage progression on:
+  // an arm config without one would run the workload with the derive-and-record
+  // channel silently unenforced, which is the skippable-instruction failure the
+  // channel exists to end. Ids and stages only, never expected values: grading
+  // is post-hoc and the worker process hosts the model. Closed-book exclusion
+  // lives with the other no-referent keys below.
+  assertExperiment(value.sessionType === EXPERIMENT_CLOSED_BOOK_LABEL ||
+    (Array.isArray(value.ledgerTasks) && value.ledgerTasks.length > 0 &&
+      value.ledgerTasks.every((task) => exactKeys(task, ["id", "stage"]) &&
+        typeof task.id === "string" && task.id.length > 0 &&
+        Number.isSafeInteger(task.stage) && task.stage >= 1 && task.stage <= value.stageCount)),
+  "An arm run config must carry the plan's ledger task schedule");
   assertExperiment(value.sessionType === undefined ||
     EXPERIMENT_SESSION_TYPES.includes(value.sessionType),
   "Run config session type is invalid");
@@ -2010,7 +2357,7 @@ export function validateExperimentRunConfig(value) {
   assertExperiment(value.sessionType !== EXPERIMENT_CLOSED_BOOK_LABEL ||
     (value.foldScheduling === undefined && value.foldPeekResults === undefined &&
       value.guidance === undefined && value.guidedCuration === undefined &&
-      value.briefGenerator === undefined),
+      value.briefGenerator === undefined && value.ledgerTasks === undefined),
   "Closed-book run config carries arm-condition keys with no referent");
   // A generator belongs to the arm that registers the runtime and writes briefs; on any
   // other arm the descriptor would be a fact about nothing.
