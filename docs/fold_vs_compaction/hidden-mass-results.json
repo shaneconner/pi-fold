@@ -1,0 +1,1611 @@
+{
+  "version": 1,
+  "campaignLabel": "sol-20260815-hidden",
+  "protocolVersion": 4,
+  "planSha256": "eb488827c46ddf630f79b582f0b75070c54e73a65cdf4045002a6fc785e572db",
+  "design": {
+    "model": {
+      "provider": "openai-codex",
+      "id": "gpt-5.6-sol",
+      "effort": "xhigh"
+    },
+    "transport": "sse",
+    "providerInputBudget": 251520,
+    "target": {
+      "commit": "133785b15936d9417fdc41f77b87304b6bf458d5",
+      "treeSha256": "62b9c2bef50c315253945e348117714a164da61f1ac0cd45c7a77842406ab519"
+    },
+    "stages": 64,
+    "attemptedAssignmentsPerArm": 2
+  },
+  "findings": {
+    "completion": {
+      "pifold": {
+        "completed": 2,
+        "attempted": 2
+      },
+      "native": {
+        "completed": 0,
+        "attempted": 2
+      }
+    },
+    "ledgerRecordEndpoints": {
+      "pifold": {
+        "correct": 8,
+        "unknown": 0,
+        "total": 8
+      },
+      "native": {
+        "correct": 0,
+        "unknown": 8,
+        "total": 8
+      }
+    },
+    "ordinaryProbes": {
+      "pifold": {
+        "matches": 40,
+        "total": 42
+      },
+      "native": null
+    },
+    "withheldEndBlock": {
+      "pifold": {
+        "matches": 60,
+        "total": 60,
+        "completedRuns": 2
+      },
+      "native": null
+    },
+    "certification": {
+      "rows": 102,
+      "expectedRows": 102,
+      "matchingOrdinaryAnswersAbsentOffBranch": 2,
+      "ordinaryMismatchesWithVisibleBrief": 2
+    }
+  },
+  "claimLimits": [
+    "Two assigned attempts per arm do not estimate a population failure rate.",
+    "Neither native attempt reached the withheld end block, so there is no direct cross-arm end-block score.",
+    "Both pi-fold end blocks were recovery-assisted; carriage is classified after those recovery calls and at the answering request.",
+    "Native repetition 1 is excluded from cost comparison because the unbounded resume defect produced 1,761 provider responses.",
+    "The result covers one model, one frozen plan, and one repository workload."
+  ],
+  "runs": [
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "codeCommit": "4868ad8de92e1ea8cd3948151dc5d45269c52e7f",
+      "codeTree": "f0a0bbd41bd6b986b80e43a44effb6d5ef253b9f",
+      "completed": true,
+      "stages": {
+        "released": 64,
+        "planned": 64
+      },
+      "failure": null,
+      "usage": {
+        "messageResponses": {
+          "calls": 127,
+          "inputFresh": 2213523,
+          "cacheRead": 16481280,
+          "cacheWrite": 0,
+          "output": 51019,
+          "reasoning": 27367,
+          "totalTokens": 18745822,
+          "usd": 20.838825
+        },
+        "nativeCompactions": {
+          "calls": 0,
+          "inputFresh": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "output": 0,
+          "reasoning": 0,
+          "totalTokens": 0,
+          "usd": 0
+        },
+        "allProvider": {
+          "calls": 127,
+          "inputFresh": 2213523,
+          "cacheRead": 16481280,
+          "cacheWrite": 0,
+          "output": 51019,
+          "reasoning": 27367,
+          "totalTokens": 18745822,
+          "usd": 20.838825
+        },
+        "pooledCacheShare": 0.8815968801596893,
+        "longContextMessageCalls": 0,
+        "peakPromptTokens": 239132,
+        "wallClockMs": 2563711,
+        "comparisonDisposition": "completed-attempt"
+      },
+      "mechanism": {
+        "folds": 119,
+        "foldCommits": 9,
+        "unpaidFoldReceipts": 0,
+        "nativeCompactions": 0
+      },
+      "ledgerRecords": [
+        {
+          "taskId": "lt-01",
+          "recordedValue": "lv-f0318c",
+          "correct": true,
+          "occurrences": 1
+        },
+        {
+          "taskId": "lt-02",
+          "recordedValue": "lv-0a5f42",
+          "correct": true,
+          "occurrences": 1
+        },
+        {
+          "taskId": "lt-03",
+          "recordedValue": "lv-12e84b",
+          "correct": true,
+          "occurrences": 1
+        },
+        {
+          "taskId": "lt-04",
+          "recordedValue": "lv-e5bc52",
+          "correct": true,
+          "occurrences": 1
+        }
+      ],
+      "ordinaryProbes": {
+        "matches": 20,
+        "total": 21
+      },
+      "endBlock": {
+        "delivered": true,
+        "checksums": {
+          "matches": 10,
+          "total": 10,
+          "correctedSubjects": 4,
+          "withdrawnChosen": 0
+        },
+        "joins": {
+          "recordCorrect": 4,
+          "recallOfRecord": 4,
+          "truthMatch": 4,
+          "total": 4
+        },
+        "reconstruction": {
+          "matches": 16,
+          "answered": 16,
+          "total": 16
+        },
+        "recovery": {
+          "historySearches": 0,
+          "contextToolCalls": 5,
+          "fileReads": 0,
+          "recoveryCalls": 5,
+          "lastResetKind": "commit",
+          "entriesSinceReset": 30
+        }
+      },
+      "carriage": {
+        "rows": 51,
+        "probeValueClassifications": {
+          "absent-off-branch": 1,
+          "numeric-not-attributed": 3,
+          "visible-brief": 3,
+          "visible-raw": 14
+        },
+        "endBlockValueClassifications": {
+          "visible-brief": 7,
+          "visible-raw": 23
+        },
+        "withdrawnClassifications": {
+          "visible-raw": 4
+        }
+      },
+      "artifactHashes": {
+        "runConfigSha256": "c4273d77541711b8f49b68356ff3c55130e071445cb171b1984f527cae7d0a10",
+        "candidateReportSha256": "3added797a6e4d0e5875d3caf490a8a84fb3fb89b05574d4d26fcd49489abe08",
+        "candidateSealSha256": "a9b22f4b6654f315cb44fc69665ad50cfa056a06a70d072292c43294263bbcc3",
+        "workerReportSha256": "3e185f3c27da5eeaaf2b0412801d4f1797205b99723530ab3594423bef228c66",
+        "sessionSha256": "3a23ae83641c842e8892329b1289e5ddfe71ee242d4261dfe375b2eb3be8ffc4",
+        "providerLedgerSha256": "30d5c5747cebdfcf51f5747fe6bd247d1cc0063bfd437d3681afe4a6c1ba14c5",
+        "runManifestFileSha256": "64d147fac0db5477406ec87359a54ab770e2865ef8859727a6203101ed1ea70a",
+        "runManifestSha256": "a69d2e4c028180dcfce66672a99726b126d1e2b24ad0a1e64ae68d4a3db5bcf6",
+        "experimentEvidenceSha256": "b98eb56a0865075ba123107a73fb7cc07399d0fd9ece569d1df1370ca4194d68"
+      }
+    },
+    {
+      "runId": "2026-08-15T13-21-18Z-native-rep1-9ea6470e",
+      "arm": "native",
+      "repetition": 1,
+      "codeCommit": "a436cc19b458d3c5e0a6bfe73c265fa381906648",
+      "codeTree": "b19949f7121598fa90607df009b8514e1fbd5cdf",
+      "completed": false,
+      "stages": {
+        "released": 39,
+        "planned": 64
+      },
+      "failure": {
+        "candidate": "stage 40 request terminated by SIGTERM",
+        "worker": "Experiment worker terminated by SIGTERM",
+        "terminatedBySignal": "SIGTERM"
+      },
+      "usage": {
+        "messageResponses": {
+          "calls": 1761,
+          "inputFresh": 2023615,
+          "cacheRead": 221202944,
+          "cacheWrite": 0,
+          "output": 122449,
+          "reasoning": 51383,
+          "totalTokens": 223349008,
+          "usd": 127.676225
+        },
+        "nativeCompactions": {
+          "calls": 3,
+          "inputFresh": 182435,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "output": 11257,
+          "reasoning": 5135,
+          "totalTokens": 193692,
+          "usd": 1.249885
+        },
+        "allProvider": {
+          "calls": 1764,
+          "inputFresh": 2206050,
+          "cacheRead": 221202944,
+          "cacheWrite": 0,
+          "output": 133706,
+          "reasoning": 56518,
+          "totalTokens": 223542700,
+          "usd": 128.92611
+        },
+        "pooledCacheShare": 0.9909347032491774,
+        "longContextMessageCalls": 14,
+        "peakPromptTokens": 371065,
+        "wallClockMs": 16823716,
+        "comparisonDisposition": "excluded-harness-runaway"
+      },
+      "mechanism": {
+        "folds": 0,
+        "foldCommits": 0,
+        "unpaidFoldReceipts": 0,
+        "nativeCompactions": 3
+      },
+      "ledgerRecords": [
+        {
+          "taskId": "lt-01",
+          "recordedValue": "unknown",
+          "correct": false,
+          "occurrences": 1
+        },
+        {
+          "taskId": "lt-02",
+          "recordedValue": "unknown",
+          "correct": false,
+          "occurrences": 1
+        },
+        {
+          "taskId": "lt-03",
+          "recordedValue": "unknown",
+          "correct": false,
+          "occurrences": 1
+        },
+        {
+          "taskId": "lt-04",
+          "recordedValue": "unknown",
+          "correct": false,
+          "occurrences": 2
+        }
+      ],
+      "ordinaryProbes": null,
+      "endBlock": null,
+      "carriage": null,
+      "artifactHashes": {
+        "runConfigSha256": "da70e368f39de5c53c68a62cdcfdac7976a21884431a51295e87797f654be248",
+        "candidateReportSha256": "fff8622ce5de38559efb7711ca2af6985796776681f7b57f08c66e2e3bcbafe9",
+        "candidateSealSha256": "7e628130d25e2e51ccb4d1e7ed745c7b0ef5580ba808ed3f06330cf81c0d5389",
+        "workerReportSha256": "adb762de60faaf3b9d871bcaddb0dacc40489caaac51552a85f5e7127dee7c1c",
+        "sessionSha256": "2d8d60393fdac1a3b92bed2f54d0016a41debaafedf430325febd990cdfaa61d",
+        "providerLedgerSha256": "69d43d15880e7d5ff2afe0cabf8ffd343bc7ebf9f7b7a96bbebafc0db6f462e9",
+        "runManifestFileSha256": null,
+        "runManifestSha256": null,
+        "experimentEvidenceSha256": null
+      }
+    },
+    {
+      "runId": "2026-08-15T18-12-53Z-native-rep2-97268b20",
+      "arm": "native",
+      "repetition": 2,
+      "codeCommit": "6fd42cc17e3f845e7bcbfb031f740244ff19b71d",
+      "codeTree": "bec81181d2fb7f3e57ca1c8fa6010942a8a5dd74",
+      "completed": false,
+      "stages": {
+        "released": 56,
+        "planned": 64
+      },
+      "failure": {
+        "candidate": "stage 57 request lost worker: code=1 signal=null",
+        "worker": "resume-loop-without-progress: stage 57 of 64 still undelivered after 3 resume prompt(s) that bought no progress",
+        "terminatedBySignal": null
+      },
+      "usage": {
+        "messageResponses": {
+          "calls": 126,
+          "inputFresh": 1189839,
+          "cacheRead": 18867200,
+          "cacheWrite": 0,
+          "output": 43164,
+          "reasoning": 27362,
+          "totalTokens": 20100203,
+          "usd": 22.445992
+        },
+        "nativeCompactions": {
+          "calls": 3,
+          "inputFresh": 90023,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "output": 12739,
+          "reasoning": 6110,
+          "totalTokens": 102762,
+          "usd": 0.832285
+        },
+        "allProvider": {
+          "calls": 129,
+          "inputFresh": 1279862,
+          "cacheRead": 18867200,
+          "cacheWrite": 0,
+          "output": 55903,
+          "reasoning": 33472,
+          "totalTokens": 20202965,
+          "usd": 23.278277
+        },
+        "pooledCacheShare": 0.9406772355580503,
+        "longContextMessageCalls": 27,
+        "peakPromptTokens": 365934,
+        "wallClockMs": 1972192,
+        "comparisonDisposition": "failed-attempt-only"
+      },
+      "mechanism": {
+        "folds": 0,
+        "foldCommits": 0,
+        "unpaidFoldReceipts": 0,
+        "nativeCompactions": 3
+      },
+      "ledgerRecords": [
+        {
+          "taskId": "lt-01",
+          "recordedValue": "unknown",
+          "correct": false,
+          "occurrences": 1
+        },
+        {
+          "taskId": "lt-02",
+          "recordedValue": "unknown",
+          "correct": false,
+          "occurrences": 1
+        },
+        {
+          "taskId": "lt-03",
+          "recordedValue": "unknown",
+          "correct": false,
+          "occurrences": 1
+        },
+        {
+          "taskId": "lt-04",
+          "recordedValue": "unknown",
+          "correct": false,
+          "occurrences": 1
+        }
+      ],
+      "ordinaryProbes": null,
+      "endBlock": null,
+      "carriage": null,
+      "artifactHashes": {
+        "runConfigSha256": "b119b230e8078cb98f1f3556f3db591ae1d582b71c6d79e3fb67588db737e61b",
+        "candidateReportSha256": "8eed4fa7cef4a8ab17a3cd8fe54aeab3121c13425e01815f11f299881a7b25e1",
+        "candidateSealSha256": "f40be24352d570b702d4a0743b84910a0b997ef3874fd71a1ad7f79b65356b6e",
+        "workerReportSha256": "0dfcceed43357b3ea11062bbce26063bb1d18b314ea478ac91934a2132f7b5d2",
+        "sessionSha256": "408e6bbc8ae84bc0e4c278158cc87051cb28e8c67a94d861a674d62b3160e9d0",
+        "providerLedgerSha256": "f43e6ea1bb782048389bfa8bb37c2a0c61042559b36f0c8ac6a448fc1e3cc89e",
+        "runManifestFileSha256": null,
+        "runManifestSha256": null,
+        "experimentEvidenceSha256": null
+      }
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "codeCommit": "6f8b43855a24c31e7e193d33872bf57801d73849",
+      "codeTree": "4b4af8c68dea4e07fd705a00ff83264150f78b98",
+      "completed": true,
+      "stages": {
+        "released": 64,
+        "planned": 64
+      },
+      "failure": null,
+      "usage": {
+        "messageResponses": {
+          "calls": 104,
+          "inputFresh": 1779734,
+          "cacheRead": 12832256,
+          "cacheWrite": 0,
+          "output": 23734,
+          "reasoning": 13482,
+          "totalTokens": 14635724,
+          "usd": 16.026818
+        },
+        "nativeCompactions": {
+          "calls": 0,
+          "inputFresh": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "output": 0,
+          "reasoning": 0,
+          "totalTokens": 0,
+          "usd": 0
+        },
+        "allProvider": {
+          "calls": 104,
+          "inputFresh": 1779734,
+          "cacheRead": 12832256,
+          "cacheWrite": 0,
+          "output": 23734,
+          "reasoning": 13482,
+          "totalTokens": 14635724,
+          "usd": 16.026818
+        },
+        "pooledCacheShare": 0.8782004367646022,
+        "longContextMessageCalls": 0,
+        "peakPromptTokens": 235290,
+        "wallClockMs": 1477259,
+        "comparisonDisposition": "completed-attempt"
+      },
+      "mechanism": {
+        "folds": 93,
+        "foldCommits": 7,
+        "unpaidFoldReceipts": 0,
+        "nativeCompactions": 0
+      },
+      "ledgerRecords": [
+        {
+          "taskId": "lt-01",
+          "recordedValue": "lv-f0318c",
+          "correct": true,
+          "occurrences": 1
+        },
+        {
+          "taskId": "lt-02",
+          "recordedValue": "lv-0a5f42",
+          "correct": true,
+          "occurrences": 1
+        },
+        {
+          "taskId": "lt-03",
+          "recordedValue": "lv-12e84b",
+          "correct": true,
+          "occurrences": 1
+        },
+        {
+          "taskId": "lt-04",
+          "recordedValue": "lv-e5bc52",
+          "correct": true,
+          "occurrences": 1
+        }
+      ],
+      "ordinaryProbes": {
+        "matches": 20,
+        "total": 21
+      },
+      "endBlock": {
+        "delivered": true,
+        "checksums": {
+          "matches": 10,
+          "total": 10,
+          "correctedSubjects": 4,
+          "withdrawnChosen": 0
+        },
+        "joins": {
+          "recordCorrect": 4,
+          "recallOfRecord": 4,
+          "truthMatch": 4,
+          "total": 4
+        },
+        "reconstruction": {
+          "matches": 16,
+          "answered": 16,
+          "total": 16
+        },
+        "recovery": {
+          "historySearches": 0,
+          "contextToolCalls": 9,
+          "fileReads": 0,
+          "recoveryCalls": 9,
+          "lastResetKind": "commit",
+          "entriesSinceReset": 113
+        }
+      },
+      "carriage": {
+        "rows": 51,
+        "probeValueClassifications": {
+          "absent-off-branch": 1,
+          "numeric-not-attributed": 3,
+          "visible-brief": 3,
+          "visible-raw": 14
+        },
+        "endBlockValueClassifications": {
+          "visible-raw": 30
+        },
+        "withdrawnClassifications": {
+          "visible-raw": 4
+        }
+      },
+      "artifactHashes": {
+        "runConfigSha256": "0a2b7fcc1f8f5a0e3a9ab80571ea43f8667e3097923330ef06332dcbb10f48ea",
+        "candidateReportSha256": "97bcfcc1d5f6fc6ca7642d48b7e840725036e921b59d9d0ab8134c0c8d080fef",
+        "candidateSealSha256": "613e99a8866808519197b428e45fd0239c92f701690281859d7c944963a0eae9",
+        "workerReportSha256": "9f19eda10470148d8c4d08989071ee29e139743e3af83ab49d6a7dd771bd9479",
+        "sessionSha256": "769ccf9c4d25627534b16d6ac2a56dc05b8a211a81d75e7cef7628322784acb0",
+        "providerLedgerSha256": "6b3a35fad00259e7b56f0316c4638e1ef8e9d170098c516b084cb19c46f963c8",
+        "runManifestFileSha256": "9cfb606d7dc833cf64bfc4b7500e2f7ebe5773738d20585da0d115a3c7701724",
+        "runManifestSha256": "e1cb5528ee886f6f77dd26218ed7fa7009da736e0f34a50f659de0880b26c33b",
+        "experimentEvidenceSha256": "2885400b2ce6052ad8eef0ac458c4d060da4bde898ad2c8736d5a75dfedacd9f"
+      }
+    }
+  ],
+  "carriageRows": [
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-16-01",
+      "verdict": "match",
+      "ordinal": 108,
+      "valueCarriage": "numeric-not-attributed",
+      "bindingCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-16-02",
+      "verdict": "mismatch",
+      "ordinal": 108,
+      "valueCarriage": "visible-brief",
+      "bindingCarriage": "absent"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-16-03",
+      "verdict": "match",
+      "ordinal": 108,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-16-04",
+      "verdict": "match",
+      "ordinal": 108,
+      "valueCarriage": "visible-brief",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-16-05",
+      "verdict": "match",
+      "ordinal": 108,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-16-06",
+      "verdict": "match",
+      "ordinal": 108,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-32-01",
+      "verdict": "match",
+      "ordinal": 223,
+      "valueCarriage": "visible-brief",
+      "bindingCarriage": "visible-brief"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-32-02",
+      "verdict": "match",
+      "ordinal": 223,
+      "valueCarriage": "numeric-not-attributed",
+      "bindingCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-32-04",
+      "verdict": "match",
+      "ordinal": 223,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-32-05",
+      "verdict": "match",
+      "ordinal": 223,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-32-06",
+      "verdict": "match",
+      "ordinal": 223,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-48-01",
+      "verdict": "match",
+      "ordinal": 314,
+      "valueCarriage": "numeric-not-attributed",
+      "bindingCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-48-02",
+      "verdict": "match",
+      "ordinal": 314,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-48-04",
+      "verdict": "match",
+      "ordinal": 314,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-48-05",
+      "verdict": "match",
+      "ordinal": 314,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-48-06",
+      "verdict": "match",
+      "ordinal": 314,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-64-01",
+      "verdict": "match",
+      "ordinal": 429,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-64-02",
+      "verdict": "match",
+      "ordinal": 429,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-64-04",
+      "verdict": "match",
+      "ordinal": 429,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-64-05",
+      "verdict": "match",
+      "ordinal": 429,
+      "valueCarriage": "absent-off-branch",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "probeId": "probe-64-06",
+      "verdict": "match",
+      "ordinal": 429,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-01",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-02",
+      "kind": "join",
+      "verdict": "recall-of-record",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-03",
+      "kind": "join",
+      "verdict": "recall-of-record",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-04",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-05",
+      "kind": "join",
+      "verdict": "recall-of-record",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-06",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-07",
+      "kind": "join",
+      "verdict": "recall-of-record",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-08",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-brief",
+      "withdrawnCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-09",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-brief",
+      "withdrawnCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-10",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-brief",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-11",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-brief",
+      "withdrawnCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-12",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-13",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-brief",
+      "withdrawnCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-14",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-table#01",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-table#02",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-table#03",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-table#04",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-table#05",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-table#06",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-table#07",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-table#08",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-table#09",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-table#10",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-table#11",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-table#12",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-table#13",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-table#14",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-table#15",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-brief"
+    },
+    {
+      "runId": "2026-08-15T12-27-50Z-pifold-rep1-d2a21458",
+      "arm": "pifold",
+      "repetition": 1,
+      "endBlockId": "end-table#16",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 444,
+      "valueCarriage": "visible-brief"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-16-01",
+      "verdict": "match",
+      "ordinal": 90,
+      "valueCarriage": "numeric-not-attributed",
+      "bindingCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-16-02",
+      "verdict": "match",
+      "ordinal": 90,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-16-03",
+      "verdict": "match",
+      "ordinal": 90,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-16-04",
+      "verdict": "match",
+      "ordinal": 90,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-16-05",
+      "verdict": "match",
+      "ordinal": 90,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-16-06",
+      "verdict": "match",
+      "ordinal": 90,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-32-01",
+      "verdict": "match",
+      "ordinal": 175,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-32-02",
+      "verdict": "match",
+      "ordinal": 175,
+      "valueCarriage": "numeric-not-attributed",
+      "bindingCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-32-04",
+      "verdict": "match",
+      "ordinal": 175,
+      "valueCarriage": "visible-brief",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-32-05",
+      "verdict": "match",
+      "ordinal": 175,
+      "valueCarriage": "visible-brief",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-32-06",
+      "verdict": "match",
+      "ordinal": 175,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-48-01",
+      "verdict": "match",
+      "ordinal": 260,
+      "valueCarriage": "numeric-not-attributed",
+      "bindingCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-48-02",
+      "verdict": "match",
+      "ordinal": 260,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": "recoverable"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-48-04",
+      "verdict": "mismatch",
+      "ordinal": 260,
+      "valueCarriage": "visible-brief",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-48-05",
+      "verdict": "match",
+      "ordinal": 260,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-48-06",
+      "verdict": "match",
+      "ordinal": 260,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-64-01",
+      "verdict": "match",
+      "ordinal": 351,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-64-02",
+      "verdict": "match",
+      "ordinal": 351,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-64-04",
+      "verdict": "match",
+      "ordinal": 351,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-64-05",
+      "verdict": "match",
+      "ordinal": 351,
+      "valueCarriage": "absent-off-branch",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "probeId": "probe-64-06",
+      "verdict": "match",
+      "ordinal": 351,
+      "valueCarriage": "visible-raw",
+      "bindingCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-01",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-02",
+      "kind": "join",
+      "verdict": "recall-of-record",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-03",
+      "kind": "join",
+      "verdict": "recall-of-record",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-04",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-05",
+      "kind": "join",
+      "verdict": "recall-of-record",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-06",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-07",
+      "kind": "join",
+      "verdict": "recall-of-record",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-08",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-09",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-10",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-11",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-12",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-13",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-14",
+      "kind": "checksum",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw",
+      "withdrawnCarriage": null
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-table#01",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-table#02",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-table#03",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-table#04",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-table#05",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-table#06",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-table#07",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-table#08",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-table#09",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-table#10",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-table#11",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-table#12",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-table#13",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-table#14",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-table#15",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw"
+    },
+    {
+      "runId": "2026-08-15T19-24-15Z-pifold-rep2-fbe748d0",
+      "arm": "pifold",
+      "repetition": 2,
+      "endBlockId": "end-table#16",
+      "kind": "table-row",
+      "verdict": "match",
+      "ordinal": 375,
+      "valueCarriage": "visible-raw"
+    }
+  ],
+  "sourceHashes": {
+    "extractorSha256": "7fa32d0228b6b7d262bed7ff1a5b035eacafd8db2989febaaebe3ddb9cc2b9e8",
+    "carriageScriptSha256": "58fbeb380f29326d6cc0a48368f106373246cc7b63bd4e649d907debf1d4c173"
+  },
+  "extractSha256": "30c04ee94792b40b5aef5d2edf5f2b41cd8ca57b2e1de531f512c4b8ce9b0e6a"
+}

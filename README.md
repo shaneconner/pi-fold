@@ -48,7 +48,7 @@ Folding keeps the turn. Occupancy crosses a threshold, spans fold in place, and 
 
 ## Measured results
 
-The campaign behind these tables is two experiments. The first, here, is pi-fold against Pi's native compaction. The second, further down under [epoch fold scheduling](#epoch-fold-scheduling), is pi-fold against itself with fold scheduling as the only variable.
+The first campaign behind these tables contains two experiments. The first, here, is pi-fold against Pi's native compaction. The second, further down under [epoch fold scheduling](#epoch-fold-scheduling), is pi-fold against itself with fold scheduling as the only variable. A later transcript-only hidden-mass campaign is reported separately below, with its own protocol and claim limits.
 
 One 64-stage staged assignment over the curl C repository: one Pi session per run, one user message, and the agent calls a `repo_stage` tool 64 times inside a single agentic turn. Model gpt-5.6-sol at xhigh effort, provider openai-codex. The 272,000-token figure in these tables is the transport's per-request input descriptor, which is what pi-fold budgeted against; the Codex catalog actually serves gpt-5.6 at a 372,000-token cap, which is where the native arm lived, peaking at 369.0k before each compaction. One arm runs pi-fold, the other runs Pi's native compaction.
 
@@ -107,6 +107,23 @@ The measurement is written up as a paper, with the figure sources, the redacted 
 - **The reread story is a count, not a duplicate-payload metric.** It rests on file read count and bytes from disk, both in the tables above.
 
 Full method, artifact hashes and per-iteration history: [docs/fold_vs_compaction/experiment-log.md](https://github.com/shaneconner/pi-fold/blob/main/docs/fold_vs_compaction/experiment-log.md). Queued work: [docs/next-steps.md](https://github.com/shaneconner/pi-fold/blob/main/docs/next-steps.md).
+
+### Transcript-only hidden mass, protocol v4
+
+The follow-up campaign plants seeded values only in the transcript, never in the repository checkout, and withholds one final 30-cell block until all 64 stages are delivered. The plan, question order and target checkout were frozen before the readout. Both arms ran gpt-5.6-sol at xhigh effort on the same plan hash, `eb488827c46d`.
+
+| Outcome across assigned attempts | pi-fold | native compaction |
+| --- | ---: | ---: |
+| Completed 64 stages | 2 of 2 | 0 of 2 |
+| Join endpoints recorded correctly | 8 of 8 | 0 of 8; all eight recorded `unknown` |
+| Ordinary probes | 40 of 42 | not available from two incomplete runs |
+| Withheld end-block cells | 60 of 60 | not reached |
+
+Native compaction lost a different continuation key in each attempt, after stages 39 and 56. The first run was killed after an unbounded resume defect produced 1,761 provider responses; the second carried the fixed three-resume bound and failed by name within 33 minutes. At that point the campaign stopped native rather than launching until one survived, which would select on the outcome, and ran a second pi-fold attempt to leave two attempted assignments per arm.
+
+The pi-fold end blocks were recovery-assisted. The agent made five context calls in repetition 1 and nine in repetition 2 before answering. At the answering requests, the carriage sweep classified all 60 expected end-block values as visible raw or visible in a brief. This is evidence for recoverable retrieval and correction selection, not unaided hidden recall. The same 102-row certification found that both ordinary misses had their expected value visible in a brief, while the same matched control in both runs had its value absent from the answering branch.
+
+There is no direct cross-arm end-block score and no cost ratio from this campaign: neither native run completed, and native repetition 1 is excluded from cost comparison because of the harness runaway. Two attempts do not estimate a population failure rate. The portable result contains all 102 rows and the source artifact hashes: [hidden-mass-results.json](https://github.com/shaneconner/pi-fold/blob/main/docs/fold_vs_compaction/hidden-mass-results.json). The full chronology and stop rule are in the [experiment log](https://github.com/shaneconner/pi-fold/blob/main/docs/fold_vs_compaction/experiment-log.md).
 
 ## How it works
 
@@ -178,10 +195,19 @@ The package entry calls `registerPiFold(pi)` with the defaults below, and that i
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `thresholds` | `{ maxTarget: 0.80, minTarget: 0.35, freshTail: 0.02, consolidateAfter: 10 }` | The thermostat, set whole or not at all. The first three are proportions of the serving budget; `consolidateAfter` is a positive integer count. Validated atomically at registration, and an impossible policy is refused by name rather than clamped. User policy only: no agent action can read it back as a mutable surface, though status reports the values. |
+| `thresholds` | `{ maxTarget: 0.80, minTarget: 0.20, freshTail: 0.02, consolidateAfter: 10 }` | The thermostat, set whole or not at all. The first three are proportions of the serving budget; `consolidateAfter` is a positive integer count. Validated atomically at registration, and an impossible policy is refused by name rather than clamped. User policy only: no agent action can read it back as a mutable surface, though status reports the values. |
 | `providerInputBudget` | the transport's descriptor | The tokens this deployment may actually put into a request, already net of whatever output reservation it holds back. Every ratio, fence and budget divides by it directly: pi-fold subtracts nothing from a declared value. Supply it when the deployment knows its real ceiling, because the per-request max-input descriptor a provider advertises assumes a full reservation and understates it. With no value supplied the runtime falls back to that descriptor and estimates the reservation out of it, which is the conservative default for a model it has no budget fact for; the descriptor is read and reported in status either way, so the gap stays auditable. |
 | `blacklistAutoFoldTools` | `new Set()` | The exception list. Every completed tool batch is foldable by the runtime on its own, without an agent mark; name a tool here and its results stay raw instead. Empty by default, because foldability is not the protection: pins, the fresh tail and the commit guard are, and they apply to a blacklisted tool and an ordinary one alike. Pass a `ReadonlySet<string>`. Blacklisting is not free: the mass stays in the window until a chapter fold takes it, and a closed unit that alone exceeds the chapter cap is reclaimed whole rather than in pieces. |
-| `guidance` | `{ thresholdNotices: true, actionResponses: true }` | The two guidance surfaces, set together. `thresholdNotices` is the append-once occupancy waypoint at 25, 50 and 75 percent of the serving budget; `actionResponses` is the persistent acknowledgement a context action returns. Booleans only, and off means the carrier is absent rather than empty. |
+| `guidance` | `{ actionResponses: true }` | The persistent acknowledgement returned by a context action. Boolean only, and off means the carrier is absent rather than empty. |
+
+### Migrating from 1.x
+
+Version 2.0 makes the measured deletions explicit instead of accepting options that no longer control the runtime.
+
+- Remove `summarizer` and `summarizeContextSpan`. The model brief generator is deleted; every new fold carries a deterministic or agent-supplied brief. Passing either name is refused with the deletion reason.
+- Remove `guidance.thresholdNotices`. `guidance` now contains only `actionResponses`.
+- The default `thresholds.minTarget` is now `0.20`. A host supplying the whole threshold object keeps its declared value.
+- Existing sessions remain readable. Fold records already carrying model-authored briefs keep those briefs and their provenance on load.
 
 ### Projection candidate records
 

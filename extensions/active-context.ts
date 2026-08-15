@@ -5,7 +5,6 @@ import {
   sha256Value,
   stableStringify,
 } from "./json.ts";
-import type { EvidenceRef } from "./json.ts";
 import {
   bytes,
   clone,
@@ -121,7 +120,6 @@ import type {
   ActiveContextState,
   ActiveContextThresholds,
   ActiveContextToolAction,
-  BriefProvenance,
   FoldCandidate,
   FoldKind,
   FoldRecordEntry,

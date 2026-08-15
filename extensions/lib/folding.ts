@@ -413,21 +413,10 @@ export async function prepareFold(input: {
     throw new Error("Fold source is not exact, stale, and unprotected");
   }
   const sourceText = encodedFoldSource(snapshot, state, candidate.parts, candidate.kind);
-  const groupChildren = candidate.parts.filter((part) => part.kind === "fold").length;
-  const readableSource = groupChildren
-    ? consolidationSourceText(snapshot, state, candidate.parts)
-    : sourceText;
   const orientation = boundedOrientation(snapshot, candidate.sourceRefs);
   const sourceSha256 = sha256Text(sourceText);
   const beforeSha256 = sha256Text(orientation.beforeText);
   const afterSha256 = sha256Text(orientation.afterText);
-  const candidateId = sha256Value({
-    kind: candidate.kind,
-    parts: candidate.parts.map(normalizedPart),
-    sourceSha256,
-    beforeSha256,
-    afterSha256,
-  });
 
   let brief: string;
   let provenance: BriefProvenance;

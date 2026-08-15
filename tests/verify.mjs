@@ -95,7 +95,6 @@ const NO_FRESH_TAIL = Object.freeze({ ...context.DEFAULT_THRESHOLDS, freshTail: 
 /** A fresh tail wide enough that the newest turns are unfoldable at fixture scale. */
 const WIDE_FRESH_TAIL = Object.freeze({ ...context.DEFAULT_THRESHOLDS, freshTail: 0.10 });
 
-
 function near(actual, expected, tolerance = 1e-9, label = "number") {
   assert(Math.abs(actual - expected) <= tolerance,
     `${label}: expected ${expected} ± ${tolerance}, received ${actual}`);
@@ -3034,39 +3033,6 @@ async function gateEpochMarkCommit() {
  * fold. Gates that count preparations count them with this, so the upgrade lane adding
  * a caller does not read as a preparation nobody asked for.
  */
-
-/** Every fold a request names, whichever shape it arrived in. */
-function requestFoldIds(request) {
-  return Array.isArray(request?.spans)
-    ? request.spans.map((span) => span?.candidateId)
-    : [request?.candidateId];
-}
-
-/**
- * The spans a request carries. A batch states them; a single-span request IS one, so it is
- * read as a one-span batch and every caller can ask the same question of both.
- */
-function requestSpans(request) {
-  return Array.isArray(request?.spans) ? request.spans : [request];
-}
-
-/**
- * A generator stub that answers either shape with the same words: one brief for a single
- * span, one brief per span for a batch. `write` is given a fold id and returns its text.
- */
-function briefAnswer(request, write) {
-  const attribution = {
-    provider: "openai-codex",
-    model: "gpt-5.6-luna",
-    effort: "medium",
-    toolCalls: 0,
-    launchContractDigest: "b".repeat(64),
-  };
-  const ids = requestFoldIds(request);
-  return Array.isArray(request?.spans)
-    ? { briefs: ids.map((id) => write(id)), ...attribution }
-    : { brief: write(ids[0]), ...attribution };
-}
 
 function bytesOf(value) {
   return Buffer.byteLength(json.stableStringify(value), "utf8");

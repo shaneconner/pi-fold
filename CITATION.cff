@@ -1,13 +1,13 @@
 cff-version: 1.2.0
-message: "If you use pi-fold, cite it as below. To cite the measurement, use the preferred citation."
+message: "If you use pi-fold, cite it as below. To cite the first measurement, use the preferred citation."
 title: "pi-fold"
 abstract: "Agent-governed lossless context folding for Pi. Finished spans of a session transcript collapse in place into short briefs; the exact originals stay on disk, addressed and verified by SHA-256, and peek and expand return them byte for byte."
 type: software
 authors:
   - family-names: Conner
     given-names: Shane
-version: 1.0.2
-date-released: 2026-08-09
+version: 2.0.0
+date-released: 2026-08-15
 license: MIT
 repository-code: "https://github.com/shaneconner/pi-fold"
 url: "https://shaneconner.com/projects/pi-fold/"

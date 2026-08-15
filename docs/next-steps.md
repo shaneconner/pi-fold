@@ -1,58 +1,53 @@
-# pi-fold: next steps
+# pi-fold: post-2.0 release and research queue
 
-Queued work, recorded 2026-08-10. Ordering is not priority. Entries from earlier
-revisions of this file that shipped (the durable pin, the pre-commit last call, the
-exposed thresholds, the user-triggered fold event, tool-usage instrumentation, and
-the surfacing slate) left the list with their builds; git history holds them.
+Recorded 2026-08-15 after the protocol-v4 hidden-mass campaign closed. Git
+history holds the longer design queue and every mechanism that shipped or was
+deleted.
 
-## Overflow recovery
+## Current stop
 
-- **The fold-side record at the hard fence.** A session already parked at the
-  provider-window fence aborts the retried pass before the projection budget runs,
-  so an armed rollback there leaves no fold-side recovery record, and the
-  adjudication lens counts the episode as a rollback without recovery. The terminal
-  behavior is right either way; what is missing is the record. The fix is one
-  ordering decision, letting the rejection-armed pass reach the projection budget
-  before the lagging abort, with a gate asserting a fold-side record for every
-  armed rollback.
-- **The giant message.** After a rollback and a full commit, the triggering message
-  alone can still exceed the budget. Candidate shape: ingest the oversized message
-  as evidence and fold it on arrival, so the window carries its brief and the exact
-  bytes stay one peek away.
-- **An attempt cap.** Pi retries a rejected request once. Decide what the lane does
-  when the retry overflows again, rather than inheriting the one-shot by accident.
+The campaign stops at two assigned attempts per arm. pi-fold completed two of
+two; native completed zero of two after compaction lost a different continuation
+key in each attempt. Launching native runs until one survived would condition the
+comparison on success. No further provider run belongs to this campaign.
 
-## Agent control surface
+No new folding mechanism is promoted. The release candidate is the measured
+runtime plus release hardening, migration notes, and the portable result extract.
 
-- **Simplify the argument surface.** The action arguments were designed when a fold applied at the
-  moment of the tool call. Folding is now an automated batch event, so several arguments describe
-  a control the agent no longer exercises per call. Reduce them to what still means something.
+## Release order
 
-## Fold interiors
+1. Tag the exact green commit as `v2.0.0` and create the GitHub release from its
+   migration notes and result boundaries.
+2. Let Shane publish the same commit to npm. The tarball version, lockfile and
+   citation metadata must all read `2.0.0` before that step.
+3. Reserve the follow-up Zenodo DOI, then write that identifier into the paper
+   and citation metadata. Do not invent or prefill a DOI.
+4. Publish the follow-up paper from
+   `docs/fold_vs_compaction/hidden-mass-results.json`, not from copied numbers in
+   the experiment log.
 
-- **Auto-fold what a folded span contains.** (Shane, 2026-08-08.) When a span folds, the tool
-  results and any unpinned folds inside it should collapse too, so that expanding the outer fold
-  one level returns structure (briefs of the units inside) rather than every raw byte the span
-  ever held. Expand is already outside-in one level at a time; this makes the levels real at fold
-  time instead of only at consolidation time. The natural default is tool results always, since
-  they are the mass (see the peek-mass finding), with sub-span briefs only where a unit boundary
-  already exists. Marking gives this for free: when a span is marked, mark its interior tool
-  results too, and the whole structure lands in the same commit, so it costs zero extra rewrites.
-  Not an argument surface (Shane, 2026-08-08): every fold already carries an ID, and peek on an
-  ID returns just that fold's source as a tool result at any depth, which stays the deep-read
-  path. Expand stays limited to briefs present in the current window. The open design question
-  is deep expand in place: expanding a nested fold's ID directly at its own depth, with
-  everything above it staying folded. Needs thinking out before it becomes a build.
+The paper's primary outcomes are attempt-level completion and record-time join
+endpoints. The pi-fold end-block result is secondary and explicitly
+recovery-assisted. There is no direct native end-block score, no cost ratio from
+this campaign, and no population failure-rate estimate from two attempts.
 
-## Measurement
+## One later experiment worth doing
 
-- **A new experiment design for transcript recall.** The current probes ask about repository facts,
-  which are re-derivable by rereading the repo, so they do not discriminate context loss. Probe
-  instead against facts that exist only in the earlier conversation. Fix the known harness defects
-  first: the file line count is reported as `split("\n").length`, one more than `wc -l`, and one
-  symbol-file probe has a defensible wrong answer. Both change the plan hash, so they force a new
-  baseline.
-- **Grade the slate in the field.** The surfacing slate ships fully instrumented: every
-  suggestion is graded acted, used, or ignored, and the harness reads first-hop peek precision
-  per arm. The memex fold-lane accept rate of 2.2 percent is the floor the mechanism exists to
-  beat, and the next campaign carries that comparison.
+After the release and paper, preregister a fixed attempt count on a different
+repository workload and model family, keep transcript-only seeded values, and
+retain completion as a treatment outcome. Promotion requires the completion and
+record-time endpoint directions to repeat without selecting a surviving native
+run. A failed direction is a stop signal, not a prompt for mechanism work.
+
+## Parked product questions
+
+These are not 2.0 blockers and have no promoted build:
+
+- Record fold-side recovery when an already fenced retry aborts before the
+  projection budget runs.
+- Decide how exact evidence ingestion should handle one message that exceeds the
+  serving budget by itself.
+- Reduce action arguments that no longer describe agent control under epoch
+  scheduling.
+
+Each waits for a named failure, one mechanism, and a gate before implementation.

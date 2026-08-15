@@ -24,6 +24,21 @@
 // and are not replayed as readable text, and fold sources store the same entry
 // shapes, so one definition of "the fact's bytes" serves every class.
 
+// A full sealed run can hold enough transcript state that repeatedly rebuilding
+// the fold forest in one process exhausts the host. The sweep owns one fixed
+// batch size, not a tuning surface: each batch exits before the next starts.
+export const ATTRIBUTION_BATCH_ROWS = 4;
+
+export function attributionBatchStarts(rowCount) {
+  if (!Number.isSafeInteger(rowCount) || rowCount < 0) {
+    throw new Error("attribution row count must be a non-negative safe integer");
+  }
+  return Array.from(
+    { length: Math.ceil(rowCount / ATTRIBUTION_BATCH_ROWS) },
+    (_, index) => index * ATTRIBUTION_BATCH_ROWS,
+  );
+}
+
 export function entryText(entry) {
   const message = entry?.message;
   if (!message || typeof message !== "object") return "";
@@ -123,6 +138,20 @@ export function classifyFactCarriage(view, fact) {
   };
 }
 
+export function attributeFactInView({ view, entries, fact }) {
+  const result = classifyFactCarriage(view, fact);
+  if (result.classification === "absent") {
+    const onBranch = new Set(view.branch.map((entry) => entry.id));
+    const offBranchEntryIds = [];
+    for (const entry of entries) {
+      if (entry?.type !== "message" || onBranch.has(entry.id)) continue;
+      if (entryText(entry).includes(fact)) offBranchEntryIds.push(entry.id);
+    }
+    if (offBranchEntryIds.length) return { ...result, offBranchEntryIds };
+  }
+  return result;
+}
+
 // The whole reading for one fact at one leaf, with the off-branch tail that
 // names a discard: absent on the branch while present on a dead one is what
 // native compaction leaves behind, and naming the entries keeps the claim
@@ -132,17 +161,7 @@ export function attributeFactInSession({
 }) {
   const branch = branchTo(entries, leafId);
   const view = carriageView({ runtime, branch, sessionId, stateEntryType, foldRecordEntryType });
-  const result = classifyFactCarriage(view, fact);
-  if (result.classification === "absent") {
-    const onBranch = new Set(branch.map((entry) => entry.id));
-    const offBranchEntryIds = [];
-    for (const entry of entries) {
-      if (entry?.type !== "message" || onBranch.has(entry.id)) continue;
-      if (entryText(entry).includes(fact)) offBranchEntryIds.push(entry.id);
-    }
-    if (offBranchEntryIds.length) return { ...result, offBranchEntryIds };
-  }
-  return result;
+  return attributeFactInView({ view, entries, fact });
 }
 
 // The answering request for a piece of response text: the entry that CONTAINS
