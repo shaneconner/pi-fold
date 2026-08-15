@@ -34,17 +34,26 @@ const readJsonl = (path) => readFileSync(path, "utf8").split("\n").filter(Boolea
   try { return [JSON.parse(line)]; } catch { return []; }
 });
 
-const plan = JSON.parse(readFileSync(join(campaignDir, "stages-full.json"), "utf8"));
-const probesById = new Map();
-const collect = (node) => {
-  if (Array.isArray(node)) { for (const item of node) collect(item); return; }
-  if (!node || typeof node !== "object") return;
-  const id = node.probeId ?? node.id;
-  if (typeof id === "string" && id.startsWith("probe-") && typeof node.expectedAnswer === "string" &&
-    !probesById.has(id)) probesById.set(id, node);
-  for (const value of Object.values(node)) collect(value);
+// Each run pins its own plan path, so the sweep reads THAT plan rather than
+// assuming a mode: a smoke campaign and a full campaign sweep identically.
+const planCache = new Map();
+const planOf = (path) => {
+  if (!planCache.has(path)) {
+    const plan = JSON.parse(readFileSync(path, "utf8"));
+    const probesById = new Map();
+    const collect = (node) => {
+      if (Array.isArray(node)) { for (const item of node) collect(item); return; }
+      if (!node || typeof node !== "object") return;
+      const id = node.probeId ?? node.id;
+      if (typeof id === "string" && id.startsWith("probe-") && typeof node.expectedAnswer === "string" &&
+        !probesById.has(id)) probesById.set(id, node);
+      for (const value of Object.values(node)) collect(value);
+    };
+    collect(plan);
+    planCache.set(path, { plan, probesById });
+  }
+  return planCache.get(path);
 };
-collect(plan);
 
 const HARNESS_JSONL = new Set(["provider-requests.jsonl", "pace.jsonl", "heartbeats.jsonl",
   "failure-latch.jsonl", "tool-results.jsonl", "worker-events.jsonl"]);
@@ -68,6 +77,8 @@ for (const runName of readdirSync(join(campaignDir, "runs")).sort()) {
   const evidencePath = join(runDir, "experiment-evidence.json");
   if (!existsSync(evidencePath)) continue;
   const evidence = JSON.parse(readFileSync(evidencePath, "utf8"));
+  const runConfig = JSON.parse(readFileSync(join(runDir, "run-config.json"), "utf8"));
+  const { plan, probesById } = planOf(runConfig.planPath);
   const sessionName = readdirSync(runDir).find((name) =>
     name.endsWith(".jsonl") && !HARNESS_JSONL.has(name));
   if (!sessionName) { process.stderr.write(`${runName}: no session file\n`); continue; }
@@ -124,8 +135,6 @@ for (const runName of readdirSync(join(campaignDir, "runs")).sort()) {
   // verdict rather than letting a match read as recall. Runs sealed before the
   // instrument carry no endBlock and are skipped: there is nothing to certify.
   if (evidence.endBlock?.rows) {
-    const runConfig = JSON.parse(readFileSync(join(runDir, "run-config.json"), "utf8"));
-    const plan = JSON.parse(readFileSync(runConfig.planPath, "utf8"));
     const questions = experiment.endBlockQuestions(plan.ledger, runConfig.querySeed);
     const verdictOf = new Map(evidence.endBlock.rows.map((row) => [row.id, row]));
     // One answering request for the whole block: the first end-block id that

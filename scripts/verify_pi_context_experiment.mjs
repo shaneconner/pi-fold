@@ -5372,6 +5372,8 @@ try {
   "the adjudicator must recompute the end-block pin rather than trust it");
   assert(adjudicator.includes("endBlockVerdicts({"),
     "the adjudicator must grade the end block through the shared lens");
+  assert(adjudicator.includes("userMessages === 1 + recordedResumes + endBlockDelivered"),
+    "the one-user-message contract must count the identified end block, and only it");
   const supervisor71 = source("scripts/run_pi_context_experiment.mjs");
   assert(supervisor71.includes('"hidden-mass-seeds.json"') &&
     supervisor71.includes("querySeed: hiddenMassSeeds.querySeed"),

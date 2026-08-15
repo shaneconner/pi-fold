@@ -29,6 +29,7 @@ import {
   closedBookPrompt,
   closedBookQuestions,
   endBlockPrompt,
+  endBlockTranscript,
   endBlockVerdicts,
   closedBookTranscript,
   computeRereadTax,
@@ -371,9 +372,18 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   // spoon-feeding this rule exists to catch, and the resume count is reported beside the
   // workload rather than absorbed into it: on this arm it is a cost of the mechanism.
   const recordedResumes = Array.isArray(worker.stageNudges) ? worker.stageNudges.length : 0;
-  assertExperiment(userMessages === 1 + recordedResumes,
+  // The withheld end block is the one further message an arm session may
+  // legitimately carry (task #79 build 3): asked after the last stage, its
+  // bytes pinned by the manifest. It counts here only when a user message is
+  // BYTE-IDENTICAL to the recomputed prompt, so an extra message no resume and
+  // no end block accounts for still breaks the contract.
+  const endBlockDelivered = closedBook ? 0
+    : endBlockTranscript({
+      entries: runEntries, ledger: plan.ledger, querySeed: config.querySeed,
+    }).delivered ? 1 : 0;
+  assertExperiment(userMessages === 1 + recordedResumes + endBlockDelivered,
     `One-user-message contract broken: ${userMessages} user messages in the run span ` +
-    `against ${recordedResumes} recorded resume(s)`);
+    `against ${recordedResumes} recorded resume(s) and ${endBlockDelivered} end block(s)`);
 
   // Closed-book runs grade through the SAME mechanical verdicts and stop there. The
   // prompt law makes "no stage payload bytes" checkable: the sealed prompt hash must
