@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "campaignLabel": "sol-20260815-hidden",
   "protocolVersion": 4,
   "planSha256": "eb488827c46ddf630f79b582f0b75070c54e73a65cdf4045002a6fc785e572db",
@@ -13,7 +13,10 @@
     "providerInputBudget": 251520,
     "target": {
       "commit": "133785b15936d9417fdc41f77b87304b6bf458d5",
-      "treeSha256": "62b9c2bef50c315253945e348117714a164da61f1ac0cd45c7a77842406ab519"
+      "sourceCorpusFiles": 474,
+      "sourceCorpusManifestSha256": "1d8ce148425f4ee2fe7a3121095cce176bf615e4d95b7094377128a3ecdfa7e8",
+      "stagedFiles": 266,
+      "stagedCorpusManifestSha256": "62b9c2bef50c315253945e348117714a164da61f1ac0cd45c7a77842406ab519"
     },
     "stages": 64,
     "attemptedAssignmentsPerArm": 2
@@ -39,6 +42,18 @@
         "correct": 0,
         "unknown": 8,
         "total": 8
+      }
+    },
+    "ledgerRecordTaskIdCallAttempts": {
+      "pifold": {
+        "accepted": 8,
+        "rejected": 0,
+        "total": 8
+      },
+      "native": {
+        "accepted": 8,
+        "rejected": 1,
+        "total": 9
       }
     },
     "ordinaryProbes": {
@@ -137,25 +152,37 @@
           "taskId": "lt-01",
           "recordedValue": "lv-f0318c",
           "correct": true,
-          "occurrences": 1
+          "acceptedRecords": 1,
+          "taskIdCallAttempts": 1,
+          "rejectedTaskIdCallAttempts": 0,
+          "rejectionCauses": {}
         },
         {
           "taskId": "lt-02",
           "recordedValue": "lv-0a5f42",
           "correct": true,
-          "occurrences": 1
+          "acceptedRecords": 1,
+          "taskIdCallAttempts": 1,
+          "rejectedTaskIdCallAttempts": 0,
+          "rejectionCauses": {}
         },
         {
           "taskId": "lt-03",
           "recordedValue": "lv-12e84b",
           "correct": true,
-          "occurrences": 1
+          "acceptedRecords": 1,
+          "taskIdCallAttempts": 1,
+          "rejectedTaskIdCallAttempts": 0,
+          "rejectionCauses": {}
         },
         {
           "taskId": "lt-04",
           "recordedValue": "lv-e5bc52",
           "correct": true,
-          "occurrences": 1
+          "acceptedRecords": 1,
+          "taskIdCallAttempts": 1,
+          "rejectedTaskIdCallAttempts": 0,
+          "rejectionCauses": {}
         }
       ],
       "ordinaryProbes": {
@@ -211,6 +238,7 @@
         "candidateReportSha256": "3added797a6e4d0e5875d3caf490a8a84fb3fb89b05574d4d26fcd49489abe08",
         "candidateSealSha256": "a9b22f4b6654f315cb44fc69665ad50cfa056a06a70d072292c43294263bbcc3",
         "workerReportSha256": "3e185f3c27da5eeaaf2b0412801d4f1797205b99723530ab3594423bef228c66",
+        "workerEventsSha256": "ca1340b1a657ab513142f8d81217c411e4bf7484add02ede0ae812b04a72a94c",
         "sessionSha256": "3a23ae83641c842e8892329b1289e5ddfe71ee242d4261dfe375b2eb3be8ffc4",
         "providerLedgerSha256": "30d5c5747cebdfcf51f5747fe6bd247d1cc0063bfd437d3681afe4a6c1ba14c5",
         "runManifestFileSha256": "64d147fac0db5477406ec87359a54ab770e2865ef8859727a6203101ed1ea70a",
@@ -282,25 +310,39 @@
           "taskId": "lt-01",
           "recordedValue": "unknown",
           "correct": false,
-          "occurrences": 1
+          "acceptedRecords": 1,
+          "taskIdCallAttempts": 1,
+          "rejectedTaskIdCallAttempts": 0,
+          "rejectionCauses": {}
         },
         {
           "taskId": "lt-02",
           "recordedValue": "unknown",
           "correct": false,
-          "occurrences": 1
+          "acceptedRecords": 1,
+          "taskIdCallAttempts": 1,
+          "rejectedTaskIdCallAttempts": 0,
+          "rejectionCauses": {}
         },
         {
           "taskId": "lt-03",
           "recordedValue": "unknown",
           "correct": false,
-          "occurrences": 1
+          "acceptedRecords": 1,
+          "taskIdCallAttempts": 1,
+          "rejectedTaskIdCallAttempts": 0,
+          "rejectionCauses": {}
         },
         {
           "taskId": "lt-04",
           "recordedValue": "unknown",
           "correct": false,
-          "occurrences": 2
+          "acceptedRecords": 1,
+          "taskIdCallAttempts": 2,
+          "rejectedTaskIdCallAttempts": 1,
+          "rejectionCauses": {
+            "already-recorded": 1
+          }
         }
       ],
       "ordinaryProbes": null,
@@ -311,6 +353,7 @@
         "candidateReportSha256": "fff8622ce5de38559efb7711ca2af6985796776681f7b57f08c66e2e3bcbafe9",
         "candidateSealSha256": "7e628130d25e2e51ccb4d1e7ed745c7b0ef5580ba808ed3f06330cf81c0d5389",
         "workerReportSha256": "adb762de60faaf3b9d871bcaddb0dacc40489caaac51552a85f5e7127dee7c1c",
+        "workerEventsSha256": "6d2731d26b2ed60518e14d46338ab11c8c15d66c8166840b22542fe155c51415",
         "sessionSha256": "2d8d60393fdac1a3b92bed2f54d0016a41debaafedf430325febd990cdfaa61d",
         "providerLedgerSha256": "69d43d15880e7d5ff2afe0cabf8ffd343bc7ebf9f7b7a96bbebafc0db6f462e9",
         "runManifestFileSha256": null,
@@ -382,25 +425,37 @@
           "taskId": "lt-01",
           "recordedValue": "unknown",
           "correct": false,
-          "occurrences": 1
+          "acceptedRecords": 1,
+          "taskIdCallAttempts": 1,
+          "rejectedTaskIdCallAttempts": 0,
+          "rejectionCauses": {}
         },
         {
           "taskId": "lt-02",
           "recordedValue": "unknown",
           "correct": false,
-          "occurrences": 1
+          "acceptedRecords": 1,
+          "taskIdCallAttempts": 1,
+          "rejectedTaskIdCallAttempts": 0,
+          "rejectionCauses": {}
         },
         {
           "taskId": "lt-03",
           "recordedValue": "unknown",
           "correct": false,
-          "occurrences": 1
+          "acceptedRecords": 1,
+          "taskIdCallAttempts": 1,
+          "rejectedTaskIdCallAttempts": 0,
+          "rejectionCauses": {}
         },
         {
           "taskId": "lt-04",
           "recordedValue": "unknown",
           "correct": false,
-          "occurrences": 1
+          "acceptedRecords": 1,
+          "taskIdCallAttempts": 1,
+          "rejectedTaskIdCallAttempts": 0,
+          "rejectionCauses": {}
         }
       ],
       "ordinaryProbes": null,
@@ -411,6 +466,7 @@
         "candidateReportSha256": "8eed4fa7cef4a8ab17a3cd8fe54aeab3121c13425e01815f11f299881a7b25e1",
         "candidateSealSha256": "f40be24352d570b702d4a0743b84910a0b997ef3874fd71a1ad7f79b65356b6e",
         "workerReportSha256": "0dfcceed43357b3ea11062bbce26063bb1d18b314ea478ac91934a2132f7b5d2",
+        "workerEventsSha256": "1b781363ff865a1dc7017ebcb449ee37b2ab4c31df7c41912522cf1b1504b966",
         "sessionSha256": "408e6bbc8ae84bc0e4c278158cc87051cb28e8c67a94d861a674d62b3160e9d0",
         "providerLedgerSha256": "f43e6ea1bb782048389bfa8bb37c2a0c61042559b36f0c8ac6a448fc1e3cc89e",
         "runManifestFileSha256": null,
@@ -478,25 +534,37 @@
           "taskId": "lt-01",
           "recordedValue": "lv-f0318c",
           "correct": true,
-          "occurrences": 1
+          "acceptedRecords": 1,
+          "taskIdCallAttempts": 1,
+          "rejectedTaskIdCallAttempts": 0,
+          "rejectionCauses": {}
         },
         {
           "taskId": "lt-02",
           "recordedValue": "lv-0a5f42",
           "correct": true,
-          "occurrences": 1
+          "acceptedRecords": 1,
+          "taskIdCallAttempts": 1,
+          "rejectedTaskIdCallAttempts": 0,
+          "rejectionCauses": {}
         },
         {
           "taskId": "lt-03",
           "recordedValue": "lv-12e84b",
           "correct": true,
-          "occurrences": 1
+          "acceptedRecords": 1,
+          "taskIdCallAttempts": 1,
+          "rejectedTaskIdCallAttempts": 0,
+          "rejectionCauses": {}
         },
         {
           "taskId": "lt-04",
           "recordedValue": "lv-e5bc52",
           "correct": true,
-          "occurrences": 1
+          "acceptedRecords": 1,
+          "taskIdCallAttempts": 1,
+          "rejectedTaskIdCallAttempts": 0,
+          "rejectionCauses": {}
         }
       ],
       "ordinaryProbes": {
@@ -552,6 +620,7 @@
         "candidateReportSha256": "97bcfcc1d5f6fc6ca7642d48b7e840725036e921b59d9d0ab8134c0c8d080fef",
         "candidateSealSha256": "613e99a8866808519197b428e45fd0239c92f701690281859d7c944963a0eae9",
         "workerReportSha256": "9f19eda10470148d8c4d08989071ee29e139743e3af83ab49d6a7dd771bd9479",
+        "workerEventsSha256": "1959d3e918196f2c6059d04a3574e749db9993d7ac18823703eb10e6980dd9ed",
         "sessionSha256": "769ccf9c4d25627534b16d6ac2a56dc05b8a211a81d75e7cef7628322784acb0",
         "providerLedgerSha256": "6b3a35fad00259e7b56f0316c4638e1ef8e9d170098c516b084cb19c46f963c8",
         "runManifestFileSha256": "9cfb606d7dc833cf64bfc4b7500e2f7ebe5773738d20585da0d115a3c7701724",
@@ -1611,7 +1680,7 @@
     }
   ],
   "sourceHashes": {
-    "extractorSha256": "8469fabf353f1337403a7820465a5b5f83fbdb142e83e2c4f1eb56d62d2b2dc0",
+    "extractorSha256": "ec4a2bd4ed1f7ac72b0d5a5e0348831b6e5f3a23e4a34ad33b6ae17bc27a020b",
     "carriageScriptSha256": "e5acb08a18e11f9f5460df658381b6fee0c9cba2e2158fa4cbeb42a0b8703804",
     "attributionHelperSha256": "4f618faee9f2dd3b305c287d5d1e202360f38d6b7f579c5091a4da1535930402",
     "foldIdentitySha256": "7052817353d4ccdc054d6307e3167cdf9eec7aa7dd2a6c83d73c993deb330c1d",
@@ -1619,5 +1688,5 @@
     "attestationHelperSha256": "97be466d24512c9ddc41203c43b74763025c541d4ccc08e8abf3499734438bbb",
     "runtimeTreeSha256": "86241bc31ebec33115b388bfb5c07b4cd5889743e0aa547bb341f612d5c18ff1"
   },
-  "extractSha256": "8aa3e7290496e2b7e2e8f3b6c8a100072071e4244d7ddb10d1c0d709abb38f45"
+  "extractSha256": "1a6a9dc7dd1cbd5c35d0863c132e66efec276339fe9ceb144bbf4c7c3bce6fe2"
 }

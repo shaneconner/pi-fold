@@ -15,6 +15,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { branchTo } from "./lib/pi_context_attribution.mjs";
+import { corpusManifestSha256 } from "./lib/pi_context_experiment.mjs";
 import { directoryTreeSha256, sha256Json } from "./lib/pi_context_soak_attestation.mjs";
 
 const PROJECT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -132,6 +133,7 @@ function extractRun(runDir, carriageRows, plan) {
   const candidatePath = join(runDir, "candidate-report.json");
   const candidateSealPath = join(runDir, "candidate-seal.json");
   const workerPath = join(runDir, "worker-report.json");
+  const workerEventsPath = join(runDir, "worker-events.jsonl");
   const providerPath = join(runDir, "provider-requests.jsonl");
   const evidencePath = join(runDir, "experiment-evidence.json");
   const manifestPath = join(runDir, "run-manifest.json");
@@ -147,6 +149,7 @@ function extractRun(runDir, carriageRows, plan) {
     candidateReportSha256: sha256File(candidatePath),
     candidateSealSha256: sha256File(candidateSealPath),
     workerReportSha256: sha256File(workerPath),
+    workerEventsSha256: sha256File(workerEventsPath),
     sessionSha256: sha256File(session),
     providerLedgerSha256: sha256File(providerPath),
     runManifestFileSha256: manifest ? sha256File(manifestPath) : null,
@@ -162,6 +165,7 @@ function extractRun(runDir, carriageRows, plan) {
   for (const [name, digest] of [
     ["run-config.json", hashes.runConfigSha256],
     ["worker-report.json", hashes.workerReportSha256],
+    ["worker-events.jsonl", hashes.workerEventsSha256],
     ["provider-requests.jsonl", hashes.providerLedgerSha256],
     [basename(session), hashes.sessionSha256],
     ...(manifest ? [["run-manifest.json", hashes.runManifestFileSha256]] : []),
@@ -181,6 +185,7 @@ function extractRun(runDir, carriageRows, plan) {
       `${config.runId}: evidence does not name the run manifest`);
   }
   const providerRows = readJsonl(providerPath);
+  const workerEvents = readJsonl(workerEventsPath);
   const entries = readJsonl(session);
   const providerResponses = providerRows.filter((row) => row.kind === "provider-response" && row.usage);
   const lastRequest = providerRows.findLast((row) => row.kind === "provider-request");
@@ -194,30 +199,58 @@ function extractRun(runDir, carriageRows, plan) {
     (row.usage.input ?? 0) + (row.usage.cacheRead ?? 0));
   const pooledDenominator = messageUsage.inputFresh + messageUsage.cacheRead;
   const expectedJoins = new Map(plan.ledger.joins.map((row) => [row.id, row.expectedAnswer]));
-  const ledgerRecordEvents = [];
+  const ledgerRecordCalls = [];
   for (const entry of activeBranch) {
     for (const part of entry.message?.content ?? []) {
       if (part.type !== "toolCall" || part.name !== "ledger_record") continue;
       const taskId = part.arguments?.id;
       if (!expectedJoins.has(taskId)) continue;
-      ledgerRecordEvents.push({
+      ledgerRecordCalls.push({
+        toolCallId: part.id,
         taskId,
         recordedValue: part.arguments?.value ?? null,
       });
     }
   }
+  const ledgerOutcomes = workerEvents.filter((row) =>
+    ["ledger-record", "ledger-record-refused"].includes(row.kind) &&
+    expectedJoins.has(row.details?.id));
+  const outcomesByCall = new Map();
+  for (const outcome of ledgerOutcomes) {
+    const toolCallId = outcome.details?.toolCallId;
+    assertResult(typeof toolCallId === "string" && toolCallId.length > 0,
+      `${config.runId}: ledger outcome lacks a tool-call identity`);
+    assertResult(!outcomesByCall.has(toolCallId),
+      `${config.runId}: ledger call ${toolCallId} has more than one outcome`);
+    outcomesByCall.set(toolCallId, outcome);
+  }
+  assertResult(ledgerRecordCalls.every((call) => outcomesByCall.has(call.toolCallId)),
+    `${config.runId}: a task-id ledger call has no authoritative worker outcome`);
+  assertResult(ledgerOutcomes.every((outcome) =>
+    ledgerRecordCalls.some((call) => call.toolCallId === outcome.details.toolCallId)),
+  `${config.runId}: a task-id ledger outcome has no call on the final active branch`);
   const ledgerRecords = [...expectedJoins].map(([taskId, expectedValue]) => {
-    const events = ledgerRecordEvents.filter((row) => row.taskId === taskId);
-    const values = new Set(events.map((row) => row.recordedValue));
-    assertResult(events.length > 0, `${config.runId}: no ledger record for ${taskId}`);
-    assertResult(values.size === 1,
-      `${config.runId}: ${taskId} was recorded with conflicting values`);
-    const recordedValue = events[0].recordedValue;
+    const calls = ledgerRecordCalls.filter((row) => row.taskId === taskId);
+    const accepted = calls.filter((call) =>
+      outcomesByCall.get(call.toolCallId)?.kind === "ledger-record");
+    const rejected = calls.filter((call) =>
+      outcomesByCall.get(call.toolCallId)?.kind === "ledger-record-refused");
+    assertResult(accepted.length === 1,
+      `${config.runId}: ${taskId} has ${accepted.length} accepted records instead of one`);
+    assertResult(accepted[0].recordedValue ===
+      outcomesByCall.get(accepted[0].toolCallId)?.details?.value,
+    `${config.runId}: ${taskId} accepted value differs between call and worker event`);
+    const recordedValue = accepted[0].recordedValue;
     return {
       taskId,
       recordedValue,
       correct: recordedValue === expectedValue,
-      occurrences: events.length,
+      acceptedRecords: accepted.length,
+      taskIdCallAttempts: calls.length,
+      rejectedTaskIdCallAttempts: rejected.length,
+      rejectionCauses: countBy(rejected.map((call) => ({
+        cause: outcomesByCall.get(call.toolCallId).details.cause,
+      })), "cause"),
     };
   });
   const probeVerdicts = evidence?.probeVerdicts ?? [];
@@ -287,11 +320,29 @@ const runDirs = readdirSync(join(campaignDir, "runs"), { withFileTypes: true })
   .map((entry) => join(campaignDir, "runs", entry.name));
 assertResult(runDirs.length > 0, "campaign has no run directories");
 const configs = runDirs.map((runDir) => readJson(join(runDir, "run-config.json")));
-const planHashes = new Set(configs.map((config) => config.planSha256));
-assertResult(planHashes.size === 1, "hidden-mass extract requires one plan hash");
+const commonConfig = (config) => ({
+  planSha256: config.planSha256,
+  mode: config.mode,
+  stageCount: config.stageCount,
+  model: config.model,
+  transport: config.transport,
+  providerInputBudget: config.providerInputBudget,
+  targetCommit: config.targetCommit,
+  targetTreeSha256: config.targetTreeSha256,
+  dependencyHashes: config.dependencyHashes,
+});
+const configIdentity = JSON.stringify(commonConfig(configs[0]));
+assertResult(configs.every((config) => JSON.stringify(commonConfig(config)) === configIdentity),
+  "hidden-mass extract requires one plan, model, transport, budget, target, and dependency identity");
 const plan = readJson(configs[0].planPath);
 assertResult(plan.version === 4, `hidden-mass extract requires protocol v4, received ${plan.version}`);
-assertResult(plan.planSha256 === configs[0].planSha256, "plan file does not match the run configuration");
+assertResult(configs.every((config) => plan.planSha256 === config.planSha256),
+  "plan file does not match every run configuration");
+const stagedFiles = plan.stages.flatMap((stage) => stage.files);
+assertResult(new Set(stagedFiles.map((file) => file.path)).size === stagedFiles.length,
+  "hidden-mass plan stages repeat a staged source file");
+assertResult(corpusManifestSha256(stagedFiles) === configs[0].targetTreeSha256,
+  "run target fingerprint is not the staged path-plus-content corpus manifest");
 
 const sweep = spawnSync(process.execPath, [CARRIAGE_SCRIPT, campaignDir], {
   encoding: "utf8",
@@ -317,6 +368,14 @@ const ledgerTotals = (armRuns) => ({
     .filter((row) => row.recordedValue === "unknown").length,
   total: armRuns.flatMap((run) => run.ledgerRecords).length,
 });
+const ledgerCallTotals = (armRuns) => ({
+  accepted: armRuns.flatMap((run) => run.ledgerRecords)
+    .reduce((sum, row) => sum + row.acceptedRecords, 0),
+  rejected: armRuns.flatMap((run) => run.ledgerRecords)
+    .reduce((sum, row) => sum + row.rejectedTaskIdCallAttempts, 0),
+  total: armRuns.flatMap((run) => run.ledgerRecords)
+    .reduce((sum, row) => sum + row.taskIdCallAttempts, 0),
+});
 const endBlockCells = pifold.reduce((total, run) => total +
   run.endBlock.checksums.matches + run.endBlock.joins.recallOfRecord +
   run.endBlock.reconstruction.matches, 0);
@@ -324,7 +383,7 @@ const probeRows = carriageRows.filter((row) => row.probeId);
 const endBlockRows = carriageRows.filter((row) => row.endBlockId);
 
 const payload = {
-  version: 2,
+  version: 3,
   campaignLabel: basename(campaignDir),
   protocolVersion: plan.version,
   planSha256: plan.planSha256,
@@ -334,7 +393,10 @@ const payload = {
     providerInputBudget: configs[0].providerInputBudget,
     target: {
       commit: configs[0].targetCommit,
-      treeSha256: configs[0].targetTreeSha256,
+      sourceCorpusFiles: plan.corpus.files,
+      sourceCorpusManifestSha256: plan.repo.treeSha256,
+      stagedFiles: stagedFiles.length,
+      stagedCorpusManifestSha256: configs[0].targetTreeSha256,
     },
     stages: plan.stageCount,
     attemptedAssignmentsPerArm: 2,
@@ -347,6 +409,10 @@ const payload = {
     ledgerRecordEndpoints: {
       pifold: ledgerTotals(pifold),
       native: ledgerTotals(native),
+    },
+    ledgerRecordTaskIdCallAttempts: {
+      pifold: ledgerCallTotals(pifold),
+      native: ledgerCallTotals(native),
     },
     ordinaryProbes: {
       pifold: {

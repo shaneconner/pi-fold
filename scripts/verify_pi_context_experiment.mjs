@@ -5045,8 +5045,8 @@ try {
   const { extractSha256, ...resultBody } = releaseResult;
   assert.equal(extractSha256, sha256Json(resultBody),
     "the hidden-mass release result changed without regenerating its self-hash");
-  assert.equal(releaseResult.version, 2,
-    "the corrected nested-carriage semantics did not bump the portable result schema");
+  assert.equal(releaseResult.version, 3,
+    "accepted records and refused task-id calls are not separated in the portable schema");
   assert.equal(releaseResult.planSha256,
     "eb488827c46ddf630f79b582f0b75070c54e73a65cdf4045002a6fc785e572db");
   assert.deepEqual(releaseResult.findings.completion, {
@@ -5057,6 +5057,21 @@ try {
     pifold: { correct: 8, unknown: 0, total: 8 },
     native: { correct: 0, unknown: 8, total: 8 },
   });
+  assert.deepEqual(releaseResult.findings.ledgerRecordTaskIdCallAttempts, {
+    pifold: { accepted: 8, rejected: 0, total: 8 },
+    native: { accepted: 8, rejected: 1, total: 9 },
+  }, "the refused native duplicate was counted as an accepted endpoint record");
+  const nativeDuplicate = releaseResult.runs.find((run) =>
+    run.arm === "native" && run.repetition === 1).ledgerRecords.find((row) => row.taskId === "lt-04");
+  assert.deepEqual(nativeDuplicate, {
+    taskId: "lt-04",
+    recordedValue: "unknown",
+    correct: false,
+    acceptedRecords: 1,
+    taskIdCallAttempts: 2,
+    rejectedTaskIdCallAttempts: 1,
+    rejectionCauses: { "already-recorded": 1 },
+  }, "native repetition 1 lt-04 does not distinguish its accepted record from its refusal");
   assert.deepEqual(releaseResult.findings.ordinaryProbes,
     { pifold: { matches: 40, total: 42 }, native: null });
   assert.deepEqual(releaseResult.findings.withheldEndBlock,
