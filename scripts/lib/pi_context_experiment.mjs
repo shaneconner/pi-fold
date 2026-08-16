@@ -31,6 +31,15 @@ import {
 // reproducible from checkouts that predate the generator deletion.
 export const EXPERIMENT_PROTOCOL_VERSION = 4;
 
+// Sealed run configs retain the absolute path used by the authoring host because
+// their bytes are evidence. Analysis reads the plan beside the campaign instead,
+// so an unchanged deposit can be moved without reaching back to that host path.
+export function campaignPlanPath(campaignDir) {
+  assertSoak(typeof campaignDir === "string" && campaignDir.length > 0,
+    "campaign directory must be a non-empty path");
+  return join(resolve(campaignDir), "stages-full.json");
+}
+
 // (a) pifold: active-context runtime ON, native auto-compaction OFF.
 // (b) native: pi-fold OFF, Pi native auto-compaction ON.
 // (c) unmanaged: both OFF; the run terminates at window overflow, which is the datum.

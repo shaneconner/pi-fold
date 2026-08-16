@@ -23,6 +23,7 @@ import {
   ATTRIBUTION_BATCH_ROWS,
   attributionBatchStarts,
 } from "./lib/pi_context_attribution.mjs";
+import { campaignPlanPath } from "./lib/pi_context_experiment.mjs";
 
 const PROJECT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SCRIPT = fileURLToPath(import.meta.url);
@@ -127,7 +128,7 @@ async function runAttributionBatch(runName, startText) {
   const totalRows = expandedRowCount(evidence);
   if (start >= totalRows) throw new Error(`${runName}: batch start ${start} is past ${totalRows} rows`);
   const runConfig = readJson(join(runDir, "run-config.json"));
-  const plan = readJson(runConfig.planPath);
+  const plan = readJson(campaignPlanPath(campaignDir));
   const probesById = new Map();
   const collectProbes = (node) => {
     if (Array.isArray(node)) { for (const item of node) collectProbes(item); return; }

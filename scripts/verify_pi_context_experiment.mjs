@@ -135,6 +135,7 @@ import {
   matchedFenceShare,
   closedBookSystemPrompt,
   closedBookTranscript,
+  campaignPlanPath,
 } from "./lib/pi_context_experiment.mjs";
 import {
   PI_INSTALL_ROOT,
@@ -5630,6 +5631,29 @@ try {
     "the failure does not name itself and the stage it is owed");
 
   checks.aResumeThatBuysNoProgressFailsByName = true;
+}
+
+// GATE 73 - a deposited campaign reads its own plan after relocation.
+//
+// Run configs are sealed evidence and therefore retain the authoring host's
+// absolute planPath. Analysis must not follow that path: a recipient should be
+// able to unpack the campaign anywhere and use the stages-full.json beside it.
+// ---------------------------------------------------------------------------
+{
+  const relocated = join(tmpdir(), "relocated hidden-mass campaign");
+  assert.equal(campaignPlanPath(relocated), join(relocated, "stages-full.json"),
+    "campaign plan resolution is not rooted in the relocated campaign");
+
+  const extractor = source("scripts/extract_hidden_mass_results.mjs");
+  const carriage = source("scripts/attribute_probe_carriage.mjs");
+  assert(extractor.includes("campaignPlanPath(campaignDir)") &&
+    !extractor.includes("readJson(configs[0].planPath)"),
+  "the portable extractor still follows a sealed author-host plan path");
+  assert(carriage.includes("campaignPlanPath(campaignDir)") &&
+    !carriage.includes("readJson(runConfig.planPath)"),
+  "the carriage sweep still follows a sealed author-host plan path");
+
+  checks.aDepositedCampaignReadsItsOwnPlanAfterRelocation = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

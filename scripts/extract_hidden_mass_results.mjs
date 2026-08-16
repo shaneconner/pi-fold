@@ -15,7 +15,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { branchTo } from "./lib/pi_context_attribution.mjs";
-import { corpusManifestSha256 } from "./lib/pi_context_experiment.mjs";
+import { campaignPlanPath, corpusManifestSha256 } from "./lib/pi_context_experiment.mjs";
 import { directoryTreeSha256, sha256Json } from "./lib/pi_context_soak_attestation.mjs";
 
 const PROJECT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -334,7 +334,9 @@ const commonConfig = (config) => ({
 const configIdentity = JSON.stringify(commonConfig(configs[0]));
 assertResult(configs.every((config) => JSON.stringify(commonConfig(config)) === configIdentity),
   "hidden-mass extract requires one plan, model, transport, budget, target, and dependency identity");
-const plan = readJson(configs[0].planPath);
+const planPath = campaignPlanPath(campaignDir);
+assertResult(existsSync(planPath), `campaign plan does not exist: ${planPath}`);
+const plan = readJson(planPath);
 assertResult(plan.version === 4, `hidden-mass extract requires protocol v4, received ${plan.version}`);
 assertResult(configs.every((config) => plan.planSha256 === config.planSha256),
   "plan file does not match every run configuration");
