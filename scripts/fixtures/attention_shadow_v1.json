@@ -1,0 +1,45 @@
+{
+  "protocolVersion": 1,
+  "fixtureId": "query-responsive-four-way-v1",
+  "description": "Four complete prose candidates and four semantic queries, rotated so every target occupies every prompt position.",
+  "candidates": [
+    {
+      "id": "A",
+      "content": "The music studio had a long metallic ring after each drum hit. During renovation, the crew mounted dense wool felt behind the perforated wall panels. They changed no microphones, speakers, or software. A repeat measurement showed that reflected sound decayed much sooner, and performers could distinguish quiet notes without waiting for the room to settle. The report attributed the improvement to the added absorptive layer."
+    },
+    {
+      "id": "B",
+      "content": "The overnight software release included a database migration. Operators stopped the sequence when the read replicas fell several minutes behind the primary, even though the migration itself had not failed. They watched the delay instead of restarting services. Once replica lag returned below the agreed tolerance for ten consecutive minutes, the release continued from the paused step and completed without restoring a backup."
+    },
+    {
+      "id": "C",
+      "content": "The orchard wanted to retain the flavor and harvest date of an aging pear cultivar, but its original trees had weak roots in the wet soil. Workers cut living shoots from the desired trees and grafted them onto a disease-resistant rootstock suited to that ground. The upper growth therefore kept the named cultivar's fruit characteristics while the replacement root system supplied vigor and tolerance below ground."
+    },
+    {
+      "id": "D",
+      "content": "A museum needed to move a cracked ceramic urn to a conservation lab. The packing team first supported loose fragments with soft tissue, then shaped a closed-cell foam cradle around the vessel so pressure was distributed across stable areas. The cradle was suspended inside a rigid outer case with clearance on every side. Shock indicators on the case recorded no threshold crossings during the road journey."
+    }
+  ],
+  "cases": [
+    {
+      "id": "acoustic-treatment",
+      "query": "Which candidate explains what physical change reduced the lingering reverberation in the rehearsal room?",
+      "relevantCandidateIds": ["A"]
+    },
+    {
+      "id": "release-pause",
+      "query": "Which candidate records the condition that stopped the midnight database rollout and the observation that allowed it to resume?",
+      "relevantCandidateIds": ["B"]
+    },
+    {
+      "id": "orchard-graft",
+      "query": "Which candidate identifies how the orchard preserved the desired fruit variety while changing its underground support?",
+      "relevantCandidateIds": ["C"]
+    },
+    {
+      "id": "museum-transport",
+      "query": "Which candidate describes the packing method used to protect a cracked museum vessel during transport?",
+      "relevantCandidateIds": ["D"]
+    }
+  ]
+}

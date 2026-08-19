@@ -1,0 +1,463 @@
+{
+  "protocolVersion": 1,
+  "fixtureId": "fold-expansion-event-utility-v1",
+  "description": "Fresh disjoint event snapshots for a precision-first decision over every folded node's complete one-level expansion, including nested folds.",
+  "splits": {
+    "development": {
+      "folds": [
+        {
+          "foldId": "J1",
+          "parentFoldId": null,
+          "depth": 0,
+          "expandedContent": "The cooling-tower review compared three operating periods. It found that the conductivity controller and make-up valve were stable, and it retained the existing blowdown target. The review assigned the unresolved microbial excursion to a separate investigation. [Nested fold J2: microbial sampling pattern and remediation investigation.]",
+          "cases": {
+            "positive": {
+              "activeContext": "The current report lists a cooling-tower review but only mentions that operating periods were compared.",
+              "task": "What tower controls were found stable, and which existing target was retained?"
+            },
+            "already-visible": {
+              "activeContext": "The cooling-tower review found the conductivity controller and make-up valve stable and retained the existing blowdown target.",
+              "task": "What tower controls were found stable, and which existing target was retained?"
+            },
+            "no-relevant": {
+              "activeContext": "The current notes contain no travel booking details.",
+              "task": "What gate number is printed on the return flight boarding pass?"
+            },
+            "semantically-related-but-non-answering": {
+              "activeContext": "The current report identifies the cooling tower but not its construction records.",
+              "task": "Which contractor poured the cooling tower basin in 1998?"
+            },
+            "interruption-not-worthwhile": {
+              "activeContext": "The heading now reads Cooling tower controls and the requested style is sentence case.",
+              "task": "Render the supplied heading in sentence case."
+            }
+          }
+        },
+        {
+          "foldId": "J2",
+          "parentFoldId": "J1",
+          "depth": 1,
+          "expandedContent": "Swab maps showed the heaviest biofilm at the shaded return-side fill rather than uniformly across the tower. Cleaning removed the deposits, and follow-up counts fell everywhere except during a narrow dosing interruption. [Nested fold J3: dosing interruption cause and control repair.]",
+          "cases": {
+            "positive": {
+              "activeContext": "The active notes say tower biofilm was mapped and cleaned but do not describe the spatial pattern.",
+              "task": "Where was the tower biofilm concentrated, and what did the follow-up counts show?"
+            },
+            "already-visible": {
+              "activeContext": "The biofilm was concentrated on the shaded return-side fill; after cleaning, counts fell except during a narrow dosing interruption.",
+              "task": "Where was the tower biofilm concentrated, and what did the follow-up counts show?"
+            },
+            "no-relevant": {
+              "activeContext": "The current notes contain no restaurant reservation.",
+              "task": "At what time is the dinner table booked for Saturday?"
+            },
+            "semantically-related-but-non-answering": {
+              "activeContext": "The tower sampling notes do not include laboratory purchasing records.",
+              "task": "What purchase-order number paid for the swab kits?"
+            },
+            "interruption-not-worthwhile": {
+              "activeContext": "The requested edit is to replace the label Return side with Return-side in the supplied caption.",
+              "task": "Apply the supplied hyphenation correction to the caption label."
+            }
+          }
+        },
+        {
+          "foldId": "J3",
+          "parentFoldId": "J2",
+          "depth": 2,
+          "expandedContent": "The bromine feed lost prime whenever a cracked suction fitting admitted air during low tank level. Operators replaced the fitting, added a low-level interlock, and verified residual through two refill cycles. The dosing interruption did not recur.",
+          "cases": {
+            "positive": {
+              "activeContext": "The current tower notes identify an intermittent bromine-feed loss but give neither its physical cause nor the durable correction.",
+              "task": "What caused the bromine feed to lose prime, and how was recurrence prevented?"
+            },
+            "already-visible": {
+              "activeContext": "A cracked suction fitting admitted air at low tank level; replacing it and adding a low-level interlock prevented another bromine-feed loss.",
+              "task": "What caused the bromine feed to lose prime, and how was recurrence prevented?"
+            },
+            "no-relevant": {
+              "activeContext": "The active context has no school calendar.",
+              "task": "On what date does the autumn semester begin?"
+            },
+            "semantically-related-but-non-answering": {
+              "activeContext": "The dosing repair notes omit the chemical supplier agreement.",
+              "task": "When does the bromine supplier contract renew?"
+            },
+            "interruption-not-worthwhile": {
+              "activeContext": "The supplied sentence ends with the duplicated words refill cycles cycles.",
+              "task": "Remove the duplicated word from the supplied sentence."
+            }
+          }
+        },
+        {
+          "foldId": "J4",
+          "parentFoldId": null,
+          "depth": 0,
+          "expandedContent": "The chocolate line's temper curve was correct at the machine outlet, yet bars developed dull streaks after entering the packaging room. The team kept the tempering setpoints unchanged and opened a room-environment investigation. [Nested fold J5: packaging-room moisture mechanism and correction.]",
+          "cases": {
+            "positive": {
+              "activeContext": "The current chocolate-line summary says dull streaks appeared after tempering.",
+              "task": "Where was the temper curve verified, and which settings did the team leave unchanged?"
+            },
+            "already-visible": {
+              "activeContext": "The temper curve was verified at the machine outlet, and the team left all tempering setpoints unchanged.",
+              "task": "Where was the temper curve verified, and which settings did the team leave unchanged?"
+            },
+            "no-relevant": {
+              "activeContext": "No parcel tracking details are present.",
+              "task": "Which depot currently holds the replacement keyboard shipment?"
+            },
+            "semantically-related-but-non-answering": {
+              "activeContext": "The chocolate-line notes contain no branding approvals.",
+              "task": "Who approved the wrapper illustration used on the affected bars?"
+            },
+            "interruption-not-worthwhile": {
+              "activeContext": "The supplied chart title is temper curve at outlet and should use title case.",
+              "task": "Convert the supplied chart title to title case."
+            }
+          }
+        },
+        {
+          "foldId": "J5",
+          "parentFoldId": "J4",
+          "depth": 1,
+          "expandedContent": "Warm bars crossed a humid packaging room and briefly fell below the local dew point, leaving microscopic condensation that disrupted gloss. Dehumidification and a short enclosed transfer tunnel kept the bar surface above dew point. The streaks disappeared without changing the temper curve.",
+          "cases": {
+            "positive": {
+              "activeContext": "The active notes connect dull chocolate streaks with the packaging room but do not explain the mechanism or repair.",
+              "task": "Why did the bars lose gloss in packaging, and what changes stopped it?"
+            },
+            "already-visible": {
+              "activeContext": "The bars dipped below the humid room's dew point; dehumidification and an enclosed transfer tunnel kept their surfaces dry and stopped the streaks.",
+              "task": "Why did the bars lose gloss in packaging, and what changes stopped it?"
+            },
+            "no-relevant": {
+              "activeContext": "The active context contains no concert program.",
+              "task": "Which piece closes the orchestra's second act?"
+            },
+            "semantically-related-but-non-answering": {
+              "activeContext": "The process notes do not name the packaging-room paint color.",
+              "task": "What paint code was used on the packaging-room walls?"
+            },
+            "interruption-not-worthwhile": {
+              "activeContext": "The supplied phrase is microscopic condensation and the requested replacement is surface condensation.",
+              "task": "Apply the supplied phrase replacement."
+            }
+          }
+        },
+        {
+          "foldId": "J6",
+          "parentFoldId": null,
+          "depth": 0,
+          "expandedContent": "The warehouse reconciliation separated source-system completeness from dimensional-model timing. Source totals matched finance, so the team rejected a missing-extract theory and focused on how late facts entered the star schema. [Nested fold J7: late-fact duplication path and repair.]",
+          "cases": {
+            "positive": {
+              "activeContext": "The current warehouse summary says finance totals were reconciled but does not state which theory was rejected.",
+              "task": "What did source totals establish, and which explanation did the team reject?"
+            },
+            "already-visible": {
+              "activeContext": "Source totals matched finance, establishing source completeness and ruling out a missing extract.",
+              "task": "What did source totals establish, and which explanation did the team reject?"
+            },
+            "no-relevant": {
+              "activeContext": "No weather forecast is included in the current context.",
+              "task": "What is the predicted rainfall total for Tuesday?"
+            },
+            "semantically-related-but-non-answering": {
+              "activeContext": "The warehouse review contains no cloud billing data.",
+              "task": "How much did object storage cost during the reconciliation month?"
+            },
+            "interruption-not-worthwhile": {
+              "activeContext": "The supplied heading reads SOURCE TOTALS and the requested style is lowercase.",
+              "task": "Convert the supplied heading to lowercase."
+            }
+          }
+        },
+        {
+          "foldId": "J7",
+          "parentFoldId": "J6",
+          "depth": 1,
+          "expandedContent": "Late-arriving sales facts were inserted once under their provisional date and again after the dimension key resolved. The repair changed the load to update by immutable transaction id rather than insert by arrival partition. [Nested fold J8: watermark ordering and replay proof.]",
+          "cases": {
+            "positive": {
+              "activeContext": "The active warehouse notes mention duplicated late facts without the two insertion paths or the corrected key.",
+              "task": "How were late facts duplicated, and what identity did the repaired load use?"
+            },
+            "already-visible": {
+              "activeContext": "Late facts were inserted under a provisional date and again after key resolution; the repair updated by immutable transaction id.",
+              "task": "How were late facts duplicated, and what identity did the repaired load use?"
+            },
+            "no-relevant": {
+              "activeContext": "No library notice is in the active context.",
+              "task": "When is the borrowed atlas due back?"
+            },
+            "semantically-related-but-non-answering": {
+              "activeContext": "The load-repair notes do not state the database support ticket number.",
+              "task": "What support ticket number tracked the late-fact incident?"
+            },
+            "interruption-not-worthwhile": {
+              "activeContext": "The supplied identifier is transaction-id and the requested spelling is transaction ID.",
+              "task": "Apply the supplied identifier spelling change."
+            }
+          }
+        },
+        {
+          "foldId": "J8",
+          "parentFoldId": "J7",
+          "depth": 2,
+          "expandedContent": "The old watermark advanced on arrival time before unresolved rows were replayed, allowing the replay to cross an already processed partition. The new job resolves pending keys first, replays them idempotently, and advances the watermark only after both paths commit. A backfill replay produced no duplicate transaction ids.",
+          "cases": {
+            "positive": {
+              "activeContext": "The current ETL notes say watermark ordering mattered but omit the old failure sequence and the proof of the replacement.",
+              "task": "How did the old watermark outrun replay, and what verified the new ordering?"
+            },
+            "already-visible": {
+              "activeContext": "The old job advanced arrival-time watermarks before unresolved-row replay; the new job commits resolved replay first, and a backfill produced no duplicate transaction ids.",
+              "task": "How did the old watermark outrun replay, and what verified the new ordering?"
+            },
+            "no-relevant": {
+              "activeContext": "There is no museum timetable in the current context.",
+              "task": "When does the sculpture gallery close on Friday?"
+            },
+            "semantically-related-but-non-answering": {
+              "activeContext": "The replay proof does not identify the engineer who approved deployment.",
+              "task": "Who signed the ETL production change request?"
+            },
+            "interruption-not-worthwhile": {
+              "activeContext": "The supplied sentence uses back-fill and the requested house style is backfill.",
+              "task": "Apply the supplied house-style spelling."
+            }
+          }
+        }
+      ]
+    },
+    "validation": {
+      "folds": [
+        {
+          "foldId": "K1",
+          "parentFoldId": null,
+          "depth": 0,
+          "expandedContent": "The ceramics review separated clay formulation from drying geometry. Test bars from the same clay body remained intact, so the team retained the recipe and investigated airflow around the full-size handles. [Nested fold K2: handle drying gradient and corrective staging.]",
+          "cases": {
+            "positive": {
+              "activeContext": "The active pottery notes say test bars and full-size pieces behaved differently.",
+              "task": "What did the intact test bars rule out, and what did the team investigate next?"
+            },
+            "already-visible": {
+              "activeContext": "Intact test bars ruled out the clay recipe, so the team retained it and investigated airflow around full-size handles.",
+              "task": "What did the intact test bars rule out, and what did the team investigate next?"
+            },
+            "no-relevant": {
+              "activeContext": "No cinema listing is present.",
+              "task": "What time does the documentary begin tonight?"
+            },
+            "semantically-related-but-non-answering": {
+              "activeContext": "The pottery review contains no retail pricing.",
+              "task": "What was the listed sale price of the largest vase?"
+            },
+            "interruption-not-worthwhile": {
+              "activeContext": "The supplied title is clay formulation review and the requested style is title case.",
+              "task": "Convert the supplied title to title case."
+            }
+          }
+        },
+        {
+          "foldId": "K2",
+          "parentFoldId": "K1",
+          "depth": 1,
+          "expandedContent": "Handles facing the vent dried first at their outer curve while the vessel wall stayed wet, concentrating shrinkage at the joint. Potters added loose plastic sleeves for the first day and rotated ware halfway through drying. [Nested fold K3: humidity plateau and crack-free release rule.]",
+          "cases": {
+            "positive": {
+              "activeContext": "The current ceramics notes identify uneven handle drying but not where it began or how pieces were staged.",
+              "task": "Where did handle drying begin, and what two staging changes reduced the gradient?"
+            },
+            "already-visible": {
+              "activeContext": "Vent-facing outer curves dried first; loose plastic sleeves and a halfway rotation reduced the handle-to-wall gradient.",
+              "task": "Where did handle drying begin, and what two staging changes reduced the gradient?"
+            },
+            "no-relevant": {
+              "activeContext": "The current context has no train ticket.",
+              "task": "Which platform is assigned to the northbound train?"
+            },
+            "semantically-related-but-non-answering": {
+              "activeContext": "The drying notes omit the kiln manufacturer's service number.",
+              "task": "What number should be called for kiln warranty service?"
+            },
+            "interruption-not-worthwhile": {
+              "activeContext": "The supplied caption says outer curve and the requested replacement is outside curve.",
+              "task": "Apply the supplied wording replacement."
+            }
+          }
+        },
+        {
+          "foldId": "K3",
+          "parentFoldId": "K2",
+          "depth": 2,
+          "expandedContent": "A covered rack held near 78 percent relative humidity for twelve hours before sleeves were loosened. Pieces were released to open shelving only after handle and wall moisture readings differed by less than two points. Three subsequent batches dried without joint cracks.",
+          "cases": {
+            "positive": {
+              "activeContext": "The active drying procedure mentions a covered rack but omits its humidity plateau and release criterion.",
+              "task": "What plateau preceded sleeve loosening, and when could pieces move to open shelving?"
+            },
+            "already-visible": {
+              "activeContext": "The rack held near 78 percent relative humidity for twelve hours; pieces moved to open shelving once handle and wall moisture differed by under two points.",
+              "task": "What plateau preceded sleeve loosening, and when could pieces move to open shelving?"
+            },
+            "no-relevant": {
+              "activeContext": "No pharmacy schedule is present.",
+              "task": "When does the pharmacy close on Sunday?"
+            },
+            "semantically-related-but-non-answering": {
+              "activeContext": "The crack-free batches do not include customer order records.",
+              "task": "Which customer ordered the first crack-free batch?"
+            },
+            "interruption-not-worthwhile": {
+              "activeContext": "The supplied value is 78 percent and the requested notation is 78%.",
+              "task": "Apply the supplied percentage notation."
+            }
+          }
+        },
+        {
+          "foldId": "K4",
+          "parentFoldId": null,
+          "depth": 0,
+          "expandedContent": "The charger review found normal cabinet temperature and stable utility voltage during every reported interruption. Engineers left the power modules in service and isolated the fault to the field termination path. [Nested fold K5: loose lug heating and torque repair.]",
+          "cases": {
+            "positive": {
+              "activeContext": "The active charger summary lists intermittent stops but not which systems were cleared.",
+              "task": "Which two conditions remained normal, and what equipment stayed in service?"
+            },
+            "already-visible": {
+              "activeContext": "Cabinet temperature and utility voltage remained normal, so engineers left the charger power modules in service.",
+              "task": "Which two conditions remained normal, and what equipment stayed in service?"
+            },
+            "no-relevant": {
+              "activeContext": "No grocery receipt is visible.",
+              "task": "How much did the bag of coffee cost?"
+            },
+            "semantically-related-but-non-answering": {
+              "activeContext": "The charger review has no grant paperwork.",
+              "task": "Which municipal grant funded the charger installation?"
+            },
+            "interruption-not-worthwhile": {
+              "activeContext": "The supplied label is utility voltage and the requested abbreviation is grid V.",
+              "task": "Replace the supplied label with the requested abbreviation."
+            }
+          }
+        },
+        {
+          "foldId": "K5",
+          "parentFoldId": "K4",
+          "depth": 1,
+          "expandedContent": "Thermal imaging found one output lug heating only above 70 amperes. The conductor had settled after installation and the lug was below specified torque. Technicians cleaned the contact, applied the documented torque, and repeated a full-load soak. Temperature rise stayed within limit and interruptions stopped.",
+          "cases": {
+            "positive": {
+              "activeContext": "The current charger notes identify a load-dependent hot spot without its threshold, cause, or verification.",
+              "task": "When did the output lug heat, why, and how was the repair verified?"
+            },
+            "already-visible": {
+              "activeContext": "The lug heated above 70 amperes because a settled conductor left it undertorqued; cleaning, correct torque, and a full-load soak verified the repair.",
+              "task": "When did the output lug heat, why, and how was the repair verified?"
+            },
+            "no-relevant": {
+              "activeContext": "No sports result appears in the current context.",
+              "task": "Who won the afternoon tennis match?"
+            },
+            "semantically-related-but-non-answering": {
+              "activeContext": "The repair record does not give the electrician's license number.",
+              "task": "What license number belonged to the electrician who retorqued the lug?"
+            },
+            "interruption-not-worthwhile": {
+              "activeContext": "The supplied unit is amperes and the requested symbol is A.",
+              "task": "Apply the supplied unit-symbol replacement."
+            }
+          }
+        },
+        {
+          "foldId": "K6",
+          "parentFoldId": null,
+          "depth": 0,
+          "expandedContent": "The studio noise review reproduced a low hum only when the laptop dock and powered monitors were connected together. Battery operation cleared the symptom, so microphone self-noise and room ventilation were excluded. [Nested fold K7: ground-loop path and isolation change.]",
+          "cases": {
+            "positive": {
+              "activeContext": "The active audio summary says a hum was reproduced but not which conditions created or cleared it.",
+              "task": "Which connections reproduced the hum, and what observation excluded microphone and ventilation noise?"
+            },
+            "already-visible": {
+              "activeContext": "The hum appeared with the laptop dock and powered monitors together and vanished on battery, excluding microphone self-noise and ventilation.",
+              "task": "Which connections reproduced the hum, and what observation excluded microphone and ventilation noise?"
+            },
+            "no-relevant": {
+              "activeContext": "No hotel confirmation is present.",
+              "task": "What room type was reserved for the conference?"
+            },
+            "semantically-related-but-non-answering": {
+              "activeContext": "The studio review does not contain the microphone purchase date.",
+              "task": "When was the vocal microphone purchased?"
+            },
+            "interruption-not-worthwhile": {
+              "activeContext": "The supplied heading is studio noise review and the requested style is uppercase.",
+              "task": "Convert the supplied heading to uppercase."
+            }
+          }
+        },
+        {
+          "foldId": "K7",
+          "parentFoldId": "K6",
+          "depth": 1,
+          "expandedContent": "The dock's grounded supply and the monitors' safety earth formed a loop through the unbalanced interface cable. A transformer-isolated balanced interface broke the signal-path loop while retaining both protective-earth connections. [Nested fold K8: null test and residual-noise measurements.]",
+          "cases": {
+            "positive": {
+              "activeContext": "The current studio notes name a ground loop but not its route or the safe isolation point.",
+              "task": "What completed the audio ground loop, and how was it broken without lifting protective earth?"
+            },
+            "already-visible": {
+              "activeContext": "The dock supply and monitor earth looped through an unbalanced cable; a transformer-isolated balanced interface broke the signal path while retaining protective earth.",
+              "task": "What completed the audio ground loop, and how was it broken without lifting protective earth?"
+            },
+            "no-relevant": {
+              "activeContext": "No postal tracking record is present.",
+              "task": "On what date was the registered letter delivered?"
+            },
+            "semantically-related-but-non-answering": {
+              "activeContext": "The ground-loop note does not identify the interface retailer.",
+              "task": "Which shop sold the replacement balanced interface?"
+            },
+            "interruption-not-worthwhile": {
+              "activeContext": "The supplied term is signal path and the requested form is signal-path.",
+              "task": "Apply the supplied hyphenation."
+            }
+          }
+        },
+        {
+          "foldId": "K8",
+          "parentFoldId": "K7",
+          "depth": 2,
+          "expandedContent": "A null test with both protective grounds intact reduced the 60 hertz component by 31 decibels after isolation. Residual broadband noise stayed within one decibel of the battery-powered baseline. Reconnecting the unbalanced cable restored the hum, confirming the loop path rather than a coincidental level change.",
+          "cases": {
+            "positive": {
+              "activeContext": "The active audio notes say isolation worked but omit the measured reduction and reversal test.",
+              "task": "What measurements and reversal confirmed that isolation removed the loop hum?"
+            },
+            "already-visible": {
+              "activeContext": "Isolation cut the 60 hertz component by 31 decibels, left broadband noise within one decibel of battery baseline, and reconnecting the unbalanced cable restored the hum.",
+              "task": "What measurements and reversal confirmed that isolation removed the loop hum?"
+            },
+            "no-relevant": {
+              "activeContext": "No meal plan appears in the current context.",
+              "task": "What soup is listed for Thursday lunch?"
+            },
+            "semantically-related-but-non-answering": {
+              "activeContext": "The null-test record does not name the analyzer calibration lab.",
+              "task": "Which laboratory last calibrated the audio analyzer?"
+            },
+            "interruption-not-worthwhile": {
+              "activeContext": "The supplied value is 60 hertz and the requested notation is 60 Hz.",
+              "task": "Apply the supplied frequency notation."
+            }
+          }
+        }
+      ]
+    }
+  }
+}

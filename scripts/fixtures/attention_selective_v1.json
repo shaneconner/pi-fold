@@ -1,0 +1,159 @@
+{
+  "protocolVersion": 1,
+  "fixtureId": "precision-first-abstention-v1",
+  "description": "Disjoint development and validation evidence sets. Each split has eight positive opportunities and thirty-two negative turns across four named classes.",
+  "splits": {
+    "development": {
+      "candidates": [
+        {
+          "id": "D1",
+          "content": "A ceramics studio traced recurring pinholes in a blue glaze to gases escaping while the surface had already begun to seal. The successful firing schedule slowed the temperature rise before peak heat and added a controlled hold during early cooling. Test tiles made with the same clay and glaze then cooled without the pinhole field, while changing the pigment alone had produced no improvement.",
+          "positiveQuery": "The current context lacks the firing correction. Which archived evidence explains what schedule change stopped pinholes from forming in the blue glaze?",
+          "noRelevantQuery": "Which archived evidence states the renewal deadline in the apartment lease?",
+          "alreadyVisibleQuery": "The active context already states that the studio slowed the pre-peak rise and added an early-cooling hold to stop glaze pinholes. The current task is only to format that conclusion, so no folded evidence is missing.",
+          "nearMissQuery": "Which archived evidence gives the kiln manufacturer's serial number and warranty expiration date?",
+          "interruptionQuery": "The current task is only to rename the glaze chart legend. Earlier firing-history evidence would not help with that edit."
+        },
+        {
+          "id": "D2",
+          "content": "A queue-processing service occasionally ran the same job twice after a regional failover. Logs showed that worker clocks disagreed enough for one lease to appear expired before its owner had finished. The repair moved lease expiry comparisons to the database clock and required a fencing token on every write. Duplicate execution disappeared in the following failover drills without increasing the lease duration.",
+          "positiveQuery": "We need the missing cause and repair for duplicate queue jobs after failover. Which archived evidence contains it?",
+          "noRelevantQuery": "Which archived evidence identifies the composer of the chamber orchestra's encore?",
+          "alreadyVisibleQuery": "The active context already records that clock skew made leases appear expired and that database time plus fencing tokens fixed duplicate queue jobs. No recovery of folded evidence is needed.",
+          "nearMissQuery": "Which archived evidence lists the cloud provider's monthly invoice total for the queue service?",
+          "interruptionQuery": "The immediate change only adjusts indentation in the worker configuration. Historical failover diagnosis is not needed for this turn."
+        },
+        {
+          "id": "D3",
+          "content": "An alpine lake developed late-summer algae despite stable wastewater readings. Sampling after storms found phosphorus entering through two cattle crossings on an upstream creek. The restoration crew fenced those crossings, installed hardened watering points away from the channel, and planted a vegetated buffer. Phosphorus pulses fell sharply the next wet season, followed by lower chlorophyll readings in the lake.",
+          "positiveQuery": "Which archived evidence explains the source of the lake's phosphorus pulses and the intervention that reduced them?",
+          "noRelevantQuery": "Which archived evidence contains the winning score from the regional chess final?",
+          "alreadyVisibleQuery": "The active context already explains that cattle crossings caused phosphorus pulses and that fencing, off-channel watering, and a vegetated buffer reduced them. The answer is present without a fold.",
+          "nearMissQuery": "Which archived evidence names the laboratory brand used to calibrate the lake's dissolved-oxygen sensor?",
+          "interruptionQuery": "The current task is to correct a map caption typo. Raising old watershed evidence would be an unnecessary interruption."
+        },
+        {
+          "id": "D4",
+          "content": "A set of nineteenth-century survey maps had become brittle and acidic. Conservators first removed loose surface dirt, then washed stable sheets and treated them with a magnesium bicarbonate bath that left an alkaline reserve. The maps were dried under restraint between absorbent layers. Follow-up measurements showed a higher paper pH without bleeding the tested inks or changing the drawn dimensions.",
+          "positiveQuery": "The treatment details for the brittle survey maps are missing from active context. Which archived evidence describes the deacidification method?",
+          "noRelevantQuery": "Which archived evidence gives the tire pressure recommended for the delivery van?",
+          "alreadyVisibleQuery": "Active context already states that stable maps were washed and treated in a magnesium bicarbonate bath before restrained drying. Nothing needs to be raised to answer the treatment question.",
+          "nearMissQuery": "Which archived evidence records the auction price originally paid for the survey maps?",
+          "interruptionQuery": "The present task only alphabetizes map filenames. Conservation-treatment history is not useful to this operation."
+        },
+        {
+          "id": "D5",
+          "content": "A wind turbine showed rising vibration at the high-speed gearbox stage. Oil debris analysis found a growing count of ferrous particles, and a borescope revealed micropitting on one bearing race. The operator replaced that bearing during a planned low-wind window and flushed the lubrication circuit. Particle counts and the narrow vibration peak returned to the fleet baseline afterward.",
+          "positiveQuery": "Which archived evidence connects the turbine vibration to the physical gearbox defect and records the corrective work?",
+          "noRelevantQuery": "Which archived evidence lists the ingredients in the restaurant's tomato soup?",
+          "alreadyVisibleQuery": "The active context already states that ferrous debris and borescope micropitting identified a bearing defect, followed by bearing replacement and an oil flush. No fold is needed.",
+          "nearMissQuery": "Which archived evidence gives the turbine's original purchase contract and financing rate?",
+          "interruptionQuery": "The current task changes the plot color for vibration data. It does not require historical gearbox evidence."
+        },
+        {
+          "id": "D6",
+          "content": "A greenhouse cucumber crop set few fruits even though temperature and irrigation remained within target. Hand inspection showed abundant flowers but little pollen transfer because outdoor insects could not enter the screened house. Growers introduced managed bumblebee hives and avoided spraying during foraging hours. Fruit set rose over the next two flowering cycles without altering fertilizer concentration.",
+          "positiveQuery": "The active context is missing why greenhouse fruit set was low and what corrected it. Which archived evidence supplies those facts?",
+          "noRelevantQuery": "Which archived evidence identifies the mountain trail with the shortest hiking distance?",
+          "alreadyVisibleQuery": "Active context already records that screened walls prevented pollen transfer and managed bumblebee hives restored cucumber fruit set. Surfacing a fold would repeat known evidence.",
+          "nearMissQuery": "Which archived evidence gives the cucumber seed vendor's refund policy?",
+          "interruptionQuery": "The immediate task is to capitalize greenhouse section headings. Pollination history would not advance it."
+        },
+        {
+          "id": "D7",
+          "content": "Warehouse scanners misread glossy package labels under a new high-bay lighting system. Exposure changes reduced washout but increased motion blur. Engineers fitted a linear polarizing filter to each camera and rotated the overhead lamp polarizers to suppress specular reflection. Read accuracy recovered at the original conveyor speed, so no mechanical slowdown or label-stock replacement was required.",
+          "positiveQuery": "Which archived evidence explains how the warehouse removed label glare without slowing the conveyor?",
+          "noRelevantQuery": "Which archived evidence names the translator of the medieval poem?",
+          "alreadyVisibleQuery": "The active context already says crossed polarizers on cameras and lamps suppressed glossy-label reflection while preserving conveyor speed. The evidence is already available.",
+          "nearMissQuery": "Which archived evidence records the barcode printer's maintenance contract number?",
+          "interruptionQuery": "The current task only reorders columns in a scanner report. Old glare-remediation evidence is not worth raising."
+        },
+        {
+          "id": "D8",
+          "content": "A research telescope repeatedly fogged its secondary mirror near dawn. Weather logs showed the mirror assembly lagging behind a rapid rise in humid outside air after the dome vents opened. The team added a low-flow dry-nitrogen purge around the secondary and delayed vent opening until temperatures converged. Subsequent dawn sessions remained clear without heating the optical surface.",
+          "positiveQuery": "Which archived evidence identifies why the telescope mirror fogged and how the team prevented it without heating the optics?",
+          "noRelevantQuery": "Which archived evidence states the baggage allowance for the international flight?",
+          "alreadyVisibleQuery": "Active context already contains the humidity-lag diagnosis, dry-nitrogen purge, and delayed vent opening that prevented mirror fogging. No old fold is needed.",
+          "nearMissQuery": "Which archived evidence specifies the telescope mirror's original manufacturing price?",
+          "interruptionQuery": "The present task fixes punctuation in an observing log. Mirror-condensation history would be irrelevant overhead."
+        }
+      ]
+    },
+    "validation": {
+      "candidates": [
+        {
+          "id": "V1",
+          "content": "A bakery's sourdough loaves lost volume during winter production. Flour and hydration were unchanged, but dough entered bulk fermentation several degrees colder and reached shaping before sufficient gas developed. Bakers warmed the mixing water and ended bulk fermentation by measured dough expansion rather than a fixed clock. Loaf volume and crumb openness recovered while the starter formula stayed constant.",
+          "positiveQuery": "Which archived evidence explains the winter loss of sourdough volume and the process change that restored it?",
+          "noRelevantQuery": "Which archived evidence states the closing date for the municipal bond offering?",
+          "alreadyVisibleQuery": "The active context already states that cold dough was under-fermented and that warmer mixing water plus expansion-based timing restored loaf volume. No folded evidence is missing.",
+          "nearMissQuery": "Which archived evidence names the farm that milled the bakery's flour?",
+          "interruptionQuery": "The immediate task only changes the font in a bread-production table. Fermentation history is not worth surfacing."
+        },
+        {
+          "id": "V2",
+          "content": "Inspection of a coastal bridge found accelerated corrosion where splash water reached steel piles. Coating repairs alone failed at damaged edges. Engineers installed sacrificial zinc anodes, restored electrical continuity between pile sections, and monitored protection potentials after each tide cycle. Steel loss slowed at the instrumented locations while scheduled coating maintenance continued above the splash zone.",
+          "positiveQuery": "The corrosion-control mechanism for the coastal bridge is absent from active context. Which archived evidence supplies it?",
+          "noRelevantQuery": "Which archived evidence gives the final score of the university basketball game?",
+          "alreadyVisibleQuery": "Active context already explains that zinc sacrificial anodes and restored electrical continuity protected the splash-zone piles. Raising a fold would be redundant.",
+          "nearMissQuery": "Which archived evidence records the bridge architect's original competition entry number?",
+          "interruptionQuery": "The current task only renames a bridge photograph. Historical corrosion evidence would not help."
+        },
+        {
+          "id": "V3",
+          "content": "A vaccine shipment arrived with several cartons warmer than the approved range even though the truck display stayed normal. Independent loggers placed inside the load showed that cartons beside the rear door warmed during repeated unloading stops. The distributor moved sensitive cartons to the pallet core, added door-open alarms, and reviewed logger traces at receipt. Later routes remained within range.",
+          "positiveQuery": "Which archived evidence locates the cold-chain failure and describes the changes that prevented another warm shipment?",
+          "noRelevantQuery": "Which archived evidence lists the costumes used in the spring theater production?",
+          "alreadyVisibleQuery": "The active context already records rear-door warming during unloading, pallet-core placement, door alarms, and receipt logger review. No fold needs to be raised.",
+          "nearMissQuery": "Which archived evidence gives the vaccine manufacturer's patent expiration date?",
+          "interruptionQuery": "The immediate task only aligns columns in the shipment table. Recovering route history would add no value."
+        },
+        {
+          "id": "V4",
+          "content": "Optical character recognition performed poorly on scanned handwritten ledgers because ruled lines crossed many numerals. The digitization team corrected page skew, removed the line pattern with a directional filter, and then ran recognition on cropped account cells. Human reviewers focused on low-confidence totals. Character accuracy improved without sharpening the scans enough to distort ink strokes.",
+          "positiveQuery": "Which archived evidence describes the preprocessing that improved recognition of the handwritten ledgers?",
+          "noRelevantQuery": "Which archived evidence gives the dimensions of the new kitchen refrigerator?",
+          "alreadyVisibleQuery": "Active context already states that deskewing, directional rule-line removal, and cropped account cells improved ledger OCR. The needed evidence is already visible.",
+          "nearMissQuery": "Which archived evidence identifies the stationery company that originally sold the ledger books?",
+          "interruptionQuery": "The current task only changes a filename extension. Earlier OCR preprocessing evidence is unnecessary."
+        },
+        {
+          "id": "V5",
+          "content": "A solar farm began tripping its point-of-connection voltage limit on bright, low-load afternoons. Inverter logs showed all units exporting maximum real power while providing no reactive support. Operators enabled a coordinated volt-var curve and staggered transformer tap changes. Voltage stayed inside the interconnection band with a small reduction in peak real-power export and no new hardware.",
+          "positiveQuery": "Which archived evidence explains the solar farm's afternoon voltage trips and the control change used to stop them?",
+          "noRelevantQuery": "Which archived evidence identifies the winner of the county pie contest?",
+          "alreadyVisibleQuery": "The active context already records that absent reactive support caused high voltage and that a coordinated volt-var curve plus staggered taps corrected it. No fold is needed.",
+          "nearMissQuery": "Which archived evidence gives the landowner's lease payment for the solar site?",
+          "interruptionQuery": "The immediate task only changes a legend label on the power chart. Old inverter-control evidence is not useful."
+        },
+        {
+          "id": "V6",
+          "content": "A restored wetland remained dominated by open water after excavation. Surveyors found that wave action uprooted young emergent plants before their roots established. Crews installed temporary coir-fiber wave breaks and planted native reeds in clustered plugs behind them. Vegetated cover expanded through the next growing season, and the biodegradable barriers were left to decay in place.",
+          "positiveQuery": "Which archived evidence identifies why wetland plants failed and how establishment improved the following season?",
+          "noRelevantQuery": "Which archived evidence states the return policy for the online shoe order?",
+          "alreadyVisibleQuery": "Active context already explains that waves uprooted young plants and that coir wave breaks protected clustered reed plugs. Surfacing the old fold would repeat the answer.",
+          "nearMissQuery": "Which archived evidence gives the excavator operator's professional license number?",
+          "interruptionQuery": "The current task is merely to reorder wetland photo captions. Restoration-history evidence would be distracting."
+        },
+        {
+          "id": "V7",
+          "content": "A passenger train developed a narrow vibration peak on one axle at higher speeds. Wayside acoustic sensors and onboard accelerometers localized it to a bearing, while temperature remained below the alarm limit. Inspection found a small spall on the outer race. Replacing the bearing removed the peak, demonstrating that vibration gave earlier warning than the existing temperature threshold.",
+          "positiveQuery": "Which archived evidence explains the train's narrow vibration peak and why the usual temperature alarm did not catch it?",
+          "noRelevantQuery": "Which archived evidence names the photographer of the graduation portrait?",
+          "alreadyVisibleQuery": "The active context already states that an outer-race bearing spall produced the vibration before temperature crossed its alarm. No fold recovery is necessary.",
+          "nearMissQuery": "Which archived evidence records the passenger car's upholstery replacement schedule?",
+          "interruptionQuery": "The immediate task only adjusts axis labels on a vibration plot. Historical bearing evidence is unnecessary."
+        },
+        {
+          "id": "V8",
+          "content": "A textile mill's blue dye bath produced uneven shade between batches. Measurements showed that operators added dye while the bath pH was still drifting after an alkaline cleaning rinse. The revised procedure neutralized and verified pH before dye addition, then held circulation time constant. Shade variation narrowed without changing dye concentration or replacing the fabric supplier.",
+          "positiveQuery": "Which archived evidence explains the batch-to-batch shade variation and the procedure that corrected it?",
+          "noRelevantQuery": "Which archived evidence gives the departure platform for the morning commuter bus?",
+          "alreadyVisibleQuery": "Active context already records that residual alkaline rinse caused pH drift and that verified neutralization before dye addition fixed shade variation. Nothing needs surfacing.",
+          "nearMissQuery": "Which archived evidence names the designer of the mill's original factory building?",
+          "interruptionQuery": "The present task only sorts color-swatch filenames. Old dye-bath evidence would not help."
+        }
+      ]
+    }
+  }
+}
