@@ -145,6 +145,75 @@ import {
   verifySourceHashes,
   writeJsonPublished,
 } from "./lib/pi_context_soak_attestation.mjs";
+import {
+  SUBSCRIPTION_CACHE_API,
+  SUBSCRIPTION_CACHE_DEFAULT_REPETITIONS,
+  SUBSCRIPTION_CACHE_ENDPOINT,
+  SUBSCRIPTION_CACHE_MINIMUM_TOKENS,
+  SUBSCRIPTION_CACHE_MODEL,
+  SUBSCRIPTION_CACHE_PROVIDER,
+  assertImplicitSubscriptionPayload,
+  assertSubscriptionDestination,
+  assertSubscriptionModel,
+  buildSubscriptionCacheTopologyPlan,
+  classifySubscriptionCacheRepetition,
+  subscriptionCacheTopologyManifest,
+  summarizeSubscriptionCacheTopology,
+} from "./probe_subscription_cache_topology.mjs";
+import {
+  SUBSCRIPTION_CACHE_PROJECTION_PROTOCOL_VERSION,
+  assertSerializedSubscriptionProjectionPayload,
+  buildSubscriptionCacheProjectionPlan,
+  classifySubscriptionCacheProjectionRepetition,
+  serializedItemPrefix,
+  serializedProjectionTopology,
+  subscriptionCacheProjectionManifest,
+  summarizeSubscriptionCacheProjection,
+} from "./probe_subscription_cache_projection.mjs";
+import {
+  EPHEMERAL_SUGGESTION_IRRELEVANT_LANE,
+  EPHEMERAL_SUGGESTION_PROTOCOL_VERSION,
+  EPHEMERAL_SUGGESTION_RELEVANT_LANE,
+  assertEphemeralSuggestionPayload,
+  buildEphemeralSuggestionPlan,
+  classifyEphemeralSuggestionRepetition,
+  correctPeekCall,
+  ephemeralSuggestionManifest,
+  normalizedExactAnswer,
+  summarizeEphemeralSuggestionTrials,
+} from "./probe_subscription_ephemeral_suggestion.mjs";
+import {
+  RETRIEVAL_SHADOW_BM25_B,
+  RETRIEVAL_SHADOW_BM25_K1,
+  RETRIEVAL_SHADOW_CONTENT_CHARS,
+  RETRIEVAL_SHADOW_PROTOCOL_VERSION,
+  RETRIEVAL_SHADOW_SCORER_ID,
+  scoreRetrievalShadowCandidates,
+  summarizeRetrievalShadowQueries,
+} from "./probe_retrieval_shadow.mjs";
+import {
+  COLD_SHADOW_KILL_RULE,
+  COLD_SHADOW_PROTOCOL_VERSION,
+  COLD_SHADOW_SCORER_ID,
+  coldCohorts,
+  coldComparison,
+  coldEligible,
+  coldSelect,
+  coldUnitsFromRecords,
+  pointBiserial,
+} from "./probe_cold_shadow.mjs";
+import {
+  RETRIEVAL_RANK_KILL_NEWEST_FIRST_MARGIN,
+  RETRIEVAL_RANK_KILL_RECALL_AT_5,
+  RETRIEVAL_RANK_MINIMUM_NEEDED_QUESTIONS,
+  RETRIEVAL_RANK_PROMOTE_RECALL_AT_1,
+  RETRIEVAL_RANK_PROMOTE_RECALL_AT_5,
+  RETRIEVAL_RANK_PROTOCOL_VERSION,
+  RETRIEVAL_RANK_SCORER_ID,
+  retrievalRankVerdict,
+  scoreRetrievalRankCandidates,
+  summarizeRetrievalRankQueries,
+} from "./probe_retrieval_rank.mjs";
 
 const PROJECT = dirname(dirname(fileURLToPath(import.meta.url)));
 const source = (relative) => readFileSync(join(PROJECT, relative), "utf8");
@@ -1244,6 +1313,24 @@ try {
     { kind: "provider-response", requestOrdinal: 3, usage: { input: 1_500, cacheRead: 99_000 } },
   ]);
   assert.equal(shallow.mutations, 0);
+  // Cache creation tokens are prompt tokens too. They must sit in both the request
+  // denominator and the next request's reusable-prefix baseline.
+  const withWrites = usageSeriesFromLedger([
+    { kind: "provider-request", ordinal: 1, wallMs: 0 },
+    { kind: "provider-response", requestOrdinal: 1,
+      usage: { input: 1_000, cacheRead: 0, cacheWrite: 3_000 } },
+    { kind: "provider-request", ordinal: 2, wallMs: 1_000 },
+    { kind: "provider-response", requestOrdinal: 2,
+      usage: { input: 500, cacheRead: 4_000, cacheWrite: 500 } },
+  ]);
+  assert.deepEqual(withWrites.series.map((entry) => entry.cacheWrite), [3_000, 500]);
+  assert.equal(withWrites.series[1].cacheShare, 4_000 / 5_000,
+    "cache writes vanished from the per-request prompt denominator");
+  assert.equal(withWrites.pooledCacheShare, 4_000 / 9_000,
+    "cache writes vanished from the pooled prompt denominator");
+  assert.equal(withWrites.mutations, 0,
+    "a prefix written on the prior request was unavailable to the mutation baseline");
+  assert.match(withWrites.mutationRule.definition, /cacheWrite/);
   // Token-weighted pooled share beside the per-request mean: 11,040 cached of 17,400 input.
   assert.equal(usageSeries.pooledCacheShare, 11_040 / 17_400);
   assert.equal(usageSeriesFromLedger([]).pooledCacheShare, null);
@@ -1618,6 +1705,58 @@ try {
       cause: "unattributed" })]);
   assert.equal(clamped.counterfactual.idealCachedTokens, 100);
   assert.equal(contextEventMetrics([]).counterfactual.pooledCacheShare, null);
+  // Older sealed streams did not stamp action-specific request classes on the prefix.
+  // Accepted attempt records still surround the request boundary, so the lens can recover
+  // those classes and join the provider observation without rewriting the artifacts.
+  const usage = (input, cacheRead, cacheWrite) => custom({
+    kind: "context.usage", input_tokens: input, cache_read_tokens: cacheRead,
+    cache_write_tokens: cacheWrite,
+  });
+  const topology = contextEventMetrics([
+    prefix(1, { estimated_tokens: 100 }),
+    usage(100, 0, 0),
+    custom({ kind: "context.attempt", action: "fold", ok: true }),
+    prefix(2, { estimated_tokens: 110 }),
+    usage(10, 80, 20),
+    custom({ kind: "context.attempt", action: "peek", ok: true }),
+    prefix(3, { estimated_tokens: 120 }),
+    usage(20, 90, 10),
+    custom({ kind: "context.attempt", action: "expand", ok: true }),
+    prefix(4, { change: "rewrite", divergent_tokens: 70, estimated_tokens: 150,
+      request_class: "after-message" }),
+    usage(30, 100, 20),
+    custom({ kind: "context.attempt", action: "refold", ok: true }),
+    prefix(5, { change: "rewrite", divergent_tokens: 80, estimated_tokens: 130,
+      request_class: "after-message" }),
+    usage(20, 100, 10),
+  ]);
+  assert.deepEqual(Object.fromEntries(Object.entries(topology.counterfactual.byRequestClass)
+    .map(([requestClass, bucket]) => [requestClass, bucket.requests])), {
+    "steady-state": 1,
+    "after-mark": 1,
+    "after-peek": 1,
+    "after-expand": 1,
+    "after-refold": 1,
+  });
+  assert.equal(topology.structuralRewrites, 2,
+    "expand and refold branch switches were still counted as surface rewrites");
+  assert.equal(topology.observedCache.measuredRequests, 5);
+  assert.equal(topology.observedCache.unmeasuredRequests, 0);
+  assert.deepEqual(topology.observedCache.byRequestClass["after-expand"], {
+    requests: 1,
+    measuredRequests: 1,
+    cacheHits: 1,
+    cacheWriteRequests: 1,
+    cacheWriteReportedRequests: 1,
+    inputFresh: 30,
+    cacheRead: 100,
+    cacheWrite: 20,
+    promptTokens: 150,
+    pooledCacheShare: 100 / 150,
+    pooledCacheWriteShare: 20 / 150,
+  });
+  assert(source("scripts/extract_campaign_metrics.mjs").includes("observedCacheByRequestClass"),
+    "the campaign extract drops the action-specific observed cache table");
   assert(adjudicator.includes("contextEventMetrics(runEntries)") &&
     adjudicator.includes("pooledCacheShare: usageSeries.pooledCacheShare") &&
     adjudicator.includes('headlineMutationMetric: "contextEvents.prefixRewrites"'),
@@ -4325,19 +4464,23 @@ try {
   assert.equal(withFailure.briefGenerator.inputFresh, 10, "a failed call invented usage it never reported");
 
   // THE BILL, read from the same records the tokens are read from.
-  const response = (input, cacheRead, cost) => ({
+  const response = (input, cacheRead, cost, cacheWrite = 0) => ({
     kind: "provider-response", requestOrdinal: 0,
-    usage: cost === null ? { input, cacheRead } : { input, cacheRead, cost: { total: cost } },
+    usage: cost === null
+      ? { input, cacheRead, cacheWrite }
+      : { input, cacheRead, cacheWrite, cost: { total: cost } },
   });
   const bill = billedCostFromLedger([
     { kind: "provider-request", ordinal: 1, payloadChars: 10 },
-    response(1_000, 100_000, 0.5), response(2_000, 300_000, 4.81), response(3_000, 10_000, 0.25),
+    response(1_000, 100_000, 0.5), response(2_000, 180_000, 4.81, 120_000),
+    response(3_000, 10_000, 0.25),
   ]);
   assert.equal(bill.messageCalls, 3, "the billed lens miscounts message calls");
   assert(Math.abs(bill.messageCallsUsd - 5.56) < 1e-9, "billed cost is not summed from the records");
   assert.equal(bill.longContextCalls, 1,
     "a call whose prompt passed the long-context tier is not counted, so a surcharged run reads like a base-tier one");
-  assert.equal(bill.peakPromptTokens, 302_000, "the peak prompt is not the largest input plus cache read");
+  assert.equal(bill.peakPromptTokens, 302_000,
+    "the peak prompt is not the largest fresh input plus cache read plus cache write");
   assert.equal(bill.longContextTierPromptTokens, LONG_CONTEXT_TIER_PROMPT_TOKENS);
   // A provider that stopped reporting cost must not read as a cheap run.
   const partial = billedCostFromLedger([response(1, 1, 0.25), response(1, 1, null)]);
@@ -5654,6 +5797,3349 @@ try {
   "the carriage sweep still follows a sealed author-host plan path");
 
   checks.aDepositedCampaignReadsItsOwnPlanAfterRelocation = true;
+}
+
+// GATE 74 - the subscription cache topology probe measures revisitable branches and
+// temporary suffix replacement without borrowing an API-key path or an output ceiling.
+//
+// A positive cache read after a branch switch proves only the prefix before the fork.
+// The revisited raw and folded readings must both extend beyond that measured shared
+// baseline. Likewise, removing a temporary suffix counts only when the replacement keeps
+// at least the stable-prefix read observed while that suffix was present. Three isolated
+// repetitions are the promotion boundary, while one remains available as a smoke.
+// ---------------------------------------------------------------------------
+{
+  assert.equal(SUBSCRIPTION_CACHE_PROVIDER, "openai-codex");
+  assert.equal(SUBSCRIPTION_CACHE_MODEL, "gpt-5.6-luna");
+  assert.equal(SUBSCRIPTION_CACHE_API, "openai-codex-responses");
+  assert.equal(SUBSCRIPTION_CACHE_ENDPOINT,
+    "https://chatgpt.com/backend-api/codex/responses");
+  assert.equal(SUBSCRIPTION_CACHE_MINIMUM_TOKENS, 1_024);
+  assert.equal(SUBSCRIPTION_CACHE_DEFAULT_REPETITIONS, 3);
+
+  const cachePlan = buildSubscriptionCacheTopologyPlan({
+    nonce: "0123456789abcdef",
+    repetitions: SUBSCRIPTION_CACHE_DEFAULT_REPETITIONS,
+  });
+  const manifest = subscriptionCacheTopologyManifest(cachePlan);
+  assert.equal(manifest.requestCount, 21,
+    "the default probe is not the bounded seven-request shape repeated three times");
+  assert.deepEqual(manifest.sequences, {
+    branchRevisit: ["raw-first", "folded-first", "raw-again", "folded-again"],
+    temporarySuffix: ["prefix-warm", "temporary-suffix-present", "temporary-suffix-replaced"],
+  });
+  const cacheKeys = cachePlan.plans.flatMap((entry) => entry.lanes.map((lane) => lane.cacheKey));
+  assert.equal(new Set(cacheKeys).size, 6,
+    "a repetition or lane reuses another probe session's cache key");
+  const firstBranch = cachePlan.plans[0].lanes[0].requests;
+  assert.deepEqual(firstBranch[0].input, firstBranch[2].input,
+    "expand is not a byte-exact revisit of the original raw branch");
+  assert.deepEqual(firstBranch[1].input, firstBranch[3].input,
+    "refold is not a byte-exact revisit of the original folded branch");
+  assert.notDeepEqual(firstBranch[0].input, firstBranch[1].input,
+    "raw and folded requests do not diverge at the measured middle span");
+  assert.deepEqual(firstBranch[0].input[0], firstBranch[1].input[0],
+    "the branch fork changed material before the mutable span");
+  assert.deepEqual(firstBranch[0].input[2], firstBranch[1].input[2],
+    "the branch fork changed the stable material after the mutable span");
+  assert(firstBranch[0].input[0].content[0].text.length > 8_192,
+    "the shared branch prefix is too small to exercise the provider's cache minimum");
+  assert.notDeepEqual(cachePlan.plans[0].lanes[0].requests[0].input[0],
+    cachePlan.plans[1].lanes[0].requests[0].input[0],
+  "repetitions are not isolated near the start of the cacheable prefix");
+  const firstSuffix = cachePlan.plans[0].lanes[1].requests;
+  assert.deepEqual(firstSuffix[0].input[0], firstSuffix[1].input[0]);
+  assert.deepEqual(firstSuffix[1].input[0], firstSuffix[2].input[0]);
+  assert.notDeepEqual(firstSuffix[0].input[1], firstSuffix[1].input[1]);
+  assert.notDeepEqual(firstSuffix[1].input[1], firstSuffix[2].input[1]);
+  assert.deepEqual(firstSuffix[0].input[2], firstSuffix[2].input[2]);
+  assert(firstSuffix[0].input[0].content[0].text.length > 8_192,
+    "the temporary-suffix prefix is too small to exercise the provider's cache minimum");
+
+  const payload = {
+    input: firstBranch[0].input,
+    prompt_cache_key: cachePlan.plans[0].lanes[0].cacheKey,
+    tool_choice: "none",
+  };
+  assert.equal(assertImplicitSubscriptionPayload(payload, {
+    cacheKey: cachePlan.plans[0].lanes[0].cacheKey,
+    input: firstBranch[0].input,
+  }), true);
+  assert.throws(() => assertImplicitSubscriptionPayload(
+    { ...payload, max_output_tokens: 16 },
+    { cacheKey: payload.prompt_cache_key, input: payload.input }), /output ceiling/);
+  assert.throws(() => assertImplicitSubscriptionPayload(
+    { ...payload, metadata: { prompt_cache_breakpoint: { mode: "explicit" } } },
+    { cacheKey: payload.prompt_cache_key, input: payload.input }), /explicit cache field/);
+  assert.throws(() => assertImplicitSubscriptionPayload(
+    { ...payload, prompt_cache_options: { mode: "explicit" } },
+    { cacheKey: payload.prompt_cache_key, input: payload.input }), /explicit cache field/);
+  assert.throws(() => assertImplicitSubscriptionPayload(payload,
+    { cacheKey: "another-key", input: payload.input }), /lost.*cache key/);
+
+  const authHeaders = {
+    authorization: "Bearer offline-fixture",
+    "chatgpt-account-id": "offline-account",
+  };
+  assert.equal(assertSubscriptionDestination(SUBSCRIPTION_CACHE_ENDPOINT,
+    { headers: authHeaders }), SUBSCRIPTION_CACHE_ENDPOINT);
+  assert.throws(() => assertSubscriptionDestination("https://api.openai.example/v1/responses",
+    { headers: authHeaders }), /Blocked non-subscription destination/);
+  assert.throws(() => assertSubscriptionDestination(SUBSCRIPTION_CACHE_ENDPOINT, { headers: {} }),
+    /lacks bearer authentication/);
+  const subscriptionRuntime = {
+    isUsingSubscription: () => true,
+    isUsingOAuth: () => true,
+  };
+  const subscriptionModel = {
+    id: SUBSCRIPTION_CACHE_MODEL,
+    api: SUBSCRIPTION_CACHE_API,
+    baseUrl: "https://chatgpt.com/backend-api",
+  };
+  assert.equal(assertSubscriptionModel(subscriptionRuntime, subscriptionModel), true);
+  assert.throws(() => assertSubscriptionModel({
+    ...subscriptionRuntime,
+    isUsingOAuth: () => false,
+  }, subscriptionModel), /not using OAuth/);
+  assert.throws(() => assertSubscriptionModel(subscriptionRuntime, {
+    ...subscriptionModel,
+    baseUrl: "https://api.openai.example/v1",
+  }), /unexpected subscription base/);
+
+  const observedRows = [];
+  const observedReads = {
+    "raw-first": 0,
+    "folded-first": 2_816,
+    "raw-again": 5_888,
+    "folded-again": 4_864,
+    "prefix-warm": 0,
+    "temporary-suffix-present": 3_840,
+    "temporary-suffix-replaced": 3_840,
+  };
+  for (let repetition = 1; repetition <= 3; repetition++) {
+    for (const [label, cacheRead] of Object.entries(observedReads)) {
+      observedRows.push({
+        repetition,
+        label,
+        httpStatus: 200,
+        stopReason: "stop",
+        usage: { cacheRead: cacheRead + (repetition - 1) * 128 },
+      });
+    }
+  }
+  const observed = classifySubscriptionCacheRepetition(
+    observedRows.filter((row) => row.repetition === 1));
+  assert.equal(observed.sharedForkRead, 2_816);
+  assert.equal(observed.rawBranchBeyondFork, 3_072);
+  assert.equal(observed.foldedBranchBeyondFork, 2_048);
+  assert.equal(observed.branchRevisitConfirmed, true);
+  assert.equal(observed.temporarySuffixReplacementConfirmed, true);
+  const repeated = summarizeSubscriptionCacheTopology(observedRows, 3);
+  assert.equal(repeated.confirmedRepetitions, 3);
+  assert.equal(repeated.promotionEligible, true);
+  assert.equal(summarizeSubscriptionCacheTopology(
+    observedRows.filter((row) => row.repetition === 1), 1).promotionEligible, false,
+  "one successful session incorrectly promotes a cache assumption");
+  const noRawBranch = observedRows.filter((row) => row.repetition === 1)
+    .map((row) => row.label === "raw-again"
+      ? { ...row, usage: { cacheRead: observed.sharedForkRead } }
+      : row);
+  assert.equal(classifySubscriptionCacheRepetition(noRawBranch).branchRevisitConfirmed, false,
+    "a read ending at the shared fork is mistaken for recovery of the raw branch");
+  const suffixLoss = observedRows.filter((row) => row.repetition === 1)
+    .map((row) => row.label === "temporary-suffix-replaced"
+      ? { ...row, usage: { cacheRead: 1_024 } }
+      : row);
+  assert.equal(
+    classifySubscriptionCacheRepetition(suffixLoss).temporarySuffixReplacementConfirmed,
+    false,
+    "replacement is called safe after losing part of the stable prefix read");
+
+  const probeSource = source("scripts/probe_subscription_cache_topology.mjs");
+  assert(!probeSource.includes("OPENAI_API_KEY") && !probeSource.includes("api.openai.com"),
+    "the subscription probe contains a direct OpenAI API path");
+  assert(!/\bmaxTokens\s*:/.test(probeSource),
+    "the subscription probe supplies a provider output ceiling");
+  assert(probeSource.includes('transport: "sse"') &&
+    probeSource.includes('cacheRetention: "short"') &&
+    probeSource.includes("maxRetries: 0"),
+  "the live probe does not pin the measured subscription transport");
+  const dryRun = spawnSync(process.execPath,
+    [join(PROJECT, "scripts", "probe_subscription_cache_topology.mjs"), "--repetitions=1"],
+    { encoding: "utf8" });
+  assert.equal(dryRun.status, 0, dryRun.stderr);
+  const dryReport = JSON.parse(dryRun.stdout);
+  assert.equal(dryReport.live, false);
+  assert.equal(dryReport.networkRequests, 0);
+  assert.equal(dryReport.manifest.requestCount, 7);
+
+  checks.theSubscriptionCacheTopologyProbePinsBranchAndTemporarySuffixEvidence = true;
+}
+
+// GATE 75 - the real-path cache probe uses the production fold projection, Pi's
+// custom-message conversion, and Pi's Codex serializer without editing the payload.
+//
+// Expand must make the earlier raw request a complete prefix of the later request.
+// Refold must do the same for the earlier folded request. A temporary carrier may
+// appear for one request, but its withdrawal must leave every durable message that
+// preceded it untouched. Cache-read claims remain separate from these byte facts.
+// ---------------------------------------------------------------------------
+{
+  assert.equal(SUBSCRIPTION_CACHE_PROJECTION_PROTOCOL_VERSION, 1);
+  const projectionPlan = await buildSubscriptionCacheProjectionPlan({
+    nonce: "0123456789abcdef",
+    repetitions: SUBSCRIPTION_CACHE_DEFAULT_REPETITIONS,
+  });
+  const projectionManifest = subscriptionCacheProjectionManifest(projectionPlan);
+  assert.equal(projectionManifest.requestCount, 21,
+    "the real-path default is not the bounded seven-request shape repeated three times");
+  assert.deepEqual(projectionManifest.sequences, {
+    projectionBranch: [
+      "raw-projection", "folded-projection", "expanded-projection", "refolded-projection",
+    ],
+    temporaryCarrier: [
+      "prefix-warm", "temporary-carrier-present", "temporary-carrier-withdrawn",
+    ],
+  });
+  assert.equal(new Set(projectionPlan.plans.flatMap((repetition) =>
+    repetition.lanes.map((lane) => lane.cacheKey))).size, 6,
+  "a real projection repetition or lane reuses another cache key");
+
+  const [branch, carrierLane] = projectionPlan.plans[0].lanes;
+  const [raw, folded, expanded, refolded] = branch.requests;
+  assert(serializedItemPrefix(raw.agentMessages, expanded.agentMessages),
+    "expanded context does not begin with the prior raw production projection");
+  assert(serializedItemPrefix(folded.agentMessages, refolded.agentMessages),
+    "refolded context does not begin with the prior folded production projection");
+  assert.notDeepEqual(raw.agentMessages, folded.agentMessages,
+    "the production fold did not change its target span");
+  assert(JSON.stringify(raw.agentMessages[branch.targetIndex]).includes("RAW-MIDDLE-"),
+    "the raw production projection lost its exact target evidence");
+  assert(JSON.stringify(folded.agentMessages[branch.targetIndex])
+    .includes(`[pi-fold active-context fold ${branch.foldId}]`),
+  "the folded production projection does not carry the shipped placeholder");
+  assert(!JSON.stringify(folded.agentMessages[branch.targetIndex]).includes("RAW-MIDDLE-"),
+    "the folded production projection leaked the raw target payload");
+  assert.equal(branch.expectedPeekSourceSha256.length, 64,
+    "the production peek fixture lost its exact source digest");
+  assert(JSON.stringify(branch.peekResult).includes(branch.expectedPeekSourceSha256),
+    "the production peek result does not carry its exact source digest");
+  assert(!JSON.stringify(folded.llmMessages).includes(branch.expectedPeekSourceSha256),
+    "the folded request leaks the value reserved for a later production peek");
+  assert(raw.llmMessages[0].content[0].text.length > 8_192,
+    "the real branch prefix is too small to cross the cache minimum");
+  assert.notDeepEqual(projectionPlan.plans[0].lanes[0].requests[0].llmMessages[0],
+    projectionPlan.plans[1].lanes[0].requests[0].llmMessages[0],
+  "real projection repetitions are not isolated near the start of the message prefix");
+
+  const [warm, present, withdrawn] = carrierLane.requests;
+  const carrier = present.agentMessages.at(-1);
+  assert.equal(carrier.role, "custom");
+  assert.equal(carrier.display, false);
+  assert.equal(carrier.details.ephemeral, true);
+  assert(serializedItemPrefix(warm.agentMessages, present.agentMessages));
+  assert(serializedItemPrefix(warm.agentMessages, withdrawn.agentMessages));
+  assert(serializedItemPrefix(present.agentMessages.slice(0, -1), withdrawn.agentMessages),
+    "withdrawing the carrier changed its durable production prefix");
+  assert(JSON.stringify(present.llmMessages).includes("TEMPORARY-CARRIER-"),
+    "Pi's convertToLlm did not serialize the custom carrier");
+  assert(!JSON.stringify(withdrawn.llmMessages).includes("TEMPORARY-CARRIER-"),
+    "Pi's convertToLlm retained the withdrawn custom carrier");
+
+  const llmInputs = new Map(projectionPlan.plans[0].lanes.flatMap((lane) =>
+    lane.requests.map((request) => [request.label, request.llmMessages])));
+  const offlineTopology = serializedProjectionTopology(1, llmInputs);
+  assert.equal(offlineTopology.confirmed, true);
+  assert.equal(offlineTopology.rawPrefixOfExpanded, true);
+  assert.equal(offlineTopology.foldedPrefixOfRefolded, true);
+  assert(offlineTopology.carrierWithdrawalCommonItems >= offlineTopology.warmItems);
+  const brokenTopologyInputs = new Map(llmInputs);
+  brokenTopologyInputs.set("expanded-projection", expanded.llmMessages.slice(1));
+  assert.equal(serializedProjectionTopology(1, brokenTopologyInputs).confirmed, false,
+    "the topology check accepts an expanded request that lost the raw prefix");
+
+  assert.equal(assertSerializedSubscriptionProjectionPayload({
+    input: present.llmMessages,
+    prompt_cache_key: carrierLane.cacheKey,
+    tool_choice: "none",
+  }, {
+    cacheKey: carrierLane.cacheKey,
+    expectation: present.expectation,
+  }).inputItems, present.llmMessages.length);
+  assert.throws(() => assertSerializedSubscriptionProjectionPayload({
+    input: withdrawn.llmMessages,
+    prompt_cache_key: carrierLane.cacheKey,
+    tool_choice: "none",
+  }, {
+    cacheKey: carrierLane.cacheKey,
+    expectation: present.expectation,
+  }), /lost expected marker/);
+
+  const cacheRows = [];
+  const observedReads = {
+    "raw-projection": 0,
+    "folded-projection": 3_072,
+    "expanded-projection": 11_264,
+    "refolded-projection": 7_936,
+    "prefix-warm": 0,
+    "temporary-carrier-present": 5_120,
+    "temporary-carrier-withdrawn": 5_632,
+  };
+  const topologies = [];
+  for (let repetition = 1; repetition <= 3; repetition += 1) {
+    for (const [label, cacheRead] of Object.entries(observedReads)) {
+      cacheRows.push({
+        repetition,
+        label,
+        httpStatus: 200,
+        stopReason: "stop",
+        usage: { cacheRead: cacheRead + (repetition - 1) * 128 },
+      });
+    }
+    topologies.push({ repetition, complete: true, confirmed: true });
+  }
+  const firstCache = classifySubscriptionCacheProjectionRepetition(
+    cacheRows.filter((row) => row.repetition === 1));
+  assert.equal(firstCache.expandedBeyondFork, 8_192);
+  assert.equal(firstCache.refoldedBeyondFork, 4_864);
+  assert.equal(firstCache.projectionBranchRevisitConfirmed, true);
+  assert.equal(firstCache.temporaryCarrierWithdrawalConfirmed, true);
+  const zeroSharedFork = cacheRows.filter((row) => row.repetition === 1)
+    .map((row) => row.label === "folded-projection"
+      ? { ...row, usage: { cacheRead: 0 } }
+      : row);
+  const zeroSharedForkVerdict = classifySubscriptionCacheProjectionRepetition(zeroSharedFork);
+  assert.equal(zeroSharedForkVerdict.sharedPrefixObserved, false);
+  assert.equal(zeroSharedForkVerdict.projectionBranchRevisitConfirmed, true,
+    "zero cache at the first branch switch vetoes direct cache reads on both revisits");
+  const cacheSummary = summarizeSubscriptionCacheProjection(cacheRows, 3, topologies);
+  assert.equal(cacheSummary.confirmedRepetitions, 3);
+  assert.equal(cacheSummary.promotionEligible, true);
+  assert.equal(summarizeSubscriptionCacheProjection(
+    cacheRows.filter((row) => row.repetition === 1), 1, [topologies[0]]).promotionEligible,
+  false, "one successful real projection session incorrectly promotes a cache assumption");
+  assert.equal(summarizeSubscriptionCacheProjection(cacheRows, 3, []).promotionEligible, false,
+    "cache reads promote the claim without observed provider serialization topology");
+  const noExpandedBranch = cacheRows.filter((row) => row.repetition === 1)
+    .map((row) => row.label === "expanded-projection"
+      ? { ...row, usage: { cacheRead: firstCache.sharedForkRead } }
+      : row);
+  assert.equal(classifySubscriptionCacheProjectionRepetition(noExpandedBranch)
+    .projectionBranchRevisitConfirmed, false,
+  "a cache read ending at the shared fork is mistaken for an expanded branch revisit");
+  const carrierLoss = cacheRows.filter((row) => row.repetition === 1)
+    .map((row) => row.label === "temporary-carrier-withdrawn"
+      ? { ...row, usage: { cacheRead: 1_024 } }
+      : row);
+  assert.equal(classifySubscriptionCacheProjectionRepetition(carrierLoss)
+    .temporaryCarrierWithdrawalConfirmed, false,
+  "carrier withdrawal is called safe after losing part of the prior stable-prefix read");
+
+  const projectionProbeSource = source("scripts/probe_subscription_cache_projection.mjs");
+  assert(!projectionProbeSource.includes("OPENAI_API_KEY") &&
+    !projectionProbeSource.includes("api.openai.com"),
+  "the real projection probe contains a direct OpenAI API path");
+  assert(!/\bmaxTokens\s*:/.test(projectionProbeSource),
+    "the real projection probe supplies a provider output ceiling");
+  assert(projectionProbeSource.includes("manualFoldCandidate") &&
+    projectionProbeSource.includes("commitPreparedFold") &&
+    projectionProbeSource.includes("setFoldProjectionState") &&
+    projectionProbeSource.includes("projectActiveContext"),
+  "the real projection probe bypasses the shipped fold constructors");
+  assert(projectionProbeSource.includes("convertToLlm") &&
+    projectionProbeSource.includes("return payload;") &&
+    !projectionProbeSource.includes("input: request.input"),
+  "the real projection probe does not preserve Pi's serializer payload");
+  assert(projectionProbeSource.includes('transport: "sse"') &&
+    projectionProbeSource.includes('cacheRetention: "short"') &&
+    projectionProbeSource.includes('toolChoice: "none"') &&
+    projectionProbeSource.includes("maxRetries: 0"),
+  "the real projection live path does not pin the measured subscription transport");
+  const projectionDryRun = spawnSync(process.execPath,
+    [join(PROJECT, "scripts", "probe_subscription_cache_projection.mjs"), "--repetitions=1"],
+    { encoding: "utf8" });
+  assert.equal(projectionDryRun.status, 0, projectionDryRun.stderr);
+  const projectionDryReport = JSON.parse(projectionDryRun.stdout);
+  assert.equal(projectionDryReport.live, false);
+  assert.equal(projectionDryReport.networkRequests, 0);
+  assert.equal(projectionDryReport.manifest.requestCount, 7);
+
+  checks.theRealProjectionCacheProbePinsPiSerializationAndCarrierWithdrawal = true;
+}
+
+// GATE 76 - a one-request suggestion carrier gets a selector-free uptake trial.
+//
+// The relevant condition uses a perfect oracle: the exact answer exists only in the real
+// production peek result, and the carrier names that fold. The irrelevant control already
+// contains its answer and must not peek. This isolates the carrier from ranking quality,
+// including any BM25 threshold. A taken carrier is withdrawn from the durable follow-up,
+// whose cache read must still cross the provider's minimum. Nothing here promotes a selector
+// or adds an option to the shipped runtime.
+// ---------------------------------------------------------------------------
+{
+  assert.equal(EPHEMERAL_SUGGESTION_PROTOCOL_VERSION, 1);
+  const suggestionPlan = await buildEphemeralSuggestionPlan({
+    nonce: "0123456789abcdef",
+    repetitions: SUBSCRIPTION_CACHE_DEFAULT_REPETITIONS,
+  });
+  const suggestionManifest = ephemeralSuggestionManifest(suggestionPlan);
+  assert.equal(suggestionManifest.initialRequests, 6);
+  assert.equal(suggestionManifest.maximumRequests, 9);
+  assert.equal(suggestionManifest.selector, "perfect-oracle fixture only");
+  assert.deepEqual(suggestionManifest.conditions,
+    [EPHEMERAL_SUGGESTION_RELEVANT_LANE, EPHEMERAL_SUGGESTION_IRRELEVANT_LANE]);
+  assert.equal(new Set(suggestionPlan.plans.flatMap((repetition) =>
+    repetition.lanes.map((lane) => lane.cacheKey))).size, 6,
+  "a suggestion condition or repetition reuses another cache key");
+
+  const relevant = suggestionPlan.plans[0].lanes.find((lane) =>
+    lane.condition === EPHEMERAL_SUGGESTION_RELEVANT_LANE);
+  const irrelevant = suggestionPlan.plans[0].lanes.find((lane) =>
+    lane.condition === EPHEMERAL_SUGGESTION_IRRELEVANT_LANE);
+  assert(relevant && irrelevant, "the suggestion plan lost one of its two conditions");
+  const carrier = relevant.firstAgentMessages.at(-1);
+  assert.equal(carrier.role, "custom");
+  assert.equal(carrier.display, false);
+  assert.equal(carrier.details.ephemeral, true);
+  assert.equal(carrier.details.selector, "perfect-oracle");
+  assert.equal(carrier.details.foldId, relevant.foldId);
+  assert.deepEqual(relevant.firstAgentMessages.slice(0, -1), relevant.durableAgentMessages,
+    "the one-request carrier changed the durable production projection");
+  assert(JSON.stringify(relevant.firstMessages).includes(relevant.marker),
+    "Pi's message conversion dropped the one-request suggestion");
+  assert(!JSON.stringify(relevant.durableAgentMessages).includes(relevant.marker),
+    "the suggestion carrier entered durable context");
+  assert(JSON.stringify(relevant.durableAgentMessages)
+    .includes(`[pi-fold active-context fold ${relevant.foldId}]`),
+  "the suggestion fixture does not contain a shipped production fold");
+  assert(!JSON.stringify(relevant.firstMessages).includes(relevant.expectedAnswer),
+    "the relevant request leaks the exact answer before peek");
+  assert(JSON.stringify(relevant.peekResult).includes(relevant.expectedAnswer),
+    "the real production peek result does not reveal the withheld answer");
+  assert(JSON.stringify(irrelevant.firstMessages).includes(irrelevant.expectedAnswer),
+    "the irrelevant control does not make its answer directly visible");
+
+  const foldTool = suggestionPlan.tools.find((tool) => tool.name === "pi_fold_context");
+  assert(foldTool, "the suggestion plan does not expose the shipped fold tool");
+  assert(foldTool.parameters.properties.action.enum.includes("peek"),
+    "the suggestion plan's shipped fold tool cannot perform the requested peek");
+  const correctMessage = {
+    content: [{
+      type: "toolCall",
+      id: "peek-call",
+      name: "pi_fold_context",
+      arguments: { action: "peek", id: relevant.foldId },
+    }],
+  };
+  assert.equal(correctPeekCall(correctMessage, relevant.foldId)?.id, "peek-call");
+  assert.equal(correctPeekCall({
+    content: [{ ...correctMessage.content[0], arguments: { action: "expand", id: relevant.foldId } }],
+  }, relevant.foldId), null, "an expand is mistaken for uptake of a peek suggestion");
+  assert.equal(correctPeekCall({
+    content: [{ ...correctMessage.content[0], arguments: { action: "peek", id: "wrong-fold" } }],
+  }, relevant.foldId), null, "a peek of another fold is mistaken for suggestion uptake");
+  assert.equal(correctPeekCall({
+    content: [...correctMessage.content, { ...correctMessage.content[0], id: "extra-call" }],
+  }, relevant.foldId), null, "a multi-call turn is mistaken for exact suggestion uptake");
+  assert.equal(normalizedExactAnswer(`\`${relevant.expectedAnswer}\``), relevant.expectedAnswer);
+  assert.equal(normalizedExactAnswer(`"${relevant.expectedAnswer}"`), relevant.expectedAnswer);
+
+  assert.equal(assertEphemeralSuggestionPayload({
+    prompt_cache_key: relevant.cacheKey,
+    tool_choice: "auto",
+    input: relevant.firstMessages,
+  }, {
+    cacheKey: relevant.cacheKey,
+    marker: relevant.marker,
+    carrierPresent: true,
+    expectedAnswer: relevant.expectedAnswer,
+    answerPresent: false,
+  }).inputItems, relevant.firstMessages.length);
+  const cleanFollowupInput = [{
+    type: "message",
+    role: "tool",
+    content: [{ type: "input_text", text: relevant.expectedAnswer }],
+  }];
+  assertEphemeralSuggestionPayload({
+    prompt_cache_key: relevant.cacheKey,
+    tool_choice: "auto",
+    input: cleanFollowupInput,
+  }, {
+    cacheKey: relevant.cacheKey,
+    marker: relevant.marker,
+    carrierPresent: false,
+    expectedAnswer: relevant.expectedAnswer,
+    answerPresent: true,
+  });
+  assert.throws(() => assertEphemeralSuggestionPayload({
+    prompt_cache_key: relevant.cacheKey,
+    tool_choice: "none",
+    input: relevant.firstMessages,
+  }, {
+    cacheKey: relevant.cacheKey,
+    marker: relevant.marker,
+    carrierPresent: true,
+    expectedAnswer: relevant.expectedAnswer,
+    answerPresent: false,
+  }), /automatic tool choice/);
+  assert.throws(() => assertEphemeralSuggestionPayload({
+    prompt_cache_key: relevant.cacheKey,
+    tool_choice: "auto",
+    input: [...cleanFollowupInput, { text: relevant.marker }],
+  }, {
+    cacheKey: relevant.cacheKey,
+    marker: relevant.marker,
+    carrierPresent: false,
+    expectedAnswer: relevant.expectedAnswer,
+    answerPresent: true,
+  }), /retained the one-request suggestion carrier/);
+  assert.throws(() => assertEphemeralSuggestionPayload({
+    prompt_cache_key: relevant.cacheKey,
+    tool_choice: "auto",
+    input: [...relevant.firstMessages, { text: relevant.expectedAnswer }],
+  }, {
+    cacheKey: relevant.cacheKey,
+    marker: relevant.marker,
+    carrierPresent: true,
+    expectedAnswer: relevant.expectedAnswer,
+    answerPresent: false,
+  }), /leaked its expected evidence before peek/);
+
+  const confirmedTrial = (repetition) => ({
+    repetition,
+    relevant: {
+      correctPeek: true,
+      exactAnswer: true,
+      carrierAbsentFromFollowup: true,
+      followupRow: { usage: { cacheRead: 4_096 } },
+    },
+    irrelevant: { toolCallCount: 0, exactAnswer: true },
+  });
+  const confirmed = classifyEphemeralSuggestionRepetition(confirmedTrial(1));
+  assert.equal(confirmed.relevantTaken, true);
+  assert.equal(confirmed.relevantUsed, true);
+  assert.equal(confirmed.carrierWithdrawn, true);
+  assert.equal(confirmed.followupCachePreserved, true);
+  assert.equal(confirmed.irrelevantIgnored, true);
+  assert.equal(confirmed.confirmed, true);
+  assert.equal(summarizeEphemeralSuggestionTrials(
+    [confirmedTrial(1), confirmedTrial(2), confirmedTrial(3)], 3).promotionEligible, true);
+  assert.equal(summarizeEphemeralSuggestionTrials([confirmedTrial(1)], 1).promotionEligible, false,
+    "one successful suggestion trial incorrectly promotes the carrier");
+  assert.equal(classifyEphemeralSuggestionRepetition({
+    ...confirmedTrial(1),
+    relevant: { ...confirmedTrial(1).relevant, correctPeek: false },
+  }).confirmed, false, "an ignored relevant suggestion passes");
+  assert.equal(classifyEphemeralSuggestionRepetition({
+    ...confirmedTrial(1),
+    irrelevant: { toolCallCount: 1, exactAnswer: true },
+  }).confirmed, false, "an irrelevant false-positive peek passes");
+  assert.equal(classifyEphemeralSuggestionRepetition({
+    ...confirmedTrial(1),
+    relevant: {
+      ...confirmedTrial(1).relevant,
+      followupRow: { usage: { cacheRead: SUBSCRIPTION_CACHE_MINIMUM_TOKENS - 1 } },
+    },
+  }).confirmed, false, "carrier withdrawal passes without a cacheable follow-up read");
+
+  const suggestionSource = source("scripts/probe_subscription_ephemeral_suggestion.mjs");
+  assert(!suggestionSource.includes("OPENAI_API_KEY") &&
+    !suggestionSource.includes("api.openai.com"),
+  "the suggestion probe contains a direct OpenAI API path");
+  assert(!/\bmaxTokens\s*:/.test(suggestionSource),
+    "the suggestion probe supplies a provider output ceiling");
+  assert(suggestionSource.includes('selector: "perfect-oracle"') &&
+    suggestionSource.includes('toolChoice: "auto"'),
+  "the suggestion probe does not isolate its oracle selector and automatic tool choice");
+  assert(suggestionSource.includes('transport: "sse"') &&
+    suggestionSource.includes('cacheRetention: "short"') &&
+    suggestionSource.includes("maxRetries: 0") &&
+    suggestionSource.includes("return payload;"),
+  "the live suggestion path does not pin and preserve the subscription payload");
+  const suggestionDryRun = spawnSync(process.execPath,
+    [join(PROJECT, "scripts", "probe_subscription_ephemeral_suggestion.mjs"), "--repetitions=1"],
+    { encoding: "utf8" });
+  assert.equal(suggestionDryRun.status, 0, suggestionDryRun.stderr);
+  const suggestionDryReport = JSON.parse(suggestionDryRun.stdout);
+  assert.equal(suggestionDryReport.live, false);
+  assert.equal(suggestionDryReport.networkRequests, 0);
+  assert.equal(suggestionDryReport.manifest.initialRequests, 2);
+  assert.equal(suggestionDryReport.manifest.maximumRequests, 3);
+
+checks.aPerfectOracleSuggestionMeasuresEphemeralCarrierUptakeWithoutJudgingSelectors = true;
+}
+
+// GATE 77 - the first retrieval scorer is a complete, carrier-free shadow table.
+//
+// This reconstructs the deleted selector's BM25 geometry over every eligible fold. Labels
+// cannot enter the pure scorer, candidate order cannot move a score or tie-break, and score
+// zero is still a row. The historical content cap is not hidden: the summary names query-level
+// carrier loss beyond it. This gate promotes neither a threshold nor a shipped retrieval path.
+// ---------------------------------------------------------------------------
+{
+  assert.equal(RETRIEVAL_SHADOW_PROTOCOL_VERSION, 1);
+  assert.equal(RETRIEVAL_SHADOW_SCORER_ID, "bm25-content-brief-v1");
+  assert.equal(RETRIEVAL_SHADOW_CONTENT_CHARS, 20_000);
+  assert.equal(RETRIEVAL_SHADOW_BM25_K1, 1.5);
+  assert.equal(RETRIEVAL_SHADOW_BM25_B, 0.75);
+
+  const candidates = [
+    {
+      id: "fold-a",
+      brief: "A compact unrelated summary.",
+      scoredContent: "alpha target path and exact evidence",
+    },
+    {
+      id: "fold-b",
+      brief: "alpha target path",
+      scoredContent: "historical background without the requested evidence",
+    },
+    {
+      id: "fold-c",
+      brief: "quiet appendix",
+      scoredContent: "omega destination record",
+    },
+  ];
+  const scored = scoreRetrievalShadowCandidates({ query: "alpha target path", candidates });
+  assert.equal(scored.rows.length, candidates.length,
+    "the retrieval shadow omitted a candidate row");
+  assert.deepEqual(scored.rows.map((row) => row.id), ["fold-a", "fold-b", "fold-c"]);
+  assert.equal(scored.corpus.documents, candidates.length * 2);
+  assert.match(scored.corpus.documentFrequencySha256, /^[a-f0-9]{64}$/);
+  assert.equal(scored.rows.find((row) => row.id === "fold-a").rawContentRank, 1);
+  assert.equal(scored.rows.find((row) => row.id === "fold-b").briefRank, 1);
+  assert.equal(scored.rows.find((row) => row.id === "fold-c").rawContentScore, 0,
+    "a zero-score candidate disappeared from the shadow table");
+
+  const reordered = scoreRetrievalShadowCandidates({
+    query: "alpha target path",
+    candidates: [...candidates].reverse(),
+  });
+  assert.deepEqual(reordered, scored,
+    "candidate input order changed the retrieval shadow result");
+  const labelMutation = scoreRetrievalShadowCandidates({
+    query: "alpha target path",
+    candidates: candidates.map((candidate, index) => ({
+      ...candidate,
+      relevant: index === 2,
+      expectedAnswer: `answer-${index}`,
+      answerVerdict: index === 0 ? "correct" : "wrong",
+    })),
+  });
+  assert.deepEqual(labelMutation, scored,
+    "answer or relevance metadata reached the retrieval scorer");
+  const changedQuery = scoreRetrievalShadowCandidates({
+    query: "omega destination record",
+    candidates,
+  });
+  assert.equal(changedQuery.rows.find((row) => row.id === "fold-c").rawContentRank, 1,
+    "the retrieval rank does not respond to its explicit query");
+
+  const ranked = new Map(scored.rows.map((row) => [row.id, row]));
+  const query = ({ id, retrievalNeeded, carriage, relevantId, labelInScoredContent }) => ({
+    runId: "sealed-fixture",
+    queryId: id,
+    kind: "fixture:atomic",
+    retrievalNeeded,
+    carriage,
+    candidates: candidates.map((candidate, index) => ({
+      ...ranked.get(candidate.id),
+      newestRank: candidates.length - index,
+      relevant: candidate.id === relevantId,
+      labelInScoredContent: candidate.id === relevantId && labelInScoredContent,
+    })),
+  });
+  const summary = summarizeRetrievalShadowQueries([
+    query({
+      id: "inside-cap", retrievalNeeded: true, carriage: "recoverable",
+      relevantId: "fold-a", labelInScoredContent: true,
+    }),
+    query({
+      id: "outside-cap", retrievalNeeded: true, carriage: "recoverable",
+      relevantId: "fold-b", labelInScoredContent: false,
+    }),
+    query({
+      id: "already-visible", retrievalNeeded: false, carriage: "visible-raw",
+      relevantId: "fold-a", labelInScoredContent: true,
+    }),
+  ]);
+  assert.equal(summary.queries, 3);
+  assert.equal(summary.candidateRows, 9);
+  assert.equal(summary.retrievalNeededQueries, 2);
+  assert.equal(summary.scoringCapCoverage.retrievalNeededWithRelevantCarrierInCap, 1);
+  assert.equal(summary.scoringCapCoverage.retrievalNeededWithEveryRelevantCarrierOutsideCap, 1);
+  assert.equal(summary.thresholdSweeps.content.descriptiveOnly, true);
+  assert.equal(summary.thresholdSweeps.margin.descriptiveOnly, true);
+
+  const shadowSource = source("scripts/probe_retrieval_shadow.mjs");
+  assert(!shadowSource.includes("api.openai.com") &&
+    !shadowSource.includes("OPENAI_API_KEY") &&
+    !shadowSource.includes("fetch("),
+  "the offline retrieval shadow contains a provider or network path");
+  assert(!shadowSource.includes("context.suggestion") &&
+    !shadowSource.includes("registerTool") &&
+    !shadowSource.includes("registerMessageRenderer"),
+  "the retrieval shadow gained a carrier or shipped runtime surface");
+  assert(shadowSource.includes("active-context mark nomination is outside this build") &&
+    shadowSource.includes("thresholds are not promoted on this corpus"),
+  "the retrieval shadow does not state its experiment-only boundary");
+  const shadowHelp = spawnSync(process.execPath,
+    [join(PROJECT, "scripts", "probe_retrieval_shadow.mjs"), "--help"],
+    { encoding: "utf8" });
+  assert.equal(shadowHelp.status, 0, shadowHelp.stderr);
+  assert.match(shadowHelp.stdout, /no provider or network calls/);
+
+checks.aCompleteRetrievalShadowReconstructsBm25WithoutPromotingACarrierOrThreshold = true;
+}
+
+// GATE 78 - a local attention shadow reads tensors without first selecting candidates.
+//
+// The dry run is standard-library only and cannot load a model or touch the network. The live
+// path gives every candidate's complete supplied text to one forward-only prompt, asks eager
+// attention for the full stack, and refuses model-context overflow instead of trimming it. The
+// controlled fixture rotates all candidates through all positions; labels join only after the
+// tensor score. This gate promotes neither a scorer threshold nor a runtime carrier.
+// ---------------------------------------------------------------------------
+{
+  const attentionScript = join(PROJECT, "scripts", "probe_attention_shadow.py");
+  const attentionFixture = join(PROJECT, "scripts", "fixtures", "attention_shadow_v1.json");
+  const attentionDryRun = spawnSync("python3", [attentionScript], { encoding: "utf8" });
+  assert.equal(attentionDryRun.status, 0, attentionDryRun.stderr);
+  const dry = JSON.parse(attentionDryRun.stdout);
+  assert.equal(dry.live, false);
+  assert.equal(dry.modelLoads, 0);
+  assert.equal(dry.networkRequests, 0);
+  assert.equal(dry.contract.protocolVersion, 1);
+  assert.equal(dry.contract.scorerId, "qwen3-readout-attention-density-v1");
+  assert.equal(dry.contract.candidateSelection,
+    "all supplied candidates in every forward pass");
+  assert.equal(dry.contract.candidateContent, "complete supplied content");
+  assert.equal(dry.contract.inputTruncation, false);
+  assert.equal(dry.contract.prefilter, null);
+  assert.equal(dry.contract.generationCalls, 0);
+  assert.equal(dry.contract.providerCalls, 0);
+  assert.equal(dry.contract.labelsVisibleToScorer, false);
+  assert.equal("labelsVisibleToScorers" in dry.contract, false);
+
+  const fixture = JSON.parse(readFileSync(attentionFixture, "utf8"));
+  const ids = fixture.candidates.map((candidate) => candidate.id);
+  assert.equal(dry.contract.forwardPasses, fixture.cases.length * ids.length);
+  assert.equal(dry.contract.candidateOrders.length, ids.length);
+  for (const candidateId of ids) {
+    assert.deepEqual(dry.contract.candidateOrders.map((order) => order.indexOf(candidateId)).sort(),
+      ids.map((_, index) => index),
+      `${candidateId} did not occupy every attention fixture position`);
+  }
+
+  const attentionSource = readFileSync(attentionScript, "utf8");
+  assert(attentionSource.includes("truncation=False") &&
+    attentionSource.includes("output_attentions=True") &&
+    attentionSource.includes("use_cache=False") &&
+    attentionSource.includes('attn_implementation="eager"'),
+  "the attention shadow no longer requests complete eager forward-pass tensors");
+  assert(attentionSource.includes("attention-shadow-input-exceeds-model-context") &&
+    attentionSource.includes("attention-shadow-incomplete-attention-stack"),
+  "the attention shadow does not fail loudly on incomplete input or tensors");
+  assert(!attentionSource.includes(".generate(") &&
+    !attentionSource.includes("max_new_tokens") &&
+    !/\bBM25\b/i.test(attentionSource),
+  "the attention shadow gained generation or a lexical prefilter");
+  assert(!attentionSource.includes("registerTool") &&
+    !attentionSource.includes("context.suggestion") &&
+    !attentionSource.includes('from "../extensions') &&
+    !attentionSource.includes("api.openai.com"),
+  "the attention shadow gained a carrier, shipped runtime path, or provider call");
+
+checks.aLocalAttentionShadowScoresEveryCompleteCandidateWithoutGenerationOrPrefilter = true;
+}
+
+// GATE 79 - the attention decision policy is selective, precision-first, and held out.
+//
+// The scorer stays byte-for-byte outside this build. A development-only sweep may choose a
+// density-share threshold only after at least four offers with no observed false offer. That
+// threshold freezes before the disjoint, negative-heavy validation split is evaluated. The
+// dry gate exercises calibration without loading a model and promotes neither a threshold nor
+// a carrier.
+// ---------------------------------------------------------------------------
+{
+  const selectiveScript = join(PROJECT, "scripts", "probe_attention_selective.py");
+  const selectiveFixture = join(PROJECT, "scripts", "fixtures", "attention_selective_v1.json");
+  const selectiveDryRun = spawnSync("python3", [selectiveScript], { encoding: "utf8" });
+  assert.equal(selectiveDryRun.status, 0, selectiveDryRun.stderr);
+  const dry = JSON.parse(selectiveDryRun.stdout);
+  assert.equal(dry.live, false);
+  assert.equal(dry.modelLoads, 0);
+  assert.equal(dry.networkRequests, 0);
+  assert.equal(dry.contract.protocolVersion, 1);
+  assert.equal(dry.contract.scorerId, "qwen3-readout-attention-density-v1");
+  assert.equal(dry.contract.policyId, "top-density-share-abstention-v1");
+  assert.equal(dry.contract.confidenceScalar, "top candidate densityShare");
+  assert.equal(dry.contract.candidateSelection,
+    "all supplied candidates in every forward pass");
+  assert.equal(dry.contract.candidateContent, "complete supplied content");
+  assert.equal(dry.contract.inputTruncation, false);
+  assert.equal(dry.contract.prefilter, null);
+  assert.equal(dry.contract.generationCalls, 0);
+  assert.equal(dry.contract.providerCalls, 0);
+  assert.equal(dry.contract.labelsVisibleToScorer, false);
+  assert.equal(dry.contract.calibration.source, "development only");
+  assert.equal(dry.contract.calibration.requiredObservedPrecision, 1);
+  assert.equal(dry.contract.calibration.minimumOffers, 4);
+  assert.match(dry.contract.validation, /threshold frozen before validation labels/);
+  assert.match(dry.contract.boundary, /no carrier, runtime mutation, scorer change/);
+  assert.deepEqual(dry.calibrationSelfTest, { threshold: 0.6, offers: 4, precision: 1 });
+
+  const fixture = JSON.parse(readFileSync(selectiveFixture, "utf8"));
+  const developmentIds = new Set(
+    fixture.splits.development.candidates.map((candidate) => candidate.id));
+  const validationIds = new Set(
+    fixture.splits.validation.candidates.map((candidate) => candidate.id));
+  assert([...developmentIds].every((candidateId) => !validationIds.has(candidateId)),
+    "the attention abstention development and validation candidates overlap");
+  for (const splitName of ["development", "validation"]) {
+    const split = dry.contract.splits[splitName];
+    assert.equal(split.candidates, 8);
+    assert.equal(split.turns, 40);
+    assert.equal(split.positiveRate, 0.2);
+    assert.equal(split.classes.positive, 8);
+    assert.equal(split.classes["no-relevant"], 8);
+    assert.equal(split.classes["already-visible"], 8);
+    assert.equal(split.classes["semantically-related-but-non-answering"], 8);
+    assert.equal(split.classes["interruption-not-worthwhile"], 8);
+  }
+
+  const selectiveSource = readFileSync(selectiveScript, "utf8");
+  assert(selectiveSource.includes("output_attentions=True") &&
+    selectiveSource.includes("use_cache=False") &&
+    selectiveSource.includes('attn_implementation="eager"'),
+  "the selective policy no longer uses the fixed eager attention scorer");
+  assert(selectiveSource.includes("MIN_DEVELOPMENT_OFFERS = 4") &&
+    selectiveSource.includes("DEVELOPMENT_REQUIRED_PRECISION = 1.0") &&
+    selectiveSource.includes('"source": "development only"'),
+  "the selective policy weakened its precision-first calibration contract");
+  assert(!selectiveSource.includes(".generate(") &&
+    !selectiveSource.includes("max_new_tokens") &&
+    !/\bBM25\b/i.test(selectiveSource),
+  "the selective policy gained generation or a lexical prefilter");
+  assert(!selectiveSource.includes("registerTool") &&
+    !selectiveSource.includes("context.suggestion") &&
+    !selectiveSource.includes('from "../extensions') &&
+    !selectiveSource.includes("api.openai.com"),
+  "the selective policy gained a carrier, shipped runtime path, or provider call");
+
+  checks.aPrecisionFirstAttentionPolicyCalibratesOnDevelopmentAndAbstainsOnValidation = true;
+}
+
+// GATE 80 - query-erasure contrast seeks only jointly necessary and correct offers.
+//
+// One scorer mechanism changes: every actual-query forward is paired with a query-erased
+// forward whose token count and positions are identical. Candidate query lift is the log ratio
+// of those densities. The precision label is the whole action, so a wrong candidate on a
+// positive turn is false just like any offer on a no-retrieval turn. Development must find four
+// zero-false offers before validation runs at all. Recall and latency cannot promote the score.
+// ---------------------------------------------------------------------------
+{
+  const contrastScript = join(PROJECT, "scripts", "probe_attention_contrastive.py");
+  const contrastFixture = join(PROJECT, "scripts", "fixtures", "attention_contrastive_v1.json");
+  const contrastDryRun = spawnSync("python3", [contrastScript], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+  });
+  assert.equal(contrastDryRun.status, 0, contrastDryRun.stderr);
+  const dry = JSON.parse(contrastDryRun.stdout);
+  assert.equal(dry.live, false);
+  assert.equal(dry.modelLoads, 0);
+  assert.equal(dry.networkRequests, 0);
+  assert.equal(dry.contract.protocolVersion, 1);
+  assert.equal(dry.contract.scorerId, "qwen3-query-erasure-attention-v1");
+  assert.equal(dry.contract.policyId, "zero-false-joint-action-v1");
+  assert.equal(dry.contract.confidenceScalar,
+    "minimum of top query lift and top-minus-second query-lift margin");
+  assert.equal(dry.contract.candidateSelection,
+    "all supplied candidates in every forward pass");
+  assert.equal(dry.contract.candidateContent, "complete supplied content");
+  assert.equal(dry.contract.inputTruncation, false);
+  assert.equal(dry.contract.prefilter, null);
+  assert.equal(dry.contract.forwardsPerDecision, 2);
+  assert.match(dry.contract.contrast, /equal-length query-erased baseline/);
+  assert.match(dry.contract.jointCorrectOffer,
+    /retrieval is worthwhile.*selected candidate belongs/);
+  assert.match(dry.contract.everyOtherOffer, /wrong candidate on a positive turn/);
+  assert.equal(dry.contract.generationCalls, 0);
+  assert.equal(dry.contract.providerCalls, 0);
+  assert.equal(dry.contract.labelsVisibleToScorer, false);
+  assert.equal(dry.contract.calibration.source, "development only");
+  assert.equal(dry.contract.calibration.requiredObservedPrecision, 1);
+  assert.equal(dry.contract.calibration.minimumOffers, 4);
+  assert.match(dry.contract.validation, /not run unless development selects a threshold/);
+  assert.equal(dry.contract.primaryOutcome,
+    "zero false offers at nonzero anti-vacuous held-out coverage");
+  assert.deepEqual(dry.contract.nonPromotionalDiagnostics,
+    ["recall", "offer rate", "latency", "memory"]);
+  assert.match(dry.contract.boundary, /one scorer change, no carrier, runtime mutation/);
+  assert.deepEqual(dry.selfTest.contrast, {
+    winnerId: "target",
+    confidencePositive: true,
+    orderInvariant: true,
+  });
+  assert.deepEqual(dry.selfTest.calibration, {
+    threshold: 0.6,
+    offers: 4,
+    falseOffers: 0,
+  });
+
+  const fixture = JSON.parse(readFileSync(contrastFixture, "utf8"));
+  assert.equal(fixture.fixtureId, "query-erasure-joint-precision-v1");
+  const developmentIds = new Set(
+    fixture.splits.development.candidates.map((candidate) => candidate.id));
+  const validationIds = new Set(
+    fixture.splits.validation.candidates.map((candidate) => candidate.id));
+  assert([...developmentIds].every((candidateId) => !validationIds.has(candidateId)),
+    "the query-erasure development and validation candidates overlap");
+  for (const splitName of ["development", "validation"]) {
+    const split = dry.contract.splits[splitName];
+    assert.equal(split.candidates, 8);
+    assert.equal(split.turns, 40);
+    assert.equal(split.positiveRate, 0.2);
+    assert.equal(split.classes.positive, 8);
+    assert.equal(split.classes["no-relevant"], 8);
+    assert.equal(split.classes["already-visible"], 8);
+    assert.equal(split.classes["semantically-related-but-non-answering"], 8);
+    assert.equal(split.classes["interruption-not-worthwhile"], 8);
+  }
+
+  const contrastSource = readFileSync(contrastScript, "utf8");
+  assert(contrastSource.includes("truncation=False") &&
+    contrastSource.includes("output_attentions=True") &&
+    contrastSource.includes("use_cache=False") &&
+    contrastSource.includes('attn_implementation="eager"'),
+  "the query-erasure scorer no longer uses complete eager attention");
+  assert(contrastSource.includes(
+    'neutral_encoded["input_ids"][0, query_tokens] = neutral_token_id') &&
+    contrastSource.includes("attention-contrastive-neutral-geometry-drift") &&
+    contrastSource.includes("math.log(actual_density / neutral_density)"),
+  "the query-erasure scorer no longer removes semantics at fixed token geometry");
+  assert(contrastSource.includes('trial["class"] == "positive"') &&
+    contrastSource.includes('winner["id"] in relevant') &&
+    contrastSource.includes('"status": "not-run-no-development-threshold"'),
+  "the contrastive experiment weakened joint correctness or fail-closed validation");
+  assert(!contrastSource.includes(".generate(") &&
+    !contrastSource.includes("max_new_tokens") &&
+    !/\bBM25\b/i.test(contrastSource),
+  "the query-erasure scorer gained generation or a lexical prefilter");
+  assert(!contrastSource.includes("registerTool") &&
+    !contrastSource.includes("context.suggestion") &&
+    !contrastSource.includes('from "../extensions') &&
+    !contrastSource.includes("api.openai.com"),
+  "the query-erasure scorer gained a carrier, runtime path, or provider call");
+
+checks.aQueryErasureAttentionRequiresEveryOfferToBeNecessaryAndCorrect = true;
+}
+
+// GATE 81 - an event threshold acts only on complete hierarchical fold expansions.
+//
+// Query-erasure attention remains the fixed per-fold ranker. One new mechanism compares the
+// model's next-token logits for retrieve and skip, and that utility margin is the only scalar
+// allowed to trigger an interruption. Every supplied fold node is measured on every synthetic
+// event snapshot, including descendants beneath collapsed parents. Development requires four
+// zero-false joint actions before the frozen threshold may touch validation. This is still an
+// offline selector: no Pi event hook, carrier, context mutation, cap, or truncation ships here.
+// ---------------------------------------------------------------------------
+{
+  const utilityScript = join(PROJECT, "scripts", "probe_attention_utility.py");
+  const utilityFixture = join(PROJECT, "scripts", "fixtures", "attention_utility_v1.json");
+  const utilityDryRun = spawnSync("python3", [utilityScript], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+  });
+  assert.equal(utilityDryRun.status, 0, utilityDryRun.stderr);
+  const dry = JSON.parse(utilityDryRun.stdout);
+  assert.equal(dry.live, false);
+  assert.equal(dry.modelLoads, 0);
+  assert.equal(dry.networkRequests, 0);
+  assert.equal(dry.contract.protocolVersion, 1);
+  assert.equal(dry.contract.rankerId, "qwen3-query-erasure-attention-v1");
+  assert.equal(dry.contract.utilityScorerId,
+    "qwen3-retrieve-skip-next-token-utility-v1");
+  assert.equal(dry.contract.policyId, "zero-false-fold-expansion-event-v1");
+  assert.equal(dry.contract.confidenceScalar,
+    "retrieve next-token logit minus skip next-token logit");
+  assert.match(dry.contract.interruptWhen, /margin meets or exceeds the frozen threshold/);
+  assert.equal(dry.contract.attemptCadence,
+    "one decision at every supplied eligible event snapshot");
+  assert.deepEqual(dry.contract.eligibleEventKinds,
+    ["user-message", "tool-result", "assistant-message", "stop"]);
+  assert.equal(dry.contract.runtimeEventHook, false);
+  assert.equal(dry.contract.candidateUniverse, "standing folded nodes only");
+  assert.equal(dry.contract.candidateAction, "expand exactly one fold id");
+  assert.equal(dry.contract.candidateContent,
+    "complete supplied one-level expansion projection for that fold");
+  assert.match(dry.contract.hierarchy, /every root and nested fold.*never prunes/);
+  assert.equal(dry.contract.candidateSelection,
+    "all supplied fold nodes in every decision");
+  assert.equal(dry.contract.inputTruncation, false);
+  assert.equal(dry.contract.prefilter, null);
+  assert.deepEqual(dry.contract.forwardsPerDecision, {
+    queryErasureRanker: 2,
+    retrieveSkipUtility: 1,
+    total: 3,
+  });
+  assert.deepEqual(dry.contract.choiceTokens, [" retrieve", " skip"]);
+  assert.equal(dry.contract.generationCalls, 0);
+  assert.equal(dry.contract.providerCalls, 0);
+  assert.equal(dry.contract.labelsVisibleToScorers, false);
+  assert.match(dry.contract.jointCorrectOffer, /necessary now.*relevant fold/);
+  assert.match(dry.contract.everyOtherOffer, /wrong fold on a positive event/);
+  assert.equal(dry.contract.calibration.source, "development only");
+  assert.equal(dry.contract.calibration.requiredObservedPrecision, 1);
+  assert.equal(dry.contract.calibration.minimumOffers, 4);
+  assert.match(dry.contract.validation, /not run unless development selects a threshold/);
+  assert.deepEqual(dry.contract.nonPromotionalDiagnostics,
+    ["recall", "offer rate", "latency", "memory"]);
+  assert.match(dry.contract.boundary, /no carrier, Pi event registration, context mutation/);
+  assert.deepEqual(dry.selfTest, {
+    utilityMargin: 2,
+    unthresholdedChoice: "retrieve",
+    threshold: 0.6,
+    offers: 4,
+    falseOffers: 0,
+    wrongFoldOnPositiveIsFalse: true,
+  });
+
+  const fixture = JSON.parse(readFileSync(utilityFixture, "utf8"));
+  assert.equal(fixture.fixtureId, "fold-expansion-event-utility-v1");
+  const developmentIds = new Set(
+    fixture.splits.development.folds.map((fold) => fold.foldId));
+  const validationIds = new Set(
+    fixture.splits.validation.folds.map((fold) => fold.foldId));
+  assert([...developmentIds].every((foldId) => !validationIds.has(foldId)),
+    "the fold-expansion utility development and validation folds overlap");
+  for (const splitName of ["development", "validation"]) {
+    const split = dry.contract.splits[splitName];
+    const folds = fixture.splits[splitName].folds;
+    const ids = new Set(folds.map((fold) => fold.foldId));
+    assert.equal(split.folds, 8);
+    assert.equal(split.roots, 3);
+    assert.equal(split.nested, 5);
+    assert.equal(split.maximumDepth, 2);
+    assert.equal(split.eventSnapshots, 40);
+    assert.equal(split.foldRowsPerSnapshot, 8);
+    assert.equal(split.positiveRate, 0.2);
+    assert.deepEqual(split.classes, {
+      positive: 8,
+      "no-relevant": 8,
+      "already-visible": 8,
+      "semantically-related-but-non-answering": 8,
+      "interruption-not-worthwhile": 8,
+    });
+    assert.deepEqual(split.eventKinds, {
+      "user-message": 10,
+      "tool-result": 10,
+      "assistant-message": 10,
+      stop: 10,
+    });
+    assert.deepEqual(new Set(split.allFoldIds), ids);
+    assert(folds.some((fold) => fold.depth === 2),
+      `${splitName} does not exercise a nested fold below another nested fold`);
+    for (const fold of folds) {
+      assert.deepEqual(Object.keys(fold).sort(),
+        ["cases", "depth", "expandedContent", "foldId", "parentFoldId"]);
+      assert.equal(typeof fold.expandedContent, "string");
+      assert(fold.expandedContent.length > 0);
+      if (fold.parentFoldId !== null) {
+        assert(ids.has(fold.parentFoldId),
+          `${splitName} fold ${fold.foldId} names a missing parent`);
+      }
+      assert.equal(fold.cases.positive.task, fold.cases["already-visible"].task,
+        `${splitName} fold ${fold.foldId} changed the task instead of active context`);
+      assert.notEqual(fold.cases.positive.activeContext,
+        fold.cases["already-visible"].activeContext,
+        `${splitName} fold ${fold.foldId} did not vary active context`);
+    }
+  }
+
+  const utilitySource = readFileSync(utilityScript, "utf8");
+  assert(utilitySource.includes("contrastive.prepare_paired_prompt(") &&
+    utilitySource.includes("contrastive.score_once(") &&
+    utilitySource.includes("contrastive.contrast_rows(actual, neutral)"),
+  "the utility probe no longer fixes query-erasure attention as its fold ranker");
+  assert(utilitySource.includes("outputs.logits[0, -1].float()") &&
+    utilitySource.includes('logits[token_ids["retrieve"]]') &&
+    utilitySource.includes('logits[token_ids["skip"]]') &&
+    utilitySource.includes("retrieve_logit - skip_logit"),
+  "the utility probe no longer derives its event threshold from constrained choice logits");
+  assert(utilitySource.includes("truncation=False") &&
+    utilitySource.includes("attention-utility-ranker-did-not-measure-every-fold") &&
+    utilitySource.includes('set(rank_prompt["candidateTokens"]) == set(fold_ids)'),
+  "the utility probe no longer refuses omitted or truncated hierarchical folds");
+  assert(utilitySource.includes('trial["class"] == "positive"') &&
+    utilitySource.includes('winner["id"] in relevant') &&
+    utilitySource.includes('"status": "not-run-no-development-threshold"'),
+  "the utility experiment weakened joint correctness or fail-closed validation");
+  assert(!utilitySource.includes(".generate(") &&
+    !utilitySource.includes("max_new_tokens") &&
+    !/\bBM25\b/i.test(utilitySource) &&
+    !/folds\s*\[:\s*\d+/.test(utilitySource),
+  "the utility experiment gained generation, lexical prefiltering, or a fold cap");
+  assert(!utilitySource.includes("registerTool") &&
+    !utilitySource.includes("context.suggestion") &&
+    !utilitySource.includes('from "../extensions') &&
+    !utilitySource.includes("api.openai.com"),
+  "the utility experiment gained a carrier, shipped runtime path, or provider call");
+
+  checks.anEventUtilityThresholdMeasuresEveryCompleteFoldAtEveryDepth = true;
+}
+
+// GATE 82 - every fold carries its own conditional expansion utility.
+//
+// A separate constrained expand-versus-skip prompt now owns both selection and abstention.
+// Every root and nested fold is independently tested against the same active context and task;
+// the largest margin names the fold, and that same margin meets the interruption threshold.
+// There is no separate ranker, prefilter, truncation, fixed fold-count cap, or runtime carrier.
+// Development must produce four zero-false offers before validation can be opened.
+// ---------------------------------------------------------------------------
+{
+  const perFoldScript = join(PROJECT, "scripts", "probe_attention_per_fold_utility.py");
+  const perFoldFixture = join(PROJECT, "scripts", "fixtures", "attention_utility_v1.json");
+  const perFoldDryRun = spawnSync("python3", [perFoldScript], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+  });
+  assert.equal(perFoldDryRun.status, 0, perFoldDryRun.stderr);
+  const dry = JSON.parse(perFoldDryRun.stdout);
+  assert.equal(dry.live, false);
+  assert.equal(dry.modelLoads, 0);
+  assert.equal(dry.networkRequests, 0);
+  assert.equal(dry.contract.protocolVersion, 1);
+  assert.equal(dry.contract.scorerId, "qwen3-per-fold-expand-skip-utility-v1");
+  assert.equal(dry.contract.policyId, "zero-false-per-fold-expansion-event-v1");
+  assert.equal(dry.contract.confidenceScalar,
+    "maximum per-fold expand next-token logit minus skip next-token logit");
+  assert.match(dry.contract.interruptWhen,
+    /largest per-fold expand-minus-skip margin meets or exceeds the frozen threshold/);
+  assert.equal(dry.contract.attemptCadence,
+    "one decision at every supplied eligible event snapshot");
+  assert.deepEqual(dry.contract.eligibleEventKinds,
+    ["user-message", "tool-result", "assistant-message", "stop"]);
+  assert.equal(dry.contract.runtimeEventHook, false);
+  assert.equal(dry.contract.candidateUniverse, "standing folded nodes only");
+  assert.match(dry.contract.candidateAction,
+    /fold with the largest conditional utility margin/);
+  assert.equal(dry.contract.candidateContent,
+    "complete supplied one-level expansion projection for that fold");
+  assert.match(dry.contract.hierarchy,
+    /every root and nested fold is independently scored.*never prunes/);
+  assert.equal(dry.contract.candidateSelection,
+    "all supplied fold nodes in every decision");
+  assert.equal(dry.contract.inputTruncation, false);
+  assert.equal(dry.contract.prefilter, null);
+  assert.match(dry.contract.forwardsPerDecision,
+    /one independent local-model forward per supplied fold.*varies/);
+  assert.equal(dry.contract.ranker, null);
+  assert.deepEqual(dry.contract.choiceTokens, [" expand", " skip"]);
+  assert.equal(dry.contract.generationCalls, 0);
+  assert.equal(dry.contract.providerCalls, 0);
+  assert.equal(dry.contract.labelsVisibleToScorer, false);
+  assert.match(dry.contract.jointCorrectOffer, /winning fold is necessary now.*relevant/);
+  assert.match(dry.contract.everyOtherOffer, /wrong fold on a positive event/);
+  assert.equal(dry.contract.calibration.source, "development only");
+  assert.equal(dry.contract.calibration.requiredObservedPrecision, 1);
+  assert.equal(dry.contract.calibration.minimumOffers, 4);
+  assert.match(dry.contract.validation,
+    /not run unless development selects a threshold.*threshold frozen/);
+  assert.deepEqual(dry.contract.nonPromotionalDiagnostics,
+    ["recall", "offer rate", "latency", "memory"]);
+  assert.match(dry.contract.boundary,
+    /no carrier, Pi event registration, context mutation/);
+  assert.deepEqual(dry.selfTest, {
+    utilityMargin: 2,
+    unthresholdedChoice: "expand",
+    rankedFoldIds: ["a-fold", "z-fold", "low-fold"],
+    threshold: 0.6,
+    offers: 4,
+    falseOffers: 0,
+    wrongFoldOnPositiveIsFalse: true,
+  });
+
+  const fixture = JSON.parse(readFileSync(perFoldFixture, "utf8"));
+  for (const splitName of ["development", "validation"]) {
+    const split = dry.contract.splits[splitName];
+    const folds = fixture.splits[splitName].folds;
+    const ids = new Set(folds.map((fold) => fold.foldId));
+    assert.equal(split.folds, 8);
+    assert.equal(split.roots, 3);
+    assert.equal(split.nested, 5);
+    assert.equal(split.maximumDepth, 2);
+    assert.equal(split.eventSnapshots, 40);
+    assert.equal(split.foldRowsPerSnapshot, 8);
+    assert.equal(split.positiveRate, 0.2);
+    assert.deepEqual(split.classes, {
+      positive: 8,
+      "no-relevant": 8,
+      "already-visible": 8,
+      "semantically-related-but-non-answering": 8,
+      "interruption-not-worthwhile": 8,
+    });
+    assert.deepEqual(split.eventKinds, {
+      "user-message": 10,
+      "tool-result": 10,
+      "assistant-message": 10,
+      stop: 10,
+    });
+    assert.deepEqual(new Set(split.allFoldIds), ids);
+    assert(folds.some((fold) => fold.depth === 2),
+      `${splitName} does not exercise a descendant below another nested fold`);
+  }
+
+  const source = readFileSync(perFoldScript, "utf8");
+  assert(source.includes("for fold_id in order:") &&
+    source.includes("prepare_fold_prompt(tokenizer, folds_by_id[fold_id], case)") &&
+    source.includes("attention-per-fold-did-not-measure-every-fold"),
+  "the per-fold utility probe no longer scores every hierarchical fold independently");
+  assert(source.includes("outputs.logits[0, -1].float()") &&
+    source.includes('logits[token_ids["expand"]]') &&
+    source.includes('logits[token_ids["skip"]]') &&
+    source.includes("expand_logit - skip_logit"),
+  "the per-fold confidence no longer comes from constrained expand and skip logits");
+  assert(source.includes('sorted(rows, key=lambda row: (-row["utilityMargin"], row["id"]))') &&
+    source.includes('"confidence": winner["utilityMargin"]'),
+  "selection and interruption no longer share the winning per-fold utility margin");
+  assert(source.includes("truncation=False") &&
+    source.includes("attention-per-fold-input-exceeds-model-context") &&
+    source.includes('len(prompts) == len(fold_ids)'),
+  "the per-fold utility probe no longer refuses omitted or truncated folds");
+  assert(source.includes('trial["class"] == "positive"') &&
+    source.includes('winner["id"] in relevant') &&
+    source.includes('"status": "not-run-no-development-threshold"'),
+  "the per-fold experiment weakened joint correctness or fail-closed validation");
+  assert(!source.includes("contrastive.prepare_paired_prompt(") &&
+    !source.includes("contrastive.score_once(") &&
+    !source.includes("output_attentions=True"),
+  "the per-fold conditional scorer silently retained a separate attention ranker");
+  assert(!source.includes(".generate(") &&
+    !source.includes("max_new_tokens") &&
+    !/\bBM25\b/i.test(source) &&
+    !/folds\s*\[:\s*\d+/.test(source),
+  "the per-fold experiment gained generation, lexical prefiltering, or a fold cap");
+  assert(!source.includes("registerTool") &&
+    !source.includes("context.suggestion") &&
+    !source.includes('from "../extensions') &&
+    !source.includes("api.openai.com"),
+  "the per-fold experiment gained a carrier, shipped runtime path, or provider call");
+
+  checks.everyFoldOwnsTheUtilityThatSelectsItAndInterrupts = true;
+}
+
+// GATE 83 - candidate erasure removes the per-fold expansion prior at equal geometry.
+//
+// The actual prompt stays byte-identical to Gate 82. A paired control replaces every token
+// position overlapping the complete candidate content with one ordinary neutral token, while
+// preserving length, attention mask, and every other token position. Actual expand-minus-skip
+// margin minus erased margin is the only ranking and interruption scalar. Every root and nested
+// fold still receives both forwards. Calibration refuses negative thresholds and validation
+// remains unscored unless four development offers are all correct.
+// ---------------------------------------------------------------------------
+{
+  const counterfactualScript = join(
+    PROJECT, "scripts", "probe_attention_per_fold_counterfactual.py");
+  const counterfactualFixture = join(
+    PROJECT, "scripts", "fixtures", "attention_utility_v1.json");
+  const counterfactualDryRun = spawnSync("python3", [counterfactualScript], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+  });
+  assert.equal(counterfactualDryRun.status, 0, counterfactualDryRun.stderr);
+  const dry = JSON.parse(counterfactualDryRun.stdout);
+  assert.equal(dry.live, false);
+  assert.equal(dry.modelLoads, 0);
+  assert.equal(dry.networkRequests, 0);
+  assert.equal(dry.contract.protocolVersion, 1);
+  assert.equal(dry.contract.scorerId,
+    "qwen3-per-fold-candidate-erased-utility-v1");
+  assert.equal(dry.contract.policyId,
+    "zero-false-candidate-erased-fold-expansion-event-v1");
+  assert.equal(dry.contract.confidenceScalar,
+    "maximum per-fold actual expand-minus-skip margin minus candidate-erased margin");
+  assert.match(dry.contract.interruptWhen,
+    /largest nonnegative candidate-erased utility lift.*frozen threshold/);
+  assert.equal(dry.contract.attemptCadence,
+    "one decision at every supplied eligible event snapshot");
+  assert.deepEqual(dry.contract.eligibleEventKinds,
+    ["user-message", "tool-result", "assistant-message", "stop"]);
+  assert.equal(dry.contract.runtimeEventHook, false);
+  assert.equal(dry.contract.candidateUniverse, "standing folded nodes only");
+  assert.match(dry.contract.candidateAction,
+    /fold with the largest candidate-erased conditional utility lift/);
+  assert.equal(dry.contract.candidateContent,
+    "complete supplied one-level expansion projection for that fold");
+  assert.match(dry.contract.hierarchy,
+    /every root and nested fold is independently scored.*never prunes/);
+  assert.equal(dry.contract.candidateSelection,
+    "all supplied fold nodes in every decision");
+  assert.equal(dry.contract.inputTruncation, false);
+  assert.equal(dry.contract.prefilter, null);
+  assert.match(dry.contract.forwardsPerDecision,
+    /two independent local-model forwards per supplied fold.*varies/);
+  assert.equal(dry.contract.ranker, null);
+  assert.deepEqual(dry.contract.choiceTokens, [" expand", " skip"]);
+  assert.equal(dry.contract.generationCalls, 0);
+  assert.equal(dry.contract.providerCalls, 0);
+  assert.equal(dry.contract.labelsVisibleToScorer, false);
+  assert.match(dry.contract.normalization.actual, /complete fold expansion.*frozen/);
+  assert.match(dry.contract.normalization.control,
+    /token id whose character span overlaps candidate content.*preserving input length/);
+  assert.match(dry.contract.normalization.tokenBoundary,
+    /delimiter whitespace.*counted/);
+  assert.equal(dry.contract.normalization.score,
+    "actual expand-minus-skip margin minus candidate-erased expand-minus-skip margin");
+  assert.equal(dry.contract.normalization.minimumEligibleThreshold, 0);
+  assert.match(dry.contract.jointCorrectOffer,
+    /nonnegative candidate-erased lift.*necessary now.*relevant/);
+  assert.equal(dry.contract.calibration.source, "development only");
+  assert.equal(dry.contract.calibration.requiredObservedPrecision, 1);
+  assert.equal(dry.contract.calibration.minimumOffers, 4);
+  assert.equal(dry.contract.calibration.minimumThreshold, 0);
+  assert.match(dry.contract.validation,
+    /not run unless development selects a threshold.*threshold frozen/);
+  assert.deepEqual(dry.contract.nonPromotionalDiagnostics,
+    ["recall", "offer rate", "latency", "memory"]);
+  assert.match(dry.contract.boundary,
+    /no carrier, Pi event registration, context mutation/);
+  assert.deepEqual(dry.selfTest, {
+    counterfactualUtilityMargin: 1,
+    rankedFoldIds: ["a-fold", "z-fold", "low-fold"],
+    threshold: 0.6,
+    offers: 4,
+    falseOffers: 0,
+    negativeThresholdRefused: true,
+    wrongFoldOnPositiveIsFalse: true,
+  });
+
+  const fixture = JSON.parse(readFileSync(counterfactualFixture, "utf8"));
+  for (const splitName of ["development", "validation"]) {
+    const split = dry.contract.splits[splitName];
+    const folds = fixture.splits[splitName].folds;
+    const ids = new Set(folds.map((fold) => fold.foldId));
+    assert.equal(split.folds, 8);
+    assert.equal(split.roots, 3);
+    assert.equal(split.nested, 5);
+    assert.equal(split.maximumDepth, 2);
+    assert.equal(split.eventSnapshots, 40);
+    assert.equal(split.foldRowsPerSnapshot, 8);
+    assert.equal(split.positiveRate, 0.2);
+    assert.deepEqual(split.classes, {
+      positive: 8,
+      "no-relevant": 8,
+      "already-visible": 8,
+      "semantically-related-but-non-answering": 8,
+      "interruption-not-worthwhile": 8,
+    });
+    assert.deepEqual(split.eventKinds, {
+      "user-message": 10,
+      "tool-result": 10,
+      "assistant-message": 10,
+      stop: 10,
+    });
+    assert.deepEqual(new Set(split.allFoldIds), ids);
+    assert(folds.some((fold) => fold.depth === 2),
+      `${splitName} does not exercise a descendant below another nested fold`);
+  }
+
+  const source = readFileSync(counterfactualScript, "utf8");
+  assert(source.includes("per_fold.prepare_fold_prompt(tokenizer, fold, case)") &&
+    source.includes('legacy["promptSha256"] == attention.sha256_text(full_prompt)') &&
+    source.includes("attention-counterfactual-actual-prompt-drift"),
+  "the actual counterfactual prompt no longer proves identity with Gate 82");
+  assert(source.includes("return_offsets_mapping=True") &&
+    source.includes("attention.overlapping_token_positions(") &&
+    source.includes('erased_encoded["input_ids"][0, candidate_tokens] = neutral_token_id'),
+  "candidate erasure no longer follows the tokenizer's exact candidate span");
+  assert(source.includes('erased_encoded["input_ids"].shape == encoded["input_ids"].shape') &&
+    source.includes('erased_encoded["attention_mask"].tolist()') &&
+    source.includes("attention-counterfactual-noncandidate-token-changed") &&
+    source.includes("boundary_crossing_tokens"),
+  "the erased control no longer pins equal geometry and every outside token position");
+  assert(source.includes('actual_margin - erased_margin') &&
+    source.includes('row["counterfactualUtilityMargin"]') &&
+    source.includes('"confidence": winner["counterfactualUtilityMargin"]'),
+  "selection and interruption no longer share the candidate-erased utility lift");
+  assert(source.includes('point["threshold"] >= MINIMUM_COUNTERFACTUAL_THRESHOLD') &&
+    source.includes('"status": "not-run-no-development-threshold"') &&
+    source.includes('trial["class"] == "positive"') &&
+    source.includes('winner["id"] in relevant'),
+  "the counterfactual policy admits negative lift or weakened fail-closed correctness");
+  assert(source.includes("for fold_id in order:") &&
+    source.includes('len(prompts) == len(fold_ids)') &&
+    source.includes("attention-counterfactual-did-not-measure-every-fold"),
+  "the candidate-erased scorer no longer measures every hierarchical fold");
+  assert(source.includes("truncation=False") &&
+    source.includes("attention-counterfactual-input-exceeds-model-context"),
+  "the counterfactual scorer silently truncates inputs that do not fit");
+  assert(!source.includes("contrastive.prepare_paired_prompt(") &&
+    !source.includes("contrastive.score_once(") &&
+    !source.includes("output_attentions=True"),
+  "candidate erasure silently retained a separate attention ranker");
+  assert(!source.includes(".generate(") &&
+    !source.includes("max_new_tokens") &&
+    !/\bBM25\b/i.test(source) &&
+    !/folds\s*\[:\s*\d+/.test(source),
+  "the counterfactual experiment gained generation, lexical prefiltering, or a fold cap");
+  assert(!source.includes("registerTool") &&
+    !source.includes("context.suggestion") &&
+    !source.includes('from "../extensions') &&
+    !source.includes("api.openai.com"),
+  "the counterfactual experiment gained a carrier, shipped runtime path, or provider call");
+
+  checks.candidateErasureNormalizesEveryFoldAtEqualTokenGeometry = true;
+}
+
+// GATE 84 - a fold must change answerability, not merely look relevant.
+//
+// Every root and nested fold receives one sufficiency judgment with its complete content and
+// one equal-token active-only control. The transition bottleneck is the smaller of expanded
+// sufficiency and negated active-only sufficiency. A positive threshold therefore requires the
+// fold to change the task from insufficient to sufficient. Development still owes four
+// zero-false offers before validation can be prepared or scored.
+// ---------------------------------------------------------------------------
+{
+  const transitionScript = join(
+    PROJECT, "scripts", "probe_attention_answerability_transition.py");
+  const transitionFixture = join(
+    PROJECT, "scripts", "fixtures", "attention_utility_v1.json");
+  const transitionDryRun = spawnSync("python3", [transitionScript], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+  });
+  assert.equal(transitionDryRun.status, 0, transitionDryRun.stderr);
+  const dry = JSON.parse(transitionDryRun.stdout);
+  assert.equal(dry.live, false);
+  assert.equal(dry.modelLoads, 0);
+  assert.equal(dry.networkRequests, 0);
+  assert.equal(dry.contract.protocolVersion, 1);
+  assert.equal(dry.contract.scorerId,
+    "qwen3-per-fold-answerability-transition-v1");
+  assert.equal(dry.contract.policyId,
+    "positive-zero-false-answerability-transition-event-v1");
+  assert.equal(dry.contract.confidenceScalar,
+    "maximum per-fold minimum of expanded sufficiency margin and negated active-only sufficiency margin");
+  assert.match(dry.contract.interruptWhen,
+    /largest strictly positive answerability-transition bottleneck.*frozen threshold/);
+  assert.equal(dry.contract.attemptCadence,
+    "one decision at every supplied eligible event snapshot");
+  assert.deepEqual(dry.contract.eligibleEventKinds,
+    ["user-message", "tool-result", "assistant-message", "stop"]);
+  assert.equal(dry.contract.runtimeEventHook, false);
+  assert.equal(dry.contract.candidateUniverse, "standing folded nodes only");
+  assert.match(dry.contract.candidateAction,
+    /fold with the largest answerability-transition bottleneck/);
+  assert.equal(dry.contract.candidateContent,
+    "complete supplied one-level expansion projection for that fold");
+  assert.match(dry.contract.hierarchy,
+    /every root and nested fold is independently scored.*never prunes/);
+  assert.equal(dry.contract.candidateSelection,
+    "all supplied fold nodes in every decision");
+  assert.equal(dry.contract.inputTruncation, false);
+  assert.equal(dry.contract.prefilter, null);
+  assert.match(dry.contract.forwardsPerDecision,
+    /two independent local-model forwards per supplied fold.*varies/);
+  assert.equal(dry.contract.ranker, null);
+  assert.deepEqual(dry.contract.choiceTokens, [" sufficient", " insufficient"]);
+  assert.equal(dry.contract.generationCalls, 0);
+  assert.equal(dry.contract.providerCalls, 0);
+  assert.equal(dry.contract.labelsVisibleToScorer, false);
+  assert.match(dry.contract.judgment,
+    /enough stated evidence.*correctly and completely/);
+  assert.match(dry.contract.transition.expanded,
+    /sufficient logit minus insufficient logit.*complete fold/);
+  assert.match(dry.contract.transition.activeOnlyControl,
+    /token overlapping fold content.*ordinary neutral token id/);
+  assert.match(dry.contract.transition.equalGeometry,
+    /input length, attention mask, and every token outside candidate content.*identical/);
+  assert.equal(dry.contract.transition.answerabilityGain,
+    "expanded sufficiency margin minus active-only sufficiency margin");
+  assert.equal(dry.contract.transition.score,
+    "minimum of expanded sufficiency margin and negated active-only sufficiency margin");
+  assert.match(dry.contract.transition.meaning,
+    /positive score requires.*fold.*sufficient.*active-only control.*insufficient/);
+  assert.equal(dry.contract.transition.minimumThreshold, 0);
+  assert.equal(dry.contract.transition.thresholdIsStrictlyPositive, true);
+  assert.match(dry.contract.jointCorrectOffer,
+    /strictly positive answerability transition.*necessary now.*relevant/);
+  assert.equal(dry.contract.calibration.source, "development only");
+  assert.equal(dry.contract.calibration.requiredObservedPrecision, 1);
+  assert.equal(dry.contract.calibration.minimumOffers, 4);
+  assert.equal(dry.contract.calibration.minimumThreshold, 0);
+  assert.equal(dry.contract.calibration.thresholdIsStrictlyPositive, true);
+  assert.match(dry.contract.validation,
+    /not run unless development selects a threshold.*threshold frozen/);
+  assert.deepEqual(dry.contract.nonPromotionalDiagnostics,
+    ["recall", "offer rate", "latency", "memory"]);
+  assert.match(dry.contract.boundary,
+    /no carrier, Pi event registration, context mutation/);
+  assert.deepEqual(dry.selfTest, {
+    expandedSufficiencyMargin: 2,
+    activeOnlySufficiencyMargin: -1,
+    answerabilityGain: 3,
+    transitionMargin: 1,
+    redundantTransitionMargin: -1,
+    missingCandidateTransitionMargin: -1,
+    rankedFoldIds: ["a-fold", "z-fold", "low-fold"],
+    threshold: 0.6,
+    offers: 4,
+    falseOffers: 0,
+    zeroThresholdRefused: true,
+    wrongFoldOnPositiveIsFalse: true,
+  });
+
+  const fixture = JSON.parse(readFileSync(transitionFixture, "utf8"));
+  for (const splitName of ["development", "validation"]) {
+    const split = dry.contract.splits[splitName];
+    const folds = fixture.splits[splitName].folds;
+    const ids = new Set(folds.map((fold) => fold.foldId));
+    assert.equal(split.folds, 8);
+    assert.equal(split.roots, 3);
+    assert.equal(split.nested, 5);
+    assert.equal(split.maximumDepth, 2);
+    assert.equal(split.eventSnapshots, 40);
+    assert.equal(split.foldRowsPerSnapshot, 8);
+    assert.equal(split.positiveRate, 0.2);
+    assert.deepEqual(split.classes, {
+      positive: 8,
+      "no-relevant": 8,
+      "already-visible": 8,
+      "semantically-related-but-non-answering": 8,
+      "interruption-not-worthwhile": 8,
+    });
+    assert.deepEqual(split.eventKinds, {
+      "user-message": 10,
+      "tool-result": 10,
+      "assistant-message": 10,
+      stop: 10,
+    });
+    assert.deepEqual(new Set(split.allFoldIds), ids);
+    assert(folds.some((fold) => fold.depth === 2),
+      `${splitName} does not exercise a descendant below another nested fold`);
+  }
+
+  const source = readFileSync(transitionScript, "utf8");
+  assert(source.includes("return_offsets_mapping=True") &&
+    source.includes("attention.overlapping_token_positions(") &&
+    source.includes('active_only_encoded["input_ids"][0, candidate_tokens] = neutral_token_id'),
+  "the active-only control no longer erases the exact candidate token span");
+  assert(source.includes('active_only_encoded["input_ids"].shape == encoded["input_ids"].shape') &&
+    source.includes('active_only_encoded["attention_mask"].tolist()') &&
+    source.includes("attention-answerability-noncandidate-token-changed") &&
+    source.includes("boundary_crossing_tokens"),
+  "the active-only control no longer preserves equal geometry and every outside token");
+  assert(source.includes('logits[token_ids["sufficient"]]') &&
+    source.includes('logits[token_ids["insufficient"]]') &&
+    source.includes("sufficient_logit - insufficient_logit"),
+  "answerability no longer comes from constrained sufficient and insufficient logits");
+  assert(source.includes('min(expanded_margin, -active_only_margin)') &&
+    source.includes('row["transitionMargin"]') &&
+    source.includes('"confidence": winner["transitionMargin"]'),
+  "selection and interruption no longer share the answerability-transition bottleneck");
+  assert(source.includes('point["threshold"] > MINIMUM_TRANSITION_THRESHOLD') &&
+    source.includes('"status": "not-run-no-development-threshold"') &&
+    source.includes('trial["class"] == "positive"') &&
+    source.includes('winner["id"] in relevant'),
+  "the transition policy admits a nonpositive threshold or weakened correctness");
+  assert(source.includes("for fold_id in order:") &&
+    source.includes('len(prompts) == len(fold_ids)') &&
+    source.includes("attention-answerability-did-not-measure-every-fold"),
+  "the answerability scorer no longer measures every hierarchical fold");
+  assert(source.includes("truncation=False") &&
+    source.includes("attention-answerability-input-exceeds-model-context"),
+  "the answerability scorer silently truncates inputs that do not fit");
+  assert(!source.includes("output_attentions=True") &&
+    !source.includes("contrastive.prepare_paired_prompt(") &&
+    !source.includes("per_fold.prepare_fold_prompt("),
+  "the transition scorer silently retained a prior ranker or expansion prompt");
+  assert(!source.includes(".generate(") &&
+    !source.includes("max_new_tokens") &&
+    !/\bBM25\b/i.test(source) &&
+    !/folds\s*\[:\s*\d+/.test(source),
+  "the transition experiment gained generation, lexical prefiltering, or a fold cap");
+  assert(!source.includes("registerTool") &&
+    !source.includes("context.suggestion") &&
+    !source.includes('from "../extensions') &&
+    !source.includes("api.openai.com"),
+  "the transition experiment gained a carrier, shipped runtime path, or provider call");
+
+  checks.answerabilityMustTransitionFromInsufficientToSufficient = true;
+}
+
+// GATE 85 - model capacity changes while the answerability mechanism does not.
+//
+// Qwen3-1.7B NF4 reuses Gate 84's prompt builder, token ids, paired inputs, transition
+// bottleneck, threshold policy, fixture, labels, and validation lock. The live runner refuses
+// any development prompt or token sequence that differs from the sealed 0.6B artifact.
+// ---------------------------------------------------------------------------
+{
+  const capacityScript = join(
+    PROJECT, "scripts", "probe_attention_answerability_capacity.py");
+  const capacityFixture = join(
+    PROJECT, "scripts", "fixtures", "attention_utility_v1.json");
+  const capacityDryRun = spawnSync("python3", [capacityScript], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+  });
+  assert.equal(capacityDryRun.status, 0, capacityDryRun.stderr);
+  const dry = JSON.parse(capacityDryRun.stdout);
+  assert.equal(dry.live, false);
+  assert.equal(dry.modelLoads, 0);
+  assert.equal(dry.networkRequests, 0);
+  assert.equal(dry.contract.protocolVersion, 1);
+  assert.equal(dry.contract.scorerId,
+    "qwen3-1.7b-nf4-answerability-transition-v1");
+  assert.equal(dry.contract.mechanismScorerId,
+    "qwen3-per-fold-answerability-transition-v1");
+  assert.equal(dry.contract.policyId,
+    "positive-zero-false-answerability-transition-event-v1");
+  assert.equal(dry.contract.modelOnlyChange, true);
+  assert.equal(dry.contract.model, "Qwen/Qwen3-1.7B");
+  assert.equal(dry.contract.confidenceScalar,
+    "maximum per-fold minimum of expanded sufficiency margin and negated active-only sufficiency margin");
+  assert.deepEqual(dry.contract.choiceTokens, [" sufficient", " insufficient"]);
+  assert.equal(dry.contract.capacityComparison.baselineModel, "Qwen/Qwen3-0.6B");
+  assert.equal(dry.contract.capacityComparison.candidateModel, "Qwen/Qwen3-1.7B");
+  assert.equal(dry.contract.capacityComparison.baselineParametersBillions, 0.6);
+  assert.equal(dry.contract.capacityComparison.candidateParametersBillions, 1.7);
+  assert.equal(dry.contract.capacityComparison.candidateToBaselineParameterRatio,
+    1.7 / 0.6);
+  assert.deepEqual(dry.contract.capacityComparison.frozen, [
+    "prompt text",
+    "token ids",
+    "expanded input ids",
+    "active-only control input ids",
+    "fixture",
+    "labels",
+    "transition bottleneck",
+    "threshold policy",
+    "validation lock",
+  ]);
+  assert.deepEqual(dry.contract.capacityComparison.changed,
+    ["model weights", "model capacity", "NF4 quantization"]);
+  assert.deepEqual(dry.contract.quantization, {
+    method: "bitsandbytes-nf4",
+    loadIn4Bit: true,
+    doubleQuant: true,
+    computeDtype: "torch.float16",
+    quantStorage: "torch.uint8",
+  });
+  assert.equal(dry.contract.baselineArtifact,
+    "lab/attention-shadow/qwen3-0.6b-fp16-answerability-transition-v1.json");
+  assert.equal(dry.contract.inputTruncation, false);
+  assert.equal(dry.contract.prefilter, null);
+  assert.equal(dry.contract.generationCalls, 0);
+  assert.equal(dry.contract.providerCalls, 0);
+  assert.equal(dry.contract.labelsVisibleToScorer, false);
+  assert.equal(dry.contract.transition.thresholdIsStrictlyPositive, true);
+  assert.equal(dry.contract.calibration.requiredObservedPrecision, 1);
+  assert.equal(dry.contract.calibration.minimumOffers, 4);
+  assert.match(dry.contract.validation,
+    /not run unless development selects a threshold.*threshold frozen/);
+  assert.match(dry.contract.boundary,
+    /no prompt rewrite, score rewrite, threshold rewrite.*no.*provider request/);
+  assert.deepEqual(dry.selfTest, {
+    model: "Qwen/Qwen3-1.7B",
+    modelOnlyChange: true,
+    mechanismScorerId: "qwen3-per-fold-answerability-transition-v1",
+    policyId: "positive-zero-false-answerability-transition-event-v1",
+    transitionMargin: 1,
+    zeroThresholdRefused: true,
+    quantization: {
+      method: "bitsandbytes-nf4",
+      loadIn4Bit: true,
+      doubleQuant: true,
+      computeDtype: "torch.float16",
+      quantStorage: "torch.uint8",
+    },
+    deviceMapFallback: {"": "cuda:0"},
+  });
+
+  const fixture = JSON.parse(readFileSync(capacityFixture, "utf8"));
+  for (const splitName of ["development", "validation"]) {
+    const split = dry.contract.splits[splitName];
+    const folds = fixture.splits[splitName].folds;
+    assert.equal(split.folds, 8);
+    assert.equal(split.roots, 3);
+    assert.equal(split.nested, 5);
+    assert.equal(split.maximumDepth, 2);
+    assert.equal(split.eventSnapshots, 40);
+    assert.equal(split.foldRowsPerSnapshot, 8);
+    assert.equal(split.positiveRate, 0.2);
+  }
+
+  const source = readFileSync(capacityScript, "utf8");
+  assert(source.includes("import probe_attention_answerability_transition as transition") &&
+    source.includes("transition.prepare_split(") &&
+    source.includes("transition.run_prepared_split(") &&
+    source.includes("transition.calibrate_threshold(") &&
+    !source.includes("def build_prompt_text("),
+  "the capacity falsifier no longer reuses the frozen Gate 84 mechanism");
+  assert(source.includes('baseline.get("source", {}).get("scriptSha256")') &&
+    source.includes("attention-capacity-frozen-mechanism-source-drift") &&
+    source.includes('prompt["promptSha256"] != old["promptSha256"]') &&
+    source.includes('prompt["expandedInputSha256"] != old["expandedInputSha256"]') &&
+    source.includes('prompt["activeOnlyInputSha256"] != old["activeOnlyInputSha256"]') &&
+    source.includes("attention-capacity-model-swap-changed-frozen-inputs"),
+  "the model swap no longer proves byte and token identity with the sealed baseline");
+  assert(source.includes("BitsAndBytesConfig(") &&
+    source.includes('bnb_4bit_quant_type="nf4"') &&
+    source.includes("bnb_4bit_use_double_quant=True") &&
+    source.includes("bnb_4bit_compute_dtype=torch.float16") &&
+    source.includes("bnb_4bit_quant_storage=torch.uint8"),
+  "the capacity model no longer uses the frozen NF4 loading contract");
+  assert(source.includes('args.model == DEFAULT_MODEL') &&
+    source.includes("attention-capacity-model-is-frozen") &&
+    source.includes('validation["status"] = "evaluated-with-frozen-threshold"') &&
+    source.includes('validation["falseOffers"] == 0'),
+  "the capacity model or fail-closed validation policy is no longer frozen");
+  assert.equal(source.match(/transition\.run_prepared_split\(/g)?.length, 2);
+  assert(source.includes('split_name="development"') &&
+    source.includes('split_name="validation"') &&
+    source.match(/torch=torch,/g)?.length === 2 &&
+    source.match(/model=model,/g)?.length === 2 &&
+    source.match(/device=args\.device,/g)?.length === 2 &&
+    source.match(/token_ids=token_ids,/g)?.length === 2,
+  "the capacity falsifier no longer calls the frozen scorer with its exact interface");
+  assert(source.includes('reported = getattr(model, "hf_device_map", None)') &&
+    source.includes('return {"": str(parameter.device)}') &&
+    source.includes('"deviceMap": model_device_map(model)') &&
+    source.indexOf('"deviceMap": model_device_map(model)') <
+      source.indexOf("development_trials, development_times ="),
+  "the expensive capacity sweep can again fail after inference on missing device metadata");
+  assert(!source.includes(".generate(") &&
+    !source.includes("max_new_tokens") &&
+    !/\bBM25\b/i.test(source) &&
+    !/folds\s*\[:\s*\d+/.test(source),
+  "the capacity experiment gained generation, lexical prefiltering, or a fold cap");
+  assert(!source.includes("registerTool") &&
+    !source.includes("context.suggestion") &&
+    !source.includes('from "../extensions') &&
+    !source.includes("api.openai.com"),
+  "the capacity experiment gained a carrier, shipped runtime path, or provider call");
+
+  checks.aLargerQuantizedModelCannotChangeTheFrozenMechanism = true;
+}
+
+// GATE 86 - direct source attribution distinguishes candidate, active, and neither.
+//
+// One constrained-choice forward per complete root or nested fold asks the distinction that
+// the larger answerability model still blurred. The candidate margin over the stronger active
+// or neither alternative jointly selects a fold and decides whether interruption is warranted.
+// Development precision remains primary and validation stays sealed until it qualifies.
+// ---------------------------------------------------------------------------
+{
+  const sourceScript = join(
+    PROJECT, "scripts", "probe_attention_source_attribution.py");
+  const sourceFixture = join(
+    PROJECT, "scripts", "fixtures", "attention_utility_v1.json");
+  const sourceDryRun = spawnSync("python3", [sourceScript], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+  });
+  assert.equal(sourceDryRun.status, 0, sourceDryRun.stderr);
+  const dry = JSON.parse(sourceDryRun.stdout);
+  assert.equal(dry.live, false);
+  assert.equal(dry.modelLoads, 0);
+  assert.equal(dry.networkRequests, 0);
+  assert.equal(dry.contract.protocolVersion, 1);
+  assert.equal(dry.contract.scorerId,
+    "qwen3-per-fold-source-attribution-v1");
+  assert.equal(dry.contract.policyId,
+    "positive-zero-false-source-attribution-event-v1");
+  assert.equal(dry.contract.confidenceScalar,
+    "maximum per-fold candidate logit minus the larger of active and neither logits");
+  assert.equal(dry.contract.model, "Qwen/Qwen3-1.7B");
+  assert.deepEqual(dry.contract.choiceTokens,
+    [" candidate", " active", " neither"]);
+  assert.equal(dry.contract.judgment.candidate,
+    "active context alone is insufficient and this fold supplies every missing fact needed to answer correctly and completely");
+  assert.equal(dry.contract.judgment.active,
+    "active context alone already contains enough stated evidence to answer or perform the task, so this fold is unnecessary");
+  assert.equal(dry.contract.judgment.neither,
+    "active context alone is insufficient and this fold also does not supply all missing evidence");
+  assert.equal(dry.contract.score,
+    "candidate logit minus max(active logit, neither logit) for each complete fold");
+  assert.equal(dry.contract.candidateUniverse, "standing folded nodes only");
+  assert.equal(dry.contract.candidateSelection,
+    "all supplied fold nodes in every decision");
+  assert.equal(dry.contract.forwardsPerDecision,
+    "one independent local-model forward per supplied fold; the count varies with the complete standing fold set");
+  assert.equal(dry.contract.inputTruncation, false);
+  assert.equal(dry.contract.prefilter, null);
+  assert.equal(dry.contract.generationCalls, 0);
+  assert.equal(dry.contract.providerCalls, 0);
+  assert.equal(dry.contract.labelsVisibleToScorer, false);
+  assert.equal(dry.contract.calibration.requiredObservedPrecision, 1);
+  assert.equal(dry.contract.calibration.minimumOffers, 4);
+  assert.equal(dry.contract.calibration.minimumThreshold, 0);
+  assert.equal(dry.contract.calibration.thresholdIsStrictlyPositive, true);
+  assert.match(dry.contract.validation,
+    /not run unless development selects a threshold.*threshold frozen/);
+  assert(dry.contract.boundary.includes("no attention-tensor claim") &&
+    dry.contract.boundary.includes("provider request") &&
+    dry.contract.boundary.includes("cap, truncation"));
+  assert.deepEqual(dry.contract.quantization, {
+    method: "bitsandbytes-nf4",
+    loadIn4Bit: true,
+    doubleQuant: true,
+    computeDtype: "torch.float16",
+    quantStorage: "torch.uint8",
+  });
+
+  for (const splitName of ["development", "validation"]) {
+    const split = dry.contract.splits[splitName];
+    assert.equal(split.folds, 8);
+    assert.equal(split.roots, 3);
+    assert.equal(split.nested, 5);
+    assert.equal(split.maximumDepth, 2);
+    assert.equal(split.eventSnapshots, 40);
+    assert.equal(split.foldRowsPerSnapshot, 8);
+    assert.equal(split.positiveRate, 0.2);
+    assert.deepEqual(split.classes, {
+      positive: 8,
+      "no-relevant": 8,
+      "already-visible": 8,
+      "semantically-related-but-non-answering": 8,
+      "interruption-not-worthwhile": 8,
+    });
+    assert.deepEqual(split.eventKinds, {
+      "user-message": 10,
+      "tool-result": 10,
+      "assistant-message": 10,
+      stop: 10,
+    });
+  }
+
+  assert.deepEqual(dry.selfTest, {
+    candidateMargin: 3,
+    candidateChoice: "candidate",
+    activeMargin: -3,
+    activeChoice: "active",
+    neitherMargin: -3,
+    neitherChoice: "neither",
+    rankedFoldIds: ["a-fold", "z-fold", "low-fold"],
+    threshold: 0.6,
+    offers: 4,
+    falseOffers: 0,
+    zeroThresholdRefused: true,
+    wrongFoldOnPositiveIsFalse: true,
+  });
+
+  const fixture = JSON.parse(readFileSync(sourceFixture, "utf8"));
+  assert.equal(dry.fixtureSha256,
+    "af0b3d2731839bac524bf4d510be414f9f30abd700128f70bbe9596a5d00a965");
+  assert.deepEqual(Object.keys(fixture.splits).sort(), ["development", "validation"]);
+
+  const source = readFileSync(sourceScript, "utf8");
+  const promptStart = source.indexOf("def build_prompt_text(");
+  const promptEnd = source.indexOf("\ndef prepare_fold_prompt(", promptStart);
+  assert(promptStart >= 0 && promptEnd > promptStart);
+  const promptSource = source.slice(promptStart, promptEnd);
+  assert(promptSource.includes("Choose candidate only when") &&
+    promptSource.includes("Choose active when") &&
+    promptSource.includes("Choose neither when") &&
+    promptSource.includes("Topical relation, partial evidence") &&
+    promptSource.includes('enable_thinking=False') &&
+    promptSource.includes('return rendered + "Source:"'),
+  "the source judge no longer asks the direct three-way distinction");
+  assert(!promptSource.includes('case["class"]') &&
+    !promptSource.includes('case["themeFoldId"]') &&
+    !promptSource.includes('case["relevantFoldIds"]') &&
+    !promptSource.includes("expected_source("),
+  "development labels leaked into the source-attribution prompt");
+  assert(source.includes('logits[token_ids["candidate"]]') &&
+    source.includes('logits[token_ids["active"]]') &&
+    source.includes('logits[token_ids["neither"]]') &&
+    source.includes("alternative = max(active_logit, neither_logit)") &&
+    source.includes('"candidateSourceMargin": candidate_logit - alternative'),
+  "source attribution no longer comes from the three constrained logits");
+  assert(source.includes('key=lambda row: (-row["candidateSourceMargin"], row["id"])') &&
+    source.includes('"confidence": winner["candidateSourceMargin"]'),
+  "fold selection and interruption no longer share one candidate-source margin");
+  assert(source.includes("for fold_id in order:") &&
+    source.includes('len(prompts) == len(fold_ids)') &&
+    source.includes("attention-source-did-not-measure-every-fold"),
+  "source attribution no longer measures every hierarchical fold");
+  assert(source.includes("truncation=False") &&
+    source.includes("attention-source-input-exceeds-model-context"),
+  "source attribution silently truncates an input that does not fit");
+  assert(source.includes('point["threshold"] > MINIMUM_ATTRIBUTION_THRESHOLD') &&
+    source.includes('point["offers"] >= MIN_DEVELOPMENT_OFFERS') &&
+    source.includes('point["precision"] == DEVELOPMENT_REQUIRED_PRECISION') &&
+    source.includes('"status": "not-run-no-development-threshold"') &&
+    source.includes('validation["status"] = "evaluated-with-frozen-threshold"') &&
+    source.includes('validation["falseOffers"] == 0'),
+  "the source-attribution precision gate or fail-closed validation weakened");
+  assert(source.indexOf("values, forward_seconds = score_once(") <
+    source.indexOf('"expectedSource": expected_source('),
+  "source labels are joined before scoring instead of after it");
+  assert(source.includes("BitsAndBytesConfig(") &&
+    source.includes('bnb_4bit_quant_type="nf4"') &&
+    source.includes("bnb_4bit_use_double_quant=True") &&
+    source.includes("bnb_4bit_compute_dtype=torch.float16") &&
+    source.includes("bnb_4bit_quant_storage=torch.uint8") &&
+    source.includes('args.model == DEFAULT_MODEL') &&
+    source.includes("attention-source-model-is-frozen") &&
+    source.includes('"deviceMap": capacity.model_device_map(model)') &&
+    source.indexOf('"deviceMap": capacity.model_device_map(model)') <
+      source.indexOf("development_trials, development_times ="),
+  "the source-attribution model or pre-inference metadata contract drifted");
+  assert(!source.includes("output_attentions=True") &&
+    !source.includes(".generate(") &&
+    !source.includes("max_new_tokens") &&
+    !/\bBM25\b/i.test(source) &&
+    !/folds\s*\[:\s*\d+/.test(source),
+  "source attribution gained tensor claims, generation, lexical prefiltering, or a fold cap");
+  assert(!source.includes("registerTool") &&
+    !source.includes("context.suggestion") &&
+    !source.includes('from "../extensions') &&
+    !source.includes("api.openai.com"),
+  "source attribution gained a carrier, shipped runtime path, or provider call");
+
+  checks.sourceAttributionMustNameCandidateActiveOrNeither = true;
+}
+
+// GATE 87 - missing evidence must be true before a fold can interrupt.
+//
+// One binary proposition replaces the rejected three-label source judgment. Each complete
+// root or nested fold is scored independently: true only when active context is insufficient
+// and that exact fold supplies every missing stated fact. A strictly positive truth margin
+// selects the fold and gates interruption. Development still requires four zero-false offers,
+// and held-out validation remains sealed until that threshold exists.
+// ---------------------------------------------------------------------------
+{
+  const missingScript = join(
+    PROJECT, "scripts", "probe_attention_missing_evidence.py");
+  const missingFixture = join(
+    PROJECT, "scripts", "fixtures", "attention_utility_v1.json");
+  const missingDryRun = spawnSync("python3", [missingScript], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+  });
+  assert.equal(missingDryRun.status, 0, missingDryRun.stderr);
+  const dry = JSON.parse(missingDryRun.stdout);
+  assert.equal(dry.live, false);
+  assert.equal(dry.modelLoads, 0);
+  assert.equal(dry.networkRequests, 0);
+  assert.equal(dry.contract.protocolVersion, 1);
+  assert.equal(dry.contract.scorerId,
+    "qwen3-per-fold-missing-evidence-proposition-v1");
+  assert.equal(dry.contract.policyId,
+    "positive-zero-false-missing-evidence-event-v1");
+  assert.equal(dry.contract.confidenceScalar,
+    "maximum per-fold true logit minus false logit");
+  assert.equal(dry.contract.model, "Qwen/Qwen3-1.7B");
+  assert.deepEqual(dry.contract.choiceTokens, [" true", " false"]);
+  assert.equal(dry.contract.proposition,
+    "this exact fold supplies every piece of stated evidence missing from active context that is needed to answer the current task correctly and completely");
+  assert.deepEqual(dry.contract.falseWhen, [
+    "active context already suffices",
+    "the fold is merely related or partial",
+    "the fold does not answer the task",
+    "the task can be performed from the active instruction alone",
+  ]);
+  assert.equal(dry.contract.score,
+    "true logit minus false logit for each complete fold");
+  assert.equal(dry.contract.candidateUniverse, "standing folded nodes only");
+  assert.equal(dry.contract.candidateSelection,
+    "all supplied fold nodes in every decision");
+  assert.equal(dry.contract.forwardsPerDecision,
+    "one independent local-model forward per supplied fold; the count varies with the complete standing fold set");
+  assert.equal(dry.contract.inputTruncation, false);
+  assert.equal(dry.contract.prefilter, null);
+  assert.equal(dry.contract.generationCalls, 0);
+  assert.equal(dry.contract.providerCalls, 0);
+  assert.equal(dry.contract.labelsVisibleToScorer, false);
+  assert.equal(dry.contract.calibration.requiredObservedPrecision, 1);
+  assert.equal(dry.contract.calibration.minimumOffers, 4);
+  assert.equal(dry.contract.calibration.minimumThreshold, 0);
+  assert.equal(dry.contract.calibration.thresholdIsStrictlyPositive, true);
+  assert.match(dry.contract.validation,
+    /not run unless development selects a threshold.*threshold frozen/);
+  assert(dry.contract.boundary.includes("no attention-tensor claim") &&
+    dry.contract.boundary.includes("three-way source score") &&
+    dry.contract.boundary.includes("provider request") &&
+    dry.contract.boundary.includes("cap, truncation"));
+  assert.deepEqual(dry.contract.quantization, {
+    method: "bitsandbytes-nf4",
+    loadIn4Bit: true,
+    doubleQuant: true,
+    computeDtype: "torch.float16",
+    quantStorage: "torch.uint8",
+  });
+
+  for (const splitName of ["development", "validation"]) {
+    const split = dry.contract.splits[splitName];
+    assert.equal(split.folds, 8);
+    assert.equal(split.roots, 3);
+    assert.equal(split.nested, 5);
+    assert.equal(split.maximumDepth, 2);
+    assert.equal(split.eventSnapshots, 40);
+    assert.equal(split.foldRowsPerSnapshot, 8);
+    assert.equal(split.positiveRate, 0.2);
+    assert.deepEqual(split.classes, {
+      positive: 8,
+      "no-relevant": 8,
+      "already-visible": 8,
+      "semantically-related-but-non-answering": 8,
+      "interruption-not-worthwhile": 8,
+    });
+    assert.deepEqual(split.eventKinds, {
+      "user-message": 10,
+      "tool-result": 10,
+      "assistant-message": 10,
+      stop: 10,
+    });
+  }
+
+  assert.deepEqual(dry.selfTest, {
+    trueMargin: 3,
+    trueChoice: "true",
+    falseMargin: -3,
+    falseChoice: "false",
+    rankedFoldIds: ["a-fold", "z-fold", "low-fold"],
+    threshold: 0.6,
+    offers: 4,
+    falseOffers: 0,
+    zeroThresholdRefused: true,
+    wrongFoldOnPositiveIsFalse: true,
+  });
+
+  const fixture = JSON.parse(readFileSync(missingFixture, "utf8"));
+  assert.equal(dry.fixtureSha256,
+    "af0b3d2731839bac524bf4d510be414f9f30abd700128f70bbe9596a5d00a965");
+  assert.deepEqual(Object.keys(fixture.splits).sort(), ["development", "validation"]);
+
+  const source = readFileSync(missingScript, "utf8");
+  const promptStart = source.indexOf("def build_prompt_text(");
+  const promptEnd = source.indexOf("\ndef prepare_fold_prompt(", promptStart);
+  assert(promptStart >= 0 && promptEnd > promptStart);
+  const promptSource = source.slice(promptStart, promptEnd);
+  assert(promptSource.includes("It is true only when active context alone is insufficient") &&
+    promptSource.includes("supplies every missing stated fact") &&
+    promptSource.includes("It is false when active context already suffices") &&
+    promptSource.includes("merely related or partial") &&
+    promptSource.includes("This exact candidate fold supplies every piece of stated evidence missing from active") &&
+    promptSource.includes('enable_thinking=False') &&
+    promptSource.includes('return rendered + "Verdict:"'),
+  "the binary scorer no longer asks the frozen missing-evidence proposition");
+  assert(!promptSource.includes('case["class"]') &&
+    !promptSource.includes('case["themeFoldId"]') &&
+    !promptSource.includes('case["relevantFoldIds"]') &&
+    !promptSource.includes("expected_truth("),
+  "development labels leaked into the missing-evidence prompt");
+  assert(source.includes('logits[token_ids["true"]]') &&
+    source.includes('logits[token_ids["false"]]') &&
+    source.includes("margin = true_logit - false_logit") &&
+    source.includes('"truthMargin": margin'),
+  "the missing-evidence score no longer comes from the two constrained logits");
+  assert(source.includes('key=lambda row: (-row["truthMargin"], row["id"])') &&
+    source.includes('"confidence": winner["truthMargin"]'),
+  "fold selection and interruption no longer share one truth margin");
+  assert(source.includes("for fold_id in order:") &&
+    source.includes('len(prompts) == len(fold_ids)') &&
+    source.includes("attention-missing-did-not-measure-every-fold"),
+  "the missing-evidence scorer no longer measures every hierarchical fold");
+  assert(source.includes("truncation=False") &&
+    source.includes("attention-missing-input-exceeds-model-context"),
+  "the missing-evidence scorer silently truncates an input that does not fit");
+  assert(source.includes('point["threshold"] > MINIMUM_PROPOSITION_THRESHOLD') &&
+    source.includes('point["offers"] >= MIN_DEVELOPMENT_OFFERS') &&
+    source.includes('point["precision"] == DEVELOPMENT_REQUIRED_PRECISION') &&
+    source.includes('"status": "not-run-no-development-threshold"') &&
+    source.includes('validation["status"] = "evaluated-with-frozen-threshold"') &&
+    source.includes('validation["falseOffers"] == 0'),
+  "the missing-evidence precision gate or fail-closed validation weakened");
+  assert(source.indexOf("values, forward_seconds = score_once(") <
+    source.indexOf('"expectedTruth": expected_truth('),
+  "expected truth is joined before scoring instead of after it");
+  assert(source.includes("BitsAndBytesConfig(") &&
+    source.includes('bnb_4bit_quant_type="nf4"') &&
+    source.includes("bnb_4bit_use_double_quant=True") &&
+    source.includes("bnb_4bit_compute_dtype=torch.float16") &&
+    source.includes("bnb_4bit_quant_storage=torch.uint8") &&
+    source.includes('args.model == DEFAULT_MODEL') &&
+    source.includes("attention-missing-model-is-frozen") &&
+    source.includes('"deviceMap": capacity.model_device_map(model)') &&
+    source.indexOf('"deviceMap": capacity.model_device_map(model)') <
+      source.indexOf("development_trials, development_times ="),
+  "the missing-evidence model or pre-inference metadata contract drifted");
+  assert(!source.includes("output_attentions=True") &&
+    !source.includes(".generate(") &&
+    !source.includes("max_new_tokens") &&
+    !/\bBM25\b/i.test(source) &&
+    !/folds\s*\[:\s*\d+/.test(source),
+  "the missing-evidence experiment gained tensor claims, generation, lexical prefiltering, or a fold cap");
+  assert(!source.includes("registerTool") &&
+    !source.includes("context.suggestion") &&
+    !source.includes('from "../extensions') &&
+    !source.includes("api.openai.com"),
+  "the missing-evidence experiment gained a carrier, shipped runtime path, or provider call");
+
+  checks.missingEvidenceMustBeTrueBeforeAFoldCanInterrupt = true;
+}
+
+// GATE 88 - reversed neutral verbalizers must agree before interruption.
+//
+// The missing-evidence proposition and Qwen3-1.7B model remain fixed. Two neutral one-token
+// labels reverse their truth mapping in independent forwards for every complete fold. The
+// minimum semantic truth margin rejects a fixed label preference because both mappings must
+// choose truth. Development and held-out validation retain the Gate 87 precision boundary.
+// ---------------------------------------------------------------------------
+{
+  const verbalizerScript = join(
+    PROJECT, "scripts", "probe_attention_verbalizer_symmetry.py");
+  const verbalizerFixture = join(
+    PROJECT, "scripts", "fixtures", "attention_utility_v1.json");
+  const verbalizerDryRun = spawnSync("python3", [verbalizerScript], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+  });
+  assert.equal(verbalizerDryRun.status, 0, verbalizerDryRun.stderr);
+  const dry = JSON.parse(verbalizerDryRun.stdout);
+  assert.equal(dry.live, false);
+  assert.equal(dry.modelLoads, 0);
+  assert.equal(dry.networkRequests, 0);
+  assert.equal(dry.contract.protocolVersion, 1);
+  assert.equal(dry.contract.scorerId,
+    "qwen3-per-fold-counterbalanced-verbalizer-v1");
+  assert.equal(dry.contract.policyId,
+    "positive-zero-false-counterbalanced-verbalizer-event-v1");
+  assert.equal(dry.contract.confidenceScalar,
+    "maximum per-fold minimum semantic truth margin across reversed A/B mappings");
+  assert.equal(dry.contract.model, "Qwen/Qwen3-1.7B");
+  assert.deepEqual(dry.contract.choiceTokens, [" A", " B"]);
+  assert.deepEqual(dry.contract.choiceTokenIds, {A: 362, B: 425});
+  assert.deepEqual(dry.contract.mappingPrompts, [
+    {id: "a-means-true", trueLabel: "A", falseLabel: "B"},
+    {id: "b-means-true", trueLabel: "B", falseLabel: "A"},
+  ]);
+  assert.equal(dry.contract.proposition,
+    "this exact fold supplies every piece of stated evidence missing from active context that is needed to answer the current task correctly and completely");
+  assert.equal(dry.contract.score,
+    "minimum of the semantic true-minus-false margin under A-means-true and B-means-true mappings");
+  assert.equal(dry.contract.forwardsPerDecision,
+    "two independent reversed-mapping forwards per supplied fold; the count is twice the complete standing fold set");
+  assert.deepEqual(dry.contract.predecessor, {
+    scorerId: "qwen3-per-fold-missing-evidence-proposition-v1",
+    policyId: "positive-zero-false-missing-evidence-event-v1",
+    evidenceSha256:
+      "4d35c767eb309188d527b44e8f99f46f182aa0c736da59f62f9c104663ddbfc4",
+    semanticPropositionUnchanged: true,
+    onlyMechanismChange:
+      "replace true/false response tokens with two neutral labels and reverse their truth mapping",
+  });
+  assert.equal(dry.contract.candidateUniverse, "standing folded nodes only");
+  assert.equal(dry.contract.candidateSelection,
+    "all supplied fold nodes in every decision");
+  assert.equal(dry.contract.inputTruncation, false);
+  assert.equal(dry.contract.prefilter, null);
+  assert.equal(dry.contract.generationCalls, 0);
+  assert.equal(dry.contract.providerCalls, 0);
+  assert.equal(dry.contract.labelsVisibleToScorer, false);
+  assert.equal(dry.contract.calibration.requiredObservedPrecision, 1);
+  assert.equal(dry.contract.calibration.minimumOffers, 4);
+  assert.equal(dry.contract.calibration.minimumThreshold, 0);
+  assert.equal(dry.contract.calibration.thresholdIsStrictlyPositive, true);
+  assert.match(dry.contract.validation,
+    /not run unless development selects a threshold.*threshold frozen/);
+  assert(dry.contract.boundary.includes("no semantic proposition rewrite") &&
+    dry.contract.boundary.includes("provider request") &&
+    dry.contract.boundary.includes("cap, truncation"));
+  assert.deepEqual(dry.contract.quantization, {
+    method: "bitsandbytes-nf4",
+    loadIn4Bit: true,
+    doubleQuant: true,
+    computeDtype: "torch.float16",
+    quantStorage: "torch.uint8",
+  });
+
+  for (const splitName of ["development", "validation"]) {
+    const split = dry.contract.splits[splitName];
+    assert.equal(split.folds, 8);
+    assert.equal(split.roots, 3);
+    assert.equal(split.nested, 5);
+    assert.equal(split.maximumDepth, 2);
+    assert.equal(split.eventSnapshots, 40);
+    assert.equal(split.foldRowsPerSnapshot, 8);
+    assert.equal(split.positiveRate, 0.2);
+    assert.deepEqual(split.classes, {
+      positive: 8,
+      "no-relevant": 8,
+      "already-visible": 8,
+      "semantically-related-but-non-answering": 8,
+      "interruption-not-worthwhile": 8,
+    });
+    assert.deepEqual(split.eventKinds, {
+      "user-message": 10,
+      "tool-result": 10,
+      "assistant-message": 10,
+      stop: 10,
+    });
+  }
+
+  assert.deepEqual(dry.selfTest, {
+    consistentTrueMargin: 3,
+    consistentTrueLabels: ["A", "B"],
+    fixedLabelPriorMargin: -3,
+    fixedLabelPriorLabels: ["A", "A"],
+    consistentFalseMargin: -3,
+    rankedFoldIds: ["a-fold", "z-fold", "low-fold"],
+    threshold: 0.6,
+    offers: 4,
+    falseOffers: 0,
+    zeroThresholdRefused: true,
+  });
+
+  const fixture = JSON.parse(readFileSync(verbalizerFixture, "utf8"));
+  assert.equal(dry.fixtureSha256,
+    "af0b3d2731839bac524bf4d510be414f9f30abd700128f70bbe9596a5d00a965");
+  assert.deepEqual(Object.keys(fixture.splits).sort(), ["development", "validation"]);
+
+  const source = readFileSync(verbalizerScript, "utf8");
+  const promptStart = source.indexOf("def build_prompt_text(");
+  const promptEnd = source.indexOf("\ndef prepare_mapping_prompt(", promptStart);
+  assert(promptStart >= 0 && promptEnd > promptStart);
+  const promptSource = source.slice(promptStart, promptEnd);
+  assert(promptSource.includes("It is true only when active context alone is insufficient") &&
+    promptSource.includes("supplies every missing stated fact") &&
+    promptSource.includes("It is false when active context already suffices") &&
+    promptSource.includes("merely related or partial") &&
+    promptSource.includes("This exact candidate fold supplies every piece of stated evidence missing from active") &&
+    promptSource.includes("The response labels are arbitrary") &&
+    promptSource.includes("means the proposition is true") &&
+    promptSource.includes("means it is") &&
+    promptSource.includes('enable_thinking=False') &&
+    promptSource.includes('return rendered + "Label:"'),
+  "the verbalizer control changed the proposition or lost its reversed label mapping");
+  assert(!promptSource.includes('case["class"]') &&
+    !promptSource.includes('case["themeFoldId"]') &&
+    !promptSource.includes('case["relevantFoldIds"]') &&
+    !promptSource.includes("expected_truth("),
+  "development labels leaked into the verbalizer prompt");
+  assert(source.includes('result == EXPECTED_LABEL_TOKEN_IDS') &&
+    source.includes("attention-verbalizer-label-token-drift") &&
+    source.includes('if true_label == "A"') &&
+    source.includes("return label_a_logit - label_b_logit") &&
+    source.includes("return label_b_logit - label_a_logit") &&
+    source.includes('"counterbalancedTruthMargin": min(margins)'),
+  "the verbalizer score no longer reverses truth coding and takes the consistency bottleneck");
+  assert(source.includes("for mapping_prompt in prompt[\"mappings\"]:") &&
+    source.includes("score_mapping_once(") &&
+    source.includes('totals["forwardPasses"] += len(MAPPINGS)'),
+  "each fold no longer receives both reversed-mapping forwards");
+  assert(source.includes('key=lambda row: (-row["counterbalancedTruthMargin"], row["id"])') &&
+    source.includes('"confidence": winner["counterbalancedTruthMargin"]'),
+  "fold selection and interruption no longer share one counterbalanced margin");
+  assert(source.includes("for fold_id in order:") &&
+    source.includes('len(prompts) == len(fold_ids)') &&
+    source.includes("attention-verbalizer-did-not-measure-every-fold"),
+  "the verbalizer control no longer measures every hierarchical fold");
+  assert(source.includes("truncation=False") &&
+    source.includes("attention-verbalizer-input-exceeds-model-context") &&
+    source.includes("attention-verbalizer-reversal-changed-token-count"),
+  "a verbalizer input can be truncated or change token count across mappings");
+  assert(source.includes('point["threshold"] > MINIMUM_SYMMETRY_THRESHOLD') &&
+    source.includes('point["offers"] >= MIN_DEVELOPMENT_OFFERS') &&
+    source.includes('point["precision"] == DEVELOPMENT_REQUIRED_PRECISION') &&
+    source.includes('"status": "not-run-no-development-threshold"') &&
+    source.includes('validation["status"] = "evaluated-with-frozen-threshold"') &&
+    source.includes('validation["falseOffers"] == 0'),
+  "the counterbalanced precision gate or fail-closed validation weakened");
+  assert(source.includes('elif args.development_only:') &&
+    source.includes('"status": "pending-frozen-development-threshold"') &&
+    source.includes('"threshold": selected["threshold"]') &&
+    source.includes('parser.add_argument(\n        "--development-only"'),
+  "the bounded development checkpoint can no longer preserve a qualifying threshold");
+  assert(source.indexOf("values, forward_seconds = score_pair(") <
+    source.indexOf('"expectedTruth": expected_truth('),
+  "expected truth is joined before counterbalanced scoring instead of after it");
+  assert(source.includes("BitsAndBytesConfig(") &&
+    source.includes('bnb_4bit_quant_type="nf4"') &&
+    source.includes("bnb_4bit_use_double_quant=True") &&
+    source.includes("bnb_4bit_compute_dtype=torch.float16") &&
+    source.includes("bnb_4bit_quant_storage=torch.uint8") &&
+    source.includes('args.model == DEFAULT_MODEL') &&
+    source.includes("attention-verbalizer-model-is-frozen") &&
+    source.includes('"deviceMap": capacity.model_device_map(model)') &&
+    source.indexOf('"deviceMap": capacity.model_device_map(model)') <
+      source.indexOf("development_trials, development_times ="),
+  "the verbalizer model or pre-inference metadata contract drifted");
+  assert(!source.includes("output_attentions=True") &&
+    !source.includes(".generate(") &&
+    !source.includes("max_new_tokens") &&
+    !/\bBM25\b/i.test(source) &&
+    !/folds\s*\[:\s*\d+/.test(source),
+  "the verbalizer control gained tensor claims, generation, lexical prefiltering, or a fold cap");
+  assert(!source.includes("registerTool") &&
+    !source.includes("context.suggestion") &&
+    !source.includes('from "../extensions') &&
+    !source.includes("api.openai.com"),
+  "the verbalizer control gained a carrier, shipped runtime path, or provider call");
+
+  checks.reversedNeutralVerbalizersMustAgreeBeforeInterruption = true;
+}
+
+// GATE 89 - a different model family cannot rewrite the frozen verbalizer scorer.
+//
+// Granite 3.3 replaces Qwen3 weights, architecture, tokenizer, and native chat template.
+// The semantic prompt builder, missing-evidence proposition, reversed A/B mapping, minimum
+// truth bottleneck, complete fold hierarchy, precision policy, and validation lock remain
+// owned by Gate 88. Development labels still join only after every independent pair scores.
+// ---------------------------------------------------------------------------
+{
+  const familyScript = join(
+    PROJECT, "scripts", "probe_attention_verbalizer_family.py");
+  const familyFixture = join(
+    PROJECT, "scripts", "fixtures", "attention_utility_v1.json");
+  const familyDryRun = spawnSync("python3", [familyScript], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+  });
+  assert.equal(familyDryRun.status, 0, familyDryRun.stderr);
+  const dry = JSON.parse(familyDryRun.stdout);
+  assert.equal(dry.live, false);
+  assert.equal(dry.modelLoads, 0);
+  assert.equal(dry.networkRequests, 0);
+  assert.equal(dry.contract.protocolVersion, 1);
+  assert.equal(dry.contract.scorerId,
+    "granite3.3-per-fold-counterbalanced-verbalizer-v1");
+  assert.equal(dry.contract.policyId,
+    "positive-zero-false-counterbalanced-verbalizer-event-v1");
+  assert.equal(dry.contract.confidenceScalar,
+    "maximum per-fold minimum semantic truth margin across reversed A/B mappings");
+  assert.equal(dry.contract.model,
+    "ibm-granite/granite-3.3-2b-instruct");
+  assert.equal(dry.contract.modelFamilyOnlyChange, true);
+  assert.deepEqual(dry.contract.choiceTokens, [" A", " B"]);
+  assert.deepEqual(dry.contract.choiceTokenIds, {A: 399, B: 551});
+  assert.deepEqual(dry.contract.mappingPrompts, [
+    {id: "a-means-true", trueLabel: "A", falseLabel: "B"},
+    {id: "b-means-true", trueLabel: "B", falseLabel: "A"},
+  ]);
+  assert.equal(dry.contract.proposition,
+    "this exact fold supplies every piece of stated evidence missing from active context that is needed to answer the current task correctly and completely");
+  assert.equal(dry.contract.score,
+    "minimum of the semantic true-minus-false margin under A-means-true and B-means-true mappings");
+  assert.deepEqual(dry.contract.predecessor, {
+    scorerId: "qwen3-per-fold-counterbalanced-verbalizer-v1",
+    policyId: "positive-zero-false-counterbalanced-verbalizer-event-v1",
+    model: "Qwen/Qwen3-1.7B",
+    evidenceSha256:
+      "9baffc932baf911dba453c4dd0cc79d1c9060ca958149eeafd111cdd7442fa6c",
+  });
+  assert.deepEqual(dry.contract.familyComparison.frozen, [
+    "semantic prompt builder",
+    "missing-evidence proposition",
+    "A/B mapping reversal",
+    "minimum semantic truth bottleneck",
+    "fixture",
+    "labels",
+    "complete hierarchy",
+    "threshold policy",
+    "validation lock",
+    "NF4 quantization",
+  ]);
+  assert.deepEqual(dry.contract.familyComparison.changed, [
+    "model weights",
+    "model family",
+    "model architecture",
+    "tokenizer",
+    "native chat template",
+    "label token ids",
+  ]);
+  assert.equal(dry.contract.candidateUniverse, "standing folded nodes only");
+  assert.equal(dry.contract.candidateSelection,
+    "all supplied fold nodes in every decision");
+  assert.equal(dry.contract.inputTruncation, false);
+  assert.equal(dry.contract.prefilter, null);
+  assert.equal(dry.contract.generationCalls, 0);
+  assert.equal(dry.contract.providerCalls, 0);
+  assert.equal(dry.contract.labelsVisibleToScorer, false);
+  assert.equal(dry.contract.calibration.requiredObservedPrecision, 1);
+  assert.equal(dry.contract.calibration.minimumOffers, 4);
+  assert.equal(dry.contract.calibration.minimumThreshold, 0);
+  assert.equal(dry.contract.calibration.thresholdIsStrictlyPositive, true);
+  assert.match(dry.contract.validation,
+    /not run unless development selects a threshold.*threshold frozen/);
+  assert(dry.contract.boundary.includes("no semantic prompt rewrite") &&
+    dry.contract.boundary.includes("score rewrite") &&
+    dry.contract.boundary.includes("provider request") &&
+    dry.contract.boundary.includes("cap, truncation"));
+  assert.deepEqual(dry.contract.quantization, {
+    method: "bitsandbytes-nf4",
+    loadIn4Bit: true,
+    doubleQuant: true,
+    computeDtype: "torch.float16",
+    quantStorage: "torch.uint8",
+  });
+
+  for (const splitName of ["development", "validation"]) {
+    const split = dry.contract.splits[splitName];
+    assert.equal(split.folds, 8);
+    assert.equal(split.roots, 3);
+    assert.equal(split.nested, 5);
+    assert.equal(split.maximumDepth, 2);
+    assert.equal(split.eventSnapshots, 40);
+    assert.equal(split.foldRowsPerSnapshot, 8);
+    assert.equal(split.positiveRate, 0.2);
+    assert.deepEqual(split.classes, {
+      positive: 8,
+      "no-relevant": 8,
+      "already-visible": 8,
+      "semantically-related-but-non-answering": 8,
+      "interruption-not-worthwhile": 8,
+    });
+    assert.deepEqual(split.eventKinds, {
+      "user-message": 10,
+      "tool-result": 10,
+      "assistant-message": 10,
+      stop: 10,
+    });
+  }
+
+  assert.deepEqual(dry.selfTest, {
+    model: "ibm-granite/granite-3.3-2b-instruct",
+    revision: "707f574c62054322f6b5b04b6d075f0a8f05e0f0",
+    modelFamilyOnlyChange: true,
+    mechanismScorerId: "qwen3-per-fold-counterbalanced-verbalizer-v1",
+    policyId: "positive-zero-false-counterbalanced-verbalizer-event-v1",
+    labelTokenIds: {A: 399, B: 551},
+    fixedLabelPriorMargin: -3,
+    zeroThresholdRefused: true,
+    quantization: {
+      method: "bitsandbytes-nf4",
+      loadIn4Bit: true,
+      doubleQuant: true,
+      computeDtype: "torch.float16",
+      quantStorage: "torch.uint8",
+    },
+  });
+
+  const fixture = JSON.parse(readFileSync(familyFixture, "utf8"));
+  assert.equal(dry.fixtureSha256,
+    "af0b3d2731839bac524bf4d510be414f9f30abd700128f70bbe9596a5d00a965");
+  assert.deepEqual(Object.keys(fixture.splits).sort(), ["development", "validation"]);
+
+  const source = readFileSync(familyScript, "utf8");
+  assert(source.includes("import probe_attention_verbalizer_symmetry as verbalizer") &&
+    source.includes("verbalizer.prepare_split(") &&
+    source.includes("verbalizer.run_prepared_split(") &&
+    source.includes("verbalizer.decision_row(") &&
+    source.includes("verbalizer.calibrate_threshold(") &&
+    !source.includes("def build_prompt_text(") &&
+    !source.includes("def pair_values("),
+  "the Granite family test no longer reuses the frozen Gate 88 mechanism");
+  assert(source.includes('baseline.get("source", {}).get("scriptSha256")') &&
+    source.includes("attention-family-frozen-mechanism-source-drift") &&
+    source.includes('baseline.get("evidenceSha256")') &&
+    source.includes("attention-family-baseline-evidence-drift"),
+  "the model-family test no longer binds the sealed predecessor and mechanism source");
+  assert(source.includes('getattr(config, "_commit_hash", None) == EXPECTED_REVISION') &&
+    source.includes("attention-family-model-revision-drift") &&
+    source.includes('args.model == DEFAULT_MODEL') &&
+    source.includes("attention-family-model-is-frozen"),
+  "the Granite model id or exact downloaded revision can drift");
+  assert(source.includes("result == EXPECTED_LABEL_TOKEN_IDS") &&
+    source.includes("attention-family-label-token-drift") &&
+    source.includes('mapping_prompts == 640') &&
+    source.includes('len(rows) == 320') &&
+    source.includes("attention-family-mapping-pair-drift"),
+  "the Granite tokenizer or complete reversed-mapping input contract can drift");
+  assert(source.includes("BitsAndBytesConfig(") &&
+    source.includes('bnb_4bit_quant_type="nf4"') &&
+    source.includes("bnb_4bit_use_double_quant=True") &&
+    source.includes("bnb_4bit_compute_dtype=torch.float16") &&
+    source.includes("bnb_4bit_quant_storage=torch.uint8") &&
+    source.includes('"deviceMap": capacity.model_device_map(model)') &&
+    source.indexOf('"deviceMap": capacity.model_device_map(model)') <
+      source.indexOf("development_trials, development_times ="),
+  "the Granite quantization or pre-inference metadata contract drifted");
+  assert(source.includes('if selected is None:') &&
+    source.includes('elif args.development_only:') &&
+    source.includes("verbalizer.pending_validation(fixture, selected)") &&
+    source.includes('validation["status"] = "evaluated-with-frozen-threshold"') &&
+    source.includes('validation["falseOffers"] == 0'),
+  "the Granite development checkpoint or fail-closed validation weakened");
+  assert(source.indexOf("development_trials, development_times =") <
+    source.indexOf("development_decisions ="),
+  "development labels can enter before the Granite scorer completes");
+  assert(!source.includes("output_attentions=True") &&
+    !source.includes(".generate(") &&
+    !source.includes("max_new_tokens") &&
+    !/\bBM25\b/i.test(source) &&
+    !/folds\s*\[:\s*\d+/.test(source),
+  "the Granite family test gained tensor claims, generation, lexical prefiltering, or a fold cap");
+  assert(!source.includes("registerTool") &&
+    !source.includes("context.suggestion") &&
+    !source.includes('from "../extensions') &&
+    !source.includes("api.openai.com"),
+  "the Granite family test gained a carrier, shipped runtime path, or provider call");
+
+  checks.aDifferentModelFamilyCannotRewriteTheFrozenVerbalizerScorer = true;
+}
+
+// GATE 90 - Granite cannot rewrite the frozen candidate-active-neither scorer.
+//
+// The model family changes while Gate 86 continues to own the semantic prompt, three source
+// labels, candidate margin, complete hierarchy, precision policy, and validation lock. This
+// directly tests the active-context redundancy that remained after Gate 89's family swap.
+// ---------------------------------------------------------------------------
+{
+  const familyScript = join(
+    PROJECT, "scripts", "probe_attention_source_family.py");
+  const familyFixture = join(
+    PROJECT, "scripts", "fixtures", "attention_utility_v1.json");
+  const familyDryRun = spawnSync("python3", [familyScript], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+  });
+  assert.equal(familyDryRun.status, 0, familyDryRun.stderr);
+  const dry = JSON.parse(familyDryRun.stdout);
+  assert.equal(dry.live, false);
+  assert.equal(dry.modelLoads, 0);
+  assert.equal(dry.networkRequests, 0);
+  assert.equal(dry.contract.protocolVersion, 1);
+  assert.equal(dry.contract.scorerId,
+    "granite3.3-per-fold-source-attribution-v1");
+  assert.equal(dry.contract.policyId,
+    "positive-zero-false-source-attribution-event-v1");
+  assert.equal(dry.contract.confidenceScalar,
+    "maximum per-fold candidate logit minus the larger of active and neither logits");
+  assert.equal(dry.contract.model,
+    "ibm-granite/granite-3.3-2b-instruct");
+  assert.equal(dry.contract.modelFamilyOnlyChange, true);
+  assert.deepEqual(dry.contract.choiceTokens,
+    [" candidate", " active", " neither"]);
+  assert.deepEqual(dry.contract.choiceTokenIds, {
+    candidate: 15133,
+    active: 4523,
+    neither: 25209,
+  });
+  assert.equal(dry.contract.judgment.candidate,
+    "active context alone is insufficient and this fold supplies every missing fact needed to answer correctly and completely");
+  assert.equal(dry.contract.judgment.active,
+    "active context alone already contains enough stated evidence to answer or perform the task, so this fold is unnecessary");
+  assert.equal(dry.contract.judgment.neither,
+    "active context alone is insufficient and this fold also does not supply all missing evidence");
+  assert.equal(dry.contract.score,
+    "candidate logit minus max(active logit, neither logit) for each complete fold");
+  assert.deepEqual(dry.contract.predecessor, {
+    scorerId: "qwen3-per-fold-source-attribution-v1",
+    policyId: "positive-zero-false-source-attribution-event-v1",
+    model: "Qwen/Qwen3-1.7B",
+    evidenceSha256:
+      "1b5cdb140a9a96cc1d7dca38b9ad7dc637aee98552f80f01f7a7ff8fc1bc81d9",
+  });
+  assert.deepEqual(dry.contract.familyComparison.frozen, [
+    "semantic prompt builder",
+    "candidate-active-neither judgment",
+    "candidate margin over the stronger alternative",
+    "fixture",
+    "labels",
+    "complete hierarchy",
+    "threshold policy",
+    "validation lock",
+    "NF4 quantization",
+  ]);
+  assert.deepEqual(dry.contract.familyComparison.changed, [
+    "model weights",
+    "model family",
+    "model architecture",
+    "tokenizer",
+    "native chat template",
+    "choice token ids",
+  ]);
+  assert.equal(dry.contract.candidateUniverse, "standing folded nodes only");
+  assert.equal(dry.contract.candidateSelection,
+    "all supplied fold nodes in every decision");
+  assert.equal(dry.contract.inputTruncation, false);
+  assert.equal(dry.contract.prefilter, null);
+  assert.equal(dry.contract.generationCalls, 0);
+  assert.equal(dry.contract.providerCalls, 0);
+  assert.equal(dry.contract.labelsVisibleToScorer, false);
+  assert.equal(dry.contract.calibration.requiredObservedPrecision, 1);
+  assert.equal(dry.contract.calibration.minimumOffers, 4);
+  assert.equal(dry.contract.calibration.minimumThreshold, 0);
+  assert.equal(dry.contract.calibration.thresholdIsStrictlyPositive, true);
+  assert.match(dry.contract.validation,
+    /not run unless development selects a threshold.*threshold frozen/);
+  assert(dry.contract.boundary.includes("no source-label rewrite") &&
+    dry.contract.boundary.includes("semantic prompt rewrite") &&
+    dry.contract.boundary.includes("score rewrite") &&
+    dry.contract.boundary.includes("provider request") &&
+    dry.contract.boundary.includes("cap, truncation"));
+  assert.deepEqual(dry.contract.quantization, {
+    method: "bitsandbytes-nf4",
+    loadIn4Bit: true,
+    doubleQuant: true,
+    computeDtype: "torch.float16",
+    quantStorage: "torch.uint8",
+  });
+
+  for (const splitName of ["development", "validation"]) {
+    const split = dry.contract.splits[splitName];
+    assert.equal(split.folds, 8);
+    assert.equal(split.roots, 3);
+    assert.equal(split.nested, 5);
+    assert.equal(split.maximumDepth, 2);
+    assert.equal(split.eventSnapshots, 40);
+    assert.equal(split.foldRowsPerSnapshot, 8);
+    assert.equal(split.positiveRate, 0.2);
+    assert.deepEqual(split.classes, {
+      positive: 8,
+      "no-relevant": 8,
+      "already-visible": 8,
+      "semantically-related-but-non-answering": 8,
+      "interruption-not-worthwhile": 8,
+    });
+    assert.deepEqual(split.eventKinds, {
+      "user-message": 10,
+      "tool-result": 10,
+      "assistant-message": 10,
+      stop: 10,
+    });
+  }
+
+  assert.deepEqual(dry.selfTest, {
+    model: "ibm-granite/granite-3.3-2b-instruct",
+    revision: "707f574c62054322f6b5b04b6d075f0a8f05e0f0",
+    modelFamilyOnlyChange: true,
+    mechanismScorerId: "qwen3-per-fold-source-attribution-v1",
+    policyId: "positive-zero-false-source-attribution-event-v1",
+    choiceTokenIds: {candidate: 15133, active: 4523, neither: 25209},
+    candidateMargin: 3,
+    activeMargin: -3,
+    neitherMargin: -3,
+    zeroThresholdRefused: true,
+    quantization: {
+      method: "bitsandbytes-nf4",
+      loadIn4Bit: true,
+      doubleQuant: true,
+      computeDtype: "torch.float16",
+      quantStorage: "torch.uint8",
+    },
+  });
+
+  const fixture = JSON.parse(readFileSync(familyFixture, "utf8"));
+  assert.equal(dry.fixtureSha256,
+    "af0b3d2731839bac524bf4d510be414f9f30abd700128f70bbe9596a5d00a965");
+  assert.deepEqual(Object.keys(fixture.splits).sort(), ["development", "validation"]);
+
+  const source = readFileSync(familyScript, "utf8");
+  assert(source.includes("import probe_attention_source_attribution as source_attribution") &&
+    source.includes("source_attribution.prepare_split(") &&
+    source.includes("source_attribution.run_prepared_split(") &&
+    source.includes("source_attribution.decision_row(") &&
+    source.includes("source_attribution.calibrate_threshold(") &&
+    !source.includes("def build_prompt_text(") &&
+    !source.includes("def source_values("),
+  "the Granite source test no longer reuses the frozen Gate 86 mechanism");
+  assert(source.includes('baseline.get("source", {}).get("scriptSha256")') &&
+    source.includes("attention-source-family-frozen-mechanism-source-drift") &&
+    source.includes('baseline.get("evidenceSha256")') &&
+    source.includes("attention-source-family-baseline-evidence-drift"),
+  "the Granite source test no longer binds the sealed predecessor and source mechanism");
+  assert(source.includes('getattr(config, "_commit_hash", None) == EXPECTED_REVISION') &&
+    source.includes("attention-source-family-model-revision-drift") &&
+    source.includes('args.model == DEFAULT_MODEL') &&
+    source.includes("attention-source-family-model-is-frozen"),
+  "the Granite source model id or exact revision can drift");
+  assert(source.includes("result == EXPECTED_CHOICE_TOKEN_IDS") &&
+    source.includes("attention-source-family-choice-token-drift") &&
+    source.includes('len(rows) == 320') &&
+    source.includes("attention-source-family-development-row-count-drift"),
+  "the Granite source tokenizer or complete input contract can drift");
+  assert(source.includes("BitsAndBytesConfig(") &&
+    source.includes('bnb_4bit_quant_type="nf4"') &&
+    source.includes("bnb_4bit_use_double_quant=True") &&
+    source.includes("bnb_4bit_compute_dtype=torch.float16") &&
+    source.includes("bnb_4bit_quant_storage=torch.uint8") &&
+    source.includes('"deviceMap": capacity.model_device_map(model)') &&
+    source.indexOf('"deviceMap": capacity.model_device_map(model)') <
+      source.indexOf("development_trials, development_times ="),
+  "the Granite source quantization or pre-inference metadata contract drifted");
+  assert(source.includes('if selected is None:') &&
+    source.includes('elif args.development_only:') &&
+    source.includes("pending_validation(fixture, selected)") &&
+    source.includes('validation["status"] = "evaluated-with-frozen-threshold"') &&
+    source.includes('validation["falseOffers"] == 0'),
+  "the Granite source checkpoint or fail-closed validation weakened");
+  assert(source.indexOf("development_trials, development_times =") <
+    source.indexOf("development_decisions ="),
+  "development labels can enter before Granite source scoring completes");
+  assert(!source.includes("output_attentions=True") &&
+    !source.includes(".generate(") &&
+    !source.includes("max_new_tokens") &&
+    !/\bBM25\b/i.test(source) &&
+    !/folds\s*\[:\s*\d+/.test(source),
+  "the Granite source test gained tensor claims, generation, lexical prefiltering, or a fold cap");
+  assert(!source.includes("registerTool") &&
+    !source.includes("context.suggestion") &&
+    !source.includes('from "../extensions') &&
+    !source.includes("api.openai.com"),
+  "the Granite source test gained a carrier, shipped runtime path, or provider call");
+
+  checks.graniteCannotRewriteCandidateActiveOrNeither = true;
+}
+
+// GATE 91 - The held-out Granite source validation cannot reopen development.
+//
+// Gate 90 selected one threshold from development. This runner may score only the untouched
+// validation split, once, at that exact threshold. Confirmation still requires four offers
+// with no false interruption; no recall or latency diagnostic can rescue a failure.
+// ---------------------------------------------------------------------------
+{
+  const validationScript = join(
+    PROJECT, "scripts", "probe_attention_source_family_validation.py");
+  const validationFixture = join(
+    PROJECT, "scripts", "fixtures", "attention_utility_v1.json");
+  const validationDryRun = spawnSync("python3", [validationScript], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+  });
+  assert.equal(validationDryRun.status, 0, validationDryRun.stderr);
+  const dry = JSON.parse(validationDryRun.stdout);
+  assert.equal(dry.live, false);
+  assert.equal(dry.modelLoads, 0);
+  assert.equal(dry.networkRequests, 0);
+  assert.equal(dry.contract.protocolVersion, 1);
+  assert.equal(dry.contract.scorerId,
+    "granite3.3-per-fold-source-attribution-heldout-v1");
+  assert.equal(dry.contract.policyId,
+    "positive-zero-false-source-attribution-event-v1");
+  assert.equal(dry.contract.phase, "held-out validation only");
+  assert.equal(dry.contract.frozenThreshold, 8.625);
+  assert.equal(dry.contract.developmentArtifact,
+    "lab/attention-shadow/granite3.3-2b-nf4-source-attribution-v1.json");
+  assert.equal(dry.contract.developmentEvidenceSha256,
+    "546a68c2fc2e7fef6d72b3e8996cc0e64721b82082794e5fd7488561c8381dd7");
+  assert.deepEqual(dry.contract.developmentCalibration, {
+    threshold: 8.625,
+    offers: 5,
+    correctOffers: 5,
+    falseOffers: 0,
+    precision: 1,
+    recall: 0.625,
+  });
+  assert.equal(dry.contract.validation,
+    "score the untouched validation split once at threshold 8.625; do not recalibrate, rescore development, or change the threshold");
+  assert.equal(dry.contract.primaryOutcome,
+    "at least four held-out offers with zero false offers at the frozen development threshold");
+  assert.equal(dry.contract.candidateUniverse, "standing folded nodes only");
+  assert.equal(dry.contract.candidateSelection,
+    "all supplied fold nodes in every decision");
+  assert.equal(dry.contract.inputTruncation, false);
+  assert.equal(dry.contract.prefilter, null);
+  assert.equal(dry.contract.generationCalls, 0);
+  assert.equal(dry.contract.providerCalls, 0);
+  assert.equal(dry.contract.labelsVisibleToScorer, false);
+  assert.deepEqual(dry.contract.choiceTokenIds, {
+    candidate: 15133,
+    active: 4523,
+    neither: 25209,
+  });
+  assert.deepEqual(dry.contract.quantization, {
+    method: "bitsandbytes-nf4",
+    loadIn4Bit: true,
+    doubleQuant: true,
+    computeDtype: "torch.float16",
+    quantStorage: "torch.uint8",
+  });
+  assert(dry.contract.boundary.includes("no development rescore") &&
+    dry.contract.boundary.includes("recalibration") &&
+    dry.contract.boundary.includes("provider request") &&
+    dry.contract.boundary.includes("prefilter, cap") &&
+    dry.contract.boundary.includes("truncation"));
+
+  const split = dry.contract.splits.validation;
+  assert.equal(split.folds, 8);
+  assert.equal(split.roots, 3);
+  assert.equal(split.nested, 5);
+  assert.equal(split.maximumDepth, 2);
+  assert.equal(split.eventSnapshots, 40);
+  assert.equal(split.foldRowsPerSnapshot, 8);
+  assert.equal(split.positiveRate, 0.2);
+  assert.deepEqual(split.rootFoldIds, ["K1", "K4", "K6"]);
+  assert.deepEqual(split.nestedFoldIds, ["K2", "K3", "K5", "K7", "K8"]);
+  assert.deepEqual(split.classes, {
+    positive: 8,
+    "no-relevant": 8,
+    "already-visible": 8,
+    "semantically-related-but-non-answering": 8,
+    "interruption-not-worthwhile": 8,
+  });
+  assert.deepEqual(split.eventKinds, {
+    "user-message": 10,
+    "tool-result": 10,
+    "assistant-message": 10,
+    stop: 10,
+  });
+
+  assert.deepEqual(dry.selfTest, {
+    model: "ibm-granite/granite-3.3-2b-instruct",
+    revision: "707f574c62054322f6b5b04b6d075f0a8f05e0f0",
+    developmentEvidenceSha256:
+      "546a68c2fc2e7fef6d72b3e8996cc0e64721b82082794e5fd7488561c8381dd7",
+    developmentPoint: {
+      threshold: 8.625,
+      offers: 5,
+      correctOffers: 5,
+      falseOffers: 0,
+      precision: 1,
+      recall: 0.625,
+    },
+    validationOnly: true,
+    minimumHeldOutOffers: 4,
+    passingConfirmed: true,
+    threeOffersRefused: true,
+    choiceTokenIds: {candidate: 15133, active: 4523, neither: 25209},
+    quantization: {
+      method: "bitsandbytes-nf4",
+      loadIn4Bit: true,
+      doubleQuant: true,
+      computeDtype: "torch.float16",
+      quantStorage: "torch.uint8",
+    },
+  });
+  assert.equal(dry.fixtureSha256,
+    "af0b3d2731839bac524bf4d510be414f9f30abd700128f70bbe9596a5d00a965");
+  const fixture = JSON.parse(readFileSync(validationFixture, "utf8"));
+  assert.deepEqual(Object.keys(fixture.splits).sort(), ["development", "validation"]);
+
+  const source = readFileSync(validationScript, "utf8");
+  assert(!source.includes("calibrate_threshold(") &&
+    !source.includes('fixture["splits"]["development"]') &&
+    !source.includes("development_trials") &&
+    source.includes('fixture["splits"]["validation"]'),
+  "held-out validation can recalibrate or score the development split");
+  assert(source.includes("attention.stable_sha256(stable) == claimed") &&
+    source.includes("attention-source-validation-development-evidence-drift") &&
+    source.includes('development.get("source", {}).get("scriptSha256")') &&
+    source.includes("attention-source-validation-development-source-drift"),
+  "held-out validation no longer authenticates the sealed development evidence and source");
+  assert(source.includes('selected.get("threshold") == EXPECTED_THRESHOLD') &&
+    source.includes('selected.get("offers") == 5') &&
+    source.includes('selected.get("correctOffers") == 5') &&
+    source.includes('selected.get("falseOffers") == 0') &&
+    source.includes('selected.get("precision") == 1.0') &&
+    source.includes('selected.get("recall") == 0.625') &&
+    source.includes("attention-source-validation-calibration-drift"),
+  "the exact development operating point can drift");
+  assert(source.includes('== "pending-frozen-development-threshold"') &&
+    source.includes('not development.get("splits", {}).get("validation", {}).get("trials")') &&
+    source.includes("attention-source-validation-development-opened-validation"),
+  "validation can be rerun after the development artifact already opened it");
+  assert(source.includes("source_attribution.prepare_split(") &&
+    source.includes("source_attribution.run_prepared_split(") &&
+    source.includes("source_attribution.decision_row(") &&
+    source.includes("selective.decision_metrics(validation_decisions, threshold)") &&
+    source.indexOf("validation_trials, validation_times =") <
+      source.indexOf("validation_decisions ="),
+  "held-out validation no longer uses the frozen scorer before reading labels");
+  assert(source.includes('threshold = selected["threshold"]') &&
+    source.includes("threshold == EXPECTED_THRESHOLD") &&
+    source.includes('validation["offers"] >= source_attribution.MIN_DEVELOPMENT_OFFERS') &&
+    source.includes('validation["falseOffers"] == 0') &&
+    source.includes('"thresholdWasRecalibrated": False') &&
+    source.includes('"developmentWasRescored": False'),
+  "the held-out threshold or zero-false confirmation rule weakened");
+  assert(source.includes('getattr(config, "_commit_hash", None) == EXPECTED_REVISION') &&
+    source.includes("attention-source-validation-model-revision-drift") &&
+    source.includes('args.model == DEFAULT_MODEL') &&
+    source.includes("attention-source-validation-model-is-frozen") &&
+    source.includes("source_family.choice_token_ids(tokenizer)"),
+  "the held-out model revision or choice ids can drift");
+  assert(source.includes("BitsAndBytesConfig(") &&
+    source.includes('bnb_4bit_quant_type="nf4"') &&
+    source.includes("bnb_4bit_use_double_quant=True") &&
+    source.includes("bnb_4bit_compute_dtype=torch.float16") &&
+    source.includes("bnb_4bit_quant_storage=torch.uint8") &&
+    source.includes('"deviceMap": capacity.model_device_map(model)') &&
+    source.indexOf('"deviceMap": capacity.model_device_map(model)') <
+      source.indexOf("validation_trials, validation_times ="),
+  "the held-out quantization or pre-inference metadata contract drifted");
+  assert(!source.includes("output_attentions=True") &&
+    !source.includes(".generate(") &&
+    !source.includes("max_new_tokens") &&
+    !/\bBM25\b/i.test(source) &&
+    !/folds\s*\[:\s*\d+/.test(source),
+  "held-out validation gained tensor claims, generation, lexical prefiltering, or a fold cap");
+  assert(!source.includes("registerTool") &&
+    !source.includes("context.suggestion") &&
+    !source.includes('from "../extensions') &&
+    !source.includes("api.openai.com"),
+  "held-out validation gained a carrier, shipped runtime path, or provider call");
+
+  checks.heldOutSourceValidationCannotRecalibrateDevelopment = true;
+}
+
+// GATE 92 - the BM25 falsifier ranks complete evidence and cannot be rescued by a threshold.
+//
+// The queued rank-only successor test scores every eligible fold's complete projection
+// document, refuses a corpus below the pre-registered twenty-needed-question floor by name,
+// and decides promote or kill from the pre-registered recall lines alone, evaluating kill
+// before promote so a scorer cannot promote while failing to beat newest-first. A needed
+// question with no relevant candidate is a document-construction failure and refuses by
+// name rather than scoring as a miss. A run whose sealed state the current runtime refuses
+// is excluded beside the result, never silently dropped: the sweep report carries the list.
+// ---------------------------------------------------------------------------
+{
+  assert.equal(RETRIEVAL_RANK_PROTOCOL_VERSION, 1);
+  assert.equal(RETRIEVAL_RANK_SCORER_ID, "bm25-complete-evidence-rank-v1");
+  assert.equal(RETRIEVAL_RANK_MINIMUM_NEEDED_QUESTIONS, 20);
+  assert.equal(RETRIEVAL_RANK_PROMOTE_RECALL_AT_5, 0.80);
+  assert.equal(RETRIEVAL_RANK_PROMOTE_RECALL_AT_1, 0.50);
+  assert.equal(RETRIEVAL_RANK_KILL_RECALL_AT_5, 0.60);
+  assert.equal(RETRIEVAL_RANK_KILL_NEWEST_FIRST_MARGIN, 0.10);
+
+  // Complete evidence: the answering term sits past the historical 20,000-character
+  // cap, so the deleted slice would have blinded the scorer to it. The rank must see it.
+  const pastCap = `${"padding filler ".repeat(Math.ceil(RETRIEVAL_SHADOW_CONTENT_CHARS / 15))}navigator checksum ledger`;
+  assert(pastCap.indexOf("navigator") > RETRIEVAL_SHADOW_CONTENT_CHARS,
+    "the past-cap fixture does not reach past the historical cap");
+  // fold-noise shares one query term inside the historical cap, so a scorer
+  // that silently slices would rank it first and demote fold-deep in RANK,
+  // not just in score: the complete-evidence assertion cannot pass vacuously.
+  const candidates = [
+    { id: "fold-deep", document: pastCap },
+    { id: "fold-noise", document: "unrelated appendix narrative with one checksum mention" },
+    { id: "fold-zero", document: "quiet background" },
+  ];
+  const scored = scoreRetrievalRankCandidates({
+    query: "navigator checksum ledger", candidates });
+  assert.equal(scored.rows.find((row) => row.id === "fold-deep").rank, 1,
+    "a term past the historical cap did not reach the complete-evidence rank");
+  assert(scored.rows.find((row) => row.id === "fold-deep").score > 0);
+  assert.equal(scored.rows.find((row) => row.id === "fold-zero").score, 0,
+    "a zero-score candidate disappeared from the rank table");
+  assert.equal(scored.rows.length, candidates.length);
+  const reordered = scoreRetrievalRankCandidates({
+    query: "navigator checksum ledger", candidates: [...candidates].reverse() });
+  assert.deepEqual(reordered, scored, "candidate input order changed the rank result");
+  const labeled = scoreRetrievalRankCandidates({
+    query: "navigator checksum ledger",
+    candidates: candidates.map((candidate, index) => ({
+      ...candidate, relevant: index === 1, expectedAnswer: "leak", answerVerdict: "wrong",
+    })) });
+  assert.deepEqual(labeled, scored, "answer or relevance metadata reached the rank scorer");
+
+  // Needed metrics and the newest-first baseline share one relevance label.
+  const query = ({ id, needed, rank, newestRank }) => ({
+    runId: "sealed-fixture", queryId: id,
+    retrievalNeeded: needed, carriage: needed ? "recoverable" : "visible-raw",
+    candidates: [
+      { id: "hit", rank, newestRank, relevant: true },
+      { id: "miss", rank: rank === 1 ? 2 : 1, newestRank: newestRank === 1 ? 2 : 1, relevant: false },
+    ],
+  });
+  const summary = summarizeRetrievalRankQueries([
+    query({ id: "top", needed: true, rank: 1, newestRank: 7 }),
+    query({ id: "shortlist", needed: true, rank: 4, newestRank: 1 }),
+    query({ id: "deep", needed: true, rank: 9, newestRank: 8 }),
+    query({ id: "visible", needed: false, rank: 1, newestRank: 1 }),
+  ]);
+  assert.equal(summary.neededQuestions, 3);
+  assert.equal(summary.queries, 4);
+  assert.deepEqual(summary.hits, { bm25At1: 1, bm25At5: 2, newestFirstAt1: 1, newestFirstAt5: 1 });
+  assert.equal(summary.recallAt1, 1 / 3);
+  assert.equal(summary.recallAt5, 2 / 3);
+  assert.throws(() => summarizeRetrievalRankQueries([{
+    runId: "sealed-fixture", queryId: "orphan", retrievalNeeded: true, carriage: "recoverable",
+    candidates: [{ id: "only", rank: 1, newestRank: 1, relevant: false }],
+  }]), /retrieval-rank-needed-without-relevant-candidate:sealed-fixture\/orphan/,
+  "a needed question without a relevant candidate scored as a miss instead of refusing");
+
+  // The pre-registered decision: floor refusal by name, kill before promote, and the
+  // exact boundary the sealed sweep landed on: recallAt5 of exactly 0.60 is not a kill.
+  assert.throws(() => retrievalRankVerdict({
+    neededQuestions: 19, recallAt1: 1, recallAt5: 1, newestFirstRecallAt1: 0,
+  }), /retrieval-rank-needed-floor:19<20/,
+  "a corpus below the needed floor was scored instead of refused");
+  assert.equal(retrievalRankVerdict({
+    neededQuestions: 20, recallAt1: 0.5, recallAt5: 0.55, newestFirstRecallAt1: 0.2,
+  }).verdict, "kill");
+  const killBeforePromote = retrievalRankVerdict({
+    neededQuestions: 20, recallAt1: 0.5, recallAt5: 0.85, newestFirstRecallAt1: 0.45,
+  });
+  assert.equal(killBeforePromote.verdict, "kill",
+    "a scorer promoted while failing to beat newest-first by the pre-registered margin");
+  assert.match(killBeforePromote.reasons.join(" "), /newest-first/);
+  assert.equal(retrievalRankVerdict({
+    neededQuestions: 20, recallAt1: 0.55, recallAt5: 0.85, newestFirstRecallAt1: 0.1,
+  }).verdict, "promote");
+  assert.equal(retrievalRankVerdict({
+    neededQuestions: 20, recallAt1: 0.3, recallAt5: 0.7, newestFirstRecallAt1: 0.1,
+  }).verdict, "neither");
+  assert.equal(retrievalRankVerdict({
+    neededQuestions: 30, recallAt1: 0.3, recallAt5: 0.6, newestFirstRecallAt1: 0.1,
+  }).verdict, "neither",
+  "recallAt5 of exactly 0.60 sits on the kill line and must not kill");
+
+  const rankSource = source("scripts/probe_retrieval_rank.mjs");
+  assert(!rankSource.includes("api.openai.com") &&
+    !rankSource.includes("OPENAI_API_KEY") &&
+    !rankSource.includes("fetch("),
+  "the rank falsifier contains a provider or network path");
+  assert(!rankSource.includes("context.suggestion") &&
+    !rankSource.includes("registerTool") &&
+    !rankSource.includes("registerMessageRenderer"),
+  "the rank falsifier gained a carrier or shipped runtime surface");
+  assert(rankSource.includes("active-context mark nomination is\n// outside this build") ||
+    rankSource.includes("active-context mark nomination is outside this build"),
+  "the rank falsifier does not state its experiment-only boundary");
+  assert(rankSource.includes("no threshold may rescue failure"),
+  "the rank falsifier does not state the no-threshold rule");
+  assert(rankSource.includes(".slice(0,") === false,
+  "the rank falsifier slices candidate evidence");
+  const rankHelp = spawnSync(process.execPath,
+    [join(PROJECT, "scripts", "probe_retrieval_rank.mjs"), "--help"],
+    { encoding: "utf8" });
+  assert.equal(rankHelp.status, 0, rankHelp.stderr);
+  assert.match(rankHelp.stdout, /no provider\s*\n?or network calls|no provider/);
+
+checks.aRankOnlyBm25FalsifierScoresCompleteEvidenceAgainstPreRegisteredLines = true;
+}
+
+// GATE 93 - the cold-detection shadow judges ordering, and labels never reach its scorer.
+//
+// The conductor test from the neighbouring project runs at this project's bar: units are the
+// runtime's own fold records' DIRECT raw contributions (a brief-only parent is excluded by
+// name, never double-counted through its children), cohorts group records by the nearest
+// preceding provider request, and eligibility carries the freshness fence. The registered
+// line is ordering quality because this runtime folds every completed batch and equal-count
+// selection is near-vacuous: the cold ordering must place later-needed units strictly later
+// than the staleness ordering, an unrankable unit leaves BOTH orderings, a corpus with no
+// later-needed placements refuses by name, and the scorer's own input validation refuses
+// label fields by name. Nothing is promoted either way and no threshold exists to tune.
+// ---------------------------------------------------------------------------
+{
+  assert.equal(COLD_SHADOW_PROTOCOL_VERSION, 1);
+  assert.equal(COLD_SHADOW_SCORER_ID, "qwen3-value-weighted-anchor-ratio-v1");
+  assert.match(COLD_SHADOW_KILL_RULE, /strictly higher mean normalized fold position/);
+
+  // Units: direct raw contributions only; a parent whose parts are all child
+  // folds is brief-only and excluded by name.
+  const record = (foldId, parts) => ({ id: `entry-${foldId}`, data: { fold: { id: foldId, kind: "tool-result", parentId: null, parts } } });
+  const { units, briefOnlyUnitIds } = coldUnitsFromRecords([
+    record("fold-a", [{ kind: "raw", ref: { entryId: "e1" } }, { kind: "raw", ref: { entryId: "e2" } }]),
+    record("fold-b", [{ kind: "raw", ref: { entryId: "e3" } }]),
+    record("fold-parent", [{ kind: "fold", foldId: "fold-a" }, { kind: "fold", foldId: "fold-b" }]),
+  ]);
+  assert.deepEqual(units.map((unit) => unit.unitId), ["fold-a", "fold-b"]);
+  assert.deepEqual(units[0].entryIds, ["e1", "e2"],
+    "a unit flattened through its children instead of keeping direct raw parts");
+  assert.deepEqual(briefOnlyUnitIds, ["fold-parent"]);
+
+  // Cohorts: nearest preceding request; a record before any request is named.
+  const branchIndexById = new Map([
+    ["entry-fold-a", 5], ["entry-fold-b", 12], ["entry-fold-early", 1],
+    ["e1", 2], ["e2", 3], ["e3", 4],
+  ]);
+  const grouped = coldCohorts({
+    units: [
+      { unitId: "fold-early", recordEntryId: "entry-fold-early", entryIds: [] },
+      ...units,
+    ],
+    branchIndexById,
+    requestIndexes: [
+      { momentId: "m4", index: 4 }, { momentId: "m10", index: 10 },
+    ],
+  });
+  assert.deepEqual(grouped.preCommitUnitIds, ["fold-early"],
+    "a record before the first request was scored instead of named");
+  assert.deepEqual(grouped.cohorts.map((cohort) => [cohort.momentId, cohort.unitIds]),
+    [["m4", ["fold-a"]], ["m10", ["fold-b"]]]);
+
+  // Eligibility: existence, not-yet-folded, and the freshness fence.
+  const entryIndexById = new Map([["e1", 2], ["e2", 3], ["e3", 9]]);
+  const unitA = { unitId: "fold-a", entryIds: ["e1", "e2"] };
+  const unitB = { unitId: "fold-b", entryIds: ["e3"] };
+  assert.equal(coldEligible({ unit: unitA, momentIndex: 4, fenceIndex: 3, foldedSet: new Set(), entryIndexById }), true);
+  assert.equal(coldEligible({ unit: unitA, momentIndex: 4, fenceIndex: 2, foldedSet: new Set(), entryIndexById }), false,
+    "a unit past the freshness fence stayed eligible");
+  assert.equal(coldEligible({ unit: unitA, momentIndex: 4, fenceIndex: 3, foldedSet: new Set(["fold-a"]), entryIndexById }), false);
+  assert.equal(coldEligible({ unit: unitB, momentIndex: 4, fenceIndex: 99, foldedSet: new Set(), entryIndexById }), false,
+    "a unit whose entries had not arrived yet was eligible");
+
+  // Selection: deterministic coldest-first; a refused (non-finite) unit is not selectable.
+  const ratios = new Map([["u1", 0.5], ["u2", 0.1], ["u3", Number.NaN], ["u4", 0.1]]);
+  assert.deepEqual(coldSelect({ eligibleUnitIds: ["u1", "u2", "u3", "u4"], ratios, count: 2 }),
+    ["u2", "u4"], "cold selection is not deterministic coldest-first with id tie-break");
+  assert.deepEqual(coldSelect({ eligibleUnitIds: ["u3"], ratios, count: 1 }), [],
+    "a scoring refusal became selectable");
+
+  // Ordering verdict: cold saves the needed unit -> not killed; cold buries it -> killed.
+  const comparisonRun = (needRatio, coldRatioOther) => ({
+    runs: [{
+      runId: "fixture",
+      units: [
+        { unitId: "old-needed", bytes: 10, newestEntryIndex: 1 },
+        { unitId: "new-noise", bytes: 10, newestEntryIndex: 2 },
+      ],
+      questions: [],
+      cohorts: [{
+        momentId: "m", momentIndex: 5,
+        stalenessPickIds: ["old-needed", "new-noise"],
+        eligibleUnitIds: ["old-needed", "new-noise"],
+        laterNeededUnitIds: ["old-needed"],
+        scores: [
+          { unitId: "old-needed", ratio: needRatio },
+          { unitId: "new-noise", ratio: coldRatioOther },
+        ],
+      }],
+    }],
+  });
+  const saved = coldComparison(comparisonRun(0.9, 0.1));
+  assert.equal(saved.verdict.killed, false,
+    "cold placed the needed unit last and was still killed");
+  assert.equal(saved.ordering.meanColdPosition, 1);
+  assert.equal(saved.ordering.meanStalenessPosition, 0.5);
+  const buried = coldComparison(comparisonRun(0.1, 0.9));
+  assert.equal(buried.verdict.killed, true,
+    "cold folded the needed unit first and was not killed");
+  assert.equal(buried.verdict.promoted, false);
+  assert.equal(saved.verdict.equalCountReplay.nearVacuous, true,
+    "the equal-count replay lost its vacuity note");
+  assert.throws(() => coldComparison({ runs: [{
+    runId: "fixture", units: [{ unitId: "u", bytes: 1, newestEntryIndex: 1 }],
+    questions: [],
+    cohorts: [{ momentId: "m", momentIndex: 5, stalenessPickIds: ["u"],
+      eligibleUnitIds: ["u"], laterNeededUnitIds: [], scores: [{ unitId: "u", ratio: 0.5 }] }],
+  }] }), /no later-needed placements/,
+  "a corpus that cannot decide the kill line decided it anyway");
+
+  // Point-biserial sanity: separable labels correlate, constant scores refuse to.
+  assert(pointBiserial([
+    { score: 1, label: true }, { score: 2, label: true },
+    { score: -1, label: false }, { score: -2, label: false },
+  ]) > 0.8);
+  assert.equal(pointBiserial([{ score: 1, label: true }, { score: 1, label: false }]), null);
+
+  // The scorer's own boundary: label fields refused, no model or network on the
+  // dry path, every byte scored through complete blocks.
+  const coldSelfTest = spawnSync("python3",
+    [join(PROJECT, "scripts", "probe_attention_cold.py"), "--self-test"],
+    { encoding: "utf8" });
+  assert.equal(coldSelfTest.status, 0, coldSelfTest.stderr);
+  const coldReport = JSON.parse(coldSelfTest.stdout);
+  assert.deepEqual(coldReport.labelFieldsRefused,
+    ["laterNeededUnitIds", "stalenessPickIds", "questions"]);
+  assert.equal(coldReport.everyByteScored, true);
+  assert.equal(coldReport.modelLoads, 0);
+  assert.equal(coldReport.networkRequests, 0);
+
+  for (const relativePath of ["scripts/probe_cold_shadow.mjs", "scripts/probe_attention_cold.py"]) {
+    const coldSource = source(relativePath);
+    assert(!coldSource.includes("api.openai.com") && !coldSource.includes("fetch(") &&
+      !coldSource.includes("registerTool") && !coldSource.includes("context.suggestion"),
+    `${relativePath} gained a provider, network, or runtime surface`);
+  }
+  assert(source("scripts/probe_cold_shadow.mjs")
+    .includes("low attention alone must never commit a fold"),
+  "the cold shadow does not state the nomination boundary");
+  assert(source("scripts/probe_attention_cold.py")
+    .includes("every byte is scored and nothing is sliced away"),
+  "the cold scorer does not state complete block coverage");
+
+checks.aColdDetectionShadowJudgesOrderingWithLabelsSealedFromItsScorer = true;
+}
+
+// ---------------------------------------------------------------------------
+// Every prior surfacing scorer read one number off a frozen forward pass and
+// died at the action boundary. Gate 94 pins the first generative mechanism: one
+// comparative prompt carrying every fold's complete expansion, an explicit null
+// answer instead of a threshold, and order invariance as the decision rule.
+// Both candidate orders must name the same fold or the judge abstains under the
+// disagreement's own name; a malformed answer, an unknown fold, trailing text
+// and a generation-bound hit each abstain by name too. An offer is correct only
+// when a positive event's named fold is the exact theme fold; naming the theme
+// fold on an already-visible event is a false interruption. The development
+// gate is the pre-registered precision-first line (at least four offers, none
+// false) and a pass owes a FRESH split, because this fixture's validation split
+// was read during the gate 91 rejection; the probe cannot reach the burned
+// split at all, and the dry path loads no model and touches no network.
+// ---------------------------------------------------------------------------
+{
+  const judgeScript = join(PROJECT, "scripts", "probe_attention_toolcall_judge.py");
+  const driver = `
+import json
+import probe_attention_toolcall_judge as judge
+
+fold_ids = {"J1", "J2"}
+
+def caught(fn):
+    try:
+        fn()
+        return None
+    except SystemExit as err:
+        return str(err)
+
+folds = [
+    {"foldId": "J1", "parentFoldId": None, "depth": 0, "expandedContent": "alpha evidence"},
+    {"foldId": "J2", "parentFoldId": "J1", "depth": 1, "expandedContent": "beta evidence"},
+]
+case = {"eventKind": "stop", "activeContext": "ctx", "task": "task"}
+forward = judge.judge_user_prompt(case, folds)
+reverse = judge.judge_user_prompt(case, list(reversed(folds)))
+
+def rows(spec):
+    return [{"class": cls, "offered": offered, "correct": correct}
+            for cls, offered, correct in spec]
+
+print(json.dumps({
+    "constants": {
+        "scorerId": judge.SCORER_ID,
+        "maxNewTokens": judge.MAX_NEW_TOKENS,
+        "minimumOffers": judge.MINIMUM_OFFERS,
+        "requiredPrecision": judge.REQUIRED_PRECISION,
+        "expectedRevision": judge.EXPECTED_REVISION,
+    },
+    "parse": {
+        "clean": judge.parse_judge_answer('{"expand": "J1"}', fold_ids),
+        "preambleNull": judge.parse_judge_answer(
+            'The context already holds it. {"expand": null}', fold_ids),
+        "unknownFold": judge.parse_judge_answer('{"expand": "J9"}', fold_ids),
+        "trailing": judge.parse_judge_answer('{"expand": "J1"} because', fold_ids),
+        "twoObjects": judge.parse_judge_answer(
+            '{"expand": "J1"} {"expand": "J2"}', fold_ids),
+        "noObject": judge.parse_judge_answer('expand J1', fold_ids),
+    },
+    "decisions": {
+        "agree": judge.judge_decision({"answer": "J1"}, {"answer": "J1"}),
+        "disagree": judge.judge_decision({"answer": "J1"}, {"answer": "J2"}),
+        "oneNull": judge.judge_decision({"answer": "J1"}, {"answer": None}),
+        "bothNull": judge.judge_decision({"answer": None}, {"answer": None}),
+        "boundHit": judge.judge_decision(
+            {"malformed": "generation-bound-hit"}, {"answer": "J1"}),
+    },
+    "outcomes": {
+        "positiveTheme": judge.judge_offer_outcome(
+            {"class": "positive", "themeFoldId": "J1"},
+            {"action": "offer", "foldId": "J1"}),
+        "alreadyVisibleTheme": judge.judge_offer_outcome(
+            {"class": "already-visible", "themeFoldId": "J1"},
+            {"action": "offer", "foldId": "J1"}),
+        "positiveWrongFold": judge.judge_offer_outcome(
+            {"class": "positive", "themeFoldId": "J1"},
+            {"action": "offer", "foldId": "J2"}),
+        "abstain": judge.judge_offer_outcome(
+            {"class": "positive", "themeFoldId": "J1"},
+            {"action": "abstain", "reason": "both-null"}),
+    },
+    "gates": {
+        "earns": judge.development_gate(rows(
+            [("positive", True, True)] * 4 + [("no-relevant", False, None)] * 4)),
+        "tainted": judge.development_gate(rows(
+            [("positive", True, True)] * 4 + [("already-visible", True, False)])),
+        "sparse": judge.development_gate(rows([("positive", True, True)] * 3)),
+    },
+    "prompt": {
+        "forwardHasBoth": "alpha evidence" in forward and "beta evidence" in forward,
+        "orderMatters": forward != reverse,
+        "duplicateRefusal": caught(
+            lambda: judge.judge_user_prompt(case, [folds[0], folds[0]])),
+        "singleFoldRefusal": caught(
+            lambda: judge.judge_user_prompt(case, [folds[0]])),
+    },
+}))
+`;
+  const driven = spawnSync("python3", ["-c", driver], {
+    cwd: join(PROJECT, "scripts"),
+    encoding: "utf8",
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+  });
+  assert.equal(driven.status, 0, driven.stderr);
+  const judged = JSON.parse(driven.stdout);
+
+  assert.equal(judged.constants.scorerId, "granite3.3-comparative-toolcall-judge-v1");
+  assert.equal(judged.constants.minimumOffers, 4);
+  assert.equal(judged.constants.requiredPrecision, 1);
+  assert.equal(judged.constants.maxNewTokens, 160);
+  assert.equal(judged.constants.expectedRevision,
+    "707f574c62054322f6b5b04b6d075f0a8f05e0f0");
+
+  // Strict parse: exactly one answer object, the fold must exist, and nothing
+  // may follow the answer; reasoning BEFORE the object is allowed.
+  assert.deepEqual(judged.parse.clean, { answer: "J1" });
+  assert.deepEqual(judged.parse.preambleNull, { answer: null },
+    "reasoning before the answer object was treated as malformed");
+  assert.equal(judged.parse.unknownFold.malformed, "unknown-fold:J9");
+  assert.equal(judged.parse.trailing.malformed, "text-after-answer");
+  assert.equal(judged.parse.twoObjects.malformed, "answer-objects:2");
+  assert.equal(judged.parse.noObject.malformed, "answer-objects:0");
+
+  // Order invariance: only two clean passes naming the same fold offer.
+  assert.deepEqual(judged.decisions.agree, { action: "offer", foldId: "J1" });
+  assert.equal(judged.decisions.disagree.action, "abstain",
+    "a judge that ignores candidate order offered anyway");
+  assert.match(judged.decisions.disagree.reason, /^order-disagreement:/);
+  assert.deepEqual(judged.decisions.oneNull,
+    { action: "abstain", reason: "one-null" },
+    "one pass answering null still produced an offer");
+  assert.deepEqual(judged.decisions.bothNull,
+    { action: "abstain", reason: "both-null" });
+  assert.equal(judged.decisions.boundHit.reason,
+    "malformed-forward:generation-bound-hit",
+    "a generation-bound hit was not a named refusal");
+
+  // Labels join AFTER the decision, and precision has no leniency.
+  assert.deepEqual(judged.outcomes.positiveTheme, { offered: true, correct: true });
+  assert.deepEqual(judged.outcomes.alreadyVisibleTheme,
+    { offered: true, correct: false },
+    "an interruption on already-visible evidence was scored correct");
+  assert.deepEqual(judged.outcomes.positiveWrongFold,
+    { offered: true, correct: false },
+    "the wrong fold on a positive event was scored correct");
+  assert.deepEqual(judged.outcomes.abstain, { offered: false, correct: null });
+
+  // The pre-registered development line, probed both ways around it.
+  assert.equal(judged.gates.earns.earnsValidation, true);
+  assert.equal(judged.gates.earns.validation, "owes-a-fresh-split",
+    "a development pass forgot the burned validation split");
+  assert.equal(judged.gates.tainted.earnsValidation, false,
+    "one false offer did not kill the development gate");
+  assert.equal(judged.gates.tainted.validation, "dead-at-development");
+  assert.equal(judged.gates.sparse.earnsValidation, false,
+    "three offers earned validation below the pre-registered minimum");
+
+  // The comparative prompt carries every fold whole and order is real.
+  assert.equal(judged.prompt.forwardHasBoth, true,
+    "a fold's complete expansion was missing from the comparative prompt");
+  assert.equal(judged.prompt.orderMatters, true);
+  assert.match(judged.prompt.duplicateRefusal, /duplicate-fold:J1/);
+  assert.match(judged.prompt.singleFoldRefusal, /needs-at-least-two-folds/);
+
+  // The default path loads no model, makes no network request, and the judge
+  // carries no threshold anywhere.
+  const judgeDryRun = spawnSync("python3", [judgeScript], {
+    encoding: "utf8",
+    env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+  });
+  assert.equal(judgeDryRun.status, 0, judgeDryRun.stderr);
+  const judgeDry = JSON.parse(judgeDryRun.stdout);
+  assert.equal(judgeDry.live, false);
+  assert.equal(judgeDry.modelLoads, 0);
+  assert.equal(judgeDry.networkRequests, 0);
+  assert.equal(judgeDry.developmentCases, 40);
+  assert.equal(judgeDry.selfTest.thresholds, 0, "the judge grew a threshold");
+  assert.equal(judgeDry.selfTest.orderInvarianceRequired, true);
+  assert.equal(judgeDry.selfTest.developmentSplitOnly, true);
+
+  const judgeSource = source("scripts/probe_attention_toolcall_judge.py");
+  assert(!judgeSource.includes("api.openai.com") && !judgeSource.includes("fetch(") &&
+    !judgeSource.includes("requests.") && !judgeSource.includes("registerTool"),
+  "the judge gained a provider, network, or runtime surface");
+  assert(!judgeSource.includes('["splits"]["validation"]'),
+    "the judge reached for the burned validation split");
+  assert(judgeSource.includes("K) is burned"),
+    "the judge does not state why validation is withheld");
+
+checks.aComparativeToolCallJudgeOffersOnlyUnderOrderInvariance = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
