@@ -97,6 +97,7 @@ function extractRun(run) {
         folds: run.contextEvents.folds,
         counterfactualPooledCacheShare: counterfactual?.pooledCacheShare ?? null,
         counterfactualByRequestClass: counterfactual?.byRequestClass ?? null,
+        observedCacheByRequestClass: run.contextEvents.observedCache?.byRequestClass ?? null,
       }
       : null,
     rereadTax: run.rereadTax ?? null,

@@ -64,6 +64,7 @@ export interface CacheObservation {
   change: ProjectionChange;
   inputTokens: number;
   cacheReadTokens: number;
+  cacheWriteTokens: number;
   providerSideMiss: boolean;
 }
 
@@ -197,9 +198,14 @@ export function observeCacheUsage(
   const usage = input.usage;
   const inputTokens = ownValue(usage, "input");
   const cacheReadTokens = ownValue(usage, "cacheRead");
+  const rawCacheWriteTokens = ownValue(usage, "cacheWrite");
   if (typeof inputTokens !== "number" || !Number.isFinite(inputTokens) || inputTokens <= 0 ||
       typeof cacheReadTokens !== "number" || !Number.isFinite(cacheReadTokens) ||
       cacheReadTokens < 0) return null;
+  const cacheWriteTokens = typeof rawCacheWriteTokens === "number" &&
+      Number.isFinite(rawCacheWriteTokens) && rawCacheWriteTokens >= 0
+    ? rawCacheWriteTokens
+    : 0;
   const missed = cacheReadTokens === 0;
   const preserved = typeof input.preservedShare === "number" && Number.isFinite(input.preservedShare)
     ? input.preservedShare
@@ -209,7 +215,8 @@ export function observeCacheUsage(
     change: input.change,
     inputTokens,
     cacheReadTokens,
-    providerSideMiss: missed && (input.change !== "rewrite" ||
+    cacheWriteTokens,
+    providerSideMiss: missed && cacheWriteTokens === 0 && (input.change !== "rewrite" ||
       (preserved !== null && preserved >= PROVIDER_SIDE_MISS_PRESERVED_SHARE)),
   };
   if (missed) ledger.observedMisses += 1;

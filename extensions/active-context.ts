@@ -401,7 +401,12 @@ export function registerActiveContext(pi: any, options: {
     previousText: null as string | null,
     lastChange: "append" as ProjectionChange,
     lastPreservedShare: null as number | null,
-    sinceHandoff: [] as Array<{ seq: number; kind: string }>,
+    sinceHandoff: [] as Array<{
+      seq: number;
+      kind: string;
+      action?: string;
+      ok?: boolean;
+    }>,
     mutationsSinceHandoff: 0,
     requests: 0,
     lastMutationRequest: 0,
@@ -540,7 +545,12 @@ export function registerActiveContext(pi: any, options: {
       revision: persistence.state?.revision ?? 0,
       at: Date.now(),
     }, payload);
-    instrumentation.sinceHandoff.push({ seq: record.seq, kind });
+    instrumentation.sinceHandoff.push({
+      seq: record.seq,
+      kind,
+      ...(typeof record.action === "string" ? { action: record.action } : {}),
+      ...(typeof record.ok === "boolean" ? { ok: record.ok } : {}),
+    });
     const operation = curation.instrumentationQueue.then(async () => {
       try { await pi.appendEntry(contextEventEntryType, record); }
       catch { }
@@ -552,6 +562,12 @@ export function registerActiveContext(pi: any, options: {
   const PREFIX_MUTATING_KINDS: ReadonlySet<string> = new Set([
     "context.commit", "context.fold", "context.absorb", "context.split", "context.recovery",
   ]);
+  const CACHE_ACTION_REQUEST_CLASS: Readonly<Record<string, string>> = Object.freeze({
+    fold: "after-mark",
+    peek: "after-peek",
+    expand: "after-expand",
+    refold: "after-refold",
+  });
 
   const deliverReceipt = (receipt: ContextReceipt): void => {
     curation.receipts = withReceipt(curation.receipts, receipt);
@@ -1738,8 +1754,27 @@ export function registerActiveContext(pi: any, options: {
       ? divergence.identicalChars / previousChars
       : null;
     const charsPerToken = projectionCharsPerToken();
+    const successfulCacheActions = instrumentation.sinceHandoff.filter((event) =>
+      event.kind === "context.attempt" && event.ok === true &&
+      typeof event.action === "string" && CACHE_ACTION_REQUEST_CLASS[event.action]);
+    const latestCacheAction = successfulCacheActions.at(-1) ?? null;
+    const latestCacheActionClass = latestCacheAction?.action
+      ? CACHE_ACTION_REQUEST_CLASS[latestCacheAction.action]
+      : null;
+    const projectionActions = successfulCacheActions.filter((event) =>
+      event.action === "expand" || event.action === "refold");
     const causes = instrumentation.sinceHandoff.filter((event) =>
-      PREFIX_MUTATING_KINDS.has(event.kind));
+      PREFIX_MUTATING_KINDS.has(event.kind) || projectionActions.includes(event));
+    const structuralCause = causes.some((event) => event.kind !== "context.attempt");
+    const requestClass = causes.some((event) => event.kind === "context.recovery")
+      ? "after-rollback"
+      : (latestCacheAction?.action === "expand" || latestCacheAction?.action === "refold")
+        ? latestCacheActionClass!
+        : structuralCause
+          ? "after-fold"
+          : latestCacheActionClass
+            ? latestCacheActionClass
+            : divergence.index === null ? "steady-state" : "after-message";
     const reading = projectedTokenReading(projected);
     emit("context.projection", {
       change: comparison.change,
@@ -1768,14 +1803,14 @@ export function registerActiveContext(pi: any, options: {
       estimated_tokens: Math.ceil(text.length / charsPerToken),
       cause: divergence.index === null
         ? "pure-append"
-        : (causes.length ? causes.map((event) => event.kind).join(",") : "unattributed"),
+        : (causes.length ? causes.map((event) => event.kind === "context.attempt"
+          ? `context.attempt:${String(event.action)}`
+          : event.kind).join(",") : "unattributed"),
       cause_event_seqs: causes.map((event) => event.seq).join(","),
       events_since_handoff: instrumentation.sinceHandoff.length,
-      request_class: divergence.index === null
-        ? "steady-state"
-        : (causes.some((event) => event.kind === "context.recovery")
-          ? "after-rollback"
-          : (causes.length ? "after-fold" : "after-message")),
+      cache_action: latestCacheAction?.action ?? null,
+      cache_action_seq: latestCacheAction?.seq ?? null,
+      request_class: requestClass,
     });
     instrumentation.previousText = text;
     instrumentation.sinceHandoff = [];
@@ -2629,6 +2664,7 @@ export function registerActiveContext(pi: any, options: {
           model: ownValue(message, "model") ?? null,
           input_tokens: observation.inputTokens,
           cache_read_tokens: observation.cacheReadTokens,
+          cache_write_tokens: observation.cacheWriteTokens,
           total_tokens: providerTokens(message),
           projection_change: observation.change,
           provider_side_miss: observation.providerSideMiss,

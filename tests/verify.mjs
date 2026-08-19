@@ -3440,7 +3440,14 @@ async function gateProjectionInstrumentation() {
   ledger.projections = 4;
   assert.deepEqual(
     context.observeCacheUsage(ledger, { usage: { input: 200_000, cacheRead: 0 }, change: "append" }),
-    { ordinal: 4, change: "append", inputTokens: 200_000, cacheReadTokens: 0, providerSideMiss: true },
+    {
+      ordinal: 4,
+      change: "append",
+      inputTokens: 200_000,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      providerSideMiss: true,
+    },
   );
   assert.equal(
     context.observeCacheUsage(ledger, { usage: { input: 200_000, cacheRead: 0 }, change: "rewrite" })
@@ -3455,6 +3462,14 @@ async function gateProjectionInstrumentation() {
   assert.equal(ledger.observedMisses, 2);
   assert.equal(ledger.providerSideMisses, 1);
   assert.equal(context.observeCacheUsage(ledger, { usage: null, change: "append" }), null);
+  const writeLedger = context.emptyLedger();
+  const cacheWrite = context.observeCacheUsage(writeLedger, {
+    usage: { input: 1_000, cacheRead: 0, cacheWrite: 4_096 }, change: "append",
+  });
+  assert.equal(cacheWrite.cacheWriteTokens, 4_096,
+    "A provider cache write vanished from the runtime observation");
+  assert.equal(cacheWrite.providerSideMiss, false,
+    "A reported cache write was mislabeled as unexplained provider weather");
 
   // The record ring itself: every record keys on a prefix digest, and the ledger KEEPS
   // every one of them. It used to drop its oldest at a constant of 64, which was a second
@@ -6491,6 +6506,9 @@ async function gateContextEventStream() {
     assert(record.identical_share >= 0 && record.identical_share <= 1);
     assert.equal(typeof record.cause, "string");
     assert.equal(typeof record.cause_event_seqs, "string");
+    assert(record.cache_action === null || typeof record.cache_action === "string");
+    assert(record.cache_action_seq === null || Number.isSafeInteger(record.cache_action_seq));
+    assert.equal(typeof record.request_class, "string");
   }
   assert(prefixes.some((record) => record.cause === "pure-append"),
     "No handoff was attributed as a pure append");
@@ -6503,6 +6521,7 @@ async function gateContextEventStream() {
   const usage = stream().filter((record) => record.kind === "context.usage");
   assert(usage.every((record) =>
     Number.isSafeInteger(record.input_tokens) && Number.isSafeInteger(record.cache_read_tokens) &&
+    Number.isSafeInteger(record.cache_write_tokens) &&
     typeof record.provider === "string" && typeof record.message_sha256 === "string"));
 
   // The in-memory view and the durable stream are the same records, not two conventions.
@@ -12462,6 +12481,79 @@ async function gateBriefTruncationIsExplicit() {
   };
 }
 
+// GATE 137 - cache accounting names the topology point a request follows.
+//
+// Marks and peeks do not move old projection bytes, while expand and refold switch
+// between two exact branches. The provider decides whether either branch is still hot;
+// the runtime's job is to make that result joinable to the action that selected it.
+// This gate changes no cache policy and sends no provider parameter.
+async function gateCacheTopologyAccounting() {
+  const runtime = await epochToolRuntime({ turns: 12, resultChars: 6_000 });
+  const built = runtime.built;
+  const stream = () => contextEvents(runtime);
+  const latestPrefix = () => stream().filter((record) => record.kind === "context.prefix").at(-1);
+
+  await toolCall(runtime, {
+    action: "fold",
+    ids: [built.turnEntries[0][2]],
+    brief: "The first completed inspection remains exactly recoverable behind this fold.",
+  });
+  await project(runtime);
+  await settle();
+  const afterMark = latestPrefix();
+  assert.equal(afterMark.request_class, "after-mark");
+  assert.equal(afterMark.cache_action, "fold");
+  assert(Number.isSafeInteger(afterMark.cache_action_seq));
+  assert.equal(afterMark.divergent_char, null,
+    "Accepting a mark moved old projection bytes before the commit");
+
+  const committed = await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  assert.equal(committed.fired, true, "The cache-topology fixture never reached a fold commit");
+  const afterCommit = latestPrefix();
+  assert.equal(afterCommit.request_class, "after-fold");
+  const root = materialized(runtime).folds.find((fold) => fold.parentId === null);
+  assert(root, "The marked span did not produce a root fold");
+
+  await toolCall(runtime, { action: "expand", id: root.id });
+  await project(runtime);
+  await settle();
+  const afterExpand = latestPrefix();
+  assert.equal(afterExpand.request_class, "after-expand");
+  assert.equal(afterExpand.cache_action, "expand");
+  assert.equal(afterExpand.change, "rewrite");
+  assert.match(afterExpand.cause, /context\.attempt:expand/);
+
+  await toolCall(runtime, { action: "refold", id: root.id });
+  await project(runtime);
+  await settle();
+  const afterRefold = latestPrefix();
+  assert.equal(afterRefold.request_class, "after-refold");
+  assert.equal(afterRefold.cache_action, "refold");
+  assert.equal(afterRefold.change, "rewrite");
+  assert.match(afterRefold.cause, /context\.attempt:refold/);
+
+  await toolCall(runtime, { action: "peek", id: root.id, offset: 0, bytes: 1_024 });
+  await project(runtime);
+  await settle();
+  const afterPeek = latestPrefix();
+  assert.equal(afterPeek.request_class, "after-peek");
+  assert.equal(afterPeek.cache_action, "peek");
+  assert.equal(afterPeek.divergent_char, null,
+    "The read-only peek action rewrote the projection in the harness");
+
+  return {
+    requestClasses: [
+      afterMark.request_class,
+      afterCommit.request_class,
+      afterExpand.request_class,
+      afterRefold.request_class,
+      afterPeek.request_class,
+    ],
+    markMovedBytes: false,
+    branchSwitches: 2,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -12585,6 +12677,7 @@ const gates = [
   [134, "Opening prose survives deterministic folding", gateOpeningProseSurvivesDeterministicFolding],
   [135, "Agent notes survive; omission is stated", gateAgentNotesSurviveConsolidation],
   [136, "A brief's cut is stated, never silent", gateBriefTruncationIsExplicit],
+  [137, "Cache topology names marks and branch returns", gateCacheTopologyAccounting],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

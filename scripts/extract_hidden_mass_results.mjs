@@ -196,8 +196,8 @@ function extractRun(runDir, carriageRows, plan) {
   const compactionUsage = sumUsage(compactions);
   const allProviderUsage = addUsage(messageUsage, compactionUsage);
   const promptTokens = providerResponses.map((row) =>
-    (row.usage.input ?? 0) + (row.usage.cacheRead ?? 0));
-  const pooledDenominator = messageUsage.inputFresh + messageUsage.cacheRead;
+    (row.usage.input ?? 0) + (row.usage.cacheRead ?? 0) + (row.usage.cacheWrite ?? 0));
+  const pooledDenominator = messageUsage.inputFresh + messageUsage.cacheRead + messageUsage.cacheWrite;
   const expectedJoins = new Map(plan.ledger.joins.map((row) => [row.id, row.expectedAnswer]));
   const ledgerRecordCalls = [];
   for (const entry of activeBranch) {

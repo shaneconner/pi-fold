@@ -3480,8 +3480,8 @@ export function deliverableTranscripts({ entries, plan }) {
 //
 // A mutation is defined against the PROVIDER's own accounting, not against any design's
 // notion of what should have invalidated: a request whose cacheRead falls materially below
-// the previous request's total input (cacheRead + inputFresh) re-paid for a prefix it had
-// already paid for. interRequestWallMs sits beside it so a 0%-cached request can be
+// the previous request's total input (cacheRead + cacheWrite + inputFresh) re-paid for a
+// prefix it had already paid for. interRequestWallMs sits beside it so a 0%-cached request can be
 // attributed to a mutation rather than to provider cache TTL eviction (~5-10 minutes).
 // ---------------------------------------------------------------------------
 export const MUTATION_RELATIVE_TOLERANCE = 0.02;
@@ -3504,7 +3504,7 @@ export function usageSeriesFromLedger(ledger) {
     const cacheRead = Number.isFinite(usage.cacheRead) ? usage.cacheRead : 0;
     const cacheWrite = Number.isFinite(usage.cacheWrite) ? usage.cacheWrite : 0;
     const output = Number.isFinite(usage.output) ? usage.output : 0;
-    const totalInput = inputFresh + cacheRead;
+    const totalInput = inputFresh + cacheRead + cacheWrite;
     const requestWallMs = Number.isFinite(request?.wallMs) ? request.wallMs : null;
     const tolerance = previousTotalInput === null ? 0 : Math.max(
       MUTATION_ABSOLUTE_TOLERANCE_TOKENS, MUTATION_RELATIVE_TOLERANCE * previousTotalInput);
@@ -3526,12 +3526,13 @@ export function usageSeriesFromLedger(ledger) {
   }
   const shares = series.map((entry) => entry.cacheShare).filter((value) => value !== null);
   const pooledCacheRead = series.reduce((total, entry) => total + entry.cacheRead, 0);
-  const pooledInput = series.reduce((total, entry) => total + entry.cacheRead + entry.inputFresh, 0);
+  const pooledInput = series.reduce((total, entry) =>
+    total + entry.cacheRead + entry.cacheWrite + entry.inputFresh, 0);
   return {
     series,
     mutations,
     mutationRule: {
-      definition: "cacheRead < previousRequest(cacheRead + inputFresh) - tolerance",
+      definition: "cacheRead < previousRequest(cacheRead + cacheWrite + inputFresh) - tolerance",
       relativeTolerance: MUTATION_RELATIVE_TOLERANCE,
       absoluteToleranceTokens: MUTATION_ABSOLUTE_TOLERANCE_TOKENS,
       comparableRequests: Math.max(series.length - 1, 0),
@@ -3641,7 +3642,8 @@ export function billedCostFromLedger(ledger) {
     const cost = usage.cost?.total;
     if (Number.isFinite(cost)) messageCallsUsd += cost; else callsWithoutCost += 1;
     const prompt = (Number.isFinite(usage.input) ? usage.input : 0) +
-      (Number.isFinite(usage.cacheRead) ? usage.cacheRead : 0);
+      (Number.isFinite(usage.cacheRead) ? usage.cacheRead : 0) +
+      (Number.isFinite(usage.cacheWrite) ? usage.cacheWrite : 0);
     if (prompt > peakPromptTokens) peakPromptTokens = prompt;
     if (prompt > LONG_CONTEXT_TIER_PROMPT_TOKENS) longContextCalls += 1;
   }
@@ -4175,6 +4177,49 @@ export function contextEventMetrics(entries) {
   const prefixes = events.filter((event) => event.kind === "context.prefix");
   const commits = events.filter((event) => event.kind === "context.commit");
 
+  // Cache topology is read at the request boundary. New runtimes stamp the class on the
+  // prefix record itself; older sealed runs can still be classified because the accepted
+  // context.attempt records already sit between consecutive prefix records. This makes an
+  // expansion's return to a previously hot raw branch measurable without rewriting history.
+  const cacheActionClass = Object.freeze({
+    fold: "after-mark",
+    peek: "after-peek",
+    expand: "after-expand",
+    refold: "after-refold",
+  });
+  const prefixPositions = events
+    .map((event, index) => event.kind === "context.prefix" ? index : -1)
+    .filter((index) => index >= 0);
+  const prefixRows = prefixPositions.map((position, index) => {
+    const previousPosition = index > 0 ? prefixPositions[index - 1] : -1;
+    const nextPosition = index + 1 < prefixPositions.length ? prefixPositions[index + 1] : events.length;
+    const before = events.slice(previousPosition + 1, position);
+    const after = events.slice(position + 1, nextPosition);
+    const successfulActions = before.filter((event) => event.kind === "context.attempt" &&
+      event.ok === true && typeof event.action === "string" && cacheActionClass[event.action]);
+    const latestAction = successfulActions.at(-1) ?? null;
+    const recovered = before.some((event) => event.kind === "context.recovery");
+    const structurallyFolded = before.some((event) =>
+      event.kind === "context.fold" || event.kind === "context.absorb" || event.kind === "context.split" ||
+      (event.kind === "context.commit" && event.deferred !== true));
+    const requestClass = recovered
+      ? "after-rollback"
+      : (latestAction?.action === "expand" || latestAction?.action === "refold")
+        ? cacheActionClass[latestAction.action]
+        : structurallyFolded
+          ? "after-fold"
+          : latestAction
+            ? cacheActionClass[latestAction.action]
+            : typeof events[position].request_class === "string"
+              ? events[position].request_class
+              : "unknown";
+    return {
+      prefix: events[position],
+      requestClass,
+      usage: after.find((event) => event.kind === "context.usage") ?? null,
+    };
+  });
+
   // Tool usage, per action, from the runtime's own attempt records. The rep-23
   // finding (the agent never called the context tool at all) was discovered by hand
   // after the run; every question of that class must be a reported number here.
@@ -4218,13 +4263,14 @@ export function contextEventMetrics(entries) {
   let idealCachedTokens = 0;
   let projectedTokens = 0;
   const byRequestClass = {};
+  const observedCacheByRequestClass = {};
   let previousTokens = null;
-  for (const prefix of prefixes) {
+  for (const row of prefixRows) {
+    const { prefix, requestClass, usage } = row;
     const estimated = Number.isFinite(prefix.estimated_tokens) ? prefix.estimated_tokens : 0;
-    const cause = typeof prefix.cause === "string" ? prefix.cause : "";
     if (prefix.change === "rewrite") {
       prefixRewrites += 1;
-      if (cause.includes("context.commit") || cause.includes("context.fold")) {
+      if (["after-fold", "after-expand", "after-refold"].includes(requestClass)) {
         structuralRewrites += 1;
       } else {
         surfaceRewrites += 1;
@@ -4236,18 +4282,49 @@ export function contextEventMetrics(entries) {
         : previousTokens;
     idealCachedTokens += cached;
     projectedTokens += estimated;
-    const requestClass = typeof prefix.request_class === "string"
-      ? prefix.request_class : "unknown";
     const bucket = byRequestClass[requestClass]
       ?? (byRequestClass[requestClass] = { requests: 0, idealCachedTokens: 0, projectedTokens: 0 });
     bucket.requests += 1;
     bucket.idealCachedTokens += cached;
     bucket.projectedTokens += estimated;
+    const observed = observedCacheByRequestClass[requestClass]
+      ?? (observedCacheByRequestClass[requestClass] = {
+        requests: 0,
+        measuredRequests: 0,
+        cacheHits: 0,
+        cacheWriteRequests: 0,
+        cacheWriteReportedRequests: 0,
+        inputFresh: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        promptTokens: 0,
+      });
+    observed.requests += 1;
+    if (usage) {
+      const inputFresh = Number.isFinite(usage.input_tokens) ? usage.input_tokens : 0;
+      const cacheRead = Number.isFinite(usage.cache_read_tokens) ? usage.cache_read_tokens : 0;
+      const cacheWriteReported = Number.isFinite(usage.cache_write_tokens);
+      const cacheWrite = cacheWriteReported ? usage.cache_write_tokens : 0;
+      observed.measuredRequests += 1;
+      if (cacheRead > 0) observed.cacheHits += 1;
+      if (cacheWrite > 0) observed.cacheWriteRequests += 1;
+      if (cacheWriteReported) observed.cacheWriteReportedRequests += 1;
+      observed.inputFresh += inputFresh;
+      observed.cacheRead += cacheRead;
+      observed.cacheWrite += cacheWrite;
+      observed.promptTokens += inputFresh + cacheRead + cacheWrite;
+    }
     previousTokens = estimated;
   }
   for (const bucket of Object.values(byRequestClass)) {
     bucket.counterfactualCacheShare = bucket.projectedTokens > 0
       ? bucket.idealCachedTokens / bucket.projectedTokens : null;
+  }
+  for (const bucket of Object.values(observedCacheByRequestClass)) {
+    bucket.pooledCacheShare = bucket.promptTokens > 0
+      ? bucket.cacheRead / bucket.promptTokens : null;
+    bucket.pooledCacheWriteShare = bucket.promptTokens > 0
+      ? bucket.cacheWrite / bucket.promptTokens : null;
   }
 
   // The B1 guidance-carrier lenses. Every carrier ships its event kind and its
@@ -4336,7 +4413,7 @@ export function contextEventMetrics(entries) {
     structuralRewrites,
     surfaceRewrites,
     mutationRule: {
-      definition: "context.prefix change=rewrite; structural when cause_event_seqs names a commit or fold",
+      definition: "context.prefix change=rewrite; structural when the request follows a fold, expand, or refold",
       comparableRequests: Math.max(prefixes.length - 1, 0),
     },
     commits: commits.filter((event) => event.deferred !== true).length,
@@ -4377,6 +4454,15 @@ export function contextEventMetrics(entries) {
       projectedTokens,
       pooledCacheShare: projectedTokens > 0 ? idealCachedTokens / projectedTokens : null,
       byRequestClass,
+    },
+    observedCache: {
+      definition: "each context.prefix is joined to the first context.usage before the next prefix; " +
+        "accepted fold, peek, expand, and refold attempts classify the request, including old sealed runs",
+      measuredRequests: Object.values(observedCacheByRequestClass)
+        .reduce((total, bucket) => total + bucket.measuredRequests, 0),
+      unmeasuredRequests: Object.values(observedCacheByRequestClass)
+        .reduce((total, bucket) => total + bucket.requests - bucket.measuredRequests, 0),
+      byRequestClass: observedCacheByRequestClass,
     },
     guidanceCarriers,
   };
