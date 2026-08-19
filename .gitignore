@@ -13,3 +13,4 @@ GEMINI.md
 lab/
 memory/
 *.local.*
+__pycache__/
