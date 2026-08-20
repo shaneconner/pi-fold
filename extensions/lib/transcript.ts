@@ -73,7 +73,10 @@ export const READ_ONLY_CONTEXT_ACTION_ARGUMENTS: Readonly<Record<string, readonl
   // offset and bytes are the tool surface's own narrowing parameters: a paged or
   // narrowed peek is as byte-inert as a bare one, and excluding them made the
   // read built to SAVE window mass linger as raw mass past the reclaimer.
-  peek: Object.freeze(["action", "id", "offset", "bytes"]),
+  // ephemeral joins them for the same reason: it changes when the RESULT leaves
+  // the projection, never what the call moves, and a call the reclaimer cannot
+  // claim would linger as exactly the mass the parameter exists to shed.
+  peek: Object.freeze(["action", "id", "offset", "bytes", "ephemeral"]),
 });
 
 export function isAutoFoldableToolCall(

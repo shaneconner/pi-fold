@@ -29,7 +29,7 @@ export function buildActiveContextTool(input: {
   handler: ToolHandler;
 }) {
   const peekGuidance = input.allowedActions.includes("peek")
-    ? ` Peek is the point read: it returns one fold's index view -- every nested fold's brief in full, plus the head and tail of that fold's own span with the omitted middle stated -- for any fold id, ancestors still collapsed, changing nothing. It serves ONE level: raw entries come back exactly, folds nested inside stay placeheld, and peeking a child id you see there returns that child's own bytes, so anything folded is one hop away at any depth. It returns at most ${input.defaultPeekBytes} bytes unless you widen it with bytes, and it stays in the window like any other tool result. Expand is the durable in-place restoration.`
+    ? ` Peek is the point read: it returns one fold's index view -- every nested fold's brief in full, plus the head and tail of that fold's own span with the omitted middle stated -- for any fold id, ancestors still collapsed, changing nothing. It serves ONE level: raw entries come back exactly, folds nested inside stay placeheld, and peeking a child id you see there returns that child's own bytes, so anything folded is one hop away at any depth. It returns at most ${input.defaultPeekBytes} bytes unless you widen it with bytes, and it stays in the window like any other tool result; pass ephemeral true and it instead rides only until your next message, your reply then the surviving trace, so write down what matters before you answer. Expand is the durable in-place restoration.`
     : "";
   const correctionGuidance = input.allowedActions.includes("rebrief")
     ? " Curation is correctable: rebrief replaces a fold's brief, and reboundary with ids re-cuts a span into exactly one fold, which merges adjacent folds when the span covers several and splits one when the span sits inside it. Reboundary with a single id returns that fold's span to raw."
@@ -87,6 +87,12 @@ export function buildActiveContextTool(input: {
           description: `Factual fold brief, at most ${input.maxBriefChars} characters.`,
         },
         offset: { type: "integer", minimum: 0 },
+        ephemeral: {
+          type: "boolean",
+          description: "Peek only: the returned bytes ride your context exactly until your " +
+            "next message, then their place holds a one-line placeholder and your reply is " +
+            "the surviving trace. Default false: the result stays like any other tool result.",
+        },
         bytes: {
           type: "integer",
           minimum: input.minPeekSliceBytes,

@@ -472,6 +472,13 @@ export function registerActiveContext(pi: any, options: {
     stewardCrossingActive: false,
   };
 
+  // EPHEMERAL PEEK (Build 4b): tool call ids whose peek asked for one-read
+  // visibility. In-memory ON PURPOSE: a restart forgets the registry and the
+  // result stays durable, which is the safe default, and the durable entry
+  // always keeps the exact bytes, so folding, peek and rollback read the
+  // source unchanged whatever the projection shows.
+  const ephemeralPeeks = new Set<string>();
+
   const nativeCompaction = {
     lastThresholdDecision: null as Record<string, unknown> | null,
     pendingNativeReceipt: null as NativeCompactionCompletionReceipt | null,
@@ -1925,6 +1932,38 @@ export function registerActiveContext(pi: any, options: {
     return projected;
   };
 
+  // An ephemeral peek result rides the projection exactly until the model's
+  // next message, the same answered reading as the directed ask, then its
+  // index holds a one-line placeholder and the reply is the surviving trace.
+  // Runs against the BODY before the freeze reads it, so the one rewrite this
+  // costs lands at the moment the answer does and the projection is stable on
+  // every later pass. A message already projection-shaped (a fold's own
+  // deterministic brief placeholder carries the same toolCallId) is never
+  // touched: only the raw result is the ephemeral one.
+  const withdrawConsumedEphemeralPeeks = (body: unknown[]): void => {
+    if (!ephemeralPeeks.size) return;
+    for (let index = 0; index < body.length; index += 1) {
+      const message = body[index];
+      const callId = ownValue(message, "toolCallId");
+      if (ownValue(message, "role") !== "toolResult" || typeof callId !== "string" ||
+        !ephemeralPeeks.has(callId)) continue;
+      const details = ownValue(message, "details");
+      if (details && typeof ownValue(details, "projection") === "string") continue;
+      const answered = body.slice(index + 1).some((later) =>
+        ownValue(later, "role") === "assistant");
+      if (!answered) continue;
+      body[index] = {
+        role: "toolResult",
+        toolCallId: callId,
+        toolName: ownValue(message, "toolName"),
+        content: [{ type: "text", text: "Ephemeral peek consumed; the reply that followed it is the surviving trace." }],
+        isError: false,
+        details: { projection: "ephemeral-peek-consumed" },
+        timestamp: ownValue(message, "timestamp"),
+      };
+    }
+  };
+
   const projectWithAdvisory = (snapshot: ActiveContextSnapshot): unknown[] => {
     const body = projectActiveContext(snapshot, persistence.state!).filter((message) => {
       const customType = ownValue(message, "customType");
@@ -1932,6 +1971,7 @@ export function registerActiveContext(pi: any, options: {
         customType !== receiptProjectionType && customType !== stewardProjectionType &&
         customType !== riderProjectionType && customType !== curationProjectionType;
     });
+    withdrawConsumedEphemeralPeeks(body);
     const held = freeze.body?.length ?? 0;
     freeze.active = freeze.projection !== null && body.length >= held &&
       stableStringify(body.slice(0, held)) === freeze.bodyText;
@@ -3393,6 +3433,9 @@ export function registerActiveContext(pi: any, options: {
     if (action === "peek") {
       const id = String(params.id ?? "").trim();
       if (!id) throw new Error("peek requires id");
+      if (params.ephemeral !== undefined && typeof params.ephemeral !== "boolean") {
+        throw new Error("peek ephemeral must be a boolean");
+      }
       const offset = boundedInteger(params.offset, 0, 0, 1_000_000_000, "offset");
       const sliceBytes = boundedInteger(
         params.bytes,
@@ -3410,15 +3453,21 @@ export function registerActiveContext(pi: any, options: {
         requestedBytes: Math.max(0, Math.min(sliceBytes, target.sourceChars - offset)),
         children: childFoldIds(target),
       });
-      const payload = toolPayload(peekFoldSource({
-        foldId: id,
-        state: persistence.state,
-        entries: ctx.sessionManager.getEntries?.() ?? ctx.sessionManager.getBranch(),
-        sessionId: ctx.sessionManager.getSessionId(),
-        maximumBytes: sliceBytes,
-        offset,
-        toolName,
-      }));
+      const payload = toolPayload({
+        ...peekFoldSource({
+          foldId: id,
+          state: persistence.state,
+          entries: ctx.sessionManager.getEntries?.() ?? ctx.sessionManager.getBranch(),
+          sessionId: ctx.sessionManager.getSessionId(),
+          maximumBytes: sliceBytes,
+          offset,
+          toolName,
+        }),
+        ...(params.ephemeral === true ? {
+          ephemeral: "this result rides your context exactly until your next message; " +
+            "carry forward what matters in your reply, which takes over its place",
+        } : {}),
+      });
       return payload;
     }
     if (action === "rebrief") {
@@ -3831,6 +3880,7 @@ export function registerActiveContext(pi: any, options: {
           marks_requested: requestedMarkCount(params),
           corrections_applied: corrections.length,
           arguments_sha256: sha256Value(params ?? {}),
+          ...(action === "peek" && params?.ephemeral === true ? { ephemeral: true } : {}),
         });
         for (const correction of corrections) {
           const from = denseOwnArrayValues(ownValue(correction, "from")) ?? [];
@@ -3850,6 +3900,7 @@ export function registerActiveContext(pi: any, options: {
         const result = await executeAction(params, signal, ctx);
         const corrections = denseOwnArrayValues(ownValue(ownValue(result, "details"), "corrections"));
         attempt(true, null, (corrections ?? []) as Array<Record<string, unknown>>);
+        if (action === "peek" && params?.ephemeral === true) ephemeralPeeks.add(toolCallId);
         return result;
       } catch (error) {
         attempt(false, error instanceof Error ? error.message : String(error), []);

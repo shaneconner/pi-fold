@@ -6671,10 +6671,17 @@ async function gateLeverCollapse() {
   assert.equal(status.instrumentation.enabled, true, "Projection instrumentation is not unconditional");
   assert.equal((await toolStatus(plain)).details.index, "diet", "The status index diet is not unconditional");
   const properties = [...plain.tools.values()][0].parameters.properties;
-  // Peek is APPEND-ONLY, so the two arguments that steered its reclamation are gone
-  // from the surface entirely rather than collapsed to a default.
+  // Peek is APPEND-ONLY, so the arguments that steered its RECLAMATION are gone
+  // from the surface entirely rather than collapsed to a default. ephemeral
+  // RETURNED 2026-08-20 (Build 4b, gate 139) as a DIFFERENT lever: the
+  // iteration-2 parameter steered reclamation timing and stays dead with
+  // retain; the returned one is a projection-visibility contract (one read,
+  // the reply the surviving trace) that never touches the reclaimer, and its
+  // own gate owns it. The lever collapse still holds: no knob steers
+  // reclamation.
   assert.equal(properties.retain, undefined, "retain survived the peek reclamation cut");
-  assert.equal(properties.ephemeral, undefined, "ephemeral survived the peek reclamation cut");
+  assert.equal(properties.ephemeral?.type, "boolean",
+    "the ephemeral visibility contract left the peek surface");
   assert.equal(properties.marks.type, "array", "Batched marks are not on the surface");
   const actions = [...properties.action.enum];
   assert(actions.includes("rebrief") && actions.includes("reboundary"),
@@ -7725,7 +7732,8 @@ async function gateStatusResultsAreLadderFood() {
       status: [...context.READ_ONLY_CONTEXT_ACTION_ARGUMENTS.status],
       peek: [...context.READ_ONLY_CONTEXT_ACTION_ARGUMENTS.peek],
     },
-    { status: ["action", "detail", "offset", "limit"], peek: ["action", "id", "offset", "bytes"] },
+    { status: ["action", "detail", "offset", "limit"],
+      peek: ["action", "id", "offset", "bytes", "ephemeral"] },
   );
   const pagedShape = { action: "status", detail: "folds", offset: 40, limit: 40 };
   assert.equal(context.isAutoFoldableToolCall("pi_fold_context", pagedShape), true,
@@ -12909,6 +12917,123 @@ async function gateStewardAdvisory() {
   };
 }
 
+// ---------------------------------------------------------------------------
+// GATE 139 - an ephemeral peek is consumed by the reply that follows it.
+// Build 4b (Shane 2026-08-20): peek gains an opt-in ephemeral parameter. The
+// default is unchanged: a bare peek's result stays in the window like any
+// tool result. With ephemeral true, the result rides the projection exactly
+// until the model's next message, the same answered reading as the directed
+// ask, then its index holds a one-line placeholder and the reply is the
+// surviving trace. The registry is in-memory on purpose: a restart forgets it
+// and the result stays durable, the safe default, while the durable entry
+// keeps the exact bytes for folding and rollback either way. A message
+// already projection-shaped (a fold's deterministic tool brief carries the
+// same toolCallId) is never touched: only the raw result is the ephemeral one.
+// ---------------------------------------------------------------------------
+async function gateEphemeralPeek() {
+  const runtime = await epochToolRuntime({ turns: 14 });
+  await measureAndCommit(runtime, 80_500, 100_000);
+  const state = materialized(runtime);
+  assert(state.folds.length >= 1);
+  const foldId = state.folds[0].id;
+  const tool = runtime.tools.get("pi_fold_context");
+
+  // The parameter is on the schema, validated, and stays reclaimable: a peek
+  // the ladder cannot claim would linger as exactly the mass this exists to shed.
+  assert(tool.parameters.properties.ephemeral,
+    "the tool schema does not offer the ephemeral parameter");
+  assert([...context.READ_ONLY_CONTEXT_ACTION_ARGUMENTS.peek].includes("ephemeral"),
+    "an ephemeral peek stopped being auto-foldable");
+  await assert.rejects(
+    tool.execute("peek-junk", { action: "peek", id: foldId, ephemeral: "yes" },
+      new AbortController().signal, undefined, runtime.ctx),
+    /peek ephemeral must be a boolean/);
+
+  // Durable default: the result outlives the reply, exactly as before.
+  await tool.execute("peek-durable", { action: "peek", id: foldId },
+    new AbortController().signal, undefined, runtime.ctx);
+  runtime.appendMessage({
+    role: "toolResult", toolCallId: "peek-durable", toolName: "pi_fold_context",
+    content: [{ type: "text", text: "DURABLE-SENTINEL-2c9a" }], isError: false,
+  });
+  runtime.appendMessage({ role: "assistant", content: [{ type: "text", text: "noted." }] });
+  const afterDurable = json.stableStringify((await project(runtime)).messages);
+  assert(afterDurable.includes("DURABLE-SENTINEL-2c9a"),
+    "a bare peek's result must stay like any other tool result");
+
+  // Ephemeral: visible until answered, then the placeholder takes its index.
+  const peeked = await tool.execute("peek-ephemeral",
+    { action: "peek", id: foldId, ephemeral: true },
+    new AbortController().signal, undefined, runtime.ctx);
+  assert(String(peeked.details.ephemeral ?? "").includes("until your next message"),
+    "the payload does not state the one-read contract");
+  runtime.appendMessage({
+    role: "toolResult", toolCallId: "peek-ephemeral", toolName: "pi_fold_context",
+    content: [{ type: "text", text: "EPHEMERAL-SENTINEL-77aq" }], isError: false,
+  });
+  const beforeAnswer = json.stableStringify((await project(runtime)).messages);
+  assert(beforeAnswer.includes("EPHEMERAL-SENTINEL-77aq"),
+    "the one read: the result must be visible until the model answers");
+  runtime.appendMessage({ role: "assistant", content: [{ type: "text", text: "the figure is 41." }] });
+  const projectedAfter = (await project(runtime)).messages;
+  const afterText = json.stableStringify(projectedAfter);
+  assert(!afterText.includes("EPHEMERAL-SENTINEL-77aq"),
+    "a consumed ephemeral peek still projected its bytes");
+  const placeholder = projectedAfter.find((message) =>
+    message?.role === "toolResult" && message?.toolCallId === "peek-ephemeral");
+  assert(placeholder, "the reply must take over the result's index, not erase it");
+  assert.equal(placeholder.content[0].text,
+    "Ephemeral peek consumed; the reply that followed it is the surviving trace.");
+  assert.equal(placeholder.details.projection, "ephemeral-peek-consumed");
+  assert(afterText.includes("the figure is 41."),
+    "the surviving trace is the reply itself");
+
+  // The attempt event carries the request's shape for the campaign lens.
+  const attemptEvents = runtime.appended
+    .filter((entry) => String(entry.customType ?? "").endsWith("-event"))
+    .map((entry) => entry.data)
+    .filter((data) => data?.kind === "context.attempt" && data.action === "peek");
+  assert(attemptEvents.some((data) =>
+    data.tool_call_id === "peek-ephemeral" && data.ephemeral === true),
+  "the ephemeral peek's attempt does not say so");
+  assert(attemptEvents.every((data) =>
+    data.tool_call_id !== "peek-durable" || data.ephemeral === undefined),
+  "a bare peek's attempt claims ephemerality");
+
+  // A projection-shaped result with the same call id is never touched: after a
+  // fold claims the batch, its deterministic tool brief carries the toolCallId.
+  await tool.execute("peek-guard", { action: "peek", id: foldId, ephemeral: true },
+    new AbortController().signal, undefined, runtime.ctx);
+  runtime.appendMessage({
+    role: "toolResult", toolCallId: "peek-guard", toolName: "pi_fold_context",
+    content: [{ type: "text", text: "GUARD-BRIEF-3k1x" }], isError: false,
+    details: { projection: "deterministic-read-only-tool-brief" },
+  });
+  runtime.appendMessage({ role: "assistant", content: [{ type: "text", text: "done." }] });
+  const guarded = json.stableStringify((await project(runtime)).messages);
+  assert(guarded.includes("GUARD-BRIEF-3k1x"),
+    "a fold's own projection placeholder was overwritten by the ephemeral withdrawal");
+
+  // Restart degrade: a fresh runtime has no registry, so the result stays.
+  const resumed = makeRuntime(runtime.built,
+    { initialEntries: structuredClone(runtime.branch) });
+  resumed.messages.length = 0;
+  resumed.messages.push(...structuredClone(runtime.messages));
+  await startRuntime(resumed);
+  const resumedText = json.stableStringify((await project(resumed)).messages);
+  assert(resumedText.includes("EPHEMERAL-SENTINEL-77aq"),
+    "a restart must degrade to durable, never to silent loss");
+
+  return {
+    durableDefault: true,
+    oneRead: true,
+    placeholderKeepsIndex: true,
+    attemptSaysEphemeral: true,
+    foldPlaceholderUntouched: true,
+    restartDegradesToDurable: true,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -13034,6 +13159,7 @@ const gates = [
   [136, "A brief's cut is stated, never silent", gateBriefTruncationIsExplicit],
   [137, "Cache topology names marks and branch returns", gateCacheTopologyAccounting],
   [138, "The steward advisory invites marks one band before the epoch", gateStewardAdvisory],
+  [139, "An ephemeral peek is consumed by the reply that follows it", gateEphemeralPeek],
 ];
 
 const gateFilter = (process.env.GATES ?? "")
