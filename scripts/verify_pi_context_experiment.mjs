@@ -9263,6 +9263,12 @@ checks.aBreakpointRetestAttributesAcceptanceOnlyOverAHealthyEnvelope = true;
 // attempt inside the window; an attempt before the crossing, a failed attempt,
 // a deferred commit, and a ladder fold each count for nothing. A pre-steward
 // session reads zero crossings with a NULL take share, never a fabricated one.
+// Build 4a added the DIRECTED ask, which is delivered as a followUp the commit
+// never waits for, so its answer structurally lands after the commit closed
+// the window (sol-20260820 rep 5: the accepted rebrief landed two ordinals
+// past the commit and the take share read 0 over a real uptake). A directed
+// crossing therefore also reads an ANSWER window to the next directed
+// crossing; absorbed, advisory-only, and pre-directed crossings read null.
 // ---------------------------------------------------------------------------
 {
   const event = (kind, data = {}) => ({
@@ -9333,6 +9339,52 @@ checks.aBreakpointRetestAttributesAcceptanceOnlyOverAHealthyEnvelope = true;
   ]).steward;
   assert.equal(peekOnly.windows[0].taken, false, "a peek read as steward uptake");
 
+  // The rep-5 shape: the commit closes the directed crossing's window before
+  // the followUp answer arrives, and the rebrief lands after it. The commit
+  // window must still read not-taken (it raced and lost) while the answer
+  // window credits the ask; a rebrief past the NEXT directed crossing answers
+  // that one, never the earlier ask, because a withdrawn ask prompts nothing.
+  const directedRun = contextEventMetrics([
+    event("context.steward", { seq: 1, directed: true, top_rebrief_target: "fold-a" }),
+    event("context.commit", { seq: 2, deferred: false }),
+    event("context.steward", { seq: 3, directed: true, top_rebrief_target: "fold-b" }),
+    event("context.commit", { seq: 4, deferred: false }),
+    event("context.attempt", { seq: 5, action: "rebrief", ok: true }),
+  ]).steward;
+  assert.equal(directedRun.windows[0].answered, false,
+    "a rebrief past the next directed crossing answered the earlier ask");
+  assert.equal(directedRun.windows[0].taken, false);
+  assert.equal(directedRun.windows[1].answered, true,
+    "the answer window did not credit the rebrief that landed after the commit");
+  assert.equal(directedRun.windows[1].taken, false,
+    "the commit window claimed an answer it raced past");
+  assert.equal(directedRun.directedCrossings, 2);
+  assert.equal(directedRun.answeredCrossings, 1);
+  assert.equal(directedRun.answerShare, 0.5);
+  // An absorbed crossing (standing ask, no new send) and an advisory-only
+  // degrade crossing open no answer window; the share's denominator is the
+  // DIRECTED crossings alone, so absorption never dilutes it.
+  const absorbedRun = contextEventMetrics([
+    event("context.steward", { seq: 1, directed: true }),
+    event("context.steward", { seq: 2, directed: false, outstanding_ask: true }),
+    event("context.attempt", { seq: 3, action: "rebrief", ok: true }),
+    event("context.commit", { seq: 4, deferred: false }),
+  ]).steward;
+  assert.equal(absorbedRun.windows[1].answered, null,
+    "an absorbed crossing opened its own answer window");
+  assert.equal(absorbedRun.windows[0].answered, true,
+    "the standing ask was not credited across an absorbed crossing");
+  assert.equal(absorbedRun.directedCrossings, 1);
+  assert.equal(absorbedRun.answerShare, 1);
+  const advisoryOnly = contextEventMetrics([
+    event("context.steward", { seq: 1 }),
+    event("context.commit", { seq: 2, deferred: false }),
+  ]).steward;
+  assert.equal(advisoryOnly.windows[0].answered, null,
+    "a pre-directed crossing fabricated an answer reading");
+  assert.equal(advisoryOnly.answerShare, null,
+    "a session with no directed crossing fabricated an answer share");
+
   const preSteward = contextEventMetrics([
     foldAttempt({ seq: 1 }),
     event("context.commit", { seq: 2, deferred: false }),
@@ -9346,6 +9398,56 @@ checks.aBreakpointRetestAttributesAcceptanceOnlyOverAHealthyEnvelope = true;
   "the campaign extract drops the steward uptake lens");
 
 checks.aStewardCrossingIsTakenOnlyByAnAcceptedAgentMarkInItsWindow = true;
+}
+
+// ---------------------------------------------------------------------------
+// Gate 97: a zero-usage abort marker is excluded and reported, spend never.
+// Rep 5 of sol-20260820-steward failed the two-witness check with 172
+// assistant messages against 171 response records. The first diagnosis, a
+// directed turn delivered past the recorder, was WRONG and is recorded as
+// such: the directed turn was ledger-recorded end to end (request 571,
+// response 572, input 78,003). The unpaired message was Pi's abort marker,
+// an assistant message with stopReason "error" and an all-zero usage block
+// ("This operation was aborted"), persisted when a queued followUp delivery
+// aborted the request build in flight. Nothing was transmitted, so nothing
+// could be recorded; the marker is excluded from the witness count and
+// reported. The gate pins the discrimination: zero-usage error messages are
+// markers, an error message carrying any spend is NOT (a failed generation
+// that billed tokens must stay inside the witness count), and the
+// adjudicator nets exactly the markers and reports them.
+{
+  const { abortMarkerMessages } = await import(
+    pathToFileURL(join(PROJECT, "scripts", "lib", "pi_context_experiment.mjs")));
+  const assistant = (stopReason, usage, errorMessage) => ({
+    type: "message",
+    message: { role: "assistant", content: [], usage, stopReason,
+      ...(errorMessage ? { errorMessage } : {}) },
+  });
+  const zeroUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+  const entries = [
+    assistant("toolUse", { input: 10, output: 2, totalTokens: 12 }),
+    assistant("error", zeroUsage, "This operation was aborted"),
+    assistant("error", { input: 500, output: 0, totalTokens: 500 }, "server error"),
+    assistant("stop", { input: 20, output: 3, totalTokens: 23 }),
+    { type: "custom", customType: "pi-fold-active-context-event" },
+  ];
+  const markers = abortMarkerMessages(entries);
+  assert.equal(markers.length, 1, "the zero-usage abort marker was not excluded");
+  assert.equal(markers[0].entryIndex, 1);
+  assert.equal(markers[0].errorMessage, "This operation was aborted");
+  // The spend-carrying error is deliberately NOT a marker: a generation that
+  // billed 500 input tokens must stay inside the witness count, unrecorded
+  // spend being exactly what the two witnesses exist to catch.
+  assert(!markers.some((marker) => marker.entryIndex === 2),
+    "an error message carrying spend was excluded from the witness count");
+  const adjudicator = source("scripts/adjudicate_pi_context_experiment.mjs");
+  assert(adjudicator.includes("abortMarkerMessages(runEntries)") &&
+    adjudicator.includes("usageSeries.series.length + abortMarkers.length === usage.requests") &&
+    adjudicator.includes("zero-usage abort marker(s) excluded") &&
+    adjudicator.includes("abortMarkers,"),
+  "the adjudicator does not net and report the abort markers");
+
+checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);

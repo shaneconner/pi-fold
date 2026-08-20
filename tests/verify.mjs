@@ -12777,6 +12777,45 @@ async function gateStewardAdvisory() {
   assert.equal(afterAnswer.length, 0,
     "An answered ask must be withdrawn, frozen prefix included");
 
+  // ONE OUTSTANDING ASK (rep 5): eight asks stacked in one busy window because
+  // every band re-entry was a crossing edge and each queued another followUp
+  // while the agent was busy. A standing unanswered ask absorbs every later
+  // crossing: the crossing still counts and its event says outstanding_ask,
+  // but no second send fires until the first ask is answered.
+  const sendsBeforeSuppression = runtime.steered.filter((item) =>
+    String(item.message?.customType ?? "").endsWith("-directed")).length;
+  await measure(runtime, 40_000, 100_000);
+  await project(runtime);
+  await measure(runtime, 55_000, 100_000);
+  runtime.appendMessage({
+    role: "custom",
+    customType: lastSend.message.customType,
+    content: lastSend.message.content,
+    display: false,
+    details: { ...lastSend.message.details },
+    timestamp: 0,
+  }, "directed-ask-standing");
+  await project(runtime);
+  const suppressedEvent = stewardEvents().at(-1);
+  assert.equal(suppressedEvent.directed, false,
+    "A crossing absorbed by a standing ask must not claim a send");
+  assert.equal(suppressedEvent.outstanding_ask, true,
+    "The absorbed crossing must name the standing ask");
+  assert.equal(runtime.steered.filter((item) =>
+    String(item.message?.customType ?? "").endsWith("-directed")).length,
+  sendsBeforeSuppression,
+  "A standing unanswered ask absorbed the crossing without suppressing the send");
+  await measure(runtime, 56_000, 100_000);
+  await project(runtime);
+  await measure(runtime, 40_000, 100_000);
+  await project(runtime);
+  await measure(runtime, 55_000, 100_000);
+  await project(runtime);
+  assert.equal(runtime.steered.filter((item) =>
+    String(item.message?.customType ?? "").endsWith("-directed")).length,
+  sendsBeforeSuppression + 1,
+  "Once the ask is answered, the next crossing sends again");
+
   // Degrade: a host without sendMessage keeps the appended advisory, records
   // the crossing with directed false, and never throws inside the projection.
   const mute = await epochToolRuntime({

@@ -53,6 +53,7 @@ import {
   toolResultText,
   traceStepTranscripts,
   traceStepVerdicts,
+  abortMarkerMessages,
   usageSeriesFromLedger,
   outOfBandUsage,
   billedCostFromLedger,
@@ -630,9 +631,18 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   // cross-checked against the session's own assistant-message count so the two witnesses
   // cannot silently disagree.
   const usageSeries = usageSeriesFromLedger(ledger);
-  assertExperiment(usageSeries.series.length === usage.requests,
+  // A queued followUp delivery (the directed curation turn's trigger) can abort
+  // the request build in flight, and Pi persists that abort as an assistant
+  // message with stopReason "error" and an all-zero usage block. No request was
+  // transmitted and no spend occurred, so no ledger record exists for it; the
+  // marker is excluded from the witness count and reported beside the series.
+  // An unpaired assistant message carrying ANY spend still fails by this name,
+  // because unrecorded provider spend is what the two witnesses exist to catch.
+  const abortMarkers = abortMarkerMessages(runEntries);
+  assertExperiment(usageSeries.series.length + abortMarkers.length === usage.requests,
     `Provider ledger reports ${usageSeries.series.length} responses against ` +
-    `${usage.requests} assistant messages in the session`);
+    `${usage.requests} assistant messages in the session ` +
+    `(${abortMarkers.length} zero-usage abort marker(s) excluded)`);
   const thinkTime = thinkTimeFromPace(paceRecords);
   // Read once, reported under two headings: what was spent where the ledger cannot see it,
   // and what Pi billed for everything including that.
@@ -692,6 +702,9 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
       mutationRule: usageSeries.mutationRule,
       meanCacheShare: usageSeries.meanCacheShare,
       pooledCacheShare: usageSeries.pooledCacheShare,
+      // Aborted turns Pi persisted as zero-usage error messages: in the
+      // assistant count above, absent from the wire series, no spend to carry.
+      abortMarkers,
     },
     // WHAT THE MESSAGE LOOP CANNOT SEE, and what Pi actually billed for all of it.
     //
@@ -759,7 +772,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   };
   assertExperiment(exactKeys(report.usage, [
     "requests", "inputFresh", "cacheRead", "cacheWrite", "output", "reasoning", "totalTokens",
-    "entriesWithoutUsage", "providerResponses", "wallClockMs", "series", "mutations",
+    "entriesWithoutUsage", "providerResponses", "abortMarkers", "wallClockMs", "series", "mutations",
     "mutationRule", "meanCacheShare", "pooledCacheShare",
   ]), "Usage report shape drifted");
   // Re-adjudication never touches the original: the sidecar is named for the adjudicator

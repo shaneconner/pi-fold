@@ -3487,6 +3487,38 @@ export function deliverableTranscripts({ entries, plan }) {
 export const MUTATION_RELATIVE_TOLERANCE = 0.02;
 export const MUTATION_ABSOLUTE_TOLERANCE_TOKENS = 1_024;
 
+// Rep 5 of sol-20260820-steward failed its two-witness check with 172
+// assistant messages against 171 response records, and the first diagnosis
+// (a directed turn delivered past the recorder) was WRONG: the directed turn
+// itself was ledger-recorded end to end. The unpaired message is Pi's abort
+// MARKER: an assistant message with stopReason "error" and an all-zero usage
+// block ("This operation was aborted"), persisted when a queued followUp
+// delivery aborted the request build in flight; no request was transmitted
+// and no spend occurred, so no ledger record can exist for it. Such a marker
+// is excluded from the witness count and REPORTED, never silently dropped;
+// an unpaired assistant message that carries any spend at all still fails by
+// the check's own name, because unrecorded provider spend is exactly what
+// the two witnesses exist to catch.
+export function abortMarkerMessages(entries) {
+  const markers = [];
+  entries.forEach((entry, index) => {
+    const message = entry?.message;
+    if (message?.role !== "assistant" || !message.usage) return;
+    if (message.stopReason !== "error") return;
+    const usage = message.usage;
+    const spend = ["input", "output", "cacheRead", "cacheWrite", "totalTokens"]
+      .reduce((total, key) => total + (Number(usage[key]) || 0), 0);
+    if (spend === 0) {
+      markers.push({
+        entryIndex: index,
+        errorMessage: typeof message.errorMessage === "string"
+          ? message.errorMessage.slice(0, 256) : null,
+      });
+    }
+  });
+  return markers;
+}
+
 export function usageSeriesFromLedger(ledger) {
   assertExperiment(Array.isArray(ledger), "Usage series requires the provider ledger");
   const requestsByOrdinal = new Map(ledger
@@ -4265,8 +4297,12 @@ export function contextEventMetrics(entries) {
   // not an attempt at all. A session from a pre-steward runtime reads zero
   // crossings and a null take share rather than pretending a measurement.
   const stewardWindows = [];
+  const stewardIndices = [];
   for (let index = 0; index < events.length; index += 1) {
-    if (events[index].kind !== "context.steward") continue;
+    if (events[index].kind === "context.steward") stewardIndices.push(index);
+  }
+  const directedIndices = stewardIndices.filter((index) => events[index].directed === true);
+  for (const index of stewardIndices) {
     const crossing = events[index];
     let windowEnd = events.length;
     for (let scan = index + 1; scan < events.length; scan += 1) {
@@ -4275,10 +4311,25 @@ export function contextEventMetrics(entries) {
         break;
       }
     }
-    const takes = events.slice(index + 1, windowEnd).filter((event) =>
+    const acceptedCuration = (from, to) => events.slice(from, to).filter((event) =>
       event.kind === "context.attempt" && event.ok === true &&
       (event.action === "fold" || event.action === "rebrief"));
+    const takes = acceptedCuration(index + 1, windowEnd);
     const foldAttempts = takes.filter((event) => event.action === "fold");
+    // The ANSWER window. A directed ask is delivered as a followUp and rides in
+    // the projection until the model's next message, and the commit never waits
+    // for it, so the commit-bounded window above structurally cannot see the
+    // answer (sol-20260820 rep 5: the accepted rebrief landed two ordinals
+    // after the commit that closed its window). A directed crossing therefore
+    // also reads an answer window running to the next DIRECTED crossing or the
+    // end of the stream: the outstanding-ask guard sends no second ask while
+    // one stands, and a withdrawn ask prompts nothing. Absorbed and
+    // advisory-only crossings open no answer window and read null, as does any
+    // crossing from a pre-directed runtime.
+    const answered = crossing.directed === true
+      ? acceptedCuration(index + 1,
+          directedIndices.find((other) => other > index) ?? events.length).length > 0
+      : null;
     stewardWindows.push({
       seq: Number.isFinite(crossing.seq) ? crossing.seq : null,
       largestCandidate: typeof crossing.largest_candidate === "string"
@@ -4295,6 +4346,8 @@ export function contextEventMetrics(entries) {
       marksRequested: foldAttempts.reduce((total, event) =>
         total + (Number.isFinite(event.marks_requested) ? event.marks_requested : 0), 0),
       taken: takes.length > 0,
+      directed: typeof crossing.directed === "boolean" ? crossing.directed : null,
+      answered,
     });
   }
 
@@ -4506,14 +4559,22 @@ export function contextEventMetrics(entries) {
       byRequestClass: observedCacheByRequestClass,
     },
     steward: {
-      definition: "a crossing is a context.steward event; its window ends at the next applied " +
-        "context.commit; uptake is an accepted agent fold or rebrief attempt inside the window, " +
-        "never a ladder fold and never an attempt before the crossing; a pre-steward session " +
-        "reads zero crossings with a null take share",
+      definition: "a crossing is a context.steward event; its commit window ends at the next " +
+        "applied context.commit; uptake is an accepted agent fold or rebrief attempt inside the " +
+        "window, never a ladder fold and never an attempt before the crossing; a DIRECTED " +
+        "crossing also reads an answer window to the next directed crossing, because the ask " +
+        "rides until answered and the commit never waits for it; a pre-steward session reads " +
+        "zero crossings with a null take share",
       crossings: stewardWindows.length,
       takenCrossings: stewardWindows.filter((window) => window.taken).length,
       takeShare: stewardWindows.length
         ? stewardWindows.filter((window) => window.taken).length / stewardWindows.length
+        : null,
+      directedCrossings: stewardWindows.filter((window) => window.directed === true).length,
+      answeredCrossings: stewardWindows.filter((window) => window.answered === true).length,
+      answerShare: stewardWindows.some((window) => window.directed === true)
+        ? stewardWindows.filter((window) => window.answered === true).length
+          / stewardWindows.filter((window) => window.directed === true).length
         : null,
       acceptedFoldAttemptsInWindows: stewardWindows.reduce(
         (total, window) => total + window.acceptedFoldAttempts, 0),

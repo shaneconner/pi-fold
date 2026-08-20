@@ -1857,6 +1857,16 @@ export function registerActiveContext(pi: any, options: {
         if (answered) projected.splice(index, 1);
       }
     }
+    // ONE OUTSTANDING ASK (rep 5, 2026-08-20): the band oscillated across its
+    // boundary during a busy epoch region, every re-entry was a crossing edge,
+    // and eight asks stacked in one window while the agent was busy, followed
+    // by a seventeen-call status storm. One-send-per-crossing was the intent
+    // stated wrongly; the correct rule is that a standing unanswered ask
+    // absorbs every later crossing until it is answered. The splice above has
+    // already removed answered asks, so any directed entry still in the
+    // projection IS the outstanding one.
+    const outstandingAsk = projected.some((message) =>
+      ownValue(message, "customType") === directedProjectionType);
     if (!reading) {
       advisory.stewardCrossingActive = false;
       return projected;
@@ -1872,7 +1882,7 @@ export function registerActiveContext(pi: any, options: {
       // sendMessage degrades to the appended advisory alone rather than
       // throwing inside the projection.
       let directed = false;
-      if (typeof pi?.sendMessage === "function") {
+      if (!outstandingAsk && typeof pi?.sendMessage === "function") {
         try {
           pi.sendMessage({
             customType: directedProjectionType,
@@ -1887,7 +1897,11 @@ export function registerActiveContext(pi: any, options: {
           directed = false;
         }
       }
-      emit("context.steward", { ...reading.facts, directed });
+      emit("context.steward", {
+        ...reading.facts,
+        directed,
+        ...(outstandingAsk ? { outstanding_ask: true } : {}),
+      });
     }
     projected.push({
       role: "custom",
