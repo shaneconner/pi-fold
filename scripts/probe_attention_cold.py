@@ -101,17 +101,26 @@ def validate_manifest(manifest: dict) -> None:
 
 
 def self_test() -> dict:
-    import torch
+    # The tensor checks need torch; a machine without it (CI verifies the offline
+    # contract only) reports that BY NAME rather than failing the pure checks or
+    # silently pretending the tensor checks ran.
+    try:
+        import torch
+    except ModuleNotFoundError:
+        torch = None
+    if torch is None:
+        tensor_checks = "torch-unavailable"
+    else:
+        norms = torch.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
+        expanded = expand_kv_norms(norms, 4)
+        assert expanded.shape == (4, 4)
+        assert torch.equal(expanded[0], expanded[1]) and torch.equal(expanded[2], expanded[3])
 
-    norms = torch.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
-    expanded = expand_kv_norms(norms, 4)
-    assert expanded.shape == (4, 4)
-    assert torch.equal(expanded[0], expanded[1]) and torch.equal(expanded[2], expanded[3])
-
-    attention = torch.ones((4, 2, 4)) * 0.25
-    mass_front = weighted_span_mass(attention, expanded, (0, 2))
-    mass_back = weighted_span_mass(attention, expanded, (2, 4))
-    assert mass_back > mass_front  # larger value norms carry more mass
+        attention = torch.ones((4, 2, 4)) * 0.25
+        mass_front = weighted_span_mass(attention, expanded, (0, 2))
+        mass_back = weighted_span_mass(attention, expanded, (2, 4))
+        assert mass_back > mass_front  # larger value norms carry more mass
+        tensor_checks = "verified"
 
     spans = block_spans(10, 4)
     assert spans == [(0, 4), (4, 8), (8, 10)]
@@ -136,6 +145,7 @@ def self_test() -> dict:
         "promptTokenLimit": PROMPT_TOKEN_LIMIT,
         "upperLayerFraction": UPPER_LAYER_FRACTION,
         "readoutCue": READOUT_CUE,
+        "tensorChecks": tensor_checks,
         "labelFieldsRefused": list(FORBIDDEN_MANIFEST_KEYS),
         "everyByteScored": True,
         "modelLoads": 0,

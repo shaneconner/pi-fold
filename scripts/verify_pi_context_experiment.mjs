@@ -8929,6 +8929,8 @@ checks.aRankOnlyBm25FalsifierScoresCompleteEvidenceAgainstPreRegisteredLines = t
   const coldReport = JSON.parse(coldSelfTest.stdout);
   assert.deepEqual(coldReport.labelFieldsRefused,
     ["laterNeededUnitIds", "stalenessPickIds", "questions"]);
+  assert(["verified", "torch-unavailable"].includes(coldReport.tensorChecks),
+    "the tensor checks must report their state by name, never fail the pure checks");
   assert.equal(coldReport.everyByteScored, true);
   assert.equal(coldReport.modelLoads, 0);
   assert.equal(coldReport.networkRequests, 0);
