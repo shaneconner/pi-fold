@@ -3519,6 +3519,21 @@ export function abortMarkerMessages(entries) {
   return markers;
 }
 
+// Every assistant message owes a provider-ledger witness, except a zero-usage
+// abort marker MAY lack one: Pi's local abort ("This operation was aborted",
+// sol-20260820 pifold rep 5) never reaches the ledger, while a
+// provider-delivered zero-usage error (sol-20260820 native rep 6: "Your input
+// exceeds the context window") is recorded like any exchange. The first
+// netting asserted series + markers === requests, which reads every marker as
+// unledgered and refused the witnessed-error run; the unledgered count is
+// DERIVED instead, non-negative and at most the marker count, so a
+// spend-carrying message missing its witness still fails and an extra ledger
+// row fails the other way.
+export function reconcileWitnessCount({ requests, responses, markers }) {
+  const unledgered = requests - responses;
+  return { unledgered, ok: unledgered >= 0 && unledgered <= markers };
+}
+
 export function usageSeriesFromLedger(ledger) {
   assertExperiment(Array.isArray(ledger), "Usage series requires the provider ledger");
   const requestsByOrdinal = new Map(ledger

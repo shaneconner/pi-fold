@@ -54,6 +54,7 @@ import {
   traceStepTranscripts,
   traceStepVerdicts,
   abortMarkerMessages,
+  reconcileWitnessCount,
   usageSeriesFromLedger,
   outOfBandUsage,
   billedCostFromLedger,
@@ -633,16 +634,24 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   const usageSeries = usageSeriesFromLedger(ledger);
   // A queued followUp delivery (the directed curation turn's trigger) can abort
   // the request build in flight, and Pi persists that abort as an assistant
-  // message with stopReason "error" and an all-zero usage block. No request was
-  // transmitted and no spend occurred, so no ledger record exists for it; the
-  // marker is excluded from the witness count and reported beside the series.
-  // An unpaired assistant message carrying ANY spend still fails by this name,
-  // because unrecorded provider spend is what the two witnesses exist to catch.
+  // message with stopReason "error" and an all-zero usage block; no ledger
+  // record can exist for it. A provider-delivered zero-usage error (native
+  // rep 6: "Your input exceeds the context window") is the same marker shape
+  // WITH its exchange recorded, so the unledgered count is derived and
+  // bounded by the marker count rather than assumed equal to it. An unpaired
+  // assistant message carrying ANY spend still fails by this name, because
+  // unrecorded provider spend is what the two witnesses exist to catch.
   const abortMarkers = abortMarkerMessages(runEntries);
-  assertExperiment(usageSeries.series.length + abortMarkers.length === usage.requests,
+  const witness = reconcileWitnessCount({
+    requests: usage.requests,
+    responses: usageSeries.series.length,
+    markers: abortMarkers.length,
+  });
+  assertExperiment(witness.ok,
     `Provider ledger reports ${usageSeries.series.length} responses against ` +
     `${usage.requests} assistant messages in the session ` +
-    `(${abortMarkers.length} zero-usage abort marker(s) excluded)`);
+    `(${abortMarkers.length} zero-usage abort marker(s), ` +
+    `${witness.unledgered} unledgered)`);
   const thinkTime = thinkTimeFromPace(paceRecords);
   // Read once, reported under two headings: what was spent where the ledger cannot see it,
   // and what Pi billed for everything including that.
@@ -705,6 +714,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
       // Aborted turns Pi persisted as zero-usage error messages: in the
       // assistant count above, absent from the wire series, no spend to carry.
       abortMarkers,
+      unledgeredAbortMarkers: witness.unledgered,
     },
     // WHAT THE MESSAGE LOOP CANNOT SEE, and what Pi actually billed for all of it.
     //
@@ -772,7 +782,8 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   };
   assertExperiment(exactKeys(report.usage, [
     "requests", "inputFresh", "cacheRead", "cacheWrite", "output", "reasoning", "totalTokens",
-    "entriesWithoutUsage", "providerResponses", "abortMarkers", "wallClockMs", "series", "mutations",
+    "entriesWithoutUsage", "providerResponses", "abortMarkers", "unledgeredAbortMarkers",
+    "wallClockMs", "series", "mutations",
     "mutationRule", "meanCacheShare", "pooledCacheShare",
   ]), "Usage report shape drifted");
   // Re-adjudication never touches the original: the sidecar is named for the adjudicator

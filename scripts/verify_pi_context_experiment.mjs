@@ -9401,7 +9401,7 @@ checks.aStewardCrossingIsTakenOnlyByAnAcceptedAgentMarkInItsWindow = true;
 }
 
 // ---------------------------------------------------------------------------
-// Gate 97: a zero-usage abort marker is excluded and reported, spend never.
+// Gate 97: a zero-usage abort marker may lack its witness, spend never.
 // Rep 5 of sol-20260820-steward failed the two-witness check with 172
 // assistant messages against 171 response records. The first diagnosis, a
 // directed turn delivered past the recorder, was WRONG and is recorded as
@@ -9409,14 +9409,20 @@ checks.aStewardCrossingIsTakenOnlyByAnAcceptedAgentMarkInItsWindow = true;
 // response 572, input 78,003). The unpaired message was Pi's abort marker,
 // an assistant message with stopReason "error" and an all-zero usage block
 // ("This operation was aborted"), persisted when a queued followUp delivery
-// aborted the request build in flight. Nothing was transmitted, so nothing
-// could be recorded; the marker is excluded from the witness count and
-// reported. The gate pins the discrimination: zero-usage error messages are
-// markers, an error message carrying any spend is NOT (a failed generation
-// that billed tokens must stay inside the witness count), and the
-// adjudicator nets exactly the markers and reports them.
+// aborted the request build in flight; nothing was transmitted, so nothing
+// could be recorded. The SECOND wrongness arrived the same day: the first
+// netting asserted series + markers === requests, reading every marker as
+// unledgered, and native rep 6 refused a clean run whose zero-usage error
+// ("Your input exceeds the context window") was provider-delivered and
+// therefore ledger-recorded, 105 responses against 105 messages with one
+// marker. The unledgered count is DERIVED (requests - responses), bounded
+// by [0, markers]: every unwitnessed message must be a zero-usage marker,
+// a witnessed marker owes nothing, a spend-carrying unpaired message still
+// fails, and an extra ledger row fails the other way. The gate drives the
+// marker discrimination and the reconciliation as functions and pins the
+// adjudicator's use of both.
 {
-  const { abortMarkerMessages } = await import(
+  const { abortMarkerMessages, reconcileWitnessCount } = await import(
     pathToFileURL(join(PROJECT, "scripts", "lib", "pi_context_experiment.mjs")));
   const assistant = (stopReason, usage, errorMessage) => ({
     type: "message",
@@ -9440,11 +9446,28 @@ checks.aStewardCrossingIsTakenOnlyByAnAcceptedAgentMarkInItsWindow = true;
   // spend being exactly what the two witnesses exist to catch.
   assert(!markers.some((marker) => marker.entryIndex === 2),
     "an error message carrying spend was excluded from the witness count");
+  // The reconciliation, driven as a function through the four classes the
+  // corpus has produced: rep 5's unledgered local abort, native rep 6's
+  // witnessed provider error, a spend-carrying message missing its witness,
+  // and a ledger holding more responses than the session has messages.
+  const rep5 = reconcileWitnessCount({ requests: 172, responses: 171, markers: 1 });
+  assert.equal(rep5.ok, true, "the unledgered local abort no longer reconciles");
+  assert.equal(rep5.unledgered, 1);
+  const nativeRep6 = reconcileWitnessCount({ requests: 105, responses: 105, markers: 1 });
+  assert.equal(nativeRep6.ok, true,
+    "a provider-delivered zero-usage error with its exchange in the ledger was refused");
+  assert.equal(nativeRep6.unledgered, 0);
+  assert.equal(reconcileWitnessCount({ requests: 105, responses: 104, markers: 0 }).ok, false,
+    "a spend-carrying message missing its witness reconciled");
+  assert.equal(reconcileWitnessCount({ requests: 104, responses: 105, markers: 1 }).ok, false,
+    "a ledger holding more responses than the session has messages reconciled");
+  assert.equal(reconcileWitnessCount({ requests: 100, responses: 97, markers: 2 }).ok, false,
+    "more unwitnessed messages than zero-usage markers reconciled");
   const adjudicator = source("scripts/adjudicate_pi_context_experiment.mjs");
   assert(adjudicator.includes("abortMarkerMessages(runEntries)") &&
-    adjudicator.includes("usageSeries.series.length + abortMarkers.length === usage.requests") &&
-    adjudicator.includes("zero-usage abort marker(s) excluded") &&
-    adjudicator.includes("abortMarkers,"),
+    adjudicator.includes("reconcileWitnessCount({") &&
+    adjudicator.includes("zero-usage abort marker(s), ") &&
+    adjudicator.includes("unledgeredAbortMarkers: witness.unledgered,"),
   "the adjudicator does not net and report the abort markers");
 
 checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
