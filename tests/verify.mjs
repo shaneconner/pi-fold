@@ -284,6 +284,9 @@ function makeRuntime(built, {
   retiredOptions,
   removedOptions,
   registerEvidence = false,
+  // The degrade probe: a headless host may expose no sendMessage at all, and
+  // the runtime must fall back to the appended advisory rather than throw.
+  omitSendMessage = false,
   providerInputBudget,
   packageRegistration = false,
   sessionFile = join(tmpdir(), "pi-fold-test-session.jsonl"),
@@ -314,7 +317,9 @@ function makeRuntime(built, {
   const abandoned = [];
   const pi = {
     on(name, handler) { handlers.set(name, handler); },
-    sendMessage(message, options) { steered.push({ message, options }); },
+    ...(omitSendMessage ? {} : {
+      sendMessage(message, options) { steered.push({ message, options }); },
+    }),
     registerTool(tool) { tools.set(tool.name, tool); },
     registerCommand(name, command) { commands.set(name, command); },
     async appendEntry(customType, data) {
@@ -2777,11 +2782,14 @@ function toolCall(runtime, params, toolName = "pi_fold_context") {
   );
 }
 
-async function epochToolRuntime({ guidance, ...fixture } = {}) {
+async function epochToolRuntime({ guidance, omitSendMessage, ...fixture } = {}) {
   const built = makeFixture({
     turns: 8, resultChars: 10_000, contextWindow: 100_000, ...fixture,
   });
-  const runtime = makeRuntime(built, guidance ? { guidance } : {});
+  const runtime = makeRuntime(built, {
+    ...(guidance ? { guidance } : {}),
+    ...(omitSendMessage ? { omitSendMessage } : {}),
+  });
   await startRuntime(runtime);
   return runtime;
 }
@@ -5059,7 +5067,9 @@ async function gateProjectionBudgetFence() {
   assert(guardedRollback, "The starved session got no rollback");
   assert.equal(guardedRollback.armed, true);
   assert.equal(guardedRollback.replayed, true, "The starved session's request was not reissued");
-  assert.equal(guardedOnly.steered.length, 1, "The recovery queued more than one steered message");
+  assert.equal(guardedOnly.steered.filter((item) =>
+    String(item.message?.customType ?? "").endsWith("-overflow-recovery")).length, 1,
+  "The recovery queued more than one steered message");
   assert(!guardedOnly.branch.some((entry) => entry.message?.stopReason === "error"),
     "The rejected entry is still on the live branch");
   assert.equal(guardedOnly.labels.length, 1, "The abandoned path carries no lineage label");
@@ -5459,7 +5469,9 @@ async function gateFenceMarginAndDepth() {
   assert(climbRollback, "The starved climb got no rollback");
   assert.equal(climbRollback.armed, true);
   assert.equal(climbRollback.replayed, true);
-  assert.equal(runtime.steered.length, 1, "The recovery queued more than one steered message");
+  assert.equal(runtime.steered.filter((item) =>
+    String(item.message?.customType ?? "").endsWith("-overflow-recovery")).length, 1,
+  "The recovery queued more than one steered message");
   assert(!runtime.branch.some((entry) => entry.message?.stopReason === "error"),
     "The rejected entry is still on the live branch");
   const abortsBeforeRetry = runtime.aborts;
@@ -6193,11 +6205,15 @@ async function gateOverflowRecovery() {
     "The lineage label landed on the surviving branch instead of the abandoned one");
 
   // THE NOTICE, once. Steering drains one at a time, so a second would never arrive.
-  assert.equal(runtime.steered.length, 1, "The recovery queued more than one steered message");
-  assert.equal(runtime.steered[0].options.deliverAs, "steer");
-  assert.equal(runtime.steered[0].message.customType, "pi-fold-active-context-overflow-recovery");
-  assert.match(String(runtime.steered[0].message.content), /rolled the session back/);
-  assert.match(String(runtime.steered[0].message.content), /reissued now/);
+  assert.equal(runtime.steered.filter((item) =>
+    String(item.message?.customType ?? "").endsWith("-overflow-recovery")).length, 1,
+  "The recovery queued more than one steered message");
+  const recoverySteer = runtime.steered.find((item) =>
+    String(item.message?.customType ?? "").endsWith("-overflow-recovery"));
+  assert.equal(recoverySteer.options.deliverAs, "steer");
+  assert.equal(recoverySteer.message.customType, "pi-fold-active-context-overflow-recovery");
+  assert.match(String(recoverySteer.message.content), /rolled the session back/);
+  assert.match(String(recoverySteer.message.content), /reissued now/);
 
   const rollbackRecord = contextEvents(runtime, beforeRollback)
     .find((record) => record.kind === "context.rollback");
@@ -9094,7 +9110,9 @@ async function gateFenceOpensTheMiddle() {
   assert(fenceRollback, "The fence-level session got no rollback");
   assert.equal(fenceRollback.armed, true);
   assert.equal(fenceRollback.replayed, true);
-  assert.equal(runtime.steered.length, 1, "The recovery queued more than one steered message");
+  assert.equal(runtime.steered.filter((item) =>
+    String(item.message?.customType ?? "").endsWith("-overflow-recovery")).length, 1,
+  "The recovery queued more than one steered message");
   assert(!runtime.branch.some((entry) => entry.message?.stopReason === "error"),
     "The rejected entry is still on the live branch");
 
@@ -12694,11 +12712,11 @@ async function gateStewardAdvisory() {
   const rebriefText = afterEpoch[0].content;
   assert(!/Unmarked completed units, largest first: none/.test(rebriefText),
     "An empty remainder must be omitted, never say none");
-  assert(rebriefText.includes("Standing folds carrying deterministic briefs, newest first: "),
+  assert(rebriefText.includes("Standing folds carrying deterministic briefs, largest first: "),
     "The rebrief invitation is missing");
   assert(rebriefText.includes('{"action":"rebrief","id":"<fold-id>"'),
     "The rebrief syntax is missing");
-  const named = rebriefText.match(/newest first: ([^ ]+) \(/)[1];
+  const named = rebriefText.match(/largest first: ([^ ]+) \(/)[1];
   await toolCall(runtime, {
     action: "rebrief", id: named,
     brief: "Exact chapter facts: alpha beta gamma delta epsilon.",
@@ -12707,12 +12725,148 @@ async function gateStewardAdvisory() {
   assert.equal(reProjected.length, 1);
   assert(!reProjected[0].content.includes(named),
     "A fold the agent already rebriefed is still being offered");
+
+  // THE DIRECTED TURN (Build 4a, 2026-08-20). The passive advisory measured
+  // zero uptake across seventeen sealed windows (sol-20260820-steward reps 3
+  // and 4), so the crossing now also queues ONE required curation turn: a
+  // custom followUp message (never a user message, so the harness's
+  // one-user-message contracts are untouched) that triggers a turn when the
+  // agent settles. One send per crossing, the same edge as the event.
+  const directedSends = runtime.steered.filter((item) =>
+    String(item.message?.customType ?? "").endsWith("-directed"));
+  assert.equal(directedSends.length, stewardEvents().length,
+    "One directed turn per crossing, no more, no fewer");
+  for (const send of directedSends) {
+    assert.equal(send.options.deliverAs, "followUp");
+    assert.equal(send.options.triggerTurn, true);
+    assert.equal(send.message.display, false);
+    assert(Buffer.byteLength(String(send.message.content), "utf8") <= 2_048,
+      "The directed ask must honour the carrier bound");
+  }
+  assert(stewardEvents().every((record) => record.directed === true),
+    "A crossing whose send succeeded must say so in its event");
+  const lastSend = directedSends.at(-1);
+  assert(String(lastSend.message.content).includes(named),
+    "The directed ask must name the top visible rebrief target");
+  assert(String(lastSend.message.content).includes('"action":"rebrief"'),
+    "The directed ask must carry the rebrief syntax");
+  assert(/curation only|curation turn/.test(String(lastSend.message.content)),
+    "The directed ask must state the response contract");
+  assert(/will not wait/.test(String(lastSend.message.content)),
+    "The announcement must state the commit will not wait");
+
+  // Ride-until-answered: the delivered ask stays in the projection through the
+  // turn it triggered, commits included, and is withdrawn the moment an
+  // assistant message follows it. Withdrawing on the next commit instead was
+  // wrong: the band's whole point is that the epoch is imminent, so the commit
+  // routinely lands between the send and the followUp's delivery.
+  runtime.appendMessage({
+    role: "custom",
+    customType: lastSend.message.customType,
+    content: lastSend.message.content,
+    display: false,
+    details: { ...lastSend.message.details },
+    timestamp: 0,
+  }, "directed-ask");
+  const withAsk = (await project(runtime)).messages.filter((message) =>
+    typeof message?.customType === "string" && message.customType.endsWith("-directed"));
+  assert.equal(withAsk.length, 1, "The delivered ask must ride its own turn's projection");
+  await measure(runtime, 56_000, 100_000);
+  const afterAnswer = (await project(runtime)).messages.filter((message) =>
+    typeof message?.customType === "string" && message.customType.endsWith("-directed"));
+  assert.equal(afterAnswer.length, 0,
+    "An answered ask must be withdrawn, frozen prefix included");
+
+  // Degrade: a host without sendMessage keeps the appended advisory, records
+  // the crossing with directed false, and never throws inside the projection.
+  const mute = await epochToolRuntime({
+    turns: 12, resultChars: 16_000, omitSendMessage: true,
+  });
+  await measure(mute, 30_000, 100_000);
+  await measure(mute, 55_000, 100_000);
+  const muteAdvisories = (await project(mute)).messages.filter((message) =>
+    typeof message?.customType === "string" && message.customType.endsWith("-steward"));
+  assert.equal(muteAdvisories.length, 1,
+    "A host without sendMessage still gets the appended advisory");
+  const muteEvents = contextEvents(mute).filter((record) => record.kind === "context.steward");
+  assert.equal(muteEvents.length, 1);
+  assert.equal(muteEvents[0].directed, false,
+    "A crossing that could not send must say directed false");
+  assert.equal(mute.steered.length, 0);
+
+  // Visible targets only: the offline brief-function study measured visible
+  // carriage at 43 percent natural and ZERO seeded because consolidation
+  // parents dilute their children's briefs to subject lines, so a hidden
+  // child's brief renders nothing and offering it wastes the turn. The forest
+  // drive proves the walk: eleven roots consolidate ten under one parent, and
+  // the ask offers the PARENT, never a hidden child.
+  const forest = await chapterForest(11);
+  const forestBranch = [...forest.entries, stateEntry(
+    forest.sessionId, forest.state, "forest-state", forest.entries.at(-1).id,
+  )];
+  const forestRuntime = makeRuntime(forest, { initialEntries: forestBranch });
+  await startRuntime(forestRuntime);
+  await measure(forestRuntime, 30_000, 100_000);
+  await measure(forestRuntime, 55_000, 100_000);
+  await measureAndCommit(forestRuntime, 85_000, 100_000, "forest-commit");
+  await settle();
+  await measure(forestRuntime, 55_000, 100_000);
+  await project(forestRuntime);
+  const forestState = materialized(forestRuntime);
+  const parent = forestState.folds.find((fold) => fold.kind === "consolidation");
+  assert(parent, "Anti-vacuity: the forest drive must build a consolidation parent");
+  const hiddenChildIds = new Set(forestState.folds
+    .filter((fold) => fold.parentId !== null && !forestState.expanded.includes(fold.parentId))
+    .map((fold) => fold.id));
+  assert(hiddenChildIds.size >= context.DEFAULT_THRESHOLDS.consolidateAfter,
+    "Anti-vacuity: the parent must hide its children");
+  const forestSends = forestRuntime.steered.filter((item) =>
+    String(item.message?.customType ?? "").endsWith("-directed"));
+  assert(forestSends.length >= 1, "Anti-vacuity: the forest drive must cross the band");
+  const offered = [...String(forestSends.at(-1).message.content)
+    .matchAll(/^- (\S+) \(/gm)].map((match) => match[1]);
+  assert(offered.length >= 1, "The forest ask must offer at least one rebrief target");
+  assert(offered.every((id) => !hiddenChildIds.has(id)),
+    "A hidden child's brief renders nothing; offering it wastes the turn");
+  assert(offered.includes(parent.id),
+    "The visible consolidation parent is the rebrief target that matters");
+
+  // The discriminating half: EXPAND the parent and the offer must flip. A
+  // revealed parent's own brief no longer renders (the projection shows its
+  // children instead), so offering it wastes the turn; the children's briefs
+  // now render and become legitimate targets. A target list computed from
+  // state.folds instead of the visibility walk keeps offering the parent here,
+  // which is exactly the weakening this section exists to catch.
+  await toolCall(forestRuntime, { action: "expand", id: parent.id });
+  // Leaving to 20k grows the worst inflow step to 35k on re-entry, which moves
+  // the band to (20k, 55k]; 50k sits inside it with margin, where 55k would
+  // land exactly on the top edge and read as the wall's moment.
+  await measure(forestRuntime, 20_000, 100_000);
+  // The latch releases only where the reading runs: a projection below the
+  // band is what re-arms the crossing edge, exactly as in the main drive.
+  await project(forestRuntime);
+  await measure(forestRuntime, 50_000, 100_000);
+  await project(forestRuntime);
+  const expandedSends = forestRuntime.steered.filter((item) =>
+    String(item.message?.customType ?? "").endsWith("-directed"));
+  assert(expandedSends.length > forestSends.length,
+    "Anti-vacuity: re-entering the band after the expand must cross again");
+  const offeredAfterExpand = [...String(expandedSends.at(-1).message.content)
+    .matchAll(/^- (\S+) \(/gm)].map((match) => match[1]);
+  assert(offeredAfterExpand.length >= 1);
+  assert(!offeredAfterExpand.includes(parent.id),
+    "A revealed parent's brief does not render; offering it wastes the turn");
+
   return {
     band: "(40000, 65000] of a 90000 budget at 25000 inflow",
     eventsPerCrossing: 1,
     durableEntries: 0,
     ephemeral: true,
     rebriefInvitedAfterEpoch: true,
+    directedSends: directedSends.length,
+    directedAnsweredWithdrawn: true,
+    degradeDirectedFalse: true,
+    forestOffersParentOnly: true,
   };
 }
 

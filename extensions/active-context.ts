@@ -133,6 +133,7 @@ import {
   contextRiderText,
   markAwarenessText,
   receiptBlockText,
+  directedCurationText,
   stewardAdvisoryText,
   withReceipt,
 } from "./lib/curation.ts";
@@ -326,6 +327,7 @@ export function registerActiveContext(pi: any, options: {
   const receiptProjectionType = `${entryTypePrefix}-receipts`;
   const riderProjectionType = `${entryTypePrefix}-rider`;
   const stewardProjectionType = `${entryTypePrefix}-steward`;
+  const directedProjectionType = `${entryTypePrefix}-directed`;
   const curationProjectionType = `${entryTypePrefix}-curation`;
   const entryNamespace = entryTypeNamespace(entryTypePrefix);
   const providerMeasurementEntryType = `${entryNamespace}-provider-context-measurement`;
@@ -1720,7 +1722,7 @@ export function registerActiveContext(pi: any, options: {
 
   const stewardReading = (
     snapshot: ActiveContextSnapshot,
-  ): { text: string; facts: Record<string, unknown> } | null => {
+  ): { text: string; directedText: string; facts: Record<string, unknown> } | null => {
     const capacity = servingCapacity(snapshot.contextWindow);
     const used = capacity.usedTokens;
     const budget = capacity.budgetTokens;
@@ -1744,13 +1746,48 @@ export function registerActiveContext(pi: any, options: {
     // through rebrief. Newest first, because a brief worth writing needs the
     // agent to still remember what the fold holds; an expanded fold is visible
     // raw and needs no brief right now.
-    const rebriefTargets = [...state.folds]
-      .filter((fold) => !state.briefs?.[fold.id] &&
-        !state.expanded.includes(fold.id) &&
+    // Only a fold whose BRIEF actually renders is worth rebriefing: the offline
+    // brief-function study (2026-08-20) measured visible carriage at 43 percent
+    // natural and ZERO seeded because consolidation parents dilute their
+    // children's briefs to subject lines, so a hidden child's brief carries
+    // nothing however good it is. The walk mirrors the projection's own render
+    // rule: a collapsed fold shows its brief; a revealed one shows its parts.
+    const visibleBriefFolds: ActiveFold[] = [];
+    const byFoldId = new Map(state.folds.map((fold) => [fold.id, fold]));
+    const walkVisible = (fold: ActiveFold): void => {
+      const refs = flattenFoldRefs(fold, state);
+      const revealed = state.expanded.includes(fold.id) || (fold.kind === "tool-result"
+        ? toolRefsProtected(refs, state, snapshot)
+        : refsProtected(refs, state, snapshot));
+      if (!revealed) {
+        visibleBriefFolds.push(fold);
+        return;
+      }
+      for (const part of fold.parts) {
+        if (part.kind !== "raw") {
+          const child = byFoldId.get(part.foldId);
+          if (child) walkVisible(child);
+        }
+      }
+    };
+    for (const fold of state.folds) if (fold.parentId === null) walkVisible(fold);
+    // Largest first: the fold covering the most source has the most diluted
+    // brief (a consolidation parent's 2,000 chars divide across about ten
+    // children per level), so it is where a rebrief buys the most carriage.
+    // Consolidation parents are by construction the largest, which is exactly
+    // the study's re-aim. Ties break newest first, while the agent still
+    // remembers what the span holds.
+    const rebriefTargets = visibleBriefFolds
+      .map((fold, index) => ({ fold, index, refs: flattenFoldRefs(fold, state).length }))
+      .filter(({ fold }) => !state.briefs?.[fold.id] &&
         foldProvenance(fold, state).kind !== "agent")
-      .reverse()
+      .sort((a, b) => b.refs - a.refs || b.index - a.index)
       .slice(0, 3)
-      .map((fold) => ({ id: fold.id, kind: fold.kind }));
+      .map(({ fold }) => ({
+        id: fold.id,
+        kind: fold.kind,
+        briefHead: String(foldBrief(fold, state) ?? "").slice(0, 200),
+      }));
     if (!remainder.candidates.length && !rebriefTargets.length) return null;
     const accounting = markAccounting(snapshot, state);
     const text = stewardAdvisoryText({
@@ -1764,8 +1801,18 @@ export function registerActiveContext(pi: any, options: {
       pendingAgentMarks: accounting.agentMarks,
       eligibleMarks: accounting.eligibleMarks,
     });
+    const directedText = directedCurationText({
+      toolName,
+      brandNoun,
+      usedTokens: used,
+      budgetTokens: budget,
+      inflowTokens: inflow,
+      candidates: remainder.candidates,
+      rebriefTargets,
+    });
     return {
       text,
+      directedText,
       facts: {
         used_tokens: used,
         budget_tokens: budget,
@@ -1774,7 +1821,7 @@ export function registerActiveContext(pi: any, options: {
         unmarked_tokens: remainder.tokens,
         largest_candidate: remainder.candidates[0]?.id ?? null,
         rebrief_targets: rebriefTargets.length,
-        newest_rebrief_target: rebriefTargets[0]?.id ?? null,
+        top_rebrief_target: rebriefTargets[0]?.id ?? null,
         pending_agent_marks: accounting.agentMarks,
         eligible_marks: accounting.eligibleMarks,
         chars: text.length,
@@ -1789,19 +1836,58 @@ export function registerActiveContext(pi: any, options: {
     // standing advisory is withdrawn first, and re-appended only while the
     // band condition still holds, which is the one-request carrier shape the
     // sealed ephemeral probe promoted.
+    const reading = stewardReading(snapshot);
     for (let index = projected.length - 1; index >= 0; index -= 1) {
-      if (ownValue(projected[index], "customType") === stewardProjectionType) {
+      const customType = ownValue(projected[index], "customType");
+      if (customType === stewardProjectionType) {
         projected.splice(index, 1);
+        continue;
+      }
+      // The directed ask is durable in the session but rides the projection
+      // exactly until it has been ANSWERED: the first assistant message that
+      // lands after it proves the model saw the ask in at least one request,
+      // and from then on it is withdrawn, frozen prefix included. Withdrawing
+      // on the next commit instead was wrong twice over: the band's whole
+      // point is that the epoch is imminent, so the commit routinely lands
+      // between the send and the followUp's delivery, and the triggered turn
+      // would then arrive with its own ask already stripped.
+      if (customType === directedProjectionType) {
+        const answered = projected.slice(index + 1).some((message) =>
+          ownValue(message, "role") === "assistant");
+        if (answered) projected.splice(index, 1);
       }
     }
-    const reading = stewardReading(snapshot);
     if (!reading) {
       advisory.stewardCrossingActive = false;
       return projected;
     }
     if (!advisory.stewardCrossingActive) {
       advisory.stewardCrossingActive = true;
-      emit("context.steward", reading.facts);
+      // The passive advisory measured zero uptake across seventeen sealed
+      // windows (reps 3 and 4), while a required response at the tool boundary
+      // gets taken (the ledger-record precedent; W1j's guard, where announcing
+      // the rule was most of the mechanism). One directed turn per crossing:
+      // the ask is a custom followUp message, never a user message, so the
+      // harness's one-user-message contracts are untouched, and a host without
+      // sendMessage degrades to the appended advisory alone rather than
+      // throwing inside the projection.
+      let directed = false;
+      if (typeof pi?.sendMessage === "function") {
+        try {
+          pi.sendMessage({
+            customType: directedProjectionType,
+            content: reading.directedText,
+            display: false,
+            details: {
+              source: activeContextSource(entryTypePrefix),
+            },
+          }, { deliverAs: "followUp", triggerTurn: true });
+          directed = true;
+        } catch {
+          directed = false;
+        }
+      }
+      emit("context.steward", { ...reading.facts, directed });
     }
     projected.push({
       role: "custom",

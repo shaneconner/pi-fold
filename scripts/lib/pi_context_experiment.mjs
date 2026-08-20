@@ -4283,8 +4283,12 @@ export function contextEventMetrics(entries) {
       seq: Number.isFinite(crossing.seq) ? crossing.seq : null,
       largestCandidate: typeof crossing.largest_candidate === "string"
         ? crossing.largest_candidate : null,
-      newestRebriefTarget: typeof crossing.newest_rebrief_target === "string"
-        ? crossing.newest_rebrief_target : null,
+      // Renamed top_rebrief_target when ordering went largest-first (Build 4a);
+      // pre-rename sessions carry newest_rebrief_target and stay readable.
+      newestRebriefTarget: typeof crossing.top_rebrief_target === "string"
+        ? crossing.top_rebrief_target
+        : typeof crossing.newest_rebrief_target === "string"
+          ? crossing.newest_rebrief_target : null,
       unmarkedTokens: Number.isFinite(crossing.unmarked_tokens) ? crossing.unmarked_tokens : null,
       acceptedFoldAttempts: foldAttempts.length,
       acceptedRebriefs: takes.length - foldAttempts.length,

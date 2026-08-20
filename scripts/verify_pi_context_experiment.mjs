@@ -9318,7 +9318,14 @@ checks.aBreakpointRetestAttributesAcceptanceOnlyOverAHealthyEnvelope = true;
     "an accepted rebrief in the window is uptake");
   assert.equal(rebriefTaken.acceptedRebriefsInWindows, 1);
   assert.equal(rebriefTaken.windows[0].acceptedFoldAttempts, 0);
-  assert.equal(rebriefTaken.windows[0].newestRebriefTarget, "fold-7");
+  assert.equal(rebriefTaken.windows[0].newestRebriefTarget, "fold-7",
+    "the pre-rename newest_rebrief_target field stopped being readable");
+  const renamed = contextEventMetrics([
+    event("context.steward", { seq: 1, top_rebrief_target: "fold-9", directed: true }),
+    event("context.commit", { seq: 2, deferred: false }),
+  ]).steward;
+  assert.equal(renamed.windows[0].newestRebriefTarget, "fold-9",
+    "the largest-first top_rebrief_target field is not read");
   const peekOnly = contextEventMetrics([
     event("context.steward", { seq: 1 }),
     event("context.attempt", { seq: 2, action: "peek", ok: true }),
