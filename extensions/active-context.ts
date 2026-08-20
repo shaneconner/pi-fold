@@ -1734,9 +1734,25 @@ export function registerActiveContext(pi: any, options: {
     // pairing there is no band at all.
     if (used + inflow > budget) return null;
     if (used + 2 * inflow <= budget) return null;
-    const remainder = unmarkedRemainder(snapshot, persistence.state!, projectionCharsPerToken());
-    if (!remainder.candidates.length) return null;
-    const accounting = markAccounting(snapshot, persistence.state!);
+    const state = persistence.state!;
+    const remainder = unmarkedRemainder(snapshot, state, projectionCharsPerToken());
+    // Under real pressure the ladder has already claimed every completed batch
+    // by the time the band is reached (sol-20260820-steward rep 2: 111 folds,
+    // zero unclaimed candidates at every band moment, every rider's anchors 0),
+    // so the durable invitation is the one the agent can always act on: the
+    // newest standing folds whose briefs are not the agent's own, correctable
+    // through rebrief. Newest first, because a brief worth writing needs the
+    // agent to still remember what the fold holds; an expanded fold is visible
+    // raw and needs no brief right now.
+    const rebriefTargets = [...state.folds]
+      .filter((fold) => !state.briefs?.[fold.id] &&
+        !state.expanded.includes(fold.id) &&
+        foldProvenance(fold, state).kind !== "agent")
+      .reverse()
+      .slice(0, 3)
+      .map((fold) => ({ id: fold.id, kind: fold.kind }));
+    if (!remainder.candidates.length && !rebriefTargets.length) return null;
+    const accounting = markAccounting(snapshot, state);
     const text = stewardAdvisoryText({
       toolName,
       brandNoun,
@@ -1744,6 +1760,7 @@ export function registerActiveContext(pi: any, options: {
       budgetTokens: budget,
       inflowTokens: inflow,
       candidates: remainder.candidates,
+      rebriefTargets,
       pendingAgentMarks: accounting.agentMarks,
       eligibleMarks: accounting.eligibleMarks,
     });
@@ -1755,7 +1772,9 @@ export function registerActiveContext(pi: any, options: {
         inflow_tokens: inflow,
         unmarked_spans: remainder.spans,
         unmarked_tokens: remainder.tokens,
-        largest_candidate: remainder.candidates[0].id,
+        largest_candidate: remainder.candidates[0]?.id ?? null,
+        rebrief_targets: rebriefTargets.length,
+        newest_rebrief_target: rebriefTargets[0]?.id ?? null,
         pending_agent_marks: accounting.agentMarks,
         eligible_marks: accounting.eligibleMarks,
         chars: text.length,

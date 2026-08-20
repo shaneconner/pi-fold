@@ -9305,6 +9305,27 @@ checks.aBreakpointRetestAttributesAcceptanceOnlyOverAHealthyEnvelope = true;
     "a failed attempt or a ladder fold read as uptake");
   assert.equal(boundaries.crossings, 2);
 
+  // Rebrief is the production-shape uptake: under pressure the ladder claims
+  // everything, so the invitation the agent can always take is a rebrief on a
+  // standing deterministic-brief fold. A read action is never uptake.
+  const rebriefTaken = contextEventMetrics([
+    event("context.steward", { seq: 1, newest_rebrief_target: "fold-7" }),
+    event("context.attempt", { seq: 2, action: "peek", ok: true }),
+    event("context.attempt", { seq: 3, action: "rebrief", ok: true }),
+    event("context.commit", { seq: 4, deferred: false }),
+  ]).steward;
+  assert.equal(rebriefTaken.windows[0].taken, true,
+    "an accepted rebrief in the window is uptake");
+  assert.equal(rebriefTaken.acceptedRebriefsInWindows, 1);
+  assert.equal(rebriefTaken.windows[0].acceptedFoldAttempts, 0);
+  assert.equal(rebriefTaken.windows[0].newestRebriefTarget, "fold-7");
+  const peekOnly = contextEventMetrics([
+    event("context.steward", { seq: 1 }),
+    event("context.attempt", { seq: 2, action: "peek", ok: true }),
+    event("context.commit", { seq: 3, deferred: false }),
+  ]).steward;
+  assert.equal(peekOnly.windows[0].taken, false, "a peek read as steward uptake");
+
   const preSteward = contextEventMetrics([
     foldAttempt({ seq: 1 }),
     event("context.commit", { seq: 2, deferred: false }),

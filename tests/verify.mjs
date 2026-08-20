@@ -12664,21 +12664,40 @@ async function gateStewardAdvisory() {
     typeof entry.customType === "string" && entry.customType.endsWith("-steward"))),
   "The steward advisory must never be appended as a durable entry");
 
-  // An epoch that takes the whole remainder leaves nothing to invite marks on:
-  // back in the band afterwards, the advisory stands down rather than naming
-  // nothing, however the occupancy reads.
+  // THE PRODUCTION SHAPE (sol-20260820-steward rep 2): after an epoch under
+  // pressure the ladder has already claimed and folded every completed batch,
+  // so no unclaimed candidate exists at the band; what stands is folds carrying
+  // deterministic briefs, and the advisory invites REBRIEF on the newest of
+  // them. The rep-2 runtime stood down here instead and passed its whole
+  // session with zero crossings, which is what this section makes impossible.
   await measureAndCommit(runtime, 86_000, 100_000);
   await settle();
   await measure(runtime, 55_000, 100_000);
-  const afterEpoch = await project(runtime);
-  const standDown = stewardEntries(afterEpoch).length === 0 ||
-    !/Unmarked completed units, largest first: none/.test(stewardEntries(afterEpoch)[0]?.content ?? "");
-  assert(standDown, "An advisory with nothing to mark must stand down, never say none");
+  const afterEpoch = stewardEntries(await project(runtime));
+  assert.equal(afterEpoch.length, 1,
+    "The band after an epoch must invite rebrief, not stand down");
+  const rebriefText = afterEpoch[0].content;
+  assert(!/Unmarked completed units, largest first: none/.test(rebriefText),
+    "An empty remainder must be omitted, never say none");
+  assert(rebriefText.includes("Standing folds carrying deterministic briefs, newest first: "),
+    "The rebrief invitation is missing");
+  assert(rebriefText.includes('{"action":"rebrief","id":"<fold-id>"'),
+    "The rebrief syntax is missing");
+  const named = rebriefText.match(/newest first: ([^ ]+) \(/)[1];
+  await toolCall(runtime, {
+    action: "rebrief", id: named,
+    brief: "Exact chapter facts: alpha beta gamma delta epsilon.",
+  });
+  const reProjected = stewardEntries(await project(runtime));
+  assert.equal(reProjected.length, 1);
+  assert(!reProjected[0].content.includes(named),
+    "A fold the agent already rebriefed is still being offered");
   return {
     band: "(40000, 65000] of a 90000 budget at 25000 inflow",
     eventsPerCrossing: 1,
     durableEntries: 0,
     ephemeral: true,
+    rebriefInvitedAfterEpoch: true,
   };
 }
 

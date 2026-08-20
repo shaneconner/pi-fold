@@ -4275,17 +4275,22 @@ export function contextEventMetrics(entries) {
         break;
       }
     }
-    const foldAttempts = events.slice(index + 1, windowEnd).filter((event) =>
-      event.kind === "context.attempt" && event.action === "fold" && event.ok === true);
+    const takes = events.slice(index + 1, windowEnd).filter((event) =>
+      event.kind === "context.attempt" && event.ok === true &&
+      (event.action === "fold" || event.action === "rebrief"));
+    const foldAttempts = takes.filter((event) => event.action === "fold");
     stewardWindows.push({
       seq: Number.isFinite(crossing.seq) ? crossing.seq : null,
       largestCandidate: typeof crossing.largest_candidate === "string"
         ? crossing.largest_candidate : null,
+      newestRebriefTarget: typeof crossing.newest_rebrief_target === "string"
+        ? crossing.newest_rebrief_target : null,
       unmarkedTokens: Number.isFinite(crossing.unmarked_tokens) ? crossing.unmarked_tokens : null,
       acceptedFoldAttempts: foldAttempts.length,
+      acceptedRebriefs: takes.length - foldAttempts.length,
       marksRequested: foldAttempts.reduce((total, event) =>
         total + (Number.isFinite(event.marks_requested) ? event.marks_requested : 0), 0),
-      taken: foldAttempts.length > 0,
+      taken: takes.length > 0,
     });
   }
 
@@ -4498,9 +4503,9 @@ export function contextEventMetrics(entries) {
     },
     steward: {
       definition: "a crossing is a context.steward event; its window ends at the next applied " +
-        "context.commit; uptake is an accepted agent fold attempt inside the window, never a " +
-        "ladder fold and never an attempt before the crossing; a pre-steward session reads " +
-        "zero crossings with a null take share",
+        "context.commit; uptake is an accepted agent fold or rebrief attempt inside the window, " +
+        "never a ladder fold and never an attempt before the crossing; a pre-steward session " +
+        "reads zero crossings with a null take share",
       crossings: stewardWindows.length,
       takenCrossings: stewardWindows.filter((window) => window.taken).length,
       takeShare: stewardWindows.length
@@ -4508,6 +4513,8 @@ export function contextEventMetrics(entries) {
         : null,
       acceptedFoldAttemptsInWindows: stewardWindows.reduce(
         (total, window) => total + window.acceptedFoldAttempts, 0),
+      acceptedRebriefsInWindows: stewardWindows.reduce(
+        (total, window) => total + window.acceptedRebriefs, 0),
       marksRequestedInWindows: stewardWindows.reduce(
         (total, window) => total + window.marksRequested, 0),
       windows: stewardWindows,

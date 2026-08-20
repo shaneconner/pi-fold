@@ -75,25 +75,40 @@ export function stewardAdvisoryText(input: {
   budgetTokens: number;
   inflowTokens: number;
   candidates: ReadonlyArray<{ id: string; tokens: number }>;
+  rebriefTargets: ReadonlyArray<{ id: string; kind: string }>;
   pendingAgentMarks: number;
   eligibleMarks: number;
 }): string {
   const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
   const headroom = Math.max(0, input.budgetTokens - input.usedTokens);
-  const candidates = input.candidates.length
-    ? input.candidates.map((item) => `${item.id} (about ${item.tokens} tokens)`).join("; ")
-    : "none";
-  return boundReceiptText(
-    [
-      `[${brand} steward] The next automatic fold epoch is close: about ${headroom} tokens of ` +
-        `headroom remain against a ${input.budgetTokens}-token serving budget, and recent requests ` +
-        `have grown by about ${input.inflowTokens} tokens each.`,
-      `Unmarked completed units, largest first: ${candidates}.`,
-      `${input.pendingAgentMarks} of your mark(s) pending; ${input.eligibleMarks} mark(s) eligible now.`,
+  const lines = [
+    `[${brand} steward] The next automatic fold epoch is close: about ${headroom} tokens of ` +
+      `headroom remain against a ${input.budgetTokens}-token serving budget, and recent requests ` +
+      `have grown by about ${input.inflowTokens} tokens each.`,
+  ];
+  if (input.candidates.length) {
+    lines.push(
+      "Unmarked completed units, largest first: " +
+        input.candidates.map((item) => `${item.id} (about ${item.tokens} tokens)`).join("; ") + ".",
       "Mark finished units now with your own briefs, several in one call: " +
         `${input.toolName} {"action":"fold","marks":[{"ids":["<start>","<end>"],"brief":"<factual brief>"}]}. ` +
         "Whatever stays unmarked will be folded automatically at the epoch with a deterministic brief.",
-    ].join("\n"),
+    );
+  }
+  if (input.rebriefTargets.length) {
+    lines.push(
+      "Standing folds carrying deterministic briefs, newest first: " +
+        input.rebriefTargets.map((fold) => `${fold.id} (${fold.kind})`).join("; ") + ".",
+      `Replace any with your own factual brief: ${input.toolName} ` +
+        '{"action":"rebrief","id":"<fold-id>","brief":"<factual brief>"}. ' +
+        "Your brief rides the placeholder and index from the next request on; write it while " +
+        "you still remember what the fold holds.",
+    );
+  }
+  lines.push(
+    `${input.pendingAgentMarks} of your mark(s) pending; ${input.eligibleMarks} mark(s) eligible now.`);
+  return boundReceiptText(
+    lines.join("\n"),
     2_048,
     `[${brand} steward] The next automatic fold epoch is close; details are unavailable this pass.`,
   );
