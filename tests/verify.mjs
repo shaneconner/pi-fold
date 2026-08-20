@@ -7709,11 +7709,26 @@ async function gateStatusResultsAreLadderFood() {
       status: [...context.READ_ONLY_CONTEXT_ACTION_ARGUMENTS.status],
       peek: [...context.READ_ONLY_CONTEXT_ACTION_ARGUMENTS.peek],
     },
-    { status: ["action", "detail", "offset", "limit"], peek: ["action", "id"] },
+    { status: ["action", "detail", "offset", "limit"], peek: ["action", "id", "offset", "bytes"] },
   );
   const pagedShape = { action: "status", detail: "folds", offset: 40, limit: 40 };
   assert.equal(context.isAutoFoldableToolCall("pi_fold_context", pagedShape), true,
     "The advertised paged status call still classifies unsafe");
+  // The peek half of the same class, found by the 2026-08-20 Build 4 scoping pass:
+  // offset and bytes are advertised on the peek surface (the narrowing menu a
+  // truncated peek explicitly offers), and before this build a narrowed or paged
+  // peek carried an argument outside the allowlist, classified unsafe, and missed
+  // the reclaimer exactly as the detail-carrying status shape once did.
+  assert.equal(
+    context.isAutoFoldableToolCall(
+      "pi_fold_context", { action: "peek", id: "fold_probe", offset: 12_000, bytes: 4_096 }),
+    true,
+    "The advertised narrowed peek call still classifies unsafe");
+  assert.equal(
+    context.isAutoFoldableToolCall(
+      "pi_fold_context", { action: "peek", id: "fold_probe", offset: 12_000, expand: true }),
+    false,
+    "An argument outside the peek surface classified as ladder food");
   assert.equal(context.isAutoFoldableToolCall("pi_fold_context", { action: "status", detail: "tree" }), true);
   // Classification is allowlist-driven: one argument outside the surface and the
   // batch is unsafe, which is exactly how the detail-carrying shape was rejected
