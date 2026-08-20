@@ -9254,6 +9254,68 @@ checks.aComparativeToolCallJudgeOffersOnlyUnderOrderInvariance = true;
 checks.aBreakpointRetestAttributesAcceptanceOnlyOverAHealthyEnvelope = true;
 }
 
+// ---------------------------------------------------------------------------
+// Gate 96: the steward uptake lens. The steward advisory (runtime gate 138)
+// emits one context.steward per band crossing; Build 2's question is whether
+// the invitation is TAKEN. The lens reads only the canonical stream: a
+// crossing's window ends at the next applied context.commit, because that is
+// the epoch the invitation raced against; uptake is an accepted agent fold
+// attempt inside the window; an attempt before the crossing, a failed attempt,
+// a deferred commit, and a ladder fold each count for nothing. A pre-steward
+// session reads zero crossings with a NULL take share, never a fabricated one.
+// ---------------------------------------------------------------------------
+{
+  const event = (kind, data = {}) => ({
+    type: "custom",
+    customType: "pi-fold-active-context-event",
+    data: { kind, ...data },
+  });
+  const foldAttempt = (over = {}) => event("context.attempt",
+    { action: "fold", ok: true, marks_requested: 1, ...over });
+
+  const taken = contextEventMetrics([
+    foldAttempt({ seq: 1 }),
+    event("context.steward", { seq: 2, largest_candidate: "entry-9", unmarked_tokens: 4_000 }),
+    foldAttempt({ seq: 3, marks_requested: 2 }),
+    event("context.commit", { seq: 4, deferred: false }),
+    event("context.steward", { seq: 5, largest_candidate: "entry-3", unmarked_tokens: 900 }),
+    event("context.commit", { seq: 6, deferred: false }),
+  ]).steward;
+  assert.equal(taken.crossings, 2);
+  assert.equal(taken.takenCrossings, 1, "only the crossing with an in-window attempt is taken");
+  assert.equal(taken.takeShare, 0.5);
+  assert.equal(taken.windows[0].acceptedFoldAttempts, 1,
+    "the attempt before the crossing was counted into its window");
+  assert.equal(taken.windows[0].marksRequested, 2);
+  assert.equal(taken.windows[0].largestCandidate, "entry-9");
+  assert.equal(taken.windows[1].taken, false);
+
+  const boundaries = contextEventMetrics([
+    event("context.steward", { seq: 1 }),
+    event("context.commit", { seq: 2, deferred: true }),
+    foldAttempt({ seq: 3 }),
+    event("context.commit", { seq: 4, deferred: false }),
+    event("context.steward", { seq: 5 }),
+    foldAttempt({ seq: 6, ok: false }),
+    event("context.fold", { seq: 7, origin: "automatic", source_chars: 100 }),
+  ]).steward;
+  assert.equal(boundaries.windows[0].taken, true,
+    "a deferred commit ended the window early");
+  assert.equal(boundaries.windows[1].taken, false,
+    "a failed attempt or a ladder fold read as uptake");
+  assert.equal(boundaries.crossings, 2);
+
+  const preSteward = contextEventMetrics([
+    foldAttempt({ seq: 1 }),
+    event("context.commit", { seq: 2, deferred: false }),
+  ]).steward;
+  assert.equal(preSteward.crossings, 0);
+  assert.equal(preSteward.takeShare, null,
+    "a pre-steward session fabricated a take share");
+
+checks.aStewardCrossingIsTakenOnlyByAnAcceptedAgentMarkInItsWindow = true;
+}
+
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
 assert.deepEqual([...EXPERIMENT_MODES], ["smoke", "full"]);
 assert(plan, "stage plan fixture did not survive gate 4");

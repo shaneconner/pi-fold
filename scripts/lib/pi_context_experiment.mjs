@@ -4257,6 +4257,38 @@ export function contextEventMetrics(entries) {
   }
   const lastCommit = commits.length ? commits[commits.length - 1] : null;
 
+  // The steward advisory's uptake, read entirely from the canonical stream. A
+  // crossing is a context.steward event; its window runs to the NEXT applied
+  // context.commit (or the end of the stream), because that is the epoch the
+  // invitation raced against. Uptake is an ACCEPTED agent fold attempt inside
+  // the window; attempts before the crossing never count, and a ladder fold is
+  // not an attempt at all. A session from a pre-steward runtime reads zero
+  // crossings and a null take share rather than pretending a measurement.
+  const stewardWindows = [];
+  for (let index = 0; index < events.length; index += 1) {
+    if (events[index].kind !== "context.steward") continue;
+    const crossing = events[index];
+    let windowEnd = events.length;
+    for (let scan = index + 1; scan < events.length; scan += 1) {
+      if (events[scan].kind === "context.commit" && events[scan].deferred !== true) {
+        windowEnd = scan;
+        break;
+      }
+    }
+    const foldAttempts = events.slice(index + 1, windowEnd).filter((event) =>
+      event.kind === "context.attempt" && event.action === "fold" && event.ok === true);
+    stewardWindows.push({
+      seq: Number.isFinite(crossing.seq) ? crossing.seq : null,
+      largestCandidate: typeof crossing.largest_candidate === "string"
+        ? crossing.largest_candidate : null,
+      unmarkedTokens: Number.isFinite(crossing.unmarked_tokens) ? crossing.unmarked_tokens : null,
+      acceptedFoldAttempts: foldAttempts.length,
+      marksRequested: foldAttempts.reduce((total, event) =>
+        total + (Number.isFinite(event.marks_requested) ? event.marks_requested : 0), 0),
+      taken: foldAttempts.length > 0,
+    });
+  }
+
   let prefixRewrites = 0;
   let structuralRewrites = 0;
   let surfaceRewrites = 0;
@@ -4463,6 +4495,22 @@ export function contextEventMetrics(entries) {
       unmeasuredRequests: Object.values(observedCacheByRequestClass)
         .reduce((total, bucket) => total + bucket.requests - bucket.measuredRequests, 0),
       byRequestClass: observedCacheByRequestClass,
+    },
+    steward: {
+      definition: "a crossing is a context.steward event; its window ends at the next applied " +
+        "context.commit; uptake is an accepted agent fold attempt inside the window, never a " +
+        "ladder fold and never an attempt before the crossing; a pre-steward session reads " +
+        "zero crossings with a null take share",
+      crossings: stewardWindows.length,
+      takenCrossings: stewardWindows.filter((window) => window.taken).length,
+      takeShare: stewardWindows.length
+        ? stewardWindows.filter((window) => window.taken).length / stewardWindows.length
+        : null,
+      acceptedFoldAttemptsInWindows: stewardWindows.reduce(
+        (total, window) => total + window.acceptedFoldAttempts, 0),
+      marksRequestedInWindows: stewardWindows.reduce(
+        (total, window) => total + window.marksRequested, 0),
+      windows: stewardWindows,
     },
     guidanceCarriers,
   };
