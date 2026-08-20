@@ -9334,6 +9334,10 @@ checks.aBreakpointRetestAttributesAcceptanceOnlyOverAHealthyEnvelope = true;
   assert.equal(preSteward.takeShare, null,
     "a pre-steward session fabricated a take share");
 
+  assert(source("scripts/extract_campaign_metrics.mjs")
+    .includes("steward: run.contextEvents.steward ?? null"),
+  "the campaign extract drops the steward uptake lens");
+
 checks.aStewardCrossingIsTakenOnlyByAnAcceptedAgentMarkInItsWindow = true;
 }
 

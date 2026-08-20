@@ -98,6 +98,9 @@ function extractRun(run) {
         counterfactualPooledCacheShare: counterfactual?.pooledCacheShare ?? null,
         counterfactualByRequestClass: counterfactual?.byRequestClass ?? null,
         observedCacheByRequestClass: run.contextEvents.observedCache?.byRequestClass ?? null,
+        // Pre-steward evidence carries no lens; null distinguishes "not measured"
+        // from a measured zero-crossing session.
+        steward: run.contextEvents.steward ?? null,
       }
       : null,
     rereadTax: run.rereadTax ?? null,
