@@ -9144,6 +9144,116 @@ print(json.dumps({
 checks.aComparativeToolCallJudgeOffersOnlyUnderOrderInvariance = true;
 }
 
+// ---------------------------------------------------------------------------
+// The 2026-08-16 probe sent the documented explicit prompt-cache fields and the
+// subscription endpoint rejected them; the platform docs read 2026-08-19 say
+// GPT-5.6+ accepts them. Gate 95 pins the re-test's contract: attribution is
+// control-first (a repetition whose implicit control fails is an envelope
+// failure and yields NO field verdict), an explicit-lane rejection is named
+// with the provider's own status and error, acceptance is judged by a
+// byte-identical reuse reading at least the cacheable minimum, disagreement
+// across repetitions is verdict "mixed" by name, the marked input touches only
+// the final block without mutating its source, the explicit payload check
+// refuses ceiling fields and unmarked inputs, and the dry run is zero-network.
+// ---------------------------------------------------------------------------
+{
+  const bp = await import(pathToFileURL(join(PROJECT, "scripts", "probe_subscription_cache_breakpoint.mjs")).href);
+  assert.deepEqual({ ...bp.BREAKPOINT_REQUEST_OPTIONS }, { mode: "explicit" });
+  assert.deepEqual({ ...bp.BREAKPOINT_BLOCK_MARKER }, { mode: "explicit" });
+  assert.deepEqual([...bp.BREAKPOINT_SEQUENCE],
+    ["implicit-control", "explicit-first", "explicit-reuse"]);
+  assert.deepEqual([...bp.BREAKPOINT_OUTCOMES], [
+    "envelope-failure", "rejected-by-name", "accepted-without-reuse-evidence", "accepted-effective",
+  ]);
+
+  const sourceInput = [
+    { type: "message", role: "developer", content: [{ type: "input_text", text: "stable" }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "Return exactly OK." }] },
+  ];
+  const marked = bp.markedExplicitInput(sourceInput);
+  assert.equal(marked.at(-1).content.at(-1).prompt_cache_breakpoint.mode, "explicit",
+    "the final block must carry the explicit breakpoint marker");
+  assert.equal("prompt_cache_breakpoint" in marked[0].content[0], false,
+    "only the final block is marked");
+  assert.equal("prompt_cache_breakpoint" in sourceInput.at(-1).content.at(-1), false,
+    "marking must never mutate the source input");
+
+  const payload = {
+    prompt_cache_key: "pf-cache-x", input: marked,
+    prompt_cache_options: { mode: "explicit" },
+  };
+  assert.equal(bp.assertExplicitSubscriptionPayload(payload,
+    { cacheKey: "pf-cache-x", input: marked }), true);
+  assert.throws(() => bp.assertExplicitSubscriptionPayload(
+    { ...payload, max_output_tokens: 100 }, { cacheKey: "pf-cache-x", input: marked }),
+  /must not carry max_output_tokens/, "a ceiling field slipped through the explicit lane");
+  assert.throws(() => bp.assertExplicitSubscriptionPayload(
+    { prompt_cache_key: "pf-cache-x", input: marked },
+    { cacheKey: "pf-cache-x", input: marked }),
+  /prompt_cache_options/, "an explicit lane without the request-level mode passed");
+  assert.throws(() => bp.assertExplicitSubscriptionPayload(
+    { ...payload, input: sourceInput }, { cacheKey: "pf-cache-x", input: sourceInput }),
+  /explicit breakpoint/, "an unmarked input passed the explicit lane");
+
+  const row = (label, over = {}) => ({
+    repetition: 1, label, httpStatus: 200, stopReason: "stop",
+    usage: { cacheRead: 0 }, ...over,
+  });
+  const sickEnvelope = bp.classifyBreakpointRepetition([
+    row("implicit-control", { httpStatus: 500, stopReason: "error", error: "upstream" }),
+    row("explicit-first", { httpStatus: 400, stopReason: "error", error: "unknown field" }),
+  ]);
+  assert.equal(sickEnvelope.outcome, "envelope-failure");
+  assert.equal(sickEnvelope.fieldVerdict, false,
+    "a rejection over a sick envelope became a field verdict");
+  const rejected = bp.classifyBreakpointRepetition([
+    row("implicit-control"),
+    row("explicit-first", {
+      httpStatus: 400, stopReason: "error",
+      error: "Unknown parameter: prompt_cache_options",
+    }),
+  ]);
+  assert.equal(rejected.outcome, "rejected-by-name");
+  assert.match(rejected.detail, /prompt_cache_options/,
+    "the rejection must carry the provider's own words");
+  const effective = bp.classifyBreakpointRepetition([
+    row("implicit-control"),
+    row("explicit-first", { usage: { cacheRead: 0, cacheWrite: 2048 } }),
+    row("explicit-reuse", { usage: { cacheRead: 2048 } }),
+  ]);
+  assert.equal(effective.outcome, "accepted-effective");
+  assert.equal(effective.reuseCacheRead, 2048);
+  const inert = bp.classifyBreakpointRepetition([
+    row("implicit-control"),
+    row("explicit-first"),
+    row("explicit-reuse", { usage: { cacheRead: 0 } }),
+  ]);
+  assert.equal(inert.outcome, "accepted-without-reuse-evidence",
+    "acceptance without reuse evidence must not read as effective");
+
+  const mixedRows = [
+    row("implicit-control"), row("explicit-first"),
+    { ...row("explicit-reuse", { usage: { cacheRead: 2048 } }) },
+    { ...row("implicit-control"), repetition: 2 },
+    { ...row("explicit-first", { httpStatus: 400, stopReason: "error", error: "no" }), repetition: 2 },
+  ];
+  const mixed = bp.summarizeBreakpointProbe(mixedRows, 2);
+  assert.equal(mixed.verdict, "mixed", "disagreeing repetitions must be named mixed");
+  assert.equal(bp.summarizeBreakpointProbe(mixedRows.slice(0, 3), 1).verdict,
+    "accepted-effective");
+
+  const bpDryRun = spawnSync("node",
+    [join(PROJECT, "scripts", "probe_subscription_cache_breakpoint.mjs")], { encoding: "utf8" });
+  assert.equal(bpDryRun.status, 0, bpDryRun.stderr);
+  const bpDry = JSON.parse(bpDryRun.stdout);
+  assert.equal(bpDry.live, false);
+  assert.equal(bpDry.networkRequests, 0);
+  assert.equal(bpDry.manifest.requestCount, 9);
+  assert.equal(bpDry.endpoint, "https://chatgpt.com/backend-api/codex/responses");
+
+checks.aBreakpointRetestAttributesAcceptanceOnlyOverAHealthyEnvelope = true;
+}
+
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
 assert.deepEqual([...EXPERIMENT_MODES], ["smoke", "full"]);
 assert(plan, "stage plan fixture did not survive gate 4");
