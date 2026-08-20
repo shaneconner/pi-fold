@@ -2,7 +2,7 @@
   "version": 1,
   "corpusLabel": "corpus-root",
   "adjudicatorSourceSha256": "46ed33e1429d8f15072a616537deffe802fd480fff875e502bd54807603b8c07",
-  "runCount": 10,
+  "runCount": 12,
   "campaigns": [
     "sol-20260820-steward"
   ],
@@ -9773,7 +9773,1916 @@
         "deliverableTranscriptSha256": "75235ae0cf0a7b2b567b4f1c6efea00550e226234989622f5c2dc06ff0f2fbe3",
         "traceStepTranscriptSha256": "9eb040c1905600e65984393efd2377dfdd7bb028a9361f2fed5c5ca18d77f2fb"
       }
+    },
+    {
+      "runId": "2026-08-20T21-35-23Z-native-rep7-8a239022",
+      "campaignId": "sol-20260820-steward",
+      "arm": "native",
+      "repetition": 7,
+      "mode": "full",
+      "condition": {
+        "foldScheduling": "epoch",
+        "foldPeekResults": true,
+        "providerInputBudget": 251520,
+        "transport": "sse"
+      },
+      "workload": {
+        "stagesPlanned": 64,
+        "stagesReleased": 64,
+        "stageCalls": 64,
+        "readCalls": 60,
+        "toolCalls": 129,
+        "probeStages": 4,
+        "deliverables": 4,
+        "resumes": 0,
+        "resumesAfterFenceCompaction": 0,
+        "resumesAfterModelStop": 0
+      },
+      "usage": {
+        "requests": 92,
+        "inputFresh": 1293384,
+        "cacheRead": 33460224,
+        "cacheWrite": 0,
+        "output": 47554,
+        "reasoning": 25659,
+        "totalTokens": 34801162,
+        "wallClockMs": 1704319,
+        "meanCacheShare": 0.8840993636976643,
+        "pooledCacheShare": 0.9627841805662307,
+        "mutations": 4
+      },
+      "contextEvents": null,
+      "rereadTax": {
+        "tokenEstimatorId": "utf8-bytes-div-4-ceil",
+        "toolResults": 129,
+        "distinctPayloads": 129,
+        "repeatResults": 0,
+        "repeatBytes": 0,
+        "repeatTokensEstimated": 0,
+        "totalBytes": 4295246,
+        "totalTokensEstimated": 1073860,
+        "repeatByteShare": 0,
+        "topRepeats": []
+      },
+      "stopTheWorld": {
+        "nativeCompactions": 2,
+        "nativeCompactionSessionEntries": 2,
+        "foldsInStride": 0,
+        "events": [
+          {
+            "kind": "native-compaction",
+            "stage": 58,
+            "openedMonotonicMs": 175469343,
+            "timeToFirstProductiveRequestMs": 83219
+          },
+          {
+            "kind": "native-compaction",
+            "stage": 65,
+            "openedMonotonicMs": 175911155,
+            "timeToFirstProductiveRequestMs": 93103
+          }
+        ],
+        "foldEvents": [],
+        "medianNativeRecoveryMs": 88161
+      },
+      "curation": {
+        "contextToolCalls": 0,
+        "byAction": {},
+        "totalFolds": 0,
+        "totalFoldsCounts": "fold-records",
+        "headlineMutationMetric": "usage.mutations",
+        "voluntaryFolds": 0,
+        "automaticFolds": 0,
+        "voluntaryFoldShare": null,
+        "expandCalls": 0,
+        "protectCalls": 0,
+        "unprotectCalls": 0,
+        "refoldCalls": 0,
+        "peekCalls": 0,
+        "foldKinds": {},
+        "briefProvenance": {
+          "model": 0,
+          "deterministic": 0,
+          "generator": {
+            "calls": 0,
+            "spans": 0,
+            "spansPerCall": null,
+            "outcomes": {},
+            "cures": 0,
+            "curedSpans": 0,
+            "cureRate": null,
+            "byKind": {
+              "consolidation": {
+                "calls": 0,
+                "spans": 0,
+                "sourceChars": 0,
+                "briefChars": 0,
+                "cures": 0,
+                "usage": {},
+                "callsWithoutUsage": 0
+              },
+              "automatic": {
+                "calls": 0,
+                "spans": 0,
+                "sourceChars": 0,
+                "briefChars": 0,
+                "cures": 0,
+                "usage": {},
+                "callsWithoutUsage": 0
+              },
+              "mixed": {
+                "calls": 0,
+                "spans": 0,
+                "sourceChars": 0,
+                "briefChars": 0,
+                "cures": 0,
+                "usage": {},
+                "callsWithoutUsage": 0
+              }
+            },
+            "definition": "one record per generator call. `byKind` splits calls by whether every span was a consolidation, every span an automatic fold, or the call carried both; a mixed call's tokens are never divided between the two. `cures` counts second asks, which is how often a brief missed the stated contract and was handed back with the complaint"
+          },
+          "join": {
+            "joinKey": "fold_id",
+            "upgradedFolds": 0,
+            "foldsUpgradedToModel": 0,
+            "unmatchedUpgrades": 0,
+            "unmatchedUpgradeReasons": {},
+            "repeatedUpgradeIds": 0,
+            "upgradeFailures": 0,
+            "upgradesWaitingAtLastCommit": null,
+            "definition": "every key beside `join` is a brief provenance kind, counted per sealed fold record and moved to model where a later context.commit record names that fold id in brief_upgrade_ids; a run sealed before the upgrade lane carries no such field and reads exactly as the creation-time count did"
+          }
+        }
+      },
+      "thinkTime": {
+        "medianMs": 9757,
+        "p95Ms": 41058,
+        "maxMs": 117418
+      },
+      "overflowPoint": null,
+      "probes": [
+        {
+          "stage": 16,
+          "delivered": true,
+          "rawText": "probe-16-01: lib/ftplistparser.c\nprobe-16-02: 05\nprobe-16-03: 01\nprobe-16-04: cw-7553bd\nprobe-16-05: lib/curlx/strerr.c\nprobe-16-06: ifreq\n\n`probe-16-01` came from trace-b step 02 in stage 06, which selected the fourth file from stage 04.  \n`probe-16-02` came from trace-c step 01 in stage 07, referring back to `lib/uint-bset.c` in stage 05.  \n`probe-16-03` came from trace-a step 01 in stage 02, referring back to `lib/curlx/basename.c` in stage 01.  \n`probe-16-04` came from the correction issued in stage 09 for stage 06.  \n`probe-16-05` came from the ordered file list delivered in stage 07.  \n`probe-16-06` came from `lib/if2ip.h:58`, where `struct ifreq` is defined.",
+          "messagesSkipped": 0,
+          "resultEntryIndex": 47,
+          "answerEntryIndex": 50,
+          "answers": [
+            {
+              "probeId": "probe-16-01",
+              "kind": "chain-link",
+              "question": "The dependency appendix lists each audit trace in order and its trace-b step 02 row is blank. What value did you record for trace-b-02? Answer with the repository-relative path only.",
+              "answerText": "lib/ftplistparser.c",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-16-02",
+              "kind": "chain-link",
+              "question": "The dependency appendix lists each audit trace in order and its trace-c step 01 row is blank. What value did you record for trace-c-01? Answer with the stage number only.",
+              "answerText": "05",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-16-03",
+              "kind": "chain-link",
+              "question": "The dependency appendix lists each audit trace in order and its trace-a step 01 row is blank. What value did you record for trace-a-01? Answer with the stage number only.",
+              "answerText": "01",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-16-04",
+              "kind": "stage-fact",
+              "question": "What is the audit code word for stage 06? Answer with the code word only.",
+              "answerText": "cw-7553bd",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-16-05",
+              "kind": "stage-binding",
+              "question": "Which repository-relative file was the FIRST file delivered in stage 07? Answer with the path only.",
+              "answerText": "lib/curlx/strerr.c",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-16-06",
+              "kind": "definition-line",
+              "question": "In the file lib/if2ip.h, which identifier is defined on line 58? Answer with the identifier only.",
+              "answerText": "ifreq",
+              "parsed": true
+            }
+          ]
+        },
+        {
+          "stage": 32,
+          "delivered": true,
+          "rawText": "probe-32-01: 10\nprobe-32-02: 04\nprobe-32-03: 01\nprobe-32-04: cw-8006a5\nprobe-32-05: lib/vtls/vtls_int.h\nprobe-32-06: src/tool_vms.c\n\n`probe-32-01` came from trace-a step 04 in stage 12, referring to `lib/curl_setup.h` from stage 10.  \n`probe-32-02` came from trace-b step 01 in stage 05, referring to `lib/vdns/asyn.h` from stage 04.  \n`probe-32-03` exactly repeats the value given for `probe-16-03`.  \n`probe-32-04` came from the audit note delivered in stage 13.  \n`probe-32-05` came from the ordered file list in stage 12.  \n`probe-32-06` came from the `struct decc_feat_t` definition in stage 07’s `src/tool_vms.c`.",
+          "messagesSkipped": 0,
+          "resultEntryIndex": 95,
+          "answerEntryIndex": 96,
+          "answers": [
+            {
+              "probeId": "probe-32-01",
+              "kind": "chain-link",
+              "question": "The dependency appendix lists each audit trace in order and its trace-a step 04 row is blank. What value did you record for trace-a-04? Answer with the stage number only.",
+              "answerText": "10",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-32-02",
+              "kind": "chain-link",
+              "question": "The dependency appendix lists each audit trace in order and its trace-b step 01 row is blank. What value did you record for trace-b-01? Answer with the stage number only.",
+              "answerText": "04",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-32-03",
+              "kind": "echo",
+              "question": "Audit trail: restate the answer you gave for probe-16-03, exactly as you gave it. Answer with that value only.",
+              "answerText": "01",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-32-04",
+              "kind": "stage-fact",
+              "question": "What is the audit code word for stage 13? Answer with the code word only.",
+              "answerText": "cw-8006a5",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-32-05",
+              "kind": "stage-binding",
+              "question": "Which repository-relative file was the FIRST file delivered in stage 12? Answer with the path only.",
+              "answerText": "lib/vtls/vtls_int.h",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-32-06",
+              "kind": "symbol-file",
+              "question": "Which repository-relative file defines struct decc_feat_t? Answer with the path only.",
+              "answerText": "src/tool_vms.c",
+              "parsed": true
+            }
+          ]
+        },
+        {
+          "stage": 48,
+          "delivered": true,
+          "rawText": "probe-48-01: lib/urlapi.c\nprobe-48-02: 20\nprobe-48-03: 10\nprobe-48-04: cw-197c34\nprobe-48-05: lib/conncache.c\nprobe-48-06: finder\n\n`probe-48-01` came from trace-a step 02 in stage 03, selecting the third file delivered in stage 01.  \n`probe-48-02` came from trace-d step 01 in stage 21, referring to `lib/vtls/keylog.h` from stage 20.  \n`probe-48-03` exactly repeats the value given for `probe-32-01`.  \n`probe-48-04` came from the correction issued in stage 18 for stage 15.  \n`probe-48-05` came from the ordered file list in stage 19.  \n`probe-48-06` came from `src/tool_findfile.c:39`, where `struct finder` is defined.",
+          "messagesSkipped": 0,
+          "resultEntryIndex": 127,
+          "answerEntryIndex": 130,
+          "answers": [
+            {
+              "probeId": "probe-48-01",
+              "kind": "chain-link",
+              "question": "The dependency appendix lists each audit trace in order and its trace-a step 02 row is blank. What value did you record for trace-a-02? Answer with the repository-relative path only.",
+              "answerText": "lib/urlapi.c",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-48-02",
+              "kind": "chain-link",
+              "question": "The dependency appendix lists each audit trace in order and its trace-d step 01 row is blank. What value did you record for trace-d-01? Answer with the stage number only.",
+              "answerText": "20",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-48-03",
+              "kind": "echo",
+              "question": "Audit trail: restate the answer you gave for probe-32-01, exactly as you gave it. Answer with that value only.",
+              "answerText": "10",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-48-04",
+              "kind": "stage-fact",
+              "question": "What is the audit code word for stage 15? Answer with the code word only.",
+              "answerText": "cw-197c34",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-48-05",
+              "kind": "stage-binding",
+              "question": "Which repository-relative file was the FIRST file delivered in stage 19? Answer with the path only.",
+              "answerText": "lib/conncache.c",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-48-06",
+              "kind": "definition-line",
+              "question": "In the file src/tool_findfile.c, which identifier is defined on line 39? Answer with the identifier only.",
+              "answerText": "finder",
+              "parsed": true
+            }
+          ]
+        },
+        {
+          "stage": 64,
+          "delivered": true,
+          "rawText": "probe-64-01: lib/vquic/vquic-tls.h\nprobe-64-02: src/tool_parsecfg.c\nprobe-64-03: not sure\nprobe-64-04: not sure\nprobe-64-05: lib/curlx/fopen.h\nprobe-64-06: src/tool_getpass.c\n\nProbe 64-01 came from the recorded trace-a sequence; probe 64-02 came from trace-c. The compacted audit record did not preserve probe-48-01 or Stage 08’s code word. Probe 64-05 came from counting quoted includes in `lib/vtls/keylog.c`. Probe 64-06 came from the VMS `struct _isb` definition in `src/tool_getpass.c`.\n\n**Synthesis:** curl’s architecture centers on easy/multi transfer state, composable connection filters, protocol-specific state machines, portable resolver/TLS abstractions, and shared reader/writer pipelines. The audit also traced how platform portability, caches, authentication, CLI behavior, and HTTP/3/QUIC components connect across these layers.",
+          "messagesSkipped": 0,
+          "resultEntryIndex": 182,
+          "answerEntryIndex": 223,
+          "answers": [
+            {
+              "probeId": "probe-64-01",
+              "kind": "chain-link",
+              "question": "The dependency appendix lists each audit trace in order and its trace-a step 05 row is blank. What value did you record for trace-a-05? Answer with the repository-relative path only.",
+              "answerText": "lib/vquic/vquic-tls.h",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-64-02",
+              "kind": "chain-link",
+              "question": "The dependency appendix lists each audit trace in order and its trace-c step 02 row is blank. What value did you record for trace-c-02? Answer with the repository-relative path only.",
+              "answerText": "src/tool_parsecfg.c",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-64-03",
+              "kind": "echo",
+              "question": "Audit trail: restate the answer you gave for probe-48-01, exactly as you gave it. Answer with that value only.",
+              "answerText": "not sure",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-64-04",
+              "kind": "stage-fact",
+              "question": "What is the audit code word for stage 08? Answer with the code word only.",
+              "answerText": "not sure",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-64-05",
+              "kind": "derivation-control",
+              "question": "Control question, nothing to recall: starting from lib/vtls/keylog.c, name the target of its 4th quoted include, using the same counting and resolution rules as the audit traces. Answer with the repository-relative path only.",
+              "answerText": "lib/curlx/fopen.h",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-64-06",
+              "kind": "symbol-file",
+              "question": "Which repository-relative file defines struct _isb? Answer with the path only.",
+              "answerText": "src/tool_getpass.c",
+              "parsed": true
+            }
+          ]
+        }
+      ],
+      "deliverables": [
+        {
+          "id": "deliverable-08",
+          "textSha256": null
+        },
+        {
+          "id": "deliverable-24",
+          "textSha256": null
+        },
+        {
+          "id": "deliverable-40",
+          "textSha256": null
+        },
+        {
+          "id": "deliverable-56",
+          "textSha256": null
+        }
+      ],
+      "evidence": {
+        "sessionSha256": "112405f23a08c4cad7d34f71e4b90791aff480c356e9fb7f497f18bd3d95a5c1",
+        "candidateReportSha256": "28dd6a67e908254d6f8669c6e784954195219c664cf81cdec0fd9a731b2022cb",
+        "manifestSha256": "d08572cc76b015f4db513ff953c636fa46fd0cdde5ba5973c056a7d6246eafa4",
+        "planSha256": "b25dafbf3e202a838cb9cec17bce3fb8f25672ac04205efb544ee2221ceda7c5",
+        "providerLedgerSha256": "ef869a2853ac7360363d5ce040ea26895ac4704914934cc90a910ffa145ecc5f",
+        "toolResultLedgerSha256": "8871f7b48f8baa5a8d06253cf046d819ca4fb340c29422dc5586b42711d15035",
+        "workerEventsSha256": "f9ac5cec673ebba16a8ae76ae436aaf318619a337b71f5222aee81a12ad4e3bd",
+        "adjudicatorSourceSha256": "46ed33e1429d8f15072a616537deffe802fd480fff875e502bd54807603b8c07",
+        "probeTranscriptSha256": "0d21e1feedf96a8f070249581d25f4e68021e183617c029a7c7d81b0973e8f30",
+        "deliverableTranscriptSha256": "e3b81419c52a94c91f728fb69b91b9856300bf4075b494ab47d5a9aadd46d409",
+        "traceStepTranscriptSha256": "1be9455cb0da8b7f98c2612390c5a4ddd5185dede4ab1920d66e5eda104b29dc"
+      }
+    },
+    {
+      "runId": "2026-08-20T21-35-23Z-pifold-rep7-d4d5b15e",
+      "campaignId": "sol-20260820-steward",
+      "arm": "pifold",
+      "repetition": 7,
+      "mode": "full",
+      "condition": {
+        "foldScheduling": "epoch",
+        "foldPeekResults": true,
+        "providerInputBudget": 251520,
+        "transport": "sse"
+      },
+      "workload": {
+        "stagesPlanned": 64,
+        "stagesReleased": 64,
+        "stageCalls": 65,
+        "readCalls": 225,
+        "toolCalls": 314,
+        "probeStages": 4,
+        "deliverables": 4,
+        "resumes": 0,
+        "resumesAfterFenceCompaction": 0,
+        "resumesAfterModelStop": 0
+      },
+      "usage": {
+        "requests": 167,
+        "inputFresh": 4823969,
+        "cacheRead": 20877312,
+        "cacheWrite": 0,
+        "output": 57766,
+        "reasoning": 30464,
+        "totalTokens": 25759047,
+        "wallClockMs": 3880342,
+        "meanCacheShare": 0.7854873865386901,
+        "pooledCacheShare": 0.8123062815429316,
+        "mutations": 28
+      },
+      "contextEvents": {
+        "events": 672,
+        "byKind": {
+          "context.capacity": 1,
+          "context.projection": 167,
+          "context.prefix": 167,
+          "context.usage": 166,
+          "context.commit": 8,
+          "context.rider": 8,
+          "context.fold": 119,
+          "context.receipt": 8,
+          "context.steward": 9,
+          "context.attempt": 19
+        },
+        "prefixEvents": 167,
+        "prefixRewrites": 42,
+        "structuralRewrites": 8,
+        "surfaceRewrites": 34,
+        "commits": 8,
+        "folds": 119,
+        "counterfactualPooledCacheShare": 0.8520160772805473,
+        "counterfactualByRequestClass": {
+          "steady-state": {
+            "requests": 2,
+            "idealCachedTokens": 212912,
+            "projectedTokens": 210060,
+            "counterfactualCacheShare": 1.013577073217176
+          },
+          "after-message": {
+            "requests": 151,
+            "idealCachedTokens": 21502006,
+            "projectedTokens": 24416799,
+            "counterfactualCacheShare": 0.8806234592830944
+          },
+          "after-fold": {
+            "requests": 8,
+            "idealCachedTokens": 1709,
+            "projectedTokens": 755086,
+            "counterfactualCacheShare": 0.0022633183504925268
+          },
+          "after-peek": {
+            "requests": 6,
+            "idealCachedTokens": 920733,
+            "projectedTokens": 1187225,
+            "counterfactualCacheShare": 0.7755337025416412
+          }
+        },
+        "observedCacheByRequestClass": {
+          "steady-state": {
+            "requests": 2,
+            "measuredRequests": 2,
+            "cacheHits": 1,
+            "cacheWriteRequests": 0,
+            "cacheWriteReportedRequests": 2,
+            "inputFresh": 1945,
+            "cacheRead": 210432,
+            "cacheWrite": 0,
+            "promptTokens": 212377,
+            "pooledCacheShare": 0.9908417578174661,
+            "pooledCacheWriteShare": 0
+          },
+          "after-message": {
+            "requests": 151,
+            "measuredRequests": 150,
+            "cacheHits": 137,
+            "cacheWriteRequests": 0,
+            "cacheWriteReportedRequests": 150,
+            "inputFresh": 3611228,
+            "cacheRead": 20054528,
+            "cacheWrite": 0,
+            "promptTokens": 23665756,
+            "pooledCacheShare": 0.8474070298028933,
+            "pooledCacheWriteShare": 0
+          },
+          "after-fold": {
+            "requests": 8,
+            "measuredRequests": 8,
+            "cacheHits": 0,
+            "cacheWriteRequests": 0,
+            "cacheWriteReportedRequests": 8,
+            "inputFresh": 676586,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "promptTokens": 676586,
+            "pooledCacheShare": 0,
+            "pooledCacheWriteShare": 0
+          },
+          "after-peek": {
+            "requests": 6,
+            "measuredRequests": 6,
+            "cacheHits": 4,
+            "cacheWriteRequests": 0,
+            "cacheWriteReportedRequests": 6,
+            "inputFresh": 534210,
+            "cacheRead": 612352,
+            "cacheWrite": 0,
+            "promptTokens": 1146562,
+            "pooledCacheShare": 0.5340766569971794,
+            "pooledCacheWriteShare": 0
+          }
+        },
+        "steward": {
+          "definition": "a crossing is a context.steward event; its commit window ends at the next applied context.commit; uptake is an accepted agent fold or rebrief attempt inside the window, never a ladder fold and never an attempt before the crossing; a DIRECTED crossing also reads an answer window to the next directed crossing, because the ask rides until answered and the commit never waits for it; a pre-steward session reads zero crossings with a null take share",
+          "crossings": 9,
+          "takenCrossings": 1,
+          "takeShare": 0.1111111111111111,
+          "directedCrossings": 9,
+          "answeredCrossings": 1,
+          "answerShare": 0.1111111111111111,
+          "acceptedFoldAttemptsInWindows": 0,
+          "acceptedRebriefsInWindows": 9,
+          "marksRequestedInWindows": 0,
+          "windows": [
+            {
+              "seq": 68,
+              "largestCandidate": null,
+              "newestRebriefTarget": "fold_10146bafdb839e7ad4b74303",
+              "unmarkedTokens": 0,
+              "acceptedFoldAttempts": 0,
+              "acceptedRebriefs": 0,
+              "marksRequested": 0,
+              "taken": false,
+              "directed": true,
+              "answered": false
+            },
+            {
+              "seq": 102,
+              "largestCandidate": null,
+              "newestRebriefTarget": "fold_10146bafdb839e7ad4b74303",
+              "unmarkedTokens": 0,
+              "acceptedFoldAttempts": 0,
+              "acceptedRebriefs": 0,
+              "marksRequested": 0,
+              "taken": false,
+              "directed": true,
+              "answered": false
+            },
+            {
+              "seq": 179,
+              "largestCandidate": null,
+              "newestRebriefTarget": "fold_ea5b0948bcb5e2ba55ba2fa5",
+              "unmarkedTokens": 0,
+              "acceptedFoldAttempts": 0,
+              "acceptedRebriefs": 0,
+              "marksRequested": 0,
+              "taken": false,
+              "directed": true,
+              "answered": false
+            },
+            {
+              "seq": 258,
+              "largestCandidate": null,
+              "newestRebriefTarget": "fold_ad3bfc6122cd92b39d2e85d2",
+              "unmarkedTokens": 0,
+              "acceptedFoldAttempts": 0,
+              "acceptedRebriefs": 0,
+              "marksRequested": 0,
+              "taken": false,
+              "directed": true,
+              "answered": false
+            },
+            {
+              "seq": 318,
+              "largestCandidate": null,
+              "newestRebriefTarget": "fold_f55164102fa89fe66121aed6",
+              "unmarkedTokens": 0,
+              "acceptedFoldAttempts": 0,
+              "acceptedRebriefs": 0,
+              "marksRequested": 0,
+              "taken": false,
+              "directed": true,
+              "answered": false
+            },
+            {
+              "seq": 372,
+              "largestCandidate": null,
+              "newestRebriefTarget": "fold_002a118f9bc417efdb2ab7bd",
+              "unmarkedTokens": 0,
+              "acceptedFoldAttempts": 0,
+              "acceptedRebriefs": 0,
+              "marksRequested": 0,
+              "taken": false,
+              "directed": true,
+              "answered": false
+            },
+            {
+              "seq": 457,
+              "largestCandidate": null,
+              "newestRebriefTarget": "fold_e0322de53b6b7bff1dcab7d5",
+              "unmarkedTokens": 0,
+              "acceptedFoldAttempts": 0,
+              "acceptedRebriefs": 0,
+              "marksRequested": 0,
+              "taken": false,
+              "directed": true,
+              "answered": false
+            },
+            {
+              "seq": 532,
+              "largestCandidate": null,
+              "newestRebriefTarget": "fold_b27035e8380c4e2bfe61cabc",
+              "unmarkedTokens": 0,
+              "acceptedFoldAttempts": 0,
+              "acceptedRebriefs": 0,
+              "marksRequested": 0,
+              "taken": false,
+              "directed": true,
+              "answered": false
+            },
+            {
+              "seq": 626,
+              "largestCandidate": null,
+              "newestRebriefTarget": "fold_21413683ae695d477db4c9ba",
+              "unmarkedTokens": 0,
+              "acceptedFoldAttempts": 0,
+              "acceptedRebriefs": 9,
+              "marksRequested": 0,
+              "taken": true,
+              "directed": true,
+              "answered": true
+            }
+          ]
+        }
+      },
+      "rereadTax": {
+        "tokenEstimatorId": "utf8-bytes-div-4-ceil",
+        "toolResults": 314,
+        "distinctPayloads": 308,
+        "repeatResults": 6,
+        "repeatBytes": 21119,
+        "repeatTokensEstimated": 5282,
+        "totalBytes": 5801951,
+        "totalTokensEstimated": 1450614,
+        "repeatByteShare": 0.0036399824817548443,
+        "topRepeats": [
+          {
+            "contentSha256": "188cad2528d767e1129e1515fa3671bad53a903e984f749760825076ed91230a",
+            "toolName": "read",
+            "firstOrdinal": 78,
+            "repeats": 1,
+            "repeatBytes": 9543,
+            "repeatTokensEstimated": 2386,
+            "repeatOrdinals": [
+              169
+            ]
+          },
+          {
+            "contentSha256": "7d770979b9709403efe820d2d6c575edd3d04788084c8485740cba0b7da6ec08",
+            "toolName": "read",
+            "firstOrdinal": 68,
+            "repeats": 1,
+            "repeatBytes": 5897,
+            "repeatTokensEstimated": 1475,
+            "repeatOrdinals": [
+              251
+            ]
+          },
+          {
+            "contentSha256": "ed26afaf2c39c337a8845ff688c0c68267b42b77e07132e6db989f43a9344b33",
+            "toolName": "read",
+            "firstOrdinal": 154,
+            "repeats": 1,
+            "repeatBytes": 5107,
+            "repeatTokensEstimated": 1277,
+            "repeatOrdinals": [
+              299
+            ]
+          },
+          {
+            "contentSha256": "35e05a5c4edf1e927da0b430e1174a3ba2ab69ce980415afd733264f3ccd74bb",
+            "toolName": "read",
+            "firstOrdinal": 227,
+            "repeats": 1,
+            "repeatBytes": 193,
+            "repeatTokensEstimated": 49,
+            "repeatOrdinals": [
+              228
+            ]
+          },
+          {
+            "contentSha256": "5fa5f5dc8e4f2fdde005cba04d09fffbc1e08c24f0dceeef153f2fe2a861176c",
+            "toolName": "read",
+            "firstOrdinal": 171,
+            "repeats": 1,
+            "repeatBytes": 192,
+            "repeatTokensEstimated": 48,
+            "repeatOrdinals": [
+              172
+            ]
+          },
+          {
+            "contentSha256": "919014732987712a9a550e522cdc6a7d74ecf56ec0b7d8640e3b719177cc32bf",
+            "toolName": "read",
+            "firstOrdinal": 291,
+            "repeats": 1,
+            "repeatBytes": 187,
+            "repeatTokensEstimated": 47,
+            "repeatOrdinals": [
+              292
+            ]
+          }
+        ]
+      },
+      "stopTheWorld": {
+        "nativeCompactions": 0,
+        "nativeCompactionSessionEntries": 0,
+        "foldsInStride": 119,
+        "events": [],
+        "foldEvents": [
+          {
+            "kind": "fold",
+            "foldId": "fold_3a8c11fa94ed6af43ca3eba6",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_01954ce5f467e24a258ee9f4",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_ec6e50ab072d32c3d8fd4994",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_5d1e5985d02d2c4f47b815fe",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_b0b67cb364bd6dc66d637954",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_c773fc97f0f1d121b00bc777",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_d8b0c085f70096f605721d53",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_64e09d36e9cc11e2ab9ab078",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_10146bafdb839e7ad4b74303",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_dddcfdf70a3f3fc515f7e230",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_76db6a7cb056e2c844e1d5ed",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_3a454d24678f7337348f41f3",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_ea5b0948bcb5e2ba55ba2fa5",
+            "foldKind": "consolidation",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_eb850e5c9b8f1850df1f24fb",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_a72db91d97ba46756ffe4df9",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_e5b9c244ac2de644d70b6335",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_69e8175861ca92836d912859",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_08797b9c0847adecd048d35f",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_ab0c9d1093d6b9fad156eaf4",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_0fc3c85b0250b80925230dd6",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_0d3ec444342c4cd6a3cbcf3f",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_8747fdf1efc503f5958a4516",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_f815a222da32a1fc334dc45d",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_2939497f3d7d066af3b66d10",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_41cf65c1537522b8cebd9ffe",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_ad3bfc6122cd92b39d2e85d2",
+            "foldKind": "consolidation",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_81b113feddaa4358731d5123",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_0a3c1cd17ed4d836eaa16ee6",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_9337e96497d5a6a0a7c3787a",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_6cae8dd1a0be06111e740b75",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_4156f5c2d3e4741c08ad57c1",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_dd1062b4424a96838f05dedb",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_6d8a727a905bd5ac79cee56b",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_6ea1b6ca35328b9a6b5b0bdf",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_fb44f7c726a9ce5d71a76dac",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_93cf496bca745666b0b54dba",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_f862142714bc824b3523c76f",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_237de90fdc2f4ac15c28b429",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_802fdb04ad2ee2c8959495ab",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_2e052541eb0512665851f6b0",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_4ecf12751b16c4a887b957fc",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_158cf4549d2aab44de9cb250",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_582fdac6b3eb58b8916c4c50",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_f55164102fa89fe66121aed6",
+            "foldKind": "consolidation",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_30893a47dcce9a7bff5ebda7",
+            "foldKind": "consolidation",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_c6956aed92592c4732ff94bb",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_31dc8607e2f3f6025a59a36b",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_eeec753eabc03738a38e92c0",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_b1beb0e56b9a7649a6a76614",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_a0be9cf30a1916b50fa08ed9",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_41f83b21f8871af75bcd7abe",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_3b7ec84e74cc11a992e118b9",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_48aef902e3eba3120c995a7b",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_b5cea5441638676aefaba74c",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_82ef760dd86379d4b0c8f97a",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_1dfc1771b0604d231994dbda",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_10fb73f53f90b4647767ade6",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_3ff177a1223e39abff9bd96a",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_6df38ba1dcbdfe6507e5aabd",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_002a118f9bc417efdb2ab7bd",
+            "foldKind": "consolidation",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_fb521dc4f2c8ba802f071e84",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_b43397aca56ec0631ab3aa59",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_87cc355ae09045397ea38978",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_93b3b63b65aab6cdacabb2ba",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_86d6a99f31ac67655ef0b770",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_35ff1f94664c7b0b01d7b047",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_701baf05176ce2673df8b894",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_9112912e2a25df472968503a",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_75c37085c6c58809871ff899",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_c987dbd2cc883db002517a57",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_7ae452de1e1611a307d97374",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_14ac4325be76528400551c8f",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_e0322de53b6b7bff1dcab7d5",
+            "foldKind": "consolidation",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_0db49987dbb45619e7cbe2eb",
+            "foldKind": "consolidation",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_9ba82ded706e01381155c076",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_32207503c29d1a1215366174",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_235a7650bcca2c3115bd6285",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_92b99d14642363893a8cdd43",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_4eb75438c560452025c4208f",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_4aa5b479b20bdb20cd33057b",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_96c0ba24a7c1c8c4a43089ee",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_b9c695e65395ed59530fbab2",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_aa29915952c0a2212543163d",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_aa2bc5da4a247e2d14f9f197",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_b27035e8380c4e2bfe61cabc",
+            "foldKind": "consolidation",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_e685b66c1b45502e5bd5ec45",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_f2b8a4ae3377dff09c6cb129",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_19e12008cf7e2823e000f558",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_4144f04633c1f5f48dc9ef60",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_6a7a333c5568363dcfccef66",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_9a2317d04cf7b56d04a914cf",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_b8a0f5d840cf23a766f50a2e",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_bbd42149353ab0ef5f63d495",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_f34a9afecd84aab1b201a7e3",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_09c8cf839ec5ef6d70ab4fd7",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_9090a715c82a6b45f1687858",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_5e774d09bee31759ecfaf26a",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_cc57743435c5e1260335f69c",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_6541aa333fd195d83f757d70",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_c0dbcd01da3f3e2236f22174",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_21413683ae695d477db4c9ba",
+            "foldKind": "consolidation",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_149b74bdf7672be697d3bf61",
+            "foldKind": "consolidation",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_72f30e90b12b8c4ce5456092",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_7dc3e406d945b861df501fd2",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_599dc6df1ed5f1932961c423",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_e8b648ada7158bcf4f8f6846",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_451bbf33f2233c9bd0f9acda",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_2e6ee0c4ca1463264490ea66",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_5f34cf4840ad602373edd5f3",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_3c78e9fa19364396e329c743",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_a774c215611074d3a86fac52",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_d199a7cfa3534091bf689eff",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_5f063cfc35fcdd65d7192b0f",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_e908610b9b9c6897f693265b",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_e0e46931229c4e2e7c4a0cfc",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_f2df6292d6720932827642ed",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_85bb7626b764fb499693db53",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_8b7d932535d0d4e2b680cba5",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          },
+          {
+            "kind": "fold",
+            "foldId": "fold_7c0c498297342fd609f66f47",
+            "foldKind": "tool-result",
+            "openedMonotonicMs": null,
+            "timeToFirstProductiveRequestMs": null
+          }
+        ],
+        "medianNativeRecoveryMs": null
+      },
+      "curation": {
+        "contextToolCalls": 19,
+        "byAction": {
+          "peek": 7,
+          "status": 3,
+          "rebrief": 9
+        },
+        "invocationJoin": {
+          "joinKey": "tool_call_id",
+          "modelEmittedCalls": 19,
+          "runtimeAttempts": 19,
+          "attemptsWithJoinKey": 19,
+          "emittedWithoutAttempt": 0,
+          "attemptsWithoutEmitted": 0
+        },
+        "endOfRun": {
+          "protectedRefs": 0,
+          "pendingMarks": 11,
+          "pendingAgentMarks": 0
+        },
+        "expandCalls": 0,
+        "protectCalls": 0,
+        "unprotectCalls": 0,
+        "refoldCalls": 0,
+        "peekCalls": 7,
+        "totalFolds": 119,
+        "totalFoldsCounts": "fold-records",
+        "headlineMutationMetric": "contextEvents.prefixRewrites",
+        "voluntaryFolds": 0,
+        "automaticFolds": 119,
+        "voluntaryFoldShare": 0,
+        "foldKinds": {
+          "tool-result": 109,
+          "consolidation": 10
+        },
+        "briefProvenance": {
+          "model": 0,
+          "deterministic": 119,
+          "generator": {
+            "calls": 0,
+            "spans": 0,
+            "spansPerCall": null,
+            "outcomes": {},
+            "cures": 0,
+            "curedSpans": 0,
+            "cureRate": null,
+            "byKind": {
+              "consolidation": {
+                "calls": 0,
+                "spans": 0,
+                "sourceChars": 0,
+                "briefChars": 0,
+                "cures": 0,
+                "usage": {},
+                "callsWithoutUsage": 0
+              },
+              "automatic": {
+                "calls": 0,
+                "spans": 0,
+                "sourceChars": 0,
+                "briefChars": 0,
+                "cures": 0,
+                "usage": {},
+                "callsWithoutUsage": 0
+              },
+              "mixed": {
+                "calls": 0,
+                "spans": 0,
+                "sourceChars": 0,
+                "briefChars": 0,
+                "cures": 0,
+                "usage": {},
+                "callsWithoutUsage": 0
+              }
+            },
+            "definition": "one record per generator call. `byKind` splits calls by whether every span was a consolidation, every span an automatic fold, or the call carried both; a mixed call's tokens are never divided between the two. `cures` counts second asks, which is how often a brief missed the stated contract and was handed back with the complaint"
+          },
+          "join": {
+            "joinKey": "fold_id",
+            "upgradedFolds": 0,
+            "foldsUpgradedToModel": 0,
+            "unmatchedUpgrades": 0,
+            "unmatchedUpgradeReasons": {},
+            "repeatedUpgradeIds": 0,
+            "upgradeFailures": 0,
+            "upgradesWaitingAtLastCommit": null,
+            "definition": "every key beside `join` is a brief provenance kind, counted per sealed fold record and moved to model where a later context.commit record names that fold id in brief_upgrade_ids; a run sealed before the upgrade lane carries no such field and reads exactly as the creation-time count did"
+          }
+        }
+      },
+      "thinkTime": {
+        "medianMs": 11082,
+        "p95Ms": 40804,
+        "maxMs": 77385
+      },
+      "overflowPoint": null,
+      "probes": [
+        {
+          "stage": 16,
+          "delivered": true,
+          "rawText": "probe-16-01: lib/ftplistparser.c\nprobe-16-02: 05\nprobe-16-03: 01\nprobe-16-04: cw-7553bd\nprobe-16-05: lib/curlx/strerr.c\nprobe-16-06: ifreq\n\nThese came respectively from stage 06’s trace-b follow-up to stage 04, stage 07’s trace-c prompt, stage 02’s trace-a prompt, stage 09’s correction of stage 06, stage 07’s ordered file list, and `lib/if2ip.h` line 58.",
+          "messagesSkipped": 0,
+          "resultEntryIndex": 190,
+          "answerEntryIndex": 204,
+          "answers": [
+            {
+              "probeId": "probe-16-01",
+              "kind": "chain-link",
+              "question": "The dependency appendix lists each audit trace in order and its trace-b step 02 row is blank. What value did you record for trace-b-02? Answer with the repository-relative path only.",
+              "answerText": "lib/ftplistparser.c",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-16-02",
+              "kind": "chain-link",
+              "question": "The dependency appendix lists each audit trace in order and its trace-c step 01 row is blank. What value did you record for trace-c-01? Answer with the stage number only.",
+              "answerText": "05",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-16-03",
+              "kind": "chain-link",
+              "question": "The dependency appendix lists each audit trace in order and its trace-a step 01 row is blank. What value did you record for trace-a-01? Answer with the stage number only.",
+              "answerText": "01",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-16-04",
+              "kind": "stage-fact",
+              "question": "What is the audit code word for stage 06? Answer with the code word only.",
+              "answerText": "cw-7553bd",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-16-05",
+              "kind": "stage-binding",
+              "question": "Which repository-relative file was the FIRST file delivered in stage 07? Answer with the path only.",
+              "answerText": "lib/curlx/strerr.c",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-16-06",
+              "kind": "definition-line",
+              "question": "In the file lib/if2ip.h, which identifier is defined on line 58? Answer with the identifier only.",
+              "answerText": "ifreq",
+              "parsed": true
+            }
+          ]
+        },
+        {
+          "stage": 32,
+          "delivered": true,
+          "rawText": "probe-32-01: 10\nprobe-32-02: 04\nprobe-32-03: 01\nprobe-32-04: cw-8006a5\nprobe-32-05: lib/vtls/vtls_int.h\nprobe-32-06: src/tool_vms.c\n\nThese came respectively from the corrected trace-a chain, stage 04’s trace-b start, my stage 16 probe response, stage 13’s audit note, stage 12’s ordered file list, and the `struct decc_feat_t` definition in `src/tool_vms.c`.",
+          "messagesSkipped": 0,
+          "resultEntryIndex": 470,
+          "answerEntryIndex": 499,
+          "answers": [
+            {
+              "probeId": "probe-32-01",
+              "kind": "chain-link",
+              "question": "The dependency appendix lists each audit trace in order and its trace-a step 04 row is blank. What value did you record for trace-a-04? Answer with the stage number only.",
+              "answerText": "10",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-32-02",
+              "kind": "chain-link",
+              "question": "The dependency appendix lists each audit trace in order and its trace-b step 01 row is blank. What value did you record for trace-b-01? Answer with the stage number only.",
+              "answerText": "04",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-32-03",
+              "kind": "echo",
+              "question": "Audit trail: restate the answer you gave for probe-16-03, exactly as you gave it. Answer with that value only.",
+              "answerText": "01",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-32-04",
+              "kind": "stage-fact",
+              "question": "What is the audit code word for stage 13? Answer with the code word only.",
+              "answerText": "cw-8006a5",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-32-05",
+              "kind": "stage-binding",
+              "question": "Which repository-relative file was the FIRST file delivered in stage 12? Answer with the path only.",
+              "answerText": "lib/vtls/vtls_int.h",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-32-06",
+              "kind": "symbol-file",
+              "question": "Which repository-relative file defines struct decc_feat_t? Answer with the path only.",
+              "answerText": "src/tool_vms.c",
+              "parsed": true
+            }
+          ]
+        },
+        {
+          "stage": 48,
+          "delivered": true,
+          "rawText": "probe-48-01: lib/urlapi.c\nprobe-48-02: 20\nprobe-48-03: 10\nprobe-48-04: cw-197c34\nprobe-48-05: lib/conncache.c\nprobe-48-06: finder\n\nThese came respectively from trace-a’s stage-01 file ordering, trace-d’s stage-20 start, my stage-32 response, the corrected stage-15 audit note, stage 19’s ordered file list, and line 39 of `src/tool_findfile.c`.",
+          "messagesSkipped": 0,
+          "resultEntryIndex": 745,
+          "answerEntryIndex": 768,
+          "answers": [
+            {
+              "probeId": "probe-48-01",
+              "kind": "chain-link",
+              "question": "The dependency appendix lists each audit trace in order and its trace-a step 02 row is blank. What value did you record for trace-a-02? Answer with the repository-relative path only.",
+              "answerText": "lib/urlapi.c",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-48-02",
+              "kind": "chain-link",
+              "question": "The dependency appendix lists each audit trace in order and its trace-d step 01 row is blank. What value did you record for trace-d-01? Answer with the stage number only.",
+              "answerText": "20",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-48-03",
+              "kind": "echo",
+              "question": "Audit trail: restate the answer you gave for probe-32-01, exactly as you gave it. Answer with that value only.",
+              "answerText": "10",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-48-04",
+              "kind": "stage-fact",
+              "question": "What is the audit code word for stage 15? Answer with the code word only.",
+              "answerText": "cw-197c34",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-48-05",
+              "kind": "stage-binding",
+              "question": "Which repository-relative file was the FIRST file delivered in stage 19? Answer with the path only.",
+              "answerText": "lib/conncache.c",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-48-06",
+              "kind": "definition-line",
+              "question": "In the file src/tool_findfile.c, which identifier is defined on line 39? Answer with the identifier only.",
+              "answerText": "finder",
+              "parsed": true
+            }
+          ]
+        },
+        {
+          "stage": 64,
+          "delivered": true,
+          "rawText": "probe-64-01: lib/vquic/vquic-tls.h\nprobe-64-02: lv-87bb49\nprobe-64-03: 20\nprobe-64-04: cw-cae449\nprobe-64-05: 7\nprobe-64-06: not sure\n\n`probe-64-01` came from the completed trace-a chain, which resolved stage 10’s second file.  \n`probe-64-02` came from stage 09’s audit-ledger statement for relay `lv-84853d`.  \n`probe-64-03` came from stage 20’s ordered list, where `lib/cf-haproxy.c` was sixth.  \n`probe-64-04` came from stage 08’s audit note.  \n`probe-64-05` came from counting quoted includes in `lib/vtls/keylog.c`.  \nI could not verify `probe-64-06` confidently from the delivered material, so I have not guessed.",
+          "messagesSkipped": 0,
+          "resultEntryIndex": 987,
+          "answerEntryIndex": 1559,
+          "answers": [
+            {
+              "probeId": "probe-64-01",
+              "kind": "chain-link",
+              "question": "The dependency appendix lists each audit trace in order and its trace-a step 05 row is blank. What value did you record for trace-a-05? Answer with the repository-relative path only.",
+              "answerText": "lib/vquic/vquic-tls.h",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-64-02",
+              "kind": "chain-link",
+              "question": "The dependency appendix lists each audit trace in order and its trace-c step 02 row is blank. What value did you record for trace-c-02? Answer with the repository-relative path only.",
+              "answerText": "lv-87bb49",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-64-03",
+              "kind": "echo",
+              "question": "Audit trail: restate the answer you gave for probe-48-01, exactly as you gave it. Answer with that value only.",
+              "answerText": "20",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-64-04",
+              "kind": "stage-fact",
+              "question": "What is the audit code word for stage 08? Answer with the code word only.",
+              "answerText": "cw-cae449",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-64-05",
+              "kind": "derivation-control",
+              "question": "Control question, nothing to recall: starting from lib/vtls/keylog.c, name the target of its 4th quoted include, using the same counting and resolution rules as the audit traces. Answer with the repository-relative path only.",
+              "answerText": "7",
+              "parsed": true
+            },
+            {
+              "probeId": "probe-64-06",
+              "kind": "symbol-file",
+              "question": "Which repository-relative file defines struct _isb? Answer with the path only.",
+              "answerText": "not sure",
+              "parsed": true
+            }
+          ]
+        }
+      ],
+      "deliverables": [
+        {
+          "id": "deliverable-08",
+          "textSha256": null
+        },
+        {
+          "id": "deliverable-24",
+          "textSha256": null
+        },
+        {
+          "id": "deliverable-40",
+          "textSha256": null
+        },
+        {
+          "id": "deliverable-56",
+          "textSha256": null
+        }
+      ],
+      "evidence": {
+        "sessionSha256": "135b03384967f6cb762fe03be26dbf57c5371cfaef8a128c0356a4f9a13913c6",
+        "candidateReportSha256": "67443f87933a377dfc10a30e723c9d114290a9883ffa9713b34ae12aa917c743",
+        "manifestSha256": "a20ace9e8f815415267e96e75e795347db32eae216080523a66afe244a13808c",
+        "planSha256": "b25dafbf3e202a838cb9cec17bce3fb8f25672ac04205efb544ee2221ceda7c5",
+        "providerLedgerSha256": "0c5d87aed0f58bc67ffa1bd87c21617c5b3894d6a02d0a075e4301c155007135",
+        "toolResultLedgerSha256": "cffd014555c4842e3ed54f47f6d6ca9eb30fdef18d9696a2be37a06e43be51d1",
+        "workerEventsSha256": "81f240bb1e7f3306fb7a7b7b5965b37996eeff3dbc0fa667ee6d270f0382b928",
+        "adjudicatorSourceSha256": "46ed33e1429d8f15072a616537deffe802fd480fff875e502bd54807603b8c07",
+        "probeTranscriptSha256": "44fb4493669154893bc2b1738c5d03be891f3c3bee61cd1052e27b5f051965ae",
+        "deliverableTranscriptSha256": "3bed71f2524da744ec2c6cc01f156971c656b96b9286465cba4fe25109115850",
+        "traceStepTranscriptSha256": "4c18363a04670dbfb93cf8584b24d4f3d9fac63a5a753f416d84daeba488af6d"
+      }
     }
   ],
-  "extractSha256": "beb344c0910ed01ee0548e3ca6784922039ba80d799dbdfab75ece57caf9d4d8"
+  "extractSha256": "ecac7f01fc539cf417002f39ba2a7bad49d37ad12f5544795f44962f17709c64"
 }
