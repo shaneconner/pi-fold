@@ -88,6 +88,7 @@ export type ContextEventKind =
   | "context.capacity"
   | "context.receipt"
   | "context.rider"
+  | "context.steward"
   | "context.lastcall"
   | "context.response"
   | "context.suggestion"

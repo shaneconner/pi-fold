@@ -68,6 +68,37 @@ export function contextRiderText(input: {
   );
 }
 
+export function stewardAdvisoryText(input: {
+  toolName: string;
+  brandNoun?: string;
+  usedTokens: number;
+  budgetTokens: number;
+  inflowTokens: number;
+  candidates: ReadonlyArray<{ id: string; tokens: number }>;
+  pendingAgentMarks: number;
+  eligibleMarks: number;
+}): string {
+  const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
+  const headroom = Math.max(0, input.budgetTokens - input.usedTokens);
+  const candidates = input.candidates.length
+    ? input.candidates.map((item) => `${item.id} (about ${item.tokens} tokens)`).join("; ")
+    : "none";
+  return boundReceiptText(
+    [
+      `[${brand} steward] The next automatic fold epoch is close: about ${headroom} tokens of ` +
+        `headroom remain against a ${input.budgetTokens}-token serving budget, and recent requests ` +
+        `have grown by about ${input.inflowTokens} tokens each.`,
+      `Unmarked completed units, largest first: ${candidates}.`,
+      `${input.pendingAgentMarks} of your mark(s) pending; ${input.eligibleMarks} mark(s) eligible now.`,
+      "Mark finished units now with your own briefs, several in one call: " +
+        `${input.toolName} {"action":"fold","marks":[{"ids":["<start>","<end>"],"brief":"<factual brief>"}]}. ` +
+        "Whatever stays unmarked will be folded automatically at the epoch with a deterministic brief.",
+    ].join("\n"),
+    2_048,
+    `[${brand} steward] The next automatic fold epoch is close; details are unavailable this pass.`,
+  );
+}
+
 export interface ContextReceipt {
   kind: string;
   ordinal: number;

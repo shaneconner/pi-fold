@@ -133,6 +133,7 @@ import {
   contextRiderText,
   markAwarenessText,
   receiptBlockText,
+  stewardAdvisoryText,
   withReceipt,
 } from "./lib/curation.ts";
 import type {
@@ -324,6 +325,7 @@ export function registerActiveContext(pi: any, options: {
   const advisoryProjectionType = `${entryTypePrefix}-advisory`;
   const receiptProjectionType = `${entryTypePrefix}-receipts`;
   const riderProjectionType = `${entryTypePrefix}-rider`;
+  const stewardProjectionType = `${entryTypePrefix}-steward`;
   const curationProjectionType = `${entryTypePrefix}-curation`;
   const entryNamespace = entryTypeNamespace(entryTypePrefix);
   const providerMeasurementEntryType = `${entryNamespace}-provider-context-measurement`;
@@ -465,6 +467,7 @@ export function registerActiveContext(pi: any, options: {
     hardFenceNoticeKey: null as string | null,
     hardFenceReleaseSessionId: null as string | null,
     hardFenceReleasedProjectionKeys: new Set<string>(),
+    stewardCrossingActive: false,
   };
 
   const nativeCompaction = {
@@ -1715,6 +1718,88 @@ export function registerActiveContext(pi: any, options: {
     return projected;
   };
 
+  const stewardReading = (
+    snapshot: ActiveContextSnapshot,
+  ): { text: string; facts: Record<string, unknown> } | null => {
+    const capacity = servingCapacity(snapshot.contextWindow);
+    const used = capacity.usedTokens;
+    const budget = capacity.budgetTokens;
+    const inflow = expectedWallInflowTokens();
+    if (used === null || !(budget > 0) || !(inflow > 0)) return null;
+    // The steward band sits one inflow step ahead of the wall's own: the agent gets
+    // roughly one request's worth of room to mark finished units with its own briefs
+    // before the band-top epoch takes the remainder with deterministic ones. Inside
+    // the wall band and past the budget the existing lanes own the moment, so the
+    // advisory stands down exactly where they stand up, and with no measured inflow
+    // pairing there is no band at all.
+    if (used + inflow > budget) return null;
+    if (used + 2 * inflow <= budget) return null;
+    const remainder = unmarkedRemainder(snapshot, persistence.state!, projectionCharsPerToken());
+    if (!remainder.candidates.length) return null;
+    const accounting = markAccounting(snapshot, persistence.state!);
+    const text = stewardAdvisoryText({
+      toolName,
+      brandNoun,
+      usedTokens: used,
+      budgetTokens: budget,
+      inflowTokens: inflow,
+      candidates: remainder.candidates,
+      pendingAgentMarks: accounting.agentMarks,
+      eligibleMarks: accounting.eligibleMarks,
+    });
+    return {
+      text,
+      facts: {
+        used_tokens: used,
+        budget_tokens: budget,
+        inflow_tokens: inflow,
+        unmarked_spans: remainder.spans,
+        unmarked_tokens: remainder.tokens,
+        largest_candidate: remainder.candidates[0].id,
+        pending_agent_marks: accounting.agentMarks,
+        eligible_marks: accounting.eligibleMarks,
+        chars: text.length,
+      },
+    };
+  };
+
+  const appendSteward = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
+    // Unlike the rider, which persists until the next epoch replaces it, the
+    // steward must be able to STAND DOWN: a frozen pass reuses the prior
+    // projection as its prefix, so declining to append is not enough. Any
+    // standing advisory is withdrawn first, and re-appended only while the
+    // band condition still holds, which is the one-request carrier shape the
+    // sealed ephemeral probe promoted.
+    for (let index = projected.length - 1; index >= 0; index -= 1) {
+      if (ownValue(projected[index], "customType") === stewardProjectionType) {
+        projected.splice(index, 1);
+      }
+    }
+    const reading = stewardReading(snapshot);
+    if (!reading) {
+      advisory.stewardCrossingActive = false;
+      return projected;
+    }
+    if (!advisory.stewardCrossingActive) {
+      advisory.stewardCrossingActive = true;
+      emit("context.steward", reading.facts);
+    }
+    projected.push({
+      role: "custom",
+      customType: stewardProjectionType,
+      content: reading.text,
+      display: false,
+      details: {
+        source: activeContextSource(entryTypePrefix),
+        ephemeral: true,
+      },
+      timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
+        ? ownValue(snapshot.messages.at(-1), "timestamp")
+        : 0,
+    });
+    return projected;
+  };
+
   const holdFrozen = (projected: unknown[]): unknown[] => {
     freeze.projection = [...projected];
     freeze.active = false;
@@ -1725,7 +1810,7 @@ export function registerActiveContext(pi: any, options: {
     const body = projectActiveContext(snapshot, persistence.state!).filter((message) => {
       const customType = ownValue(message, "customType");
       return customType !== milestoneProjectionType && customType !== advisoryProjectionType &&
-        customType !== receiptProjectionType &&
+        customType !== receiptProjectionType && customType !== stewardProjectionType &&
         customType !== riderProjectionType && customType !== curationProjectionType;
     });
     const held = freeze.body?.length ?? 0;
@@ -1739,6 +1824,7 @@ export function registerActiveContext(pi: any, options: {
     freeze.bodyText = stableStringify(body);
     appendReceipts(projected, snapshot);
     appendRider(projected, snapshot);
+    appendSteward(projected, snapshot);
     return holdFrozen(projected);
   };
   const noteProjection = (projected: unknown[]): void => {

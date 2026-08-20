@@ -12554,6 +12554,134 @@ async function gateCacheTopologyAccounting() {
   };
 }
 
+// GATE 138 - the steward advisory invites marking one band before the epoch.
+//
+// The surfacing falsification program (experiment gates 77-94) killed every cheap
+// judge, leaving the agent itself the only relevance judge standing. The steward
+// advisory is that verdict as runtime behavior: when occupancy stands one inflow
+// step ahead of the wall's own band, an EPHEMERAL projection-tail carrier states
+// mechanical facts only (headroom, budget, inflow, the largest unmarked completed
+// units, mark accounting) and invites marks with agent briefs before the band-top
+// epoch takes the remainder with deterministic ones. It never pretends judgment,
+// never mutates the prefix, never enters the durable stream, and stands down
+// exactly where the wall band, the overflow lanes, and an empty remainder stand
+// up. With no measured inflow pairing there is no band at all, mirroring how the
+// gate-119 trigger degrades. One context.steward event per crossing, not per pass.
+async function gateStewardAdvisory() {
+  const runtime = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
+  const stewardEntries = (projection) => projection.messages.filter((message) =>
+    typeof message?.customType === "string" && message.customType.endsWith("-steward"));
+  const stewardEvents = () => contextEvents(runtime)
+    .filter((record) => record.kind === "context.steward");
+
+  // Budget for a 100k window is 90k (16,384-token reserve capped at 10% of the
+  // window). A LARGE measured inflow step is the steward's whole reason to exist:
+  // at a 25k step the band is (40k, 65k], far below the ladder's own working
+  // range, so the invitation lands while the agent still has unclaimed mass to
+  // mark. A small step's band overlaps the threshold epochs, and there the
+  // remainder is already claimed, which the stand-down at the end pins.
+  await measure(runtime, 30_000, 100_000);
+  assert.equal(stewardEntries(await project(runtime)).length, 0,
+    "With no measured inflow pairing there is no steward band");
+  assert.equal(stewardEvents().length, 0, "No crossing has happened yet");
+
+  await measure(runtime, 55_000, 100_000);
+  const inBand = await project(runtime);
+  let stewards = stewardEntries(inBand);
+  assert.equal(stewards.length, 1, "Inside the steward band exactly one advisory rides");
+  assert.equal(inBand.messages.at(-1), stewards[0],
+    "The advisory rides the projection tail, after every other carrier");
+  assert.equal(stewards[0].display, false, "The advisory is never displayed");
+  assert.equal(stewards[0].details?.ephemeral, true, "The advisory is an ephemeral carrier");
+  const text = stewards[0].content;
+  assert(text.includes(" steward] "), "The advisory speaks under the steward header");
+  assert(text.includes("90000-token serving budget"),
+    "The advisory states the serving budget it read");
+  assert(/Unmarked completed units, largest first: (?!none)/.test(text),
+    "The advisory names the unmarked completed units");
+  assert(text.includes('"brief":"<factual brief>"'),
+    "The invitation carries the agent-brief mark syntax");
+  // A re-render regenerates CURRENT facts rather than replaying a literal: the
+  // ladder may claim spans between passes, and a stale invitation would name
+  // mass the agent can no longer mark. What must hold is one advisory, at the
+  // tail, still speaking real candidates.
+  const again = await project(runtime);
+  const rerendered = stewardEntries(again);
+  assert.equal(rerendered.length, 1, "A frozen pass must not stack a second advisory");
+  assert.equal(again.messages.at(-1), rerendered[0], "The re-rendered advisory still rides the tail");
+  assert(/Unmarked completed units, largest first: (?!none)/.test(rerendered[0].content),
+    "The re-rendered advisory still names current unmarked units");
+  assert.equal(stewardEvents().length, 1, "One crossing, one context.steward event");
+  const facts = stewardEvents()[0];
+  assert.equal(facts.used_tokens, 55_000);
+  assert.equal(facts.budget_tokens, 90_000);
+  assert.equal(facts.inflow_tokens, 25_000);
+  assert(typeof facts.largest_candidate === "string" && facts.largest_candidate.length > 0,
+    "The event names the largest unmarked candidate");
+
+  // Leaving through the QUIET side: below the band no epoch fires, so the mass
+  // survives for the re-entry probe. The wall side is visited last, because the
+  // wall's own epoch rightfully consumes the remainder there.
+  await measure(runtime, 40_000, 100_000);
+  assert.equal(stewardEntries(await project(runtime)).length, 0,
+    "Below the steward band the advisory must stay silent");
+  assert.equal(stewardEvents().length, 1, "Leaving the band is not a crossing");
+  await measure(runtime, 55_500, 100_000);
+  stewards = stewardEntries(await project(runtime));
+  assert.equal(stewards.length, 1, "Re-entering the band re-arms the advisory");
+  assert.equal(stewardEvents().length, 2, "A second crossing is a second event, no more");
+  await measure(runtime, 70_000, 100_000);
+  assert.equal(stewardEntries(await project(runtime)).length, 0,
+    "Inside the wall band the existing lanes own the moment");
+
+  // The wall handover, probed where it alone does the work: a 36k step from a
+  // low base puts 55k INSIDE the wall band (55k + 36k > 90k) at an occupancy
+  // the ladder does not yet act on, so unclaimed mass is still standing and
+  // only the handover check keeps the steward silent. In the main drive above,
+  // the wall's own epoch had already consumed the remainder, which would let a
+  // weakened handover pass unnoticed.
+  const wallRuntime = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
+  await measure(wallRuntime, 19_000, 100_000);
+  await measure(wallRuntime, 55_000, 100_000);
+  const wallProjection = await project(wallRuntime);
+  assert.equal(wallProjection.messages.filter((message) =>
+    typeof message?.customType === "string" && message.customType.endsWith("-steward")).length, 0,
+  "Inside the wall band the advisory yields even with unclaimed mass standing");
+
+  // Nothing to mark, nothing to say: a session whose only batch sits inside the
+  // fresh tail has an empty remainder at any occupancy, so inside the band the
+  // advisory stands down entirely rather than inviting marks on "none".
+  const quietRuntime = await epochToolRuntime({ turns: 1, resultChars: 400 });
+  await measure(quietRuntime, 30_000, 100_000);
+  await measure(quietRuntime, 55_000, 100_000);
+  assert.equal((await project(quietRuntime)).messages.filter((message) =>
+    typeof message?.customType === "string" && message.customType.endsWith("-steward")).length, 0,
+  "An advisory with nothing to mark must stand down, never say none");
+
+  // The advisory is projection-only: nothing steward-typed may ever land on the
+  // durable branch, and the instrumentation record is the sole trace.
+  assert(runtime.appended.every((entry) => !(
+    typeof entry.customType === "string" && entry.customType.endsWith("-steward"))),
+  "The steward advisory must never be appended as a durable entry");
+
+  // An epoch that takes the whole remainder leaves nothing to invite marks on:
+  // back in the band afterwards, the advisory stands down rather than naming
+  // nothing, however the occupancy reads.
+  await measureAndCommit(runtime, 86_000, 100_000);
+  await settle();
+  await measure(runtime, 55_000, 100_000);
+  const afterEpoch = await project(runtime);
+  const standDown = stewardEntries(afterEpoch).length === 0 ||
+    !/Unmarked completed units, largest first: none/.test(stewardEntries(afterEpoch)[0]?.content ?? "");
+  assert(standDown, "An advisory with nothing to mark must stand down, never say none");
+  return {
+    band: "(40000, 65000] of a 90000 budget at 25000 inflow",
+    eventsPerCrossing: 1,
+    durableEntries: 0,
+    ephemeral: true,
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -12678,6 +12806,7 @@ const gates = [
   [135, "Agent notes survive; omission is stated", gateAgentNotesSurviveConsolidation],
   [136, "A brief's cut is stated, never silent", gateBriefTruncationIsExplicit],
   [137, "Cache topology names marks and branch returns", gateCacheTopologyAccounting],
+  [138, "The steward advisory invites marks one band before the epoch", gateStewardAdvisory],
 ];
 
 const gateFilter = (process.env.GATES ?? "")
