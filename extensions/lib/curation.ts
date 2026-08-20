@@ -114,52 +114,6 @@ export function stewardAdvisoryText(input: {
   );
 }
 
-export function directedCurationText(input: {
-  toolName: string;
-  brandNoun?: string;
-  usedTokens: number;
-  budgetTokens: number;
-  inflowTokens: number;
-  candidates: ReadonlyArray<{ id: string; tokens: number }>;
-  rebriefTargets: ReadonlyArray<{ id: string; kind: string; briefHead: string }>;
-}): string {
-  const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
-  const headroom = Math.max(0, input.budgetTokens - input.usedTokens);
-  const lines = [
-    `[${brand} curation turn] A fold commit is imminent: about ${headroom} tokens of headroom ` +
-      `remain against a ${input.budgetTokens}-token serving budget, and recent requests have ` +
-      `grown by about ${input.inflowTokens} tokens each. This turn is for context curation ` +
-      `only: respond with ${input.toolName} calls, or the single line "nothing to curate". ` +
-      "The commit will not wait for you either way.",
-  ];
-  if (input.rebriefTargets.length) {
-    lines.push(
-      "These folds are what the window will SHOW for their spans from now on; each carries a " +
-        "machine-written brief. Replace any whose brief does not hold what still matters, " +
-        "while you still remember what the span holds:",
-      ...input.rebriefTargets.map((fold) =>
-        `- ${fold.id} (${fold.kind}): "${fold.briefHead}"`),
-      `${input.toolName} {"action":"rebrief","id":"<fold-id>","brief":"<short factual brief>"}. ` +
-        "A short brief survives later regrouping whole; a long one is cut to its opening.",
-    );
-  }
-  if (input.candidates.length) {
-    lines.push(
-      "Unmarked completed units, largest first: " +
-        input.candidates.map((item) => `${item.id} (about ${item.tokens} tokens)`).join("; ") + ".",
-      `Mark finished units with your own briefs, several in one call: ${input.toolName} ` +
-        '{"action":"fold","marks":[{"ids":["<start>","<end>"],"brief":"<factual brief>"}]}. ' +
-        "Whatever stays unmarked folds automatically with a machine-written brief.",
-    );
-  }
-  return boundReceiptText(
-    lines.join("\n"),
-    2_048,
-    `[${brand} curation turn] A fold commit is imminent; details are unavailable this pass. ` +
-      "Respond with the single line \"nothing to curate\".",
-  );
-}
-
 export interface ContextReceipt {
   kind: string;
   ordinal: number;

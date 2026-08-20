@@ -12734,98 +12734,31 @@ async function gateStewardAdvisory() {
   assert(!reProjected[0].content.includes(named),
     "A fold the agent already rebriefed is still being offered");
 
-  // THE DIRECTED TURN (Build 4a, 2026-08-20). The passive advisory measured
-  // zero uptake across seventeen sealed windows (sol-20260820-steward reps 3
-  // and 4), so the crossing now also queues ONE required curation turn: a
-  // custom followUp message (never a user message, so the harness's
-  // one-user-message contracts are untouched) that triggers a turn when the
-  // agent settles. One send per crossing, the same edge as the event.
-  const directedSends = runtime.steered.filter((item) =>
-    String(item.message?.customType ?? "").endsWith("-directed"));
-  assert.equal(directedSends.length, stewardEvents().length,
-    "One directed turn per crossing, no more, no fewer");
-  for (const send of directedSends) {
-    assert.equal(send.options.deliverAs, "followUp");
-    assert.equal(send.options.triggerTurn, true);
-    assert.equal(send.message.display, false);
-    assert(Buffer.byteLength(String(send.message.content), "utf8") <= 2_048,
-      "The directed ask must honour the carrier bound");
-  }
-  assert(stewardEvents().every((record) => record.directed === true),
-    "A crossing whose send succeeded must say so in its event");
-  const lastSend = directedSends.at(-1);
-  assert(String(lastSend.message.content).includes(named),
-    "The directed ask must name the top visible rebrief target");
-  assert(String(lastSend.message.content).includes('"action":"rebrief"'),
-    "The directed ask must carry the rebrief syntax");
-  assert(/curation only|curation turn/.test(String(lastSend.message.content)),
-    "The directed ask must state the response contract");
-  assert(/will not wait/.test(String(lastSend.message.content)),
-    "The announcement must state the commit will not wait");
-
-  // Ride-until-answered: the delivered ask stays in the projection through the
-  // turn it triggered, commits included, and is withdrawn the moment an
-  // assistant message follows it. Withdrawing on the next commit instead was
-  // wrong: the band's whole point is that the epoch is imminent, so the commit
-  // routinely lands between the send and the followUp's delivery.
-  runtime.appendMessage({
-    role: "custom",
-    customType: lastSend.message.customType,
-    content: lastSend.message.content,
-    display: false,
-    details: { ...lastSend.message.details },
-    timestamp: 0,
-  }, "directed-ask");
-  const withAsk = (await project(runtime)).messages.filter((message) =>
-    typeof message?.customType === "string" && message.customType.endsWith("-directed"));
-  assert.equal(withAsk.length, 1, "The delivered ask must ride its own turn's projection");
-  await measure(runtime, 56_000, 100_000);
-  const afterAnswer = (await project(runtime)).messages.filter((message) =>
-    typeof message?.customType === "string" && message.customType.endsWith("-directed"));
-  assert.equal(afterAnswer.length, 0,
-    "An answered ask must be withdrawn, frozen prefix included");
-
-  // ONE OUTSTANDING ASK (rep 5): eight asks stacked in one busy window because
-  // every band re-entry was a crossing edge and each queued another followUp
-  // while the agent was busy. A standing unanswered ask absorbs every later
-  // crossing: the crossing still counts and its event says outstanding_ask,
-  // but no second send fires until the first ask is answered.
-  const sendsBeforeSuppression = runtime.steered.filter((item) =>
-    String(item.message?.customType ?? "").endsWith("-directed")).length;
-  await measure(runtime, 40_000, 100_000);
-  await project(runtime);
-  await measure(runtime, 55_000, 100_000);
-  runtime.appendMessage({
-    role: "custom",
-    customType: lastSend.message.customType,
-    content: lastSend.message.content,
-    display: false,
-    details: { ...lastSend.message.details },
-    timestamp: 0,
-  }, "directed-ask-standing");
-  await project(runtime);
-  const suppressedEvent = stewardEvents().at(-1);
-  assert.equal(suppressedEvent.directed, false,
-    "A crossing absorbed by a standing ask must not claim a send");
-  assert.equal(suppressedEvent.outstanding_ask, true,
-    "The absorbed crossing must name the standing ask");
+  // THE DIRECTED TURN IS DELETED (Build 4a f2d6f6e, killed 2026-08-20 on the
+  // sol-20260820-steward verdict at n=3). The crossing queued one required
+  // followUp curation turn; across three sealed reps on the same workload it
+  // elicited 0, 1 and 9 rebriefs, the engaged reps were the campaign's most
+  // expensive ($27.03 and $36.29 against an $18-21 advisory-era band), the
+  // max-engagement rep ran the campaign's worst cache share (0.812, because
+  // every rebrief rewrites the projection at its fold's placeholder), rep 7's
+  // nine rebriefs were one end-of-session burst after the work they could have
+  // served, and no measured outcome moved: the end block read 10/10 in every
+  // pifold rep with or without them, because lossless peek already carries
+  // recall. The pre-registered kill line (carriage must beat deterministic or
+  // the turn is deleted) fired on its own terms. This section pins the
+  // DELETION: a crossing on a host WITH sendMessage queues nothing, the event
+  // carries neither directed nor outstanding_ask, and a host without
+  // sendMessage reads identically. The advisory, the crossing latch, its
+  // event, and the rebrief invitation all STAY as costless instrumentation.
+  // Retired concepts stay spent: no future mechanism may reuse the -directed
+  // customType or the directed/outstanding_ask event fields under other names.
   assert.equal(runtime.steered.filter((item) =>
-    String(item.message?.customType ?? "").endsWith("-directed")).length,
-  sendsBeforeSuppression,
-  "A standing unanswered ask absorbed the crossing without suppressing the send");
-  await measure(runtime, 56_000, 100_000);
-  await project(runtime);
-  await measure(runtime, 40_000, 100_000);
-  await project(runtime);
-  await measure(runtime, 55_000, 100_000);
-  await project(runtime);
-  assert.equal(runtime.steered.filter((item) =>
-    String(item.message?.customType ?? "").endsWith("-directed")).length,
-  sendsBeforeSuppression + 1,
-  "Once the ask is answered, the next crossing sends again");
-
-  // Degrade: a host without sendMessage keeps the appended advisory, records
-  // the crossing with directed false, and never throws inside the projection.
+    String(item.message?.customType ?? "").endsWith("-directed")).length, 0,
+  "The deleted directed turn still queues a send");
+  assert(stewardEvents().length >= 1, "Anti-vacuity: the drive must have crossed");
+  assert(stewardEvents().every((record) =>
+    record.directed === undefined && record.outstanding_ask === undefined),
+  "The steward event still carries the deleted directed fields");
   const mute = await epochToolRuntime({
     turns: 12, resultChars: 16_000, omitSendMessage: true,
   });
@@ -12837,8 +12770,8 @@ async function gateStewardAdvisory() {
     "A host without sendMessage still gets the appended advisory");
   const muteEvents = contextEvents(mute).filter((record) => record.kind === "context.steward");
   assert.equal(muteEvents.length, 1);
-  assert.equal(muteEvents[0].directed, false,
-    "A crossing that could not send must say directed false");
+  assert.equal(muteEvents[0].directed, undefined,
+    "A host without sendMessage must read identically to one with it");
   assert.equal(mute.steered.length, 0);
 
   // Visible targets only: the offline brief-function study measured visible
@@ -12858,7 +12791,6 @@ async function gateStewardAdvisory() {
   await measureAndCommit(forestRuntime, 85_000, 100_000, "forest-commit");
   await settle();
   await measure(forestRuntime, 55_000, 100_000);
-  await project(forestRuntime);
   const forestState = materialized(forestRuntime);
   const parent = forestState.folds.find((fold) => fold.kind === "consolidation");
   assert(parent, "Anti-vacuity: the forest drive must build a consolidation parent");
@@ -12867,11 +12799,15 @@ async function gateStewardAdvisory() {
     .map((fold) => fold.id));
   assert(hiddenChildIds.size >= context.DEFAULT_THRESHOLDS.consolidateAfter,
     "Anti-vacuity: the parent must hide its children");
-  const forestSends = forestRuntime.steered.filter((item) =>
-    String(item.message?.customType ?? "").endsWith("-directed"));
-  assert(forestSends.length >= 1, "Anti-vacuity: the forest drive must cross the band");
-  const offered = [...String(forestSends.at(-1).message.content)
-    .matchAll(/^- (\S+) \(/gm)].map((match) => match[1]);
+  const advisoryTargets = (projection) => {
+    const advisories = projection.messages.filter((message) =>
+      typeof message?.customType === "string" && message.customType.endsWith("-steward"));
+    assert.equal(advisories.length, 1, "Anti-vacuity: the forest band must render the advisory");
+    const listed = String(advisories[0].content)
+      .match(/deterministic briefs, largest first: ([^.]+)\./);
+    return listed ? listed[1].split("; ").map((part) => part.split(" (")[0]) : [];
+  };
+  const offered = advisoryTargets(await project(forestRuntime));
   assert(offered.length >= 1, "The forest ask must offer at least one rebrief target");
   assert(offered.every((id) => !hiddenChildIds.has(id)),
     "A hidden child's brief renders nothing; offering it wastes the turn");
@@ -12893,13 +12829,7 @@ async function gateStewardAdvisory() {
   // band is what re-arms the crossing edge, exactly as in the main drive.
   await project(forestRuntime);
   await measure(forestRuntime, 50_000, 100_000);
-  await project(forestRuntime);
-  const expandedSends = forestRuntime.steered.filter((item) =>
-    String(item.message?.customType ?? "").endsWith("-directed"));
-  assert(expandedSends.length > forestSends.length,
-    "Anti-vacuity: re-entering the band after the expand must cross again");
-  const offeredAfterExpand = [...String(expandedSends.at(-1).message.content)
-    .matchAll(/^- (\S+) \(/gm)].map((match) => match[1]);
+  const offeredAfterExpand = advisoryTargets(await project(forestRuntime));
   assert(offeredAfterExpand.length >= 1);
   assert(!offeredAfterExpand.includes(parent.id),
     "A revealed parent's brief does not render; offering it wastes the turn");
@@ -12910,9 +12840,7 @@ async function gateStewardAdvisory() {
     durableEntries: 0,
     ephemeral: true,
     rebriefInvitedAfterEpoch: true,
-    directedSends: directedSends.length,
-    directedAnsweredWithdrawn: true,
-    degradeDirectedFalse: true,
+    directedTurnDeleted: true,
     forestOffersParentOnly: true,
   };
 }

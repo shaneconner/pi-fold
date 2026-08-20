@@ -133,7 +133,6 @@ import {
   contextRiderText,
   markAwarenessText,
   receiptBlockText,
-  directedCurationText,
   stewardAdvisoryText,
   withReceipt,
 } from "./lib/curation.ts";
@@ -327,7 +326,6 @@ export function registerActiveContext(pi: any, options: {
   const receiptProjectionType = `${entryTypePrefix}-receipts`;
   const riderProjectionType = `${entryTypePrefix}-rider`;
   const stewardProjectionType = `${entryTypePrefix}-steward`;
-  const directedProjectionType = `${entryTypePrefix}-directed`;
   const curationProjectionType = `${entryTypePrefix}-curation`;
   const entryNamespace = entryTypeNamespace(entryTypePrefix);
   const providerMeasurementEntryType = `${entryNamespace}-provider-context-measurement`;
@@ -1729,7 +1727,7 @@ export function registerActiveContext(pi: any, options: {
 
   const stewardReading = (
     snapshot: ActiveContextSnapshot,
-  ): { text: string; directedText: string; facts: Record<string, unknown> } | null => {
+  ): { text: string; facts: Record<string, unknown> } | null => {
     const capacity = servingCapacity(snapshot.contextWindow);
     const used = capacity.usedTokens;
     const budget = capacity.budgetTokens;
@@ -1808,18 +1806,8 @@ export function registerActiveContext(pi: any, options: {
       pendingAgentMarks: accounting.agentMarks,
       eligibleMarks: accounting.eligibleMarks,
     });
-    const directedText = directedCurationText({
-      toolName,
-      brandNoun,
-      usedTokens: used,
-      budgetTokens: budget,
-      inflowTokens: inflow,
-      candidates: remainder.candidates,
-      rebriefTargets,
-    });
     return {
       text,
-      directedText,
       facts: {
         used_tokens: used,
         budget_tokens: budget,
@@ -1845,70 +1833,29 @@ export function registerActiveContext(pi: any, options: {
     // sealed ephemeral probe promoted.
     const reading = stewardReading(snapshot);
     for (let index = projected.length - 1; index >= 0; index -= 1) {
-      const customType = ownValue(projected[index], "customType");
-      if (customType === stewardProjectionType) {
+      if (ownValue(projected[index], "customType") === stewardProjectionType) {
         projected.splice(index, 1);
-        continue;
-      }
-      // The directed ask is durable in the session but rides the projection
-      // exactly until it has been ANSWERED: the first assistant message that
-      // lands after it proves the model saw the ask in at least one request,
-      // and from then on it is withdrawn, frozen prefix included. Withdrawing
-      // on the next commit instead was wrong twice over: the band's whole
-      // point is that the epoch is imminent, so the commit routinely lands
-      // between the send and the followUp's delivery, and the triggered turn
-      // would then arrive with its own ask already stripped.
-      if (customType === directedProjectionType) {
-        const answered = projected.slice(index + 1).some((message) =>
-          ownValue(message, "role") === "assistant");
-        if (answered) projected.splice(index, 1);
       }
     }
-    // ONE OUTSTANDING ASK (rep 5, 2026-08-20): the band oscillated across its
-    // boundary during a busy epoch region, every re-entry was a crossing edge,
-    // and eight asks stacked in one window while the agent was busy, followed
-    // by a seventeen-call status storm. One-send-per-crossing was the intent
-    // stated wrongly; the correct rule is that a standing unanswered ask
-    // absorbs every later crossing until it is answered. The splice above has
-    // already removed answered asks, so any directed entry still in the
-    // projection IS the outstanding one.
-    const outstandingAsk = projected.some((message) =>
-      ownValue(message, "customType") === directedProjectionType);
     if (!reading) {
       advisory.stewardCrossingActive = false;
       return projected;
     }
     if (!advisory.stewardCrossingActive) {
       advisory.stewardCrossingActive = true;
-      // The passive advisory measured zero uptake across seventeen sealed
-      // windows (reps 3 and 4), while a required response at the tool boundary
-      // gets taken (the ledger-record precedent; W1j's guard, where announcing
-      // the rule was most of the mechanism). One directed turn per crossing:
-      // the ask is a custom followUp message, never a user message, so the
-      // harness's one-user-message contracts are untouched, and a host without
-      // sendMessage degrades to the appended advisory alone rather than
-      // throwing inside the projection.
-      let directed = false;
-      if (!outstandingAsk && typeof pi?.sendMessage === "function") {
-        try {
-          pi.sendMessage({
-            customType: directedProjectionType,
-            content: reading.directedText,
-            display: false,
-            details: {
-              source: activeContextSource(entryTypePrefix),
-            },
-          }, { deliverAs: "followUp", triggerTurn: true });
-          directed = true;
-        } catch {
-          directed = false;
-        }
-      }
-      emit("context.steward", {
-        ...reading.facts,
-        directed,
-        ...(outstandingAsk ? { outstanding_ask: true } : {}),
-      });
+      // The DIRECTED TURN is deleted (sol-20260820 reps 5-7, kill line fired
+      // 2026-08-20): a followUp curation turn queued at this crossing elicited
+      // 0, 1 and 9 rebriefs across three sealed reps on the same workload, the
+      // engaged reps were the campaign's most expensive ($27.03 and $36.29
+      // against an $18-21 advisory-era band) with the campaign's worst cache
+      // share on the max-engagement rep (0.812, because every rebrief rewrites
+      // the projection at its fold's placeholder), rep 7's nine rebriefs were
+      // one end-of-session burst after the work they could have served, and no
+      // measured outcome moved: the end block read 10/10 in every pifold rep
+      // with or without them, because lossless peek already carries recall.
+      // The crossing, its event and the appended advisory STAY as costless
+      // instrumentation; a future model's voluntary uptake reads for free.
+      emit("context.steward", reading.facts);
     }
     projected.push({
       role: "custom",
