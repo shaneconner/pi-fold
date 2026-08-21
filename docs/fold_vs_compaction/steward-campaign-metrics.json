@@ -152,6 +152,444 @@
           }
         }
       },
+      "probeVerdicts": [
+        {
+          "probeId": "probe-16-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "FIN",
+          "lag": 10,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 9,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-03",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 14,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 20,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "FIN",
+          "lag": 45,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 51,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 56,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-05",
+          "kind": "derivation-control",
+          "class": "derived",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        }
+      ],
+      "endBlock": {
+        "delivered": true,
+        "rows": [
+          {
+            "id": "end-01",
+            "kind": "checksum",
+            "subject": "lv-2124f4",
+            "corrected": false,
+            "answerText": "lv-f7264a",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-02",
+            "kind": "join",
+            "taskId": "lt-01",
+            "answerText": "lv-f0318c",
+            "recordedValue": "lv-f0318c",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-03",
+            "kind": "join",
+            "taskId": "lt-03",
+            "answerText": "lv-12e84b",
+            "recordedValue": "lv-12e84b",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-04",
+            "kind": "checksum",
+            "subject": "lv-01ea2e",
+            "corrected": false,
+            "answerText": "lv-19beec",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-05",
+            "kind": "join",
+            "taskId": "lt-04",
+            "answerText": "lv-e5bc52",
+            "recordedValue": "lv-e5bc52",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-06",
+            "kind": "checksum",
+            "subject": "lv-603afb",
+            "corrected": false,
+            "answerText": "lv-c5b1ed",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-07",
+            "kind": "join",
+            "taskId": "lt-02",
+            "answerText": "lv-0a5f42",
+            "recordedValue": "lv-0a5f42",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-08",
+            "kind": "checksum",
+            "subject": "lv-7d5868",
+            "corrected": true,
+            "answerText": "lv-e9a61c",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-09",
+            "kind": "checksum",
+            "subject": "lv-d43873",
+            "corrected": true,
+            "answerText": "lv-f399a8",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-10",
+            "kind": "checksum",
+            "subject": "lv-2fcd25",
+            "corrected": false,
+            "answerText": "lv-ca9b0c",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-11",
+            "kind": "checksum",
+            "subject": "lv-3f0c49",
+            "corrected": true,
+            "answerText": "lv-f4555f",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-12",
+            "kind": "checksum",
+            "subject": "lv-07ac07",
+            "corrected": false,
+            "answerText": "lv-7db0f0",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-13",
+            "kind": "checksum",
+            "subject": "lv-9364f3",
+            "corrected": true,
+            "answerText": "lv-4c6795",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-14",
+            "kind": "checksum",
+            "subject": "lv-ee5bda",
+            "corrected": false,
+            "answerText": "lv-f63ae5",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-table",
+            "kind": "table",
+            "rowsTotal": 16,
+            "rowsAnswered": 16,
+            "rowsCorrect": 16,
+            "rows": [
+              {
+                "row": 1,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 2,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 3,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 4,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 5,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 6,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 7,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 8,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 9,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 10,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 11,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 12,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 13,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 14,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 15,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 16,
+                "answered": true,
+                "match": true
+              }
+            ]
+          }
+        ],
+        "recovery": {
+          "historySearches": 0,
+          "contextToolCalls": 0,
+          "fileReads": 0,
+          "recoveryCalls": 0,
+          "lastResetKind": "compaction",
+          "entriesSinceReset": 1
+        }
+      },
+      "billed": {
+        "messageCalls": 108,
+        "messageCallsUsd": 46.95554699999999,
+        "callsWithoutCost": 0,
+        "longContextCalls": 58,
+        "longContextTierPromptTokens": 272000,
+        "peakPromptTokens": 912601,
+        "outOfBandUsd": 0.694075,
+        "totalUsd": 47.64962199999999,
+        "unansweredRequests": {
+          "count": 0,
+          "projectedChars": 0,
+          "billed": "unknown: a request aborted after it was built leaves no record of what the provider charged for it"
+        }
+      },
       "thinkTime": {
         "medianMs": 8841,
         "p95Ms": 66170,
@@ -1527,6 +1965,444 @@
           }
         }
       },
+      "probeVerdicts": [
+        {
+          "probeId": "probe-16-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "FIN",
+          "lag": 10,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 9,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-03",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 14,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 20,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "FIN",
+          "lag": 45,
+          "verdict": "mismatch"
+        },
+        {
+          "probeId": "probe-48-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 51,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 56,
+          "verdict": "mismatch"
+        },
+        {
+          "probeId": "probe-64-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-05",
+          "kind": "derivation-control",
+          "class": "derived",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        }
+      ],
+      "endBlock": {
+        "delivered": true,
+        "rows": [
+          {
+            "id": "end-01",
+            "kind": "checksum",
+            "subject": "lv-2124f4",
+            "corrected": false,
+            "answerText": "lv-f7264a",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-02",
+            "kind": "join",
+            "taskId": "lt-01",
+            "answerText": "lv-f0318c",
+            "recordedValue": "lv-f0318c",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-03",
+            "kind": "join",
+            "taskId": "lt-03",
+            "answerText": "lv-12e84b",
+            "recordedValue": "lv-12e84b",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-04",
+            "kind": "checksum",
+            "subject": "lv-01ea2e",
+            "corrected": false,
+            "answerText": "lv-19beec",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-05",
+            "kind": "join",
+            "taskId": "lt-04",
+            "answerText": "lv-e5bc52",
+            "recordedValue": "lv-e5bc52",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-06",
+            "kind": "checksum",
+            "subject": "lv-603afb",
+            "corrected": false,
+            "answerText": "lv-c5b1ed",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-07",
+            "kind": "join",
+            "taskId": "lt-02",
+            "answerText": "lv-0a5f42",
+            "recordedValue": "lv-0a5f42",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-08",
+            "kind": "checksum",
+            "subject": "lv-7d5868",
+            "corrected": true,
+            "answerText": "lv-e9a61c",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-09",
+            "kind": "checksum",
+            "subject": "lv-d43873",
+            "corrected": true,
+            "answerText": "lv-f399a8",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-10",
+            "kind": "checksum",
+            "subject": "lv-2fcd25",
+            "corrected": false,
+            "answerText": "lv-ca9b0c",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-11",
+            "kind": "checksum",
+            "subject": "lv-3f0c49",
+            "corrected": true,
+            "answerText": "lv-f4555f",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-12",
+            "kind": "checksum",
+            "subject": "lv-07ac07",
+            "corrected": false,
+            "answerText": "lv-7db0f0",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-13",
+            "kind": "checksum",
+            "subject": "lv-9364f3",
+            "corrected": true,
+            "answerText": "lv-4c6795",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-14",
+            "kind": "checksum",
+            "subject": "lv-ee5bda",
+            "corrected": false,
+            "answerText": "lv-f63ae5",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-table",
+            "kind": "table",
+            "rowsTotal": 16,
+            "rowsAnswered": 16,
+            "rowsCorrect": 16,
+            "rows": [
+              {
+                "row": 1,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 2,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 3,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 4,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 5,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 6,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 7,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 8,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 9,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 10,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 11,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 12,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 13,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 14,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 15,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 16,
+                "answered": true,
+                "match": true
+              }
+            ]
+          }
+        ],
+        "recovery": {
+          "historySearches": 0,
+          "contextToolCalls": 2,
+          "fileReads": 0,
+          "recoveryCalls": 2,
+          "lastResetKind": "commit",
+          "entriesSinceReset": 97
+        }
+      },
+      "billed": {
+        "messageCalls": 132,
+        "messageCallsUsd": 18.223460000000006,
+        "callsWithoutCost": 0,
+        "longContextCalls": 0,
+        "longContextTierPromptTokens": 272000,
+        "peakPromptTokens": 242084,
+        "outOfBandUsd": 0,
+        "totalUsd": 18.223460000000006,
+        "unansweredRequests": {
+          "count": 0,
+          "projectedChars": 0,
+          "billed": "unknown: a request aborted after it was built leaves no record of what the provider charged for it"
+        }
+      },
       "thinkTime": {
         "medianMs": 14116,
         "p95Ms": 73084,
@@ -1960,6 +2836,444 @@
             "upgradesWaitingAtLastCommit": null,
             "definition": "every key beside `join` is a brief provenance kind, counted per sealed fold record and moved to model where a later context.commit record names that fold id in brief_upgrade_ids; a run sealed before the upgrade lane carries no such field and reads exactly as the creation-time count did"
           }
+        }
+      },
+      "probeVerdicts": [
+        {
+          "probeId": "probe-16-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "FIN",
+          "lag": 10,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 9,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-03",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 14,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 20,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "FIN",
+          "lag": 45,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 51,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 56,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "mismatch"
+        },
+        {
+          "probeId": "probe-64-05",
+          "kind": "derivation-control",
+          "class": "derived",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "mismatch"
+        }
+      ],
+      "endBlock": {
+        "delivered": true,
+        "rows": [
+          {
+            "id": "end-01",
+            "kind": "checksum",
+            "subject": "lv-2124f4",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-02",
+            "kind": "join",
+            "taskId": "lt-01",
+            "answerText": "lv-f0318c",
+            "recordedValue": "lv-f0318c",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-03",
+            "kind": "join",
+            "taskId": "lt-03",
+            "answerText": "lv-12e84b",
+            "recordedValue": "lv-12e84b",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-04",
+            "kind": "checksum",
+            "subject": "lv-01ea2e",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-05",
+            "kind": "join",
+            "taskId": "lt-04",
+            "answerText": "lv-e5bc52",
+            "recordedValue": "lv-e5bc52",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-06",
+            "kind": "checksum",
+            "subject": "lv-603afb",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-07",
+            "kind": "join",
+            "taskId": "lt-02",
+            "answerText": "lv-0a5f42",
+            "recordedValue": "lv-0a5f42",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-08",
+            "kind": "checksum",
+            "subject": "lv-7d5868",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-09",
+            "kind": "checksum",
+            "subject": "lv-d43873",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-10",
+            "kind": "checksum",
+            "subject": "lv-2fcd25",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-11",
+            "kind": "checksum",
+            "subject": "lv-3f0c49",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-12",
+            "kind": "checksum",
+            "subject": "lv-07ac07",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-13",
+            "kind": "checksum",
+            "subject": "lv-9364f3",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-14",
+            "kind": "checksum",
+            "subject": "lv-ee5bda",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-table",
+            "kind": "table",
+            "rowsTotal": 16,
+            "rowsAnswered": 16,
+            "rowsCorrect": 0,
+            "rows": [
+              {
+                "row": 1,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 2,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 3,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 4,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 5,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 6,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 7,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 8,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 9,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 10,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 11,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 12,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 13,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 14,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 15,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 16,
+                "answered": true,
+                "match": false
+              }
+            ]
+          }
+        ],
+        "recovery": {
+          "historySearches": 0,
+          "contextToolCalls": 0,
+          "fileReads": 0,
+          "recoveryCalls": 0,
+          "lastResetKind": "compaction",
+          "entriesSinceReset": 1
+        }
+      },
+      "billed": {
+        "messageCalls": 99,
+        "messageCallsUsd": 43.791887999999986,
+        "callsWithoutCost": 0,
+        "longContextCalls": 50,
+        "longContextTierPromptTokens": 272000,
+        "peakPromptTokens": 919175,
+        "outOfBandUsd": 0.593275,
+        "totalUsd": 44.385162999999984,
+        "unansweredRequests": {
+          "count": 0,
+          "projectedChars": 0,
+          "billed": "unknown: a request aborted after it was built leaves no record of what the provider charged for it"
         }
       },
       "thinkTime": {
@@ -3386,6 +4700,444 @@
           }
         }
       },
+      "probeVerdicts": [
+        {
+          "probeId": "probe-16-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "FIN",
+          "lag": 10,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 9,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-03",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 14,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 20,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "mismatch"
+        },
+        {
+          "probeId": "probe-32-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "FIN",
+          "lag": 45,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 51,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 56,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-05",
+          "kind": "derivation-control",
+          "class": "derived",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        }
+      ],
+      "endBlock": {
+        "delivered": true,
+        "rows": [
+          {
+            "id": "end-01",
+            "kind": "checksum",
+            "subject": "lv-2124f4",
+            "corrected": false,
+            "answerText": "lv-f7264a",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-02",
+            "kind": "join",
+            "taskId": "lt-01",
+            "answerText": "lv-f0318c",
+            "recordedValue": "lv-f0318c",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-03",
+            "kind": "join",
+            "taskId": "lt-03",
+            "answerText": "lv-12e84b",
+            "recordedValue": "lv-12e84b",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-04",
+            "kind": "checksum",
+            "subject": "lv-01ea2e",
+            "corrected": false,
+            "answerText": "lv-19beec",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-05",
+            "kind": "join",
+            "taskId": "lt-04",
+            "answerText": "lv-e5bc52",
+            "recordedValue": "lv-e5bc52",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-06",
+            "kind": "checksum",
+            "subject": "lv-603afb",
+            "corrected": false,
+            "answerText": "lv-c5b1ed",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-07",
+            "kind": "join",
+            "taskId": "lt-02",
+            "answerText": "lv-0a5f42",
+            "recordedValue": "lv-0a5f42",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-08",
+            "kind": "checksum",
+            "subject": "lv-7d5868",
+            "corrected": true,
+            "answerText": "lv-e9a61c",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-09",
+            "kind": "checksum",
+            "subject": "lv-d43873",
+            "corrected": true,
+            "answerText": "lv-f399a8",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-10",
+            "kind": "checksum",
+            "subject": "lv-2fcd25",
+            "corrected": false,
+            "answerText": "lv-ca9b0c",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-11",
+            "kind": "checksum",
+            "subject": "lv-3f0c49",
+            "corrected": true,
+            "answerText": "lv-f4555f",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-12",
+            "kind": "checksum",
+            "subject": "lv-07ac07",
+            "corrected": false,
+            "answerText": "lv-7db0f0",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-13",
+            "kind": "checksum",
+            "subject": "lv-9364f3",
+            "corrected": true,
+            "answerText": "lv-4c6795",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-14",
+            "kind": "checksum",
+            "subject": "lv-ee5bda",
+            "corrected": false,
+            "answerText": "lv-f63ae5",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-table",
+            "kind": "table",
+            "rowsTotal": 16,
+            "rowsAnswered": 16,
+            "rowsCorrect": 16,
+            "rows": [
+              {
+                "row": 1,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 2,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 3,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 4,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 5,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 6,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 7,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 8,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 9,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 10,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 11,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 12,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 13,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 14,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 15,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 16,
+                "answered": true,
+                "match": true
+              }
+            ]
+          }
+        ],
+        "recovery": {
+          "historySearches": 0,
+          "contextToolCalls": 3,
+          "fileReads": 0,
+          "recoveryCalls": 3,
+          "lastResetKind": "commit",
+          "entriesSinceReset": 81
+        }
+      },
+      "billed": {
+        "messageCalls": 129,
+        "messageCallsUsd": 20.729661000000007,
+        "callsWithoutCost": 0,
+        "longContextCalls": 0,
+        "longContextTierPromptTokens": 272000,
+        "peakPromptTokens": 236342,
+        "outOfBandUsd": 0,
+        "totalUsd": 20.729661000000007,
+        "unansweredRequests": {
+          "count": 0,
+          "projectedChars": 0,
+          "billed": "unknown: a request aborted after it was built leaves no record of what the provider charged for it"
+        }
+      },
       "thinkTime": {
         "medianMs": 14362,
         "p95Ms": 74552,
@@ -3791,6 +5543,444 @@
             "upgradesWaitingAtLastCommit": null,
             "definition": "every key beside `join` is a brief provenance kind, counted per sealed fold record and moved to model where a later context.commit record names that fold id in brief_upgrade_ids; a run sealed before the upgrade lane carries no such field and reads exactly as the creation-time count did"
           }
+        }
+      },
+      "probeVerdicts": [
+        {
+          "probeId": "probe-16-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "FIN",
+          "lag": 10,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 9,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-03",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 14,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 20,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "FIN",
+          "lag": 45,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 51,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 56,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "mismatch"
+        },
+        {
+          "probeId": "probe-64-05",
+          "kind": "derivation-control",
+          "class": "derived",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "mismatch"
+        }
+      ],
+      "endBlock": {
+        "delivered": true,
+        "rows": [
+          {
+            "id": "end-01",
+            "kind": "checksum",
+            "subject": "lv-2124f4",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-02",
+            "kind": "join",
+            "taskId": "lt-01",
+            "answerText": "lv-f0318c",
+            "recordedValue": "lv-f0318c",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-03",
+            "kind": "join",
+            "taskId": "lt-03",
+            "answerText": "lv-12e84b",
+            "recordedValue": "lv-12e84b",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-04",
+            "kind": "checksum",
+            "subject": "lv-01ea2e",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-05",
+            "kind": "join",
+            "taskId": "lt-04",
+            "answerText": "lv-e5bc52",
+            "recordedValue": "lv-e5bc52",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-06",
+            "kind": "checksum",
+            "subject": "lv-603afb",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-07",
+            "kind": "join",
+            "taskId": "lt-02",
+            "answerText": "lv-0a5f42",
+            "recordedValue": "lv-0a5f42",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-08",
+            "kind": "checksum",
+            "subject": "lv-7d5868",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-09",
+            "kind": "checksum",
+            "subject": "lv-d43873",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-10",
+            "kind": "checksum",
+            "subject": "lv-2fcd25",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-11",
+            "kind": "checksum",
+            "subject": "lv-3f0c49",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-12",
+            "kind": "checksum",
+            "subject": "lv-07ac07",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-13",
+            "kind": "checksum",
+            "subject": "lv-9364f3",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-14",
+            "kind": "checksum",
+            "subject": "lv-ee5bda",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-table",
+            "kind": "table",
+            "rowsTotal": 16,
+            "rowsAnswered": 16,
+            "rowsCorrect": 0,
+            "rows": [
+              {
+                "row": 1,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 2,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 3,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 4,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 5,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 6,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 7,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 8,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 9,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 10,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 11,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 12,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 13,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 14,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 15,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 16,
+                "answered": true,
+                "match": false
+              }
+            ]
+          }
+        ],
+        "recovery": {
+          "historySearches": 0,
+          "contextToolCalls": 0,
+          "fileReads": 7,
+          "recoveryCalls": 7,
+          "lastResetKind": "compaction",
+          "entriesSinceReset": 1
+        }
+      },
+      "billed": {
+        "messageCalls": 111,
+        "messageCallsUsd": 49.088992000000026,
+        "callsWithoutCost": 0,
+        "longContextCalls": 61,
+        "longContextTierPromptTokens": 272000,
+        "peakPromptTokens": 920598,
+        "outOfBandUsd": 0.734885,
+        "totalUsd": 49.823877000000024,
+        "unansweredRequests": {
+          "count": 0,
+          "projectedChars": 0,
+          "billed": "unknown: a request aborted after it was built leaves no record of what the provider charged for it"
         }
       },
       "thinkTime": {
@@ -5333,6 +7523,444 @@
           }
         }
       },
+      "probeVerdicts": [
+        {
+          "probeId": "probe-16-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "FIN",
+          "lag": 10,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 9,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-03",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 14,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 20,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "mismatch"
+        },
+        {
+          "probeId": "probe-32-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "FIN",
+          "lag": 45,
+          "verdict": "mismatch"
+        },
+        {
+          "probeId": "probe-48-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 51,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 56,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-05",
+          "kind": "derivation-control",
+          "class": "derived",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        }
+      ],
+      "endBlock": {
+        "delivered": true,
+        "rows": [
+          {
+            "id": "end-01",
+            "kind": "checksum",
+            "subject": "lv-2124f4",
+            "corrected": false,
+            "answerText": "lv-f7264a",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-02",
+            "kind": "join",
+            "taskId": "lt-01",
+            "answerText": "lv-f0318c",
+            "recordedValue": "lv-f0318c",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-03",
+            "kind": "join",
+            "taskId": "lt-03",
+            "answerText": "lv-4a0076",
+            "recordedValue": "lv-4a0076",
+            "recordCorrect": false,
+            "recallOfRecord": true,
+            "truthMatch": false
+          },
+          {
+            "id": "end-04",
+            "kind": "checksum",
+            "subject": "lv-01ea2e",
+            "corrected": false,
+            "answerText": "lv-19beec",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-05",
+            "kind": "join",
+            "taskId": "lt-04",
+            "answerText": "lv-12e84b",
+            "recordedValue": "lv-12e84b",
+            "recordCorrect": false,
+            "recallOfRecord": true,
+            "truthMatch": false
+          },
+          {
+            "id": "end-06",
+            "kind": "checksum",
+            "subject": "lv-603afb",
+            "corrected": false,
+            "answerText": "lv-c5b1ed",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-07",
+            "kind": "join",
+            "taskId": "lt-02",
+            "answerText": "lv-0a5f42",
+            "recordedValue": "lv-0a5f42",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-08",
+            "kind": "checksum",
+            "subject": "lv-7d5868",
+            "corrected": true,
+            "answerText": "lv-e9a61c",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-09",
+            "kind": "checksum",
+            "subject": "lv-d43873",
+            "corrected": true,
+            "answerText": "lv-f399a8",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-10",
+            "kind": "checksum",
+            "subject": "lv-2fcd25",
+            "corrected": false,
+            "answerText": "lv-ca9b0c",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-11",
+            "kind": "checksum",
+            "subject": "lv-3f0c49",
+            "corrected": true,
+            "answerText": "lv-f4555f",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-12",
+            "kind": "checksum",
+            "subject": "lv-07ac07",
+            "corrected": false,
+            "answerText": "lv-7db0f0",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-13",
+            "kind": "checksum",
+            "subject": "lv-9364f3",
+            "corrected": true,
+            "answerText": "lv-4c6795",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-14",
+            "kind": "checksum",
+            "subject": "lv-ee5bda",
+            "corrected": false,
+            "answerText": "lv-f63ae5",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-table",
+            "kind": "table",
+            "rowsTotal": 16,
+            "rowsAnswered": 16,
+            "rowsCorrect": 16,
+            "rows": [
+              {
+                "row": 1,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 2,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 3,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 4,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 5,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 6,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 7,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 8,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 9,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 10,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 11,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 12,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 13,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 14,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 15,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 16,
+                "answered": true,
+                "match": true
+              }
+            ]
+          }
+        ],
+        "recovery": {
+          "historySearches": 0,
+          "contextToolCalls": 4,
+          "fileReads": 0,
+          "recoveryCalls": 4,
+          "lastResetKind": "commit",
+          "entriesSinceReset": 132
+        }
+      },
+      "billed": {
+        "messageCalls": 131,
+        "messageCallsUsd": 20.348226,
+        "callsWithoutCost": 0,
+        "longContextCalls": 0,
+        "longContextTierPromptTokens": 272000,
+        "peakPromptTokens": 238525,
+        "outOfBandUsd": 0,
+        "totalUsd": 20.348226,
+        "unansweredRequests": {
+          "count": 0,
+          "projectedChars": 0,
+          "billed": "unknown: a request aborted after it was built leaves no record of what the provider charged for it"
+        }
+      },
       "thinkTime": {
         "medianMs": 12838,
         "p95Ms": 71177,
@@ -5739,6 +8367,444 @@
             "upgradesWaitingAtLastCommit": null,
             "definition": "every key beside `join` is a brief provenance kind, counted per sealed fold record and moved to model where a later context.commit record names that fold id in brief_upgrade_ids; a run sealed before the upgrade lane carries no such field and reads exactly as the creation-time count did"
           }
+        }
+      },
+      "probeVerdicts": [
+        {
+          "probeId": "probe-16-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "FIN",
+          "lag": 10,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 9,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-03",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 14,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 20,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "FIN",
+          "lag": 45,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 51,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 56,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "mismatch"
+        },
+        {
+          "probeId": "probe-64-05",
+          "kind": "derivation-control",
+          "class": "derived",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        }
+      ],
+      "endBlock": {
+        "delivered": true,
+        "rows": [
+          {
+            "id": "end-01",
+            "kind": "checksum",
+            "subject": "lv-2124f4",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-02",
+            "kind": "join",
+            "taskId": "lt-01",
+            "answerText": "lv-f0318c",
+            "recordedValue": "lv-f0318c",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-03",
+            "kind": "join",
+            "taskId": "lt-03",
+            "answerText": "lv-12e84b",
+            "recordedValue": "lv-12e84b",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-04",
+            "kind": "checksum",
+            "subject": "lv-01ea2e",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-05",
+            "kind": "join",
+            "taskId": "lt-04",
+            "answerText": "lv-e5bc52",
+            "recordedValue": "lv-e5bc52",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-06",
+            "kind": "checksum",
+            "subject": "lv-603afb",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-07",
+            "kind": "join",
+            "taskId": "lt-02",
+            "answerText": "lv-0a5f42",
+            "recordedValue": "lv-0a5f42",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-08",
+            "kind": "checksum",
+            "subject": "lv-7d5868",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-09",
+            "kind": "checksum",
+            "subject": "lv-d43873",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-10",
+            "kind": "checksum",
+            "subject": "lv-2fcd25",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-11",
+            "kind": "checksum",
+            "subject": "lv-3f0c49",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-12",
+            "kind": "checksum",
+            "subject": "lv-07ac07",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-13",
+            "kind": "checksum",
+            "subject": "lv-9364f3",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-14",
+            "kind": "checksum",
+            "subject": "lv-ee5bda",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-table",
+            "kind": "table",
+            "rowsTotal": 16,
+            "rowsAnswered": 16,
+            "rowsCorrect": 0,
+            "rows": [
+              {
+                "row": 1,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 2,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 3,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 4,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 5,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 6,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 7,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 8,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 9,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 10,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 11,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 12,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 13,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 14,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 15,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 16,
+                "answered": true,
+                "match": false
+              }
+            ]
+          }
+        ],
+        "recovery": {
+          "historySearches": 0,
+          "contextToolCalls": 0,
+          "fileReads": 8,
+          "recoveryCalls": 8,
+          "lastResetKind": "compaction",
+          "entriesSinceReset": 1
+        }
+      },
+      "billed": {
+        "messageCalls": 103,
+        "messageCallsUsd": 45.210374,
+        "callsWithoutCost": 0,
+        "longContextCalls": 54,
+        "longContextTierPromptTokens": 272000,
+        "peakPromptTokens": 912480,
+        "outOfBandUsd": 0.6560250000000001,
+        "totalUsd": 45.866399,
+        "unansweredRequests": {
+          "count": 0,
+          "projectedChars": 0,
+          "billed": "unknown: a request aborted after it was built leaves no record of what the provider charged for it"
         }
       },
       "thinkTime": {
@@ -7574,6 +10640,444 @@
           }
         }
       },
+      "probeVerdicts": [
+        {
+          "probeId": "probe-16-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "FIN",
+          "lag": 10,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 9,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-03",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 14,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 20,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "FIN",
+          "lag": 45,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "mismatch"
+        },
+        {
+          "probeId": "probe-48-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "mismatch"
+        },
+        {
+          "probeId": "probe-48-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 51,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 56,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-05",
+          "kind": "derivation-control",
+          "class": "derived",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        }
+      ],
+      "endBlock": {
+        "delivered": true,
+        "rows": [
+          {
+            "id": "end-01",
+            "kind": "checksum",
+            "subject": "lv-2124f4",
+            "corrected": false,
+            "answerText": "lv-f7264a",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-02",
+            "kind": "join",
+            "taskId": "lt-01",
+            "answerText": "lv-f0318c",
+            "recordedValue": "lv-f0318c",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-03",
+            "kind": "join",
+            "taskId": "lt-03",
+            "answerText": "lv-e5bc52",
+            "recordedValue": "lv-e5bc52",
+            "recordCorrect": false,
+            "recallOfRecord": true,
+            "truthMatch": false
+          },
+          {
+            "id": "end-04",
+            "kind": "checksum",
+            "subject": "lv-01ea2e",
+            "corrected": false,
+            "answerText": "lv-19beec",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-05",
+            "kind": "join",
+            "taskId": "lt-04",
+            "answerText": "lv-12e84b",
+            "recordedValue": "lv-12e84b",
+            "recordCorrect": false,
+            "recallOfRecord": true,
+            "truthMatch": false
+          },
+          {
+            "id": "end-06",
+            "kind": "checksum",
+            "subject": "lv-603afb",
+            "corrected": false,
+            "answerText": "lv-c5b1ed",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-07",
+            "kind": "join",
+            "taskId": "lt-02",
+            "answerText": "lv-0a5f42",
+            "recordedValue": "lv-0a5f42",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-08",
+            "kind": "checksum",
+            "subject": "lv-7d5868",
+            "corrected": true,
+            "answerText": "lv-e9a61c",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-09",
+            "kind": "checksum",
+            "subject": "lv-d43873",
+            "corrected": true,
+            "answerText": "lv-f399a8",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-10",
+            "kind": "checksum",
+            "subject": "lv-2fcd25",
+            "corrected": false,
+            "answerText": "lv-ca9b0c",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-11",
+            "kind": "checksum",
+            "subject": "lv-3f0c49",
+            "corrected": true,
+            "answerText": "lv-f4555f",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-12",
+            "kind": "checksum",
+            "subject": "lv-07ac07",
+            "corrected": false,
+            "answerText": "lv-7db0f0",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-13",
+            "kind": "checksum",
+            "subject": "lv-9364f3",
+            "corrected": true,
+            "answerText": "lv-4c6795",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-14",
+            "kind": "checksum",
+            "subject": "lv-ee5bda",
+            "corrected": false,
+            "answerText": "lv-f63ae5",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-table",
+            "kind": "table",
+            "rowsTotal": 16,
+            "rowsAnswered": 16,
+            "rowsCorrect": 16,
+            "rows": [
+              {
+                "row": 1,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 2,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 3,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 4,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 5,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 6,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 7,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 8,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 9,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 10,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 11,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 12,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 13,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 14,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 15,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 16,
+                "answered": true,
+                "match": true
+              }
+            ]
+          }
+        ],
+        "recovery": {
+          "historySearches": 0,
+          "contextToolCalls": 22,
+          "fileReads": 0,
+          "recoveryCalls": 22,
+          "lastResetKind": "commit",
+          "entriesSinceReset": 78
+        }
+      },
+      "billed": {
+        "messageCalls": 171,
+        "messageCallsUsd": 27.033178000000003,
+        "callsWithoutCost": 0,
+        "longContextCalls": 0,
+        "longContextTierPromptTokens": 272000,
+        "peakPromptTokens": 257117,
+        "outOfBandUsd": 0,
+        "totalUsd": 27.033178000000003,
+        "unansweredRequests": {
+          "count": 0,
+          "projectedChars": 0,
+          "billed": "unknown: a request aborted after it was built leaves no record of what the provider charged for it"
+        }
+      },
       "thinkTime": {
         "medianMs": 9235,
         "p95Ms": 67472,
@@ -7961,6 +11465,444 @@
             "upgradesWaitingAtLastCommit": null,
             "definition": "every key beside `join` is a brief provenance kind, counted per sealed fold record and moved to model where a later context.commit record names that fold id in brief_upgrade_ids; a run sealed before the upgrade lane carries no such field and reads exactly as the creation-time count did"
           }
+        }
+      },
+      "probeVerdicts": [
+        {
+          "probeId": "probe-16-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "FIN",
+          "lag": 10,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 9,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-03",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 14,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 20,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "FIN",
+          "lag": 45,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 51,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 56,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "mismatch"
+        },
+        {
+          "probeId": "probe-64-05",
+          "kind": "derivation-control",
+          "class": "derived",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "mismatch"
+        }
+      ],
+      "endBlock": {
+        "delivered": true,
+        "rows": [
+          {
+            "id": "end-01",
+            "kind": "checksum",
+            "subject": "lv-2124f4",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-02",
+            "kind": "join",
+            "taskId": "lt-01",
+            "answerText": "lv-f0318c",
+            "recordedValue": "lv-f0318c",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-03",
+            "kind": "join",
+            "taskId": "lt-03",
+            "answerText": "lv-12e84b",
+            "recordedValue": "lv-12e84b",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-04",
+            "kind": "checksum",
+            "subject": "lv-01ea2e",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-05",
+            "kind": "join",
+            "taskId": "lt-04",
+            "answerText": "lv-e5bc52",
+            "recordedValue": "lv-e5bc52",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-06",
+            "kind": "checksum",
+            "subject": "lv-603afb",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-07",
+            "kind": "join",
+            "taskId": "lt-02",
+            "answerText": "lv-0a5f42",
+            "recordedValue": "lv-0a5f42",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-08",
+            "kind": "checksum",
+            "subject": "lv-7d5868",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-09",
+            "kind": "checksum",
+            "subject": "lv-d43873",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-10",
+            "kind": "checksum",
+            "subject": "lv-2fcd25",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-11",
+            "kind": "checksum",
+            "subject": "lv-3f0c49",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-12",
+            "kind": "checksum",
+            "subject": "lv-07ac07",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-13",
+            "kind": "checksum",
+            "subject": "lv-9364f3",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-14",
+            "kind": "checksum",
+            "subject": "lv-ee5bda",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-table",
+            "kind": "table",
+            "rowsTotal": 16,
+            "rowsAnswered": 16,
+            "rowsCorrect": 0,
+            "rows": [
+              {
+                "row": 1,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 2,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 3,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 4,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 5,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 6,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 7,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 8,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 9,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 10,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 11,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 12,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 13,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 14,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 15,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 16,
+                "answered": true,
+                "match": false
+              }
+            ]
+          }
+        ],
+        "recovery": {
+          "historySearches": 0,
+          "contextToolCalls": 0,
+          "fileReads": 0,
+          "recoveryCalls": 0,
+          "lastResetKind": "compaction",
+          "entriesSinceReset": 1
+        }
+      },
+      "billed": {
+        "messageCalls": 105,
+        "messageCallsUsd": 46.824038000000016,
+        "callsWithoutCost": 0,
+        "longContextCalls": 61,
+        "longContextTierPromptTokens": 272000,
+        "peakPromptTokens": 917050,
+        "outOfBandUsd": 0.60207,
+        "totalUsd": 47.42610800000001,
+        "unansweredRequests": {
+          "count": 0,
+          "projectedChars": 0,
+          "billed": "unknown: a request aborted after it was built leaves no record of what the provider charged for it"
         }
       },
       "thinkTime": {
@@ -9526,6 +13468,444 @@
           }
         }
       },
+      "probeVerdicts": [
+        {
+          "probeId": "probe-16-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "FIN",
+          "lag": 10,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 9,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-03",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 14,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 20,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "FIN",
+          "lag": 45,
+          "verdict": "mismatch"
+        },
+        {
+          "probeId": "probe-48-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "mismatch"
+        },
+        {
+          "probeId": "probe-48-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "mismatch"
+        },
+        {
+          "probeId": "probe-48-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 51,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 56,
+          "verdict": "mismatch"
+        },
+        {
+          "probeId": "probe-64-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-05",
+          "kind": "derivation-control",
+          "class": "derived",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        }
+      ],
+      "endBlock": {
+        "delivered": true,
+        "rows": [
+          {
+            "id": "end-01",
+            "kind": "checksum",
+            "subject": "lv-2124f4",
+            "corrected": false,
+            "answerText": "lv-f7264a",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-02",
+            "kind": "join",
+            "taskId": "lt-01",
+            "answerText": "lv-f0318c",
+            "recordedValue": "lv-f0318c",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-03",
+            "kind": "join",
+            "taskId": "lt-03",
+            "answerText": "lv-12e84b",
+            "recordedValue": "lv-12e84b",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-04",
+            "kind": "checksum",
+            "subject": "lv-01ea2e",
+            "corrected": false,
+            "answerText": "lv-19beec",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-05",
+            "kind": "join",
+            "taskId": "lt-04",
+            "answerText": "lv-e5bc52",
+            "recordedValue": "lv-e5bc52",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-06",
+            "kind": "checksum",
+            "subject": "lv-603afb",
+            "corrected": false,
+            "answerText": "lv-c5b1ed",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-07",
+            "kind": "join",
+            "taskId": "lt-02",
+            "answerText": "lv-0a5f42",
+            "recordedValue": "lv-0a5f42",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-08",
+            "kind": "checksum",
+            "subject": "lv-7d5868",
+            "corrected": true,
+            "answerText": "lv-e9a61c",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-09",
+            "kind": "checksum",
+            "subject": "lv-d43873",
+            "corrected": true,
+            "answerText": "lv-f399a8",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-10",
+            "kind": "checksum",
+            "subject": "lv-2fcd25",
+            "corrected": false,
+            "answerText": "lv-ca9b0c",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-11",
+            "kind": "checksum",
+            "subject": "lv-3f0c49",
+            "corrected": true,
+            "answerText": "lv-f4555f",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-12",
+            "kind": "checksum",
+            "subject": "lv-07ac07",
+            "corrected": false,
+            "answerText": "lv-7db0f0",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-13",
+            "kind": "checksum",
+            "subject": "lv-9364f3",
+            "corrected": true,
+            "answerText": "lv-4c6795",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-14",
+            "kind": "checksum",
+            "subject": "lv-ee5bda",
+            "corrected": false,
+            "answerText": "lv-f63ae5",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-table",
+            "kind": "table",
+            "rowsTotal": 16,
+            "rowsAnswered": 16,
+            "rowsCorrect": 16,
+            "rows": [
+              {
+                "row": 1,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 2,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 3,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 4,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 5,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 6,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 7,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 8,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 9,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 10,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 11,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 12,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 13,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 14,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 15,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 16,
+                "answered": true,
+                "match": true
+              }
+            ]
+          }
+        ],
+        "recovery": {
+          "historySearches": 0,
+          "contextToolCalls": 8,
+          "fileReads": 0,
+          "recoveryCalls": 8,
+          "lastResetKind": "commit",
+          "entriesSinceReset": 102
+        }
+      },
+      "billed": {
+        "messageCalls": 158,
+        "messageCallsUsd": 21.52286999999999,
+        "callsWithoutCost": 0,
+        "longContextCalls": 0,
+        "longContextTierPromptTokens": 272000,
+        "peakPromptTokens": 236168,
+        "outOfBandUsd": 0,
+        "totalUsd": 21.52286999999999,
+        "unansweredRequests": {
+          "count": 0,
+          "projectedChars": 0,
+          "billed": "unknown: a request aborted after it was built leaves no record of what the provider charged for it"
+        }
+      },
       "thinkTime": {
         "medianMs": 9509,
         "p95Ms": 43358,
@@ -9913,6 +14293,444 @@
             "upgradesWaitingAtLastCommit": null,
             "definition": "every key beside `join` is a brief provenance kind, counted per sealed fold record and moved to model where a later context.commit record names that fold id in brief_upgrade_ids; a run sealed before the upgrade lane carries no such field and reads exactly as the creation-time count did"
           }
+        }
+      },
+      "probeVerdicts": [
+        {
+          "probeId": "probe-16-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "FIN",
+          "lag": 10,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 9,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-03",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 14,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 20,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "FIN",
+          "lag": 45,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 51,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 56,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "mismatch"
+        },
+        {
+          "probeId": "probe-64-05",
+          "kind": "derivation-control",
+          "class": "derived",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        }
+      ],
+      "endBlock": {
+        "delivered": true,
+        "rows": [
+          {
+            "id": "end-01",
+            "kind": "checksum",
+            "subject": "lv-2124f4",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-02",
+            "kind": "join",
+            "taskId": "lt-01",
+            "answerText": "lv-f0318c",
+            "recordedValue": "lv-f0318c",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-03",
+            "kind": "join",
+            "taskId": "lt-03",
+            "answerText": "lv-12e84b",
+            "recordedValue": "lv-12e84b",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-04",
+            "kind": "checksum",
+            "subject": "lv-01ea2e",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-05",
+            "kind": "join",
+            "taskId": "lt-04",
+            "answerText": "lv-e5bc52",
+            "recordedValue": "lv-e5bc52",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-06",
+            "kind": "checksum",
+            "subject": "lv-603afb",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-07",
+            "kind": "join",
+            "taskId": "lt-02",
+            "answerText": "lv-0a5f42",
+            "recordedValue": "lv-0a5f42",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-08",
+            "kind": "checksum",
+            "subject": "lv-7d5868",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-09",
+            "kind": "checksum",
+            "subject": "lv-d43873",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-10",
+            "kind": "checksum",
+            "subject": "lv-2fcd25",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-11",
+            "kind": "checksum",
+            "subject": "lv-3f0c49",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-12",
+            "kind": "checksum",
+            "subject": "lv-07ac07",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-13",
+            "kind": "checksum",
+            "subject": "lv-9364f3",
+            "corrected": true,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-14",
+            "kind": "checksum",
+            "subject": "lv-ee5bda",
+            "corrected": false,
+            "answerText": "not sure",
+            "verdict": "mismatch",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-table",
+            "kind": "table",
+            "rowsTotal": 16,
+            "rowsAnswered": 16,
+            "rowsCorrect": 0,
+            "rows": [
+              {
+                "row": 1,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 2,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 3,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 4,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 5,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 6,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 7,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 8,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 9,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 10,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 11,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 12,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 13,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 14,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 15,
+                "answered": true,
+                "match": false
+              },
+              {
+                "row": 16,
+                "answered": true,
+                "match": false
+              }
+            ]
+          }
+        ],
+        "recovery": {
+          "historySearches": 0,
+          "contextToolCalls": 0,
+          "fileReads": 0,
+          "recoveryCalls": 0,
+          "lastResetKind": "compaction",
+          "entriesSinceReset": 1
+        }
+      },
+      "billed": {
+        "messageCalls": 92,
+        "messageCallsUsd": 42.494569,
+        "callsWithoutCost": 0,
+        "longContextCalls": 49,
+        "longContextTierPromptTokens": 272000,
+        "peakPromptTokens": 917119,
+        "outOfBandUsd": 0.67049,
+        "totalUsd": 43.165059,
+        "unansweredRequests": {
+          "count": 0,
+          "projectedChars": 0,
+          "billed": "unknown: a request aborted after it was built leaves no record of what the provider charged for it"
         }
       },
       "thinkTime": {
@@ -11435,6 +16253,444 @@
           }
         }
       },
+      "probeVerdicts": [
+        {
+          "probeId": "probe-16-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "FIN",
+          "lag": 10,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 9,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-03",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 16,
+          "hop": "SOF",
+          "lag": 14,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-16-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 16,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 20,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 32,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-32-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 32,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "FIN",
+          "lag": 45,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 48,
+          "hop": "SOF",
+          "lag": 27,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-05",
+          "kind": "stage-binding",
+          "class": "conversation",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-48-06",
+          "kind": "definition-line",
+          "class": "repository",
+          "wave": 48,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-01",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 51,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-02",
+          "kind": "chain-link",
+          "class": "derived",
+          "wave": 64,
+          "hop": "FIN",
+          "lag": 56,
+          "verdict": "mismatch"
+        },
+        {
+          "probeId": "probe-64-04",
+          "kind": "stage-fact",
+          "class": "conversation",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "match"
+        },
+        {
+          "probeId": "probe-64-05",
+          "kind": "derivation-control",
+          "class": "derived",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "mismatch"
+        },
+        {
+          "probeId": "probe-64-06",
+          "kind": "symbol-file",
+          "class": "repository",
+          "wave": 64,
+          "hop": null,
+          "lag": null,
+          "verdict": "mismatch"
+        }
+      ],
+      "endBlock": {
+        "delivered": true,
+        "rows": [
+          {
+            "id": "end-01",
+            "kind": "checksum",
+            "subject": "lv-2124f4",
+            "corrected": false,
+            "answerText": "lv-f7264a",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-02",
+            "kind": "join",
+            "taskId": "lt-01",
+            "answerText": "lv-f0318c",
+            "recordedValue": "lv-f0318c",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-03",
+            "kind": "join",
+            "taskId": "lt-03",
+            "answerText": "lv-12e84b",
+            "recordedValue": "lv-e5bc52",
+            "recordCorrect": false,
+            "recallOfRecord": false,
+            "truthMatch": true
+          },
+          {
+            "id": "end-04",
+            "kind": "checksum",
+            "subject": "lv-01ea2e",
+            "corrected": false,
+            "answerText": "lv-19beec",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-05",
+            "kind": "join",
+            "taskId": "lt-04",
+            "answerText": "lv-e5bc52",
+            "recordedValue": "lv-12e84b",
+            "recordCorrect": false,
+            "recallOfRecord": false,
+            "truthMatch": true
+          },
+          {
+            "id": "end-06",
+            "kind": "checksum",
+            "subject": "lv-603afb",
+            "corrected": false,
+            "answerText": "lv-c5b1ed",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-07",
+            "kind": "join",
+            "taskId": "lt-02",
+            "answerText": "lv-0a5f42",
+            "recordedValue": "lv-0a5f42",
+            "recordCorrect": true,
+            "recallOfRecord": true,
+            "truthMatch": true
+          },
+          {
+            "id": "end-08",
+            "kind": "checksum",
+            "subject": "lv-7d5868",
+            "corrected": true,
+            "answerText": "lv-e9a61c",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-09",
+            "kind": "checksum",
+            "subject": "lv-d43873",
+            "corrected": true,
+            "answerText": "lv-f399a8",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-10",
+            "kind": "checksum",
+            "subject": "lv-2fcd25",
+            "corrected": false,
+            "answerText": "lv-ca9b0c",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-11",
+            "kind": "checksum",
+            "subject": "lv-3f0c49",
+            "corrected": true,
+            "answerText": "lv-f4555f",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-12",
+            "kind": "checksum",
+            "subject": "lv-07ac07",
+            "corrected": false,
+            "answerText": "lv-7db0f0",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-13",
+            "kind": "checksum",
+            "subject": "lv-9364f3",
+            "corrected": true,
+            "answerText": "lv-4c6795",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-14",
+            "kind": "checksum",
+            "subject": "lv-ee5bda",
+            "corrected": false,
+            "answerText": "lv-f63ae5",
+            "verdict": "match",
+            "withdrawnMatch": false
+          },
+          {
+            "id": "end-table",
+            "kind": "table",
+            "rowsTotal": 16,
+            "rowsAnswered": 16,
+            "rowsCorrect": 16,
+            "rows": [
+              {
+                "row": 1,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 2,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 3,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 4,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 5,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 6,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 7,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 8,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 9,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 10,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 11,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 12,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 13,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 14,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 15,
+                "answered": true,
+                "match": true
+              },
+              {
+                "row": 16,
+                "answered": true,
+                "match": true
+              }
+            ]
+          }
+        ],
+        "recovery": {
+          "historySearches": 0,
+          "contextToolCalls": 3,
+          "fileReads": 0,
+          "recoveryCalls": 3,
+          "lastResetKind": "commit",
+          "entriesSinceReset": 222
+        }
+      },
+      "billed": {
+        "messageCalls": 167,
+        "messageCallsUsd": 36.291481,
+        "callsWithoutCost": 0,
+        "longContextCalls": 0,
+        "longContextTierPromptTokens": 272000,
+        "peakPromptTokens": 236992,
+        "outOfBandUsd": 0,
+        "totalUsd": 36.291481,
+        "unansweredRequests": {
+          "count": 0,
+          "projectedChars": 0,
+          "billed": "unknown: a request aborted after it was built leaves no record of what the provider charged for it"
+        }
+      },
       "thinkTime": {
         "medianMs": 11082,
         "p95Ms": 40804,
@@ -11684,5 +16940,5 @@
       }
     }
   ],
-  "extractSha256": "ecac7f01fc539cf417002f39ba2a7bad49d37ad12f5544795f44962f17709c64"
+  "extractSha256": "cc3f8772f89dccebffbf93b1276d176d3b3bca79d394127a4f881dd5f1a3a6cd"
 }

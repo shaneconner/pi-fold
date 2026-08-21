@@ -106,6 +106,12 @@ function extractRun(run) {
     rereadTax: run.rereadTax ?? null,
     stopTheWorld: run.stopTheWorld ?? null,
     curation: run.curation ?? null,
+    // The outcome lenses the steward paper reads beside the cache tables: the
+    // adjudicator's graded probe verdicts, the graded end-block rows, and the
+    // billed dollars, carried whole so the portable corpus is the one source.
+    probeVerdicts: run.probeVerdicts ?? null,
+    endBlock: run.endBlock ?? null,
+    billed: run.billed ?? null,
     thinkTime: run.thinkTime ? { medianMs: run.thinkTime.medianMs, p95Ms: run.thinkTime.p95Ms, maxMs: run.thinkTime.maxMs } : null,
     overflowPoint: run.overflowPoint ?? null,
     probes: run.probes ?? [],
