@@ -42,6 +42,7 @@ import {
 import {
   HARNESS_SOURCE,
   SANDBOX_PATHS,
+  hostSessionFile,
   SANDBOX_WORKER_PID,
   sandboxArgv,
   sandboxConfig,
@@ -580,8 +581,9 @@ async function run() {
       workerReady.sessionFile.startsWith(`${SANDBOX_PATHS.session}/`),
     "Worker readiness identity drifted");
     // The worker names its session file from inside the namespace. Everything on
-    // this side of the boundary reads the host path for the same inode.
-    workerReady.sessionFile = join(sessionDir, basename(workerReady.sessionFile));
+    // this side of the boundary reads the host path for the same inode, through the
+    // one definition the adjudicator also uses.
+    workerReady.sessionFile = hostSessionFile(runDir, workerReady.sessionFile);
     assertExperiment(workerReady.sessionFile.startsWith(`${runDir}/`),
       "The session file landed outside the run directory the seal addresses");
     state.workerStartTicks = workerReady.workerStartTicks;

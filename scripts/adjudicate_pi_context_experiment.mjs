@@ -63,6 +63,7 @@ import {
   validateExperimentRunConfig,
   validateStagePlan,
 } from "./lib/pi_context_experiment.mjs";
+import { hostSessionFile } from "./lib/pi_context_sandbox.mjs";
 import { PI_FOLD_ACTIVE_CONTEXT_REGISTRATION } from "./lib/pi_fold_identity.mjs";
 import {
   artifactStat,
@@ -348,7 +349,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   assertExperiment(corpusManifestSha256(plan.stages.flatMap((stage) => stage.files)) ===
     manifest.target.treeSha256, "Manifest target fingerprint is not the plan's staged corpus");
 
-  const sessionFile = worker.sessionFile;
+  const sessionFile = hostSessionFile(runDir, worker.sessionFile);
   assertExperiment(sessionFile && existsSync(sessionFile), "Session evidence is missing");
   assertExperiment(fileSha256(sessionFile) === seal.sessionSha256, "Session evidence drifted after sealing");
   const entries = readJsonLines(sessionFile);

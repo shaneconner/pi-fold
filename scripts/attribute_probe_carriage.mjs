@@ -24,6 +24,7 @@ import {
   attributionBatchStarts,
 } from "./lib/pi_context_attribution.mjs";
 import { campaignPlanPath } from "./lib/pi_context_experiment.mjs";
+import { hostSessionFile } from "./lib/pi_context_sandbox.mjs";
 
 const PROJECT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SCRIPT = fileURLToPath(import.meta.url);
@@ -142,15 +143,16 @@ async function runAttributionBatch(runName, startText) {
   };
   collectProbes(plan);
 
-  const harnessJsonl = new Set([
-    "provider-requests.jsonl", "pace.jsonl", "heartbeats.jsonl", "failure-latch.jsonl",
-    "tool-results.jsonl", "worker-events.jsonl",
-  ]);
-  const sessionName = readdirSync(runDir).sort().find((name) =>
-    name.endsWith(".jsonl") && !harnessJsonl.has(name));
-  if (!sessionName) throw new Error(`${runName}: no session file`);
-  const sessionId = sessionName.replace(/\.jsonl$/, "").split("_").at(-1);
-  const entries = readJsonl(join(runDir, sessionName));
+  // The session is named by the run that wrote it, never guessed. Discovery used to
+  // scan the run directory for a .jsonl outside a hardcoded harness set, which put
+  // the sweep one new artifact away from reading the wrong file: a sandboxed run
+  // keeps its session in session/, so the scan found stop-the-world.jsonl in the
+  // native arm and reported no-answer-found for all 41 rows without failing, while
+  // the pifold arm had no stray file and threw. Silent and wrong is the worse half.
+  const sessionPath = hostSessionFile(runDir, readJson(join(runDir, "worker-report.json")).sessionFile);
+  if (!sessionPath || !existsSync(sessionPath)) throw new Error(`${runName}: no session file`);
+  const sessionId = basename(sessionPath).replace(/\.jsonl$/, "").split("_").at(-1);
+  const entries = readJsonl(sessionPath);
   const requests = readJsonl(join(runDir, "provider-requests.jsonl"));
   const batchEnd = Math.min(start + ATTRIBUTION_BATCH_ROWS, totalRows);
   const selected = (index) => index >= start && index < batchEnd;

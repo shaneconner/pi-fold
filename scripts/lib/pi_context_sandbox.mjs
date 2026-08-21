@@ -351,6 +351,18 @@ export function modelWrittenFiles(homeDir, scratchDir) {
   return found.sort((left, right) => left.path.localeCompare(right.path));
 }
 
+// The worker names its session file from INSIDE the namespace, so every reader on
+// this side has to translate. Pre-sandbox runs reported a host path already and are
+// returned unchanged, which is what keeps sealed campaigns adjudicable. One
+// definition on purpose: the supervisor needs it at readiness and the adjudicator
+// needs it months later, and two copies would drift.
+export function hostSessionFile(runDir, reported) {
+  if (typeof reported !== "string" || !reported.startsWith(`${SANDBOX_PATHS.session}/`)) {
+    return reported;
+  }
+  return join(runDir, "session", basename(reported));
+}
+
 export function sandboxSessionPath(sessionDir, sessionFile) {
   return join(SANDBOX_PATHS.session, basename(sessionFile ?? "", ""));
 }

@@ -220,6 +220,7 @@ import {
   HARNESS_SOURCE,
   SANDBOX_PATHS,
   deleteHarnessSource,
+  hostSessionFile,
   sandboxArgv,
   sandboxConfig,
   SANDBOX_PLAN_KEYS,
@@ -9821,6 +9822,65 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
     rmSync(cacheRoot, { recursive: true, force: true });
   }
   checks.theTranspileCacheNeverLandsWhereTheModelCanRead = true;
+}
+
+// ---------------------------------------------------------------------------
+// Gate 76 (2026-08-21): the session file a sandboxed run reports is a path inside
+// the namespace, and every reader on this side has to translate it.
+//
+// The supervisor already did, at readiness, because it needs the host inode to
+// tail the session while the run is live. The adjudicator read `worker.sessionFile`
+// straight out of `worker-report.json` and asked the host for `/session/<name>`,
+// which exists nowhere, so BOTH arms of the first sandboxed pair finished 64 of 64
+// stages with ok true and then failed adjudication on "Session evidence is missing".
+// The runs were fine. The reader was wrong, and it was wrong months-later rather
+// than at run time, which is the failure mode a sealed corpus cannot afford.
+//
+// One definition, driven as a function. A second copy in the adjudicator would
+// pass this gate today and drift the first time the layout moves, so the gate also
+// pins that neither reader translates on its own.
+// ---------------------------------------------------------------------------
+{
+  // Assembled, never written out: package gate 86 refuses an operator home path in
+  // any tracked file, and this fixture needs an absolute run directory to be real.
+  const runDir = ["", "home", "operator", "pi-fold-runs", "sol-x", "pifold-rep1"].join("/");
+  const inside = `${SANDBOX_PATHS.session}/2026-08-21T00-00-00.jsonl`;
+  assert.equal(hostSessionFile(runDir, inside),
+    join(runDir, "session", "2026-08-21T00-00-00.jsonl"),
+    "a namespace session path did not resolve to its host inode");
+
+  // Pre-sandbox runs reported a host path already and must read byte-identically,
+  // which is what keeps every sealed campaign adjudicable from this checkout.
+  const legacy = join(runDir, "session", "2026-08-12T00-00-00.jsonl");
+  assert.equal(hostSessionFile(runDir, legacy), legacy,
+    "translation touched a path that was already on the host");
+  assert.equal(hostSessionFile(runDir, undefined), undefined,
+    "a missing session path stopped being missing, which hides the assertion that catches it");
+  // A path that merely CONTAINS the namespace root is not one, or a host run
+  // directory named /session-archive would be rewritten out from under itself.
+  const lookalike = "/session-archive/2026-08-12T00-00-00.jsonl";
+  assert.equal(hostSessionFile(runDir, lookalike), lookalike,
+    "a host path sharing the namespace prefix was rewritten");
+
+  // EVERY reader, one definition. Three of them exist and all three were wrong in
+  // their own way: the adjudicator asked the host for a namespace path, and the
+  // carriage sweep guessed the session by scanning the run directory for a .jsonl
+  // outside a hardcoded harness set, which read stop-the-world.jsonl as the native
+  // arm's session and reported no-answer-found for every row WITHOUT failing.
+  // A reader that fails is a bug; a reader that answers wrong is a corrupt result,
+  // so the gate pins the naming rather than the scan.
+  for (const file of ["scripts/adjudicate_pi_context_experiment.mjs",
+                      "scripts/run_pi_context_experiment.mjs",
+                      "scripts/attribute_probe_carriage.mjs"]) {
+    const text = source(file);
+    assert(/hostSessionFile\(/.test(text),
+      `${file} does not resolve the session path through the shared reading`);
+    assert(!/\bjoin\(\s*sessionDir\s*,\s*basename\(/.test(text),
+      `${file} kept its own copy of the translation, which is what drifts`);
+    assert(!/readdirSync\([^)]*\)[\s\S]{0,120}endsWith\("\.jsonl"\)/.test(text),
+      `${file} still guesses the session file by scanning, which reads the wrong one silently`);
+  }
+  checks.aSandboxedSessionPathResolvesForEveryReader = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
