@@ -9567,6 +9567,25 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
     "the end block did not reach the worker as text");
   assert.equal(carried.sessionDir, SANDBOX_PATHS.session,
     "the session file would land somewhere other than its own directory");
+  // EXACTLY ONE CARRIAGE. The old law was that an arm run must be able to produce
+  // an end block; it is kept by requiring the seed or the composed text and
+  // refusing both, so a config cannot quietly reintroduce the seed alongside.
+  const hostConfig = { ...runConfig };
+  assert.throws(() => validateExperimentRunConfig({ ...hostConfig, querySeed: undefined }),
+    /frozen query seed or the composed end block/,
+    "an arm config carrying neither carriage was accepted");
+  assert.throws(() => validateExperimentRunConfig({ ...hostConfig,
+    endBlockPrompt: "the exam text" }), /and not both/,
+  "an arm config carrying the seed AND the composed block was accepted");
+  // The sandboxed shape end to end: the paths the worker will actually see, with
+  // the composed block standing in for the seed it must not hold.
+  const sandboxed = sandboxConfig(hostConfig, "the exam text");
+  assert.doesNotThrow(() => validateExperimentRunConfig(sandboxed),
+    "the config the supervisor writes for the worker is one the worker will refuse");
+  // The sandboxed branch is the STRICTER one: it pins values rather than prefixes.
+  assert.throws(() => validateExperimentRunConfig({ ...sandboxed, repoDir: "/elsewhere" }),
+    /does not name the namespace it runs in/,
+    "a config claiming to be sandboxed pointed its checkout elsewhere");
   assert(!("querySeed" in carried), "the query seed reached the sandbox");
   assert(!JSON.stringify(carried).includes("seed-must-not-travel"),
     "the query seed reached the sandbox under another key");

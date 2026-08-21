@@ -8,6 +8,7 @@
 //
 // Spec: wiki meta/memory/folds/pi_context_governor/fold-vs-compaction_experiment.
 
+import { SANDBOX_PATHS } from "./pi_context_sandbox.mjs";
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
@@ -2404,12 +2405,24 @@ export function validateExperimentRunConfig(value) {
         typeof task.id === "string" && task.id.length > 0 &&
         Number.isSafeInteger(task.stage) && task.stage >= 1 && task.stage <= value.stageCount)),
   "An arm run config must carry the plan's ledger task schedule");
-  // The frozen query seed, so the worker builds the withheld end block from the
-  // plan's ledger and this seed alone: byte-identical across arms by
-  // construction. Closed-book exclusion lives with the other no-referent keys.
+  // The withheld end block, carried EITHER as the frozen seed that composes it or
+  // as the composed text itself, and never as both.
+  //
+  // The seed is the supervisor's form: it plus the plan's ledger builds a block
+  // that is byte-identical across arms by construction. The text is the sandboxed
+  // worker's form (Shane 2026-08-21), because a seed plus the ledger geometry is a
+  // derivable question list, and a model that can derive the questions has been
+  // told what to remember, which is gate 62's leak wearing a seed. Requiring
+  // exactly one of the two keeps the old law intact: an arm run that could not
+  // produce an end block at all is still refused by name. Closed-book exclusion
+  // lives with the other no-referent keys.
+  const carriesSeed = typeof value.querySeed === "string" &&
+    /^[0-9a-f]{16,64}$/.test(value.querySeed);
+  const carriesComposedEndBlock = typeof value.endBlockPrompt === "string" &&
+    value.endBlockPrompt.length > 0;
   assertExperiment(value.sessionType === EXPERIMENT_CLOSED_BOOK_LABEL ||
-    (typeof value.querySeed === "string" && /^[0-9a-f]{16,64}$/.test(value.querySeed)),
-  "An arm run config must carry the frozen query seed");
+    carriesSeed !== carriesComposedEndBlock,
+  "An arm run config must carry the frozen query seed or the composed end block, and not both");
   assertExperiment(value.sessionType === undefined ||
     EXPERIMENT_SESSION_TYPES.includes(value.sessionType),
   "Run config session type is invalid");
@@ -2440,8 +2453,18 @@ export function validateExperimentRunConfig(value) {
     value.stageIntervalMs === modePlan.stageIntervalMs &&
     value.watchdogMs === modePlan.watchdogMs && value.heartbeatMs === modePlan.heartbeatMs,
   "Run config pacing drifted from its mode plan");
-  assertExperiment(typeof value.runDir === "string" && value.runDir.endsWith(`/${value.runId}`),
-    "Run directory does not carry its run id");
+  // TWO SHAPES, ONE VALIDATOR (Shane 2026-08-21). The supervisor's config names
+  // host paths; the worker's names the sandbox's own constants, because inside the
+  // namespace there are no host paths to name. The sandboxed branch is the
+  // stricter of the two: it pins exact values rather than a prefix relationship,
+  // so a config claiming to be sandboxed cannot point anywhere else.
+  const sandboxed = value.runDir === SANDBOX_PATHS.run;
+  assertExperiment(!sandboxed || (value.repoDir === SANDBOX_PATHS.work &&
+    value.sessionDir === SANDBOX_PATHS.session),
+  "A sandboxed run config does not name the namespace it runs in");
+  assertExperiment(sandboxed ||
+    (typeof value.runDir === "string" && value.runDir.endsWith(`/${value.runId}`)),
+  "Run directory does not carry its run id");
   assertExperiment(typeof value.campaignId === "string" && value.campaignId.length > 0,
     "Run config lacks a campaign id");
   assertExperiment(Number.isSafeInteger(value.repetition) && value.repetition > 0 &&
@@ -2452,8 +2475,12 @@ export function validateExperimentRunConfig(value) {
     HEX_40.test(value.targetCommit), "Run config commit pins are invalid");
   assertExperiment(HEX_64.test(value.planSha256) && HEX_64.test(value.targetTreeSha256),
     "Run config plan/target hashes are invalid");
-  assertExperiment(typeof value.repoDir === "string" && value.repoDir.startsWith(`${value.runDir}/`),
-    "The pinned checkout must live inside the run directory");
+  // Outside the sandbox the checkout sits inside the run directory. Inside it they
+  // are deliberately unrelated: the checkout is the cwd, and the run directory
+  // being its parent is exactly how ".." reached the run config in the first place.
+  assertExperiment(sandboxed ||
+    (typeof value.repoDir === "string" && value.repoDir.startsWith(`${value.runDir}/`)),
+  "The pinned checkout must live inside the run directory");
   assertExperiment(exactKeys(value.model, ["provider", "id", "effort"]) &&
     [value.model.provider, value.model.id, value.model.effort].every((part) =>
       typeof part === "string" && part.length > 0),
