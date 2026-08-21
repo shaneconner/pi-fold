@@ -61,6 +61,8 @@ export const SOAK_FORBIDDEN_ENV_KEYS = Object.freeze([
   "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CEILING_DIRECTORIES", "GIT_NAMESPACE",
 ]);
 
+import { SANDBOX_PATH, SANDBOX_PATHS } from "./pi_context_sandbox.mjs";
+
 const HEX_64 = /^[0-9a-f]{64}$/;
 const HEX_32 = /^[0-9a-f]{32}$/;
 const RUN_ID = /^[0-9TZ_.:-]+-[0-9a-f]{12}$/;
@@ -77,9 +79,21 @@ export function assertSanitizedRuntimeEnvironment(environment, { requireMarker =
   if (requireMarker) {
     assertSoak(environment[SOAK_SANITIZED_ENV_MARKER] === "1",
       "Soak runtime lacks its sanitized-environment launch marker");
-    assertSoak(environment.PATH === "/usr/local/bin:/usr/bin:/bin" &&
-      environment.HOME === RUNTIME_HOME && environment.XDG_RUNTIME_DIR === RUNTIME_XDG_DIR,
-    "Soak runtime PATH/HOME/XDG runtime are not pinned");
+    // TWO SHAPES (Shane 2026-08-21). A run inside its mount namespace has no host
+    // home and no XDG runtime directory to point at: bubblewrap clears the
+    // environment and sets what the sandbox needs. That is a tighter pin than this
+    // one, not a looser one, because every variable is constructed rather than
+    // inherited, so the sandboxed branch asserts the constants and additionally
+    // that no XDG runtime directory leaked in.
+    if (environment.HOME === SANDBOX_PATHS.home) {
+      assertSoak(environment.PATH === SANDBOX_PATH &&
+        environment.XDG_RUNTIME_DIR === undefined,
+      "Sandboxed runtime PATH/HOME are not pinned to the namespace");
+    } else {
+      assertSoak(environment.PATH === "/usr/local/bin:/usr/bin:/bin" &&
+        environment.HOME === RUNTIME_HOME && environment.XDG_RUNTIME_DIR === RUNTIME_XDG_DIR,
+      "Soak runtime PATH/HOME/XDG runtime are not pinned");
+    }
   }
   return true;
 }

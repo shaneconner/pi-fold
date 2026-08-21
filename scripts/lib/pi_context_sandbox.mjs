@@ -38,6 +38,10 @@ import { basename, join } from "node:path";
 // Where each bound resource lands inside the namespace. These are constants rather
 // than settings: a run that mounted its checkout somewhere else would not be the
 // run the seal describes.
+// The namespace's own PATH, pinned as a constant so the environment assertion and
+// the argv builder cannot drift apart.
+export const SANDBOX_PATH = "/usr/local/bin:/usr/bin:/bin";
+
 export const SANDBOX_PATHS = Object.freeze({
   work: "/work",
   session: "/session",
@@ -159,7 +163,7 @@ export function sandboxArgv(layout) {
     "--setenv", "HOME", SANDBOX_PATHS.home,
     "--setenv", "USER", "agent",
     "--setenv", "LOGNAME", "agent",
-    "--setenv", "PATH", "/usr/bin:/bin",
+    "--setenv", "PATH", SANDBOX_PATH,
     "--setenv", "LANG", "C.UTF-8",
     "--setenv", "TMPDIR", "/tmp",
     "--setenv", "PI_FOLD_SANITIZED", "1",
