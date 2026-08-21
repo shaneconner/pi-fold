@@ -13096,29 +13096,43 @@ async function gateFoldSettingsRoundTrip() {
     editor.handleInput("\x1b[A");
     assert(renders().includes("→ Commit trigger"), "CSI up did not move the selection back");
 
-    // Steppable rows CYCLE through allowed values, adjacent step first. The cycle
-    // lists are filtered against the current draft, so a combination
-    // resolveThresholds would refuse is never selectable; walk minTarget hard and
-    // every persisted state must stay valid and strictly below the commit trigger.
-    editor.handleInput("\r");
+    // Steppable rows respond to LEFT/RIGHT by moving one allowed increment, clamped
+    // at the range ends; the lattice is filtered against the current draft so
+    // stepping can never leave the policy surface. Enter opens an exact-value
+    // editor, which is also the only path to an off-lattice value like 0.63.
+    editor.handleInput("\x1bOC");
     assert.equal(JSON.parse(readFileSync(editorPath, "utf8")).thresholds.maxTarget, 0.85,
-      "one Enter did not advance maxTarget by one step (0.80 -> 0.85)");
+      "SS3 right did not step maxTarget by one increment (0.80 -> 0.85)");
+    editor.handleInput("\x1b[D");
+    assert.equal(JSON.parse(readFileSync(editorPath, "utf8")).thresholds.maxTarget, 0.8,
+      "CSI left did not step maxTarget back down");
+    for (let i = 0; i < 20; i++) editor.handleInput("\x1bOC");
+    assert.equal(JSON.parse(readFileSync(editorPath, "utf8")).thresholds.maxTarget, 0.95,
+      "stepping past the top of the range was not clamped at 0.95");
+    // Enter opens the exact editor prefilled; an off-lattice value lands verbatim.
+    editor.handleInput("\r");
+    assert(renders().includes("Enter to apply"), "the exact-value editor did not open");
+    for (let i = 0; i < 6; i++) editor.handleInput("\x7f");
+    for (const character of "0.63") editor.handleInput(character);
+    editor.handleInput("\r");
+    assert.equal(JSON.parse(readFileSync(editorPath, "utf8")).thresholds.maxTarget, 0.63,
+      "an exact off-lattice value did not reach disk");
+    // An invalid exact entry renders the named error and writes nothing.
     editor.handleInput("\x1b[B");
-    let previous = "";
-    for (let i = 0; i < 40; i++) {
-      editor.handleInput("\r");
-      const state = JSON.parse(readFileSync(editorPath, "utf8"));
-      context.resolveThresholds(state.thresholds);
-      assert(state.thresholds.minTarget < state.thresholds.maxTarget,
-        `cycling produced minTarget ${state.thresholds.minTarget} >= maxTarget ${state.thresholds.maxTarget}`);
-      if (i > 0 && renders() === previous) break;
-      previous = renders();
-    }
+    editor.handleInput("\r");
+    for (let i = 0; i < 6; i++) editor.handleInput("\x7f");
+    for (const character of "0.9") editor.handleInput(character);
+    editor.handleInput("\r");
+    assert(renders().includes("must sit below"), "a cross-field violation rendered no error");
+    assert.equal(JSON.parse(readFileSync(editorPath, "utf8")).thresholds.minTarget,
+      context.DEFAULT_THRESHOLDS.minTarget, "a refused submenu edit reached disk");
+    editor.handleInput("\x1b");
 
     // The budget row keeps a free-form submenu, and its DISPLAY string re-fires
     // onChange when the editor closes: parseFloat would read "300,000 tokens" as
-    // 300 and silently overwrite the saved value. The cycler must ignore that
-    // re-fire; the submenu path already applied and saved it.
+    // 300 and silently overwrite the saved value. Every row now re-fires onChange
+    // after its editor closes; the apply already happened on the submit path, so
+    // the onChange handler must be inert for every row.
     editor.handleInput("\x1b[B");
     editor.handleInput("\x1b[B");
     editor.handleInput("\x1b[B");

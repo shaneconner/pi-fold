@@ -234,20 +234,22 @@ class SettingsBorder {
 // the raw value; Enter applies through applyFoldSettingsEdit and only a valid
 // result calls done, so an invalid state can never reach the list, the file, or
 // registration. Composition mirrors the native SelectSubmenu.
-class BudgetValueEditor extends Container {
+class FoldValueEditor extends Container {
 	private readonly input = new Input();
 	private readonly errorText = new Text("", 0, 0);
 
 	constructor(
 		private readonly themeLike: any,
+		private readonly rowLabel: string,
+		private readonly rowDescription: string,
 		initialValue: string,
 		private readonly apply: (raw: string) => { ok: true; display: string } | { ok: false; error: string },
 		private readonly done: (displayValue?: string) => void,
 	) {
 		super();
 		const theme = this.themeLike;
-		this.addChild(new Text(theme.bold(theme.fg("accent", "Input budget")), 0, 0));
-		this.addChild(new Text(theme.fg("muted", "Net input tokens the deployment may fill; empty or auto derives it from the model window."), 0, 0));
+		this.addChild(new Text(theme.bold(theme.fg("accent", rowLabel)), 0, 0));
+		this.addChild(new Text(theme.fg("muted", rowDescription), 0, 0));
 		this.addChild(new Spacer(1));
 		this.input.setValue(initialValue);
 		// setValue parks the cursor at 0; a prefilled editor must start at the end,
@@ -277,7 +279,8 @@ class BudgetValueEditor extends Container {
 
 // The /fold-settings screen itself: a SettingsList over the five rows, styled off
 // the live theme, with every applied change persisted immediately the way Pi's own
-// /settings persists. Steppable rows cycle; only the budget row opens an editor.
+// /settings persists. Left/right STEPS the selected row through its allowed
+// increments (clamped at the range ends); Enter opens an exact-value editor.
 export class FoldSettingsEditor extends Container {
 	private readonly settingsList: SettingsList;
 
@@ -292,7 +295,7 @@ export class FoldSettingsEditor extends Container {
 		const theme = this.themeLike;
 		this.addChild(new SettingsBorder((text) => theme.fg("border", text)));
 		this.addChild(new Text(theme.bold(theme.fg("accent", "pi-fold settings")), 0, 0));
-		this.addChild(new Text(theme.fg("muted", "Shares are of the serving budget; edits save immediately. Enter cycles a value."), 0, 0));
+		this.addChild(new Text(theme.fg("muted", "Shares are of the serving budget; edits save immediately. ←→ steps · Enter types an exact value."), 0, 0));
 		this.addChild(new Spacer(1));
 		// SettingsList takes its own theme shape; adapt it off the live theme.
 		const listTheme = {
@@ -308,53 +311,43 @@ export class FoldSettingsEditor extends Container {
 				label: row.label,
 				description: row.description,
 				currentValue: rowDisplayValue(draft, row.id, budgetTokens),
-				values: allowedValues(row.id, draft.thresholds ?? DEFAULT_THRESHOLDS, budgetTokens),
-				submenu: row.id === "providerInputBudget"
-					? (_current: string, submenuDone: (displayValue?: string) => void) =>
-						new BudgetValueEditor(
-							themeLike,
-							rowRawValue(draft, row.id),
-							(raw) => this.applyEdit(row.id, raw),
-							submenuDone,
-						)
-					: undefined,
+				submenu: (_current: string, submenuDone: (displayValue?: string) => void) =>
+					new FoldValueEditor(
+						themeLike,
+						row.label,
+						row.description,
+						rowRawValue(draft, row.id),
+						(raw) => this.applyEdit(row.id, raw),
+						submenuDone,
+					),
 			})),
 			EDITOR_ROWS.length + 2,
 			listTheme,
-			(id, newValue) => this.applyCycled(id as FoldSettingId, newValue),
+			() => {},
 			() => this.done(true),
 		);
 		this.addChild(this.settingsList);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to cycle · Esc to close"), 0, 0));
+		this.addChild(new Text(theme.fg("dim", "  ←→ to step · Enter for exact · Esc to close"), 0, 0));
 		this.addChild(new SettingsBorder((text) => theme.fg("border", text)));
 	}
 
-	private applyCycled(id: FoldSettingId, display: string): void {
-		// The budget row reaches this handler too: SettingsList re-fires onChange with
-		// the submenu's DISPLAY string when its editor closes, and parseFloat would
-		// read "300,000 tokens" as 300. The submenu path already applied and saved it.
+	// One step along the row's allowed lattice, clamped at its ends. The lattice is
+	// filtered against the CURRENT draft, so stepping can never leave the policy
+	// surface; an exact off-lattice value arrives only through Enter's editor.
+	private step(id: FoldSettingId, direction: number): void {
 		if (id === "providerInputBudget") return;
-		const raw = id === "consolidateAfter" ? display : parseFloat(display).toFixed(2);
-		const result = applyFoldSettingsEdit(this.draft, id, raw);
-		// Unreachable while the cycle lists stay filtered against the draft; kept as
-		// the guard so the validation path owns every write regardless.
-		if (!result.ok) return;
-		this.draft = result.draft;
-		saveFoldSettingsFile(this.settingsPath, this.draft);
-		// Re-filter every other row's cycle against the new draft and refresh its
-		// displayed token equivalent.
-		for (const row of EDITOR_ROWS) {
-			const item = (this.settingsList as any).items.find((candidate: any) => candidate.id === row.id);
-			if (!item) continue;
-			item.currentValue = rowDisplayValue(this.draft, row.id, this.budgetTokens);
-			if (row.id !== "providerInputBudget") {
-				item.values = allowedValues(row.id, this.draft.thresholds ?? DEFAULT_THRESHOLDS, this.budgetTokens);
-			}
-		}
+		const thresholds = this.draft.thresholds ?? DEFAULT_THRESHOLDS;
+		const candidates = allowedValues(id, thresholds).map((entry) => Number.parseFloat(entry));
+		const current = Number(rowRawValue(this.draft, id));
+		const target = direction > 0
+			? candidates.find((candidate) => candidate > current + 1e-9)
+			: [...candidates].reverse().find((candidate) => candidate < current - 1e-9);
+		if (target === undefined) return;
+		this.applyAndSave(id, String(target));
 	}
 
-	private applyEdit(id: FoldSettingId, raw: string): { ok: true; display: string } | { ok: false; error: string } {
+	private applyAndSave(id: FoldSettingId, raw: string): { ok: true; display: string } | { ok: false; error: string } {
 		const result = applyFoldSettingsEdit(this.draft, id, raw);
 		if (!result.ok) return result;
 		this.draft = result.draft;
@@ -366,10 +359,22 @@ export class FoldSettingsEditor extends Container {
 		return { ok: true, display: rowDisplayValue(this.draft, id, this.budgetTokens) };
 	}
 
+	private applyEdit(id: FoldSettingId, raw: string): { ok: true; display: string } | { ok: false; error: string } {
+		return this.applyAndSave(id, raw);
+	}
+
 	handleInput(data: string): void {
-		// An open submenu owns Escape (it cancels the edit, not the screen).
+		// An open submenu owns everything until it closes.
 		if (this.settingsList.submenuComponent) {
 			this.settingsList.handleInput(data);
+			return;
+		}
+		if (matchesKey(data, Key.left)) {
+			this.step(EDITOR_ROWS[this.settingsList.selectedIndex].id, -1);
+			return;
+		}
+		if (matchesKey(data, Key.right)) {
+			this.step(EDITOR_ROWS[this.settingsList.selectedIndex].id, +1);
 			return;
 		}
 		if (matchesKey(data, Key.escape)) {
