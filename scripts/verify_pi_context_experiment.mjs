@@ -9639,6 +9639,50 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
   checks.theSandboxIsTheBoundaryRatherThanTheToolList = true;
 }
 
+// ---------------------------------------------------------------------------
+// GATE 74 - a delivered stage does not survive its own delivery.
+//
+// The supervisor renders each stage and drops it at ipc/responses/stage-NN.json,
+// and those files used to sit there for the whole run. In sealed native rep 5, 27
+// of the 64 carried seeded ledger values, so an arm that lost a stage to
+// compaction could re-read that stage verbatim off disk. That is a recovery
+// channel the harness invented: neither compaction nor folding puts it there, and
+// with the tool surface restored to stock Pi the model has `grep` to find it with.
+//
+// The worker consumes the file the moment it validates it. The window is not a
+// race, because the model is blocked inside its own tool call for all of it. What
+// the deletion must not cost is the proof that the stage was delivered, and that
+// proof was never in the file: it is in pace.jsonl, on the supervisor's side.
+// ---------------------------------------------------------------------------
+{
+  const extension = source("scripts/pi_context_experiment_extension.mjs");
+  assert(/rmSync\(responsePath, \{ force: true \}\);/.test(extension),
+    "the stage response is not consumed on read");
+  assert(/rmSync\(responsePath[\s\S]{0,200}const stage = expectedStage;/.test(extension),
+    "the response is consumed somewhere other than after its identity is validated");
+  const runner = source("scripts/run_pi_context_experiment.mjs");
+  assert(!/ipc\/responses\/stage-/.test(runner),
+    "the seal still expects response files the worker deletes, which would drop them silently");
+  assert(/ipc\/requests\/stage-/.test(runner),
+    "the seal stopped covering the requests too, which do persist");
+
+  // THE EVIDENCE THE DELETION MUST NOT COST. What the file held has to stay
+  // provable without the file, and it is: the supervisor stamps the response's own
+  // identity into the pace record it writes on its own side of the boundary. The
+  // block is located first, so a rename fails here rather than passing on a regex
+  // that matched nothing.
+  const paceBlock = /const paceIdentity = \{([\s\S]*?)\n      \};/.exec(runner);
+  assert(paceBlock, "the sweep cannot read the pace record, so it is scanning nothing");
+  for (const field of ["responseSha256", "contentSha256", "payloadSha256"]) {
+    // Shorthand or explicit, both are the field being present.
+    assert(new RegExp(`\\b${field}\\s*[,:]`).test(paceBlock[1]),
+      `the pace record cannot identify the deleted response: no ${field}`);
+  }
+  assert(!/\bcontent\s*[,:]\s*(?!Sha)/.test(paceBlock[1]),
+    "the pace record carries the stage text itself, which is the file we just deleted");
+  checks.aDeliveredStageDoesNotSurviveItsOwnDelivery = true;
+}
+
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
 assert.deepEqual([...EXPERIMENT_MODES], ["smoke", "full"]);
 assert(plan, "stage plan fixture did not survive gate 4");

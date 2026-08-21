@@ -629,10 +629,12 @@ async function run() {
     "run-config.json", "run-manifest.json", "worker-ready.json", "worker-report.json",
     "pace.jsonl", "heartbeats.jsonl", "provider-requests.jsonl", "worker-events.jsonl",
     "tool-results.jsonl", "stop-the-world.jsonl", "worker.stdout.log", "worker.stderr.log",
-    ...Array.from({ length: config.stageCount }, (_, index) => [
-      `ipc/requests/stage-${String(index + 1).padStart(2, "0")}.json`,
-      `ipc/responses/stage-${String(index + 1).padStart(2, "0")}.json`,
-    ]).flat(),
+    // Requests only. A response is CONSUMED by the worker the moment it is read
+    // (see the stage tool), because its rendered text is a stage the model could
+    // otherwise re-read off disk after losing it. Delivery stays provable: every
+    // pace.jsonl record carries that response's responseSha256 and contentSha256.
+    ...Array.from({ length: config.stageCount }, (_, index) =>
+      `ipc/requests/stage-${String(index + 1).padStart(2, "0")}.json`),
   ].filter((relative) => existsSync(join(runDir, relative)));
   if (sessionFile && existsSync(sessionFile)) artifactPaths.push(sessionFile.slice(runDir.length + 1));
   artifactPaths.push("failure-latch.jsonl");

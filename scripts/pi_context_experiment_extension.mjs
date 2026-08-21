@@ -15,7 +15,7 @@
 //     measurement;
 //   - every tool result is hashed into a ledger so the reread tax is measurable.
 
-import { existsSync, readFileSync, watch } from "node:fs";
+import { existsSync, readFileSync, watch, rmSync } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 // The measured runtime is this repo's own package, not a consumer's deployed copy: the
@@ -436,6 +436,21 @@ export function createPiContextExperimentExtension(config) {
               response.nextChallengeSha256 === sha256Text(response.nextChallenge) &&
               response.responseSha256 === responseIdentity(response),
             "Supervisor response identity drifted");
+            // CONSUMED ON READ (Shane 2026-08-21). This file holds the stage's
+            // rendered text, and it used to survive the whole run: in sealed
+            // native rep 5, 27 of the 64 responses carried seeded ledger values,
+            // so an arm that lost a stage to compaction could re-read that stage
+            // verbatim off disk. That is a recovery channel the harness invented,
+            // available to neither mechanism under test, and now that the tool
+            // surface is stock Pi the model has `grep` to find it with.
+            //
+            // The unlink is airtight rather than racy: the model is blocked inside
+            // its own tool call for the whole window between write and unlink, so
+            // there is no turn in which the file exists and the model can run. The
+            // delivery evidence is unaffected, because pace.jsonl records this
+            // response's own responseSha256 and contentSha256 on the supervisor
+            // side, where the model was never able to reach.
+            rmSync(responsePath, { force: true });
             const stage = expectedStage;
             expectedStage += 1;
             expectedChallenge = response.nextChallenge;
