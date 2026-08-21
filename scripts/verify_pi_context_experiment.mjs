@@ -9708,15 +9708,21 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
 // ---------------------------------------------------------------------------
 {
   const extension = source("scripts/pi_context_experiment_extension.mjs");
-  assert(/rmSync\(responsePath, \{ force: true \}\);/.test(extension),
+  assert(/truncateSync\(responsePath, 0\);/.test(extension),
     "the stage response is not consumed on read");
-  assert(/rmSync\(responsePath[\s\S]{0,200}const stage = expectedStage;/.test(extension),
+  assert(/truncateSync\(responsePath[\s\S]{0,600}const stage = expectedStage;/.test(extension),
     "the response is consumed somewhere other than after its identity is validated");
+  // EMPTIED, NOT UNLINKED. The worker's own delivery counter walks these paths to
+  // learn how many stages have landed, and a smoke run that deleted them read zero
+  // all session, tripping the resume bound at stage 1 of 8 while the supervisor had
+  // released all eight. The seal keeps listing them so a payload that survived
+  // would show up as a hash rather than going unnoticed.
+  const worker74 = source("scripts/run_pi_context_experiment_worker.mjs");
+  assert(/existsSync\(join\(config\.runDir, "ipc", "responses",/.test(worker74),
+    "the delivery counter no longer walks the response paths this gate keeps present");
   const runner = source("scripts/run_pi_context_experiment.mjs");
-  assert(!/ipc\/responses\/stage-/.test(runner),
-    "the seal still expects response files the worker deletes, which would drop them silently");
-  assert(/ipc\/requests\/stage-/.test(runner),
-    "the seal stopped covering the requests too, which do persist");
+  assert(/ipc\/responses\/stage-/.test(runner) && /ipc\/requests\/stage-/.test(runner),
+    "the seal stopped covering the stage channel");
 
   // THE EVIDENCE THE DELETION MUST NOT COST. What the file held has to stay
   // provable without the file, and it is: the supervisor stamps the response's own

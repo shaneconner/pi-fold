@@ -15,7 +15,7 @@
 //     measurement;
 //   - every tool result is hashed into a ledger so the reread tax is measurable.
 
-import { existsSync, readFileSync, watch, rmSync } from "node:fs";
+import { existsSync, readFileSync, truncateSync, watch } from "node:fs";
 import { join } from "node:path";
 import { Type } from "typebox";
 // The measured runtime is this repo's own package, not a consumer's deployed copy: the
@@ -450,7 +450,14 @@ export function createPiContextExperimentExtension(config) {
             // delivery evidence is unaffected, because pace.jsonl records this
             // response's own responseSha256 and contentSha256 on the supervisor
             // side, where the model was never able to reach.
-            rmSync(responsePath, { force: true });
+            //
+            // TRUNCATED rather than unlinked, because the worker's own delivery
+            // counter walks these paths to learn how many stages have landed. A
+            // smoke run deleted them and the counter read zero all session, which
+            // tripped the resume bound at stage 1 of 8 while the supervisor had
+            // released all eight. An empty file is not a recovery channel and it
+            // is still a receipt.
+            truncateSync(responsePath, 0);
             const stage = expectedStage;
             expectedStage += 1;
             expectedChallenge = response.nextChallenge;
