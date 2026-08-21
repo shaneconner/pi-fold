@@ -1882,13 +1882,23 @@ export function registerActiveContext(pi: any, options: {
   // An ephemeral peek result rides the projection exactly until the model's
   // next message, the same answered reading as the directed ask, then its
   // index holds a one-line placeholder and the reply is the surviving trace.
-  // Runs against the BODY before the freeze reads it, so the one rewrite this
-  // costs lands at the moment the answer does and the projection is stable on
-  // every later pass. A message already projection-shaped (a fold's own
-  // deterministic brief placeholder carries the same toolCallId) is never
-  // touched: only the raw result is the ephemeral one.
-  const withdrawConsumedEphemeralPeeks = (body: unknown[]): void => {
-    if (!ephemeralPeeks.size) return;
+  // A message already projection-shaped (a fold's own deterministic brief
+  // placeholder carries the same toolCallId) is never touched: only the raw
+  // result is the ephemeral one.
+  //
+  // Returns what it replaced, keyed by call id, because the freeze has to be
+  // told. Running against the BODY alone was not enough: the freeze compares
+  // this pass's body prefix against the previous one and reuses the previous
+  // PROJECTION when they match, and a withdrawal edits a body index inside
+  // that prefix, so the comparison failed and the whole projection was rebuilt
+  // from the body. The rebuild drops every receipt and rider the freeze had
+  // buried mid-array over the session, which moves divergence back to the
+  // FIRST buried carrier rather than leaving it at the withdrawn index. That
+  // is the opposite of what this mechanism is for: a tail edit was rewriting
+  // the session's whole cached prefix.
+  const withdrawConsumedEphemeralPeeks = (body: unknown[]): Map<string, unknown> => {
+    const withdrawn = new Map<string, unknown>();
+    if (!ephemeralPeeks.size) return withdrawn;
     for (let index = 0; index < body.length; index += 1) {
       const message = body[index];
       const callId = ownValue(message, "toolCallId");
@@ -1899,7 +1909,7 @@ export function registerActiveContext(pi: any, options: {
       const answered = body.slice(index + 1).some((later) =>
         ownValue(later, "role") === "assistant");
       if (!answered) continue;
-      body[index] = {
+      const placeholder = {
         role: "toolResult",
         toolCallId: callId,
         toolName: ownValue(message, "toolName"),
@@ -1908,6 +1918,29 @@ export function registerActiveContext(pi: any, options: {
         details: { projection: "ephemeral-peek-consumed" },
         timestamp: ownValue(message, "timestamp"),
       };
+      body[index] = placeholder;
+      withdrawn.set(callId, placeholder);
+    }
+    return withdrawn;
+  };
+
+  // Carry a withdrawal into the freeze's own kept arrays so the frozen prefix
+  // stays usable. Matched by CALL ID rather than by position: the projection
+  // interleaves buried carriers, so a body index is not a projection index.
+  // The substitution is identity-preserving on role, call id, tool name and
+  // timestamp, so what changes is the one result's content and nothing else,
+  // and divergence lands at the withdrawn index where the mechanism puts it.
+  const carryWithdrawalIntoFreeze = (messages: unknown[], withdrawn: Map<string, unknown>): void => {
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index];
+      if (ownValue(message, "role") !== "toolResult") continue;
+      const callId = ownValue(message, "toolCallId");
+      if (typeof callId !== "string") continue;
+      const placeholder = withdrawn.get(callId);
+      if (!placeholder) continue;
+      const details = ownValue(message, "details");
+      if (details && typeof ownValue(details, "projection") === "string") continue;
+      messages[index] = placeholder;
     }
   };
 
@@ -1918,7 +1951,12 @@ export function registerActiveContext(pi: any, options: {
         customType !== receiptProjectionType && customType !== stewardProjectionType &&
         customType !== riderProjectionType && customType !== curationProjectionType;
     });
-    withdrawConsumedEphemeralPeeks(body);
+    const withdrawn = withdrawConsumedEphemeralPeeks(body);
+    if (withdrawn.size && freeze.body) {
+      carryWithdrawalIntoFreeze(freeze.body, withdrawn);
+      freeze.bodyText = stableStringify(freeze.body);
+      if (freeze.projection) carryWithdrawalIntoFreeze(freeze.projection, withdrawn);
+    }
     const held = freeze.body?.length ?? 0;
     freeze.active = freeze.projection !== null && body.length >= held &&
       stableStringify(body.slice(0, held)) === freeze.bodyText;

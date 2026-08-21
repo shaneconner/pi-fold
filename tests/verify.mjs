@@ -12899,7 +12899,8 @@ async function gateEphemeralPeek() {
     role: "toolResult", toolCallId: "peek-ephemeral", toolName: "pi_fold_context",
     content: [{ type: "text", text: "EPHEMERAL-SENTINEL-77aq" }], isError: false,
   });
-  const beforeAnswer = json.stableStringify((await project(runtime)).messages);
+  const beforeAnswerMessages = (await project(runtime)).messages;
+  const beforeAnswer = json.stableStringify(beforeAnswerMessages);
   assert(beforeAnswer.includes("EPHEMERAL-SENTINEL-77aq"),
     "the one read: the result must be visible until the model answers");
   runtime.appendMessage({ role: "assistant", content: [{ type: "text", text: "the figure is 41." }] });
@@ -12915,6 +12916,41 @@ async function gateEphemeralPeek() {
   assert.equal(placeholder.details.projection, "ephemeral-peek-consumed");
   assert(afterText.includes("the figure is 41."),
     "the surviving trace is the reply itself");
+
+  // THE CACHE PROPERTY, which is the whole reason the mechanism is worth
+  // having. A withdrawal is a TAIL edit: it changes one result's content and
+  // leaves every earlier message alone, so the provider's implicit prefix
+  // cache keeps everything up to the withdrawn index. Asserting only the
+  // visibility semantics above let a defect ship: the freeze compares this
+  // pass's body prefix against the previous one, a withdrawal edits a body
+  // index INSIDE that prefix, the comparison failed, and the projection was
+  // rebuilt from the body without the receipts and riders the freeze had
+  // buried mid-array over the session. Divergence then landed on the FIRST
+  // buried carrier instead of the withdrawn result, so a tail edit rewrote the
+  // session's whole cached prefix. Measured on this fixture the identical
+  // prefix fell to 82.5 percent against 99.6 for an ordinary append; the
+  // sealed sol-20260820 campaign paid 55.1 percent where the mechanism owed
+  // 99.5. The gate pins the position rather than a share, because the share is
+  // a property of how much buried carriage a session happens to hold.
+  const withdrawnIndex = projectedAfter.findIndex((message) =>
+    message?.toolCallId === "peek-ephemeral");
+  const buriedBefore = beforeAnswerMessages
+    .map((message, index) => (typeof message?.customType === "string" ? index : -1))
+    .filter((index) => index >= 0);
+  assert(buriedBefore.some((index) => index < withdrawnIndex),
+    "the fixture holds no buried carrier before the withdrawal, so the prefix assertion is vacuous");
+  for (const index of buriedBefore) {
+    assert.equal(
+      json.stableStringify(projectedAfter[index] ?? null),
+      json.stableStringify(beforeAnswerMessages[index] ?? null),
+      `the withdrawal moved the buried carrier at index ${index}: the frozen prefix was rebuilt`);
+  }
+  for (let index = 0; index < withdrawnIndex; index += 1) {
+    assert.equal(
+      json.stableStringify(projectedAfter[index] ?? null),
+      json.stableStringify(beforeAnswerMessages[index] ?? null),
+      `a withdrawal at index ${withdrawnIndex} changed message ${index}: this is not a tail operation`);
+  }
 
   // The attempt event carries the request's shape for the campaign lens.
   const attemptEvents = runtime.appended
@@ -12956,6 +12992,8 @@ async function gateEphemeralPeek() {
     durableDefault: true,
     oneRead: true,
     placeholderKeepsIndex: true,
+    prefixIntactBeforeWithdrawnIndex: true,
+    buriedCarriersHeld: true,
     attemptSaysEphemeral: true,
     foldPlaceholderUntouched: true,
     restartDegradesToDurable: true,
