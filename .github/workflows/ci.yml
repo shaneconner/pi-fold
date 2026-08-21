@@ -37,6 +37,10 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq bubblewrap
+          # Ubuntu 24.04 ships AppArmor's restriction on unprivileged user
+          # namespaces, which is what a runner rejects with "setting up uid map:
+          # Permission denied". The workstation has it off already.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           bwrap --version
           bwrap --unshare-all --share-net --dev /dev --proc /proc --ro-bind /usr /usr \
             --symlink usr/bin /bin -- /bin/true && echo "unprivileged namespaces work"
