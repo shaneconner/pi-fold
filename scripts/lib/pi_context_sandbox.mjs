@@ -42,6 +42,11 @@ import { basename, join } from "node:path";
 // the argv builder cannot drift apart.
 export const SANDBOX_PATH = "/usr/local/bin:/usr/bin:/bin";
 
+// Inside the namespace bubblewrap is init at pid 1 and the worker is its only
+// child, so the worker always sees itself as 2. The supervisor holds the host
+// child handle separately, which is what binds liveness; this binds identity.
+export const SANDBOX_WORKER_PID = 2;
+
 // ASSEMBLED, NOT WRITTEN OUT. This is a synthetic home inside a mount namespace
 // and belongs to nobody, but it matches the pattern package gate 86 greps tracked
 // files for, and that gate is right to be blunt about operator paths rather than

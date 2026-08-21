@@ -42,6 +42,7 @@ import {
 import {
   HARNESS_SOURCE,
   SANDBOX_PATHS,
+  SANDBOX_WORKER_PID,
   sandboxArgv,
   sandboxConfig,
   sandboxIdentityFiles,
@@ -288,7 +289,7 @@ function parseRequest(path, config, stage, expectedChallenge, worker) {
   assertExperiment(request.version === 1 && request.runId === config.runId && request.stage === stage &&
     request.challenge === expectedChallenge &&
     request.challengeSha256 === sha256Text(expectedChallenge) &&
-    request.workerPid === worker.pid && request.workerStartTicks === processStartTicks(worker.pid) &&
+    request.workerPid === SANDBOX_WORKER_PID && request.workerStartTicks === state.workerStartTicks &&
     request.requestSha256 === sha256Json(identity),
   `Stage request identity drift ${stage}`);
   return request;
@@ -555,7 +556,17 @@ async function run() {
       absoluteDeadline: config.createdMonotonicMs + 5 * 60 * 1_000,
     });
     workerReady = readJson(readyPath);
-    assertExperiment(workerReady.runId === runId && workerReady.workerPid === worker.pid &&
+    // THE PID IS A NAMESPACE PID (Shane 2026-08-21). The worker reports what it can
+    // see, and inside its own PID namespace that is 2: bubblewrap is init at 1 and
+    // the worker is its only child. The host pid belongs to bwrap, so the old
+    // equality could never hold. Asserting the namespace pid is not a weaker check,
+    // it is a different one worth having: it proves the process writing this file is
+    // the namespace's own direct child rather than something re-spawned inside it.
+    // That the process exists at all, and dies with the supervisor, is bound by the
+    // child handle this side holds and by --die-with-parent.
+    assertExperiment(workerReady.workerPid === SANDBOX_WORKER_PID,
+      `Worker readiness came from namespace pid ${workerReady.workerPid}, not the namespace's own child`);
+    assertExperiment(workerReady.runId === runId &&
       workerReady.arm === arm &&
       workerReady.checkoutSha256 === (closedBook ? null : plannedFingerprint) &&
       workerReady.sessionFile.startsWith(`${SANDBOX_PATHS.session}/`),
