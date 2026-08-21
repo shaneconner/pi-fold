@@ -13084,41 +13084,57 @@ async function gateFoldSettingsRoundTrip() {
     // Every key must route through matchesKey, which carries both encodings.
     const editorPath = join(scratch, "editor.json");
     let closed = null;
-    const themeLike = { fg: (_role, text) => text };
+    const themeLike = { fg: (_role, text) => text, bold: (text) => text };
     const editor = new settingsModule.FoldSettingsEditor(
       {}, 251_520, editorPath, themeLike, (saved) => { closed = saved; },
     );
-    const renders = () => editor.render(90).join("\n");
+    const renders = () => editor.render(120).join("\n");
     // Both encodings move the cursor; assert the SELECTION moved, not just that no
     // exception flew, because a dead key handler also throws nothing.
     editor.handleInput("\x1bOB");
     assert(renders().includes("→ Post-commit aim"), "SS3 down did not move the selection");
     editor.handleInput("\x1b[A");
     assert(renders().includes("→ Commit trigger"), "CSI up did not move the selection back");
-    // Open the submenu, replace the prefilled value, apply: the file lands immediately.
+
+    // Steppable rows CYCLE through allowed values, adjacent step first. The cycle
+    // lists are filtered against the current draft, so a combination
+    // resolveThresholds would refuse is never selectable; walk minTarget hard and
+    // every persisted state must stay valid and strictly below the commit trigger.
     editor.handleInput("\r");
-    for (let i = 0; i < 6; i++) editor.handleInput("\x7f");
-    for (const character of "0.5") editor.handleInput(character);
+    assert.equal(JSON.parse(readFileSync(editorPath, "utf8")).thresholds.maxTarget, 0.85,
+      "one Enter did not advance maxTarget by one step (0.80 -> 0.85)");
+    editor.handleInput("\x1b[B");
+    let previous = "";
+    for (let i = 0; i < 40; i++) {
+      editor.handleInput("\r");
+      const state = JSON.parse(readFileSync(editorPath, "utf8"));
+      context.resolveThresholds(state.thresholds);
+      assert(state.thresholds.minTarget < state.thresholds.maxTarget,
+        `cycling produced minTarget ${state.thresholds.minTarget} >= maxTarget ${state.thresholds.maxTarget}`);
+      if (i > 0 && renders() === previous) break;
+      previous = renders();
+    }
+
+    // The budget row keeps a free-form submenu, and its DISPLAY string re-fires
+    // onChange when the editor closes: parseFloat would read "300,000 tokens" as
+    // 300 and silently overwrite the saved value. The cycler must ignore that
+    // re-fire; the submenu path already applied and saved it.
+    editor.handleInput("\x1b[B");
+    editor.handleInput("\x1b[B");
+    editor.handleInput("\x1b[B");
+    assert(renders().includes("→ Input budget"), "three SS3 downs did not reach the budget row");
     editor.handleInput("\r");
-    const savedFile = JSON.parse(readFileSync(editorPath, "utf8"));
-    assert.equal(savedFile.thresholds.maxTarget, 0.5, "an applied edit did not reach disk");
-    assert(renders().includes("0.5"), "the list did not re-render the applied value");
+    assert(renders().includes("Enter to apply"), "the budget submenu did not open");
+    for (const character of "300000") editor.handleInput(character);
+    editor.handleInput("\r");
+    assert.equal(JSON.parse(readFileSync(editorPath, "utf8")).providerInputBudget, 300000,
+      "the applied budget was corrupted by its own display string");
+
     // Escape inside an open submenu cancels THE SUBMENU, not the screen.
     editor.handleInput("\r");
-    assert(renders().includes("Enter to apply"), "the submenu did not open");
+    assert(renders().includes("Enter to apply"), "the submenu did not reopen");
     editor.handleInput("\x1b");
     assert(closed === null, "escape inside a submenu closed the whole editor");
-    assert(renders().includes("Commit trigger"), "the submenu left the main list");
-    // An invalid value renders the named error and writes nothing.
-    editor.handleInput("\x1b[B");
-    editor.handleInput("\r");
-    for (let i = 0; i < 6; i++) editor.handleInput("\x7f");
-    for (const character of "0.9") editor.handleInput(character);
-    editor.handleInput("\r");
-    assert(renders().includes("must sit below"), "a cross-field violation rendered no error");
-    assert.equal(JSON.parse(readFileSync(editorPath, "utf8")).thresholds.minTarget,
-      context.DEFAULT_THRESHOLDS.minTarget, "a refused submenu edit reached disk");
-    editor.handleInput("\x1b");
     editor.handleInput("\x1b");
     assert.equal(closed, true, "escape on the main list did not close the editor");
 
