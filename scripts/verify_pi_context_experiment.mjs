@@ -222,8 +222,10 @@ import {
   deleteHarnessSource,
   sandboxArgv,
   sandboxConfig,
+  SANDBOX_PLAN_KEYS,
   sandboxPlan,
   seededTokenCarriers,
+  validateSandboxPlan,
 } from "./lib/pi_context_sandbox.mjs";
 
 const PROJECT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -5720,11 +5722,20 @@ try {
   // cleanly and pins the exact bytes in its manifest; the adjudicator recomputes
   // the pin and grades through the shared lens; the supervisor reads the frozen
   // querySeed from the sealed seeds file.
-  assert(worker.includes("endBlockPrompt(plan.ledger, config.querySeed)"),
-    "the worker must build the end block from the plan's ledger and the frozen seed");
-  assert(worker.includes("endBlockSha256: sha256Text(endBlockPrompt(plan.ledger, config.querySeed))"),
+  // COMPOSED OUTSIDE THE SANDBOX (Shane 2026-08-21). The worker used to build this
+  // from plan.ledger and config.querySeed, which meant both had to be inside the
+  // namespace, and a seed plus the ledger geometry is a derivable question list: a
+  // model that can derive the questions has been told what to remember. The
+  // supervisor composes it from the same two inputs on its own side and the worker
+  // carries only the finished text, which rides in the self-deleting config.
+  const supervisorEndBlock = source("scripts/run_pi_context_experiment.mjs");
+  assert(supervisorEndBlock.includes("endBlockPrompt(plan.ledger, hiddenMassSeeds.querySeed)"),
+    "the supervisor must build the end block from the plan's ledger and the frozen seed");
+  assert(!worker.includes("plan.ledger"),
+    "the worker still reaches for the ledger the sandboxed plan does not carry");
+  assert(worker.includes("endBlockSha256: sha256Text(config.endBlockPrompt ?? \"\")"),
     "the worker manifest must pin the end block's exact bytes");
-  assert(/stagesDelivered\(\) === plan\.stageCount &&\n\s*modelEndedItsTurn\(terminalState\)\) \{\n\s*await session\.prompt\(endBlockPrompt/.test(worker),
+  assert(/stagesDelivered\(\) === plan\.stageCount &&\n\s*modelEndedItsTurn\(terminalState\)\) \{\n\s*await session\.prompt\(config\.endBlockPrompt/.test(worker),
     "the end block is asked only after the whole workload was delivered cleanly");
   assert(adjudicator.includes(
     "manifest.endBlockSha256 === sha256Text(endBlockPrompt(plan.ledger, config.querySeed))"),
@@ -9525,12 +9536,23 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
   // THE PLAN THE WORKER HOLDS carries geometry and nothing else. Built by
   // whitelist, so a field added to the full plan cannot arrive by default.
   const reduced = sandboxPlan(plan);
-  assert.deepEqual(Object.keys(reduced).sort(),
-    ["files", "mode", "planSha256", "repo", "stageCount", "version"],
+  assert.deepEqual(Object.keys(reduced).sort(), [...SANDBOX_PLAN_KEYS].sort(),
     "the sandboxed plan grew a field");
+  assert.doesNotThrow(() => validateSandboxPlan(reduced),
+    "the plan the supervisor writes is not one the worker will accept");
   const reducedText = JSON.stringify(reduced);
-  assert(!/expectedAnswer|instructions|probes|deliverable|codeWord|ledger/.test(reducedText),
-    "the sandboxed plan still carries graded or instructional material");
+  // Keys, not substrings: probeCount and deliverableCount are geometry and belong,
+  // while the content those names also prefix does not.
+  for (const key of ["expectedAnswer", "instructions", "probes", "stages", "codeWord",
+    "ledger", "deliverable", "chains", "seed"]) {
+    assert(!reducedText.includes(`"${key}":`),
+      `the sandboxed plan still carries graded or instructional material: ${key}`);
+  }
+  // And nothing free-text rode in under a name nobody thought to ban. Every string
+  // in this object is a path, a hash or an identifier.
+  const strings = [...reducedText.matchAll(/"([^"\\]*)"/g)].map((match) => match[1]);
+  assert(strings.every((value) => value.length <= 128 && !value.includes(" ")),
+    "the sandboxed plan carries prose, which is how instructions would arrive");
   assert.equal(reduced.stageCount, plan.stageCount, "the sandboxed plan lost the stage count");
   assert(reduced.files.length > 0, "the sandboxed plan lost the corpus it must attest");
 
@@ -9540,7 +9562,11 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
   const carried = sandboxConfig({
     arm: "native", querySeed: "seed-must-not-travel", planPath: "/campaign/stages-full.json",
     runDir: "/host/run", repoDir: "/host/run/repo", stageCount: 64,
-  });
+  }, "the exam text");
+  assert.equal(carried.endBlockPrompt, "the exam text",
+    "the end block did not reach the worker as text");
+  assert.equal(carried.sessionDir, SANDBOX_PATHS.session,
+    "the session file would land somewhere other than its own directory");
   assert(!("querySeed" in carried), "the query seed reached the sandbox");
   assert(!JSON.stringify(carried).includes("seed-must-not-travel"),
     "the query seed reached the sandbox under another key");
@@ -9566,8 +9592,8 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
     // worker imports it from: the module has to survive its own deletion.
     writeFileSync(join(root, "harness", "pi_context_sandbox.mjs"),
       source("scripts/lib/pi_context_sandbox.mjs"));
-    writeFileSync(join(root, "config.json"), "{}\n");
-    writeFileSync(join(root, "plan.json"), "{}\n");
+    writeFileSync(join(root, "harness", "config.json"), "{}\n");
+    writeFileSync(join(root, "harness", "plan.json"), "{}\n");
     writeFileSync(join(root, "identity", "passwd"),
       `agent:x:${process.getuid()}:${process.getgid()}:agent:${SANDBOX_PATHS.home}:/bin/sh\n`);
     writeFileSync(join(root, "identity", "group"), `agent:x:${process.getgid()}:\n`);
@@ -9577,7 +9603,6 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
       piRoot: PI_INSTALL_ROOT, nodeExecutable: process.execPath,
       identityDir: join(root, "identity"),
       agentDir: join(root, "agent"), authPath: join(root, "agent", "auth.json"),
-      configPath: join(root, "config.json"), planPath: join(root, "plan.json"),
       homeDir: join(root, "home"),
     });
     // The PID namespace is the part that matters. A fresh /proc alone leaves every
@@ -9632,6 +9657,11 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
     assert.equal(seen.otherExtensions, false, "the interactive extension tree is inside the namespace");
     assert.equal(seen.harness, true, "the harness never reached the namespace, so the delete proves nothing");
     assert.deepEqual(seen.harnessAfterDelete, [], "the harness source survived its own deletion");
+    // The config rides inside that copy, which is what lets it carry the exam text
+    // and the ledger geometry at all: both stop existing before the first turn.
+    assert(SANDBOX_PATHS.config.startsWith(`${SANDBOX_PATHS.harness}/`) &&
+      SANDBOX_PATHS.plan.startsWith(`${SANDBOX_PATHS.harness}/`),
+    "the config or plan outlives the harness deletion");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

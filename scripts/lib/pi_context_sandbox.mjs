@@ -49,8 +49,18 @@ export const SANDBOX_PATHS = Object.freeze({
   // own HOME. The worker resolves jiti and typebox through explicit aliases into
   // this root, so the project's node_modules is never needed and never mounted.
   pi: "/home/agent/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent",
-  config: "/config.json",
-  plan: "/plan.json",
+  // Pi's agent directory, rebuilt per run rather than bound. The real one holds
+  // run-history.jsonl (the user's own sessions), models.json (a secret-tool lookup
+  // for an unrelated provider) and the interactive pi-fold deployment. None of
+  // that belongs to this run.
+  agent: "/home/agent/.pi/agent",
+  auth: "/home/agent/.pi/agent/auth.json",
+  // The config and the plan are WRITTEN INTO the harness copy rather than bound
+  // over it, so the one deletion covers them too. A separate bind here would be a
+  // mount point the worker could not remove, and that is what lets the config
+  // still carry the end block's prompt text: it stops existing before the first turn.
+  config: "/opt/harness/config.json",
+  plan: "/opt/harness/plan.json",
 });
 
 // The ONLY first-party source copied in. Traced from the worker's import graph,
@@ -64,6 +74,11 @@ export const HARNESS_SOURCE = Object.freeze([
   "scripts/lib/pi_context_soak_attestation.mjs",
   "scripts/lib/pi_fold_identity.mjs",
   "scripts/lib/pi_context_sandbox.mjs",
+  // Pinned by the run config's source hashes, so the worker's own attestation
+  // needs them present. They go the same way as the rest, before the first turn.
+  "scripts/run_pi_context_experiment.mjs",
+  "scripts/stage_pi_context_experiment.mjs",
+  "scripts/adjudicate_pi_context_experiment.mjs",
   "extensions/active-context.ts",
   "extensions/evidence.js",
   "extensions/index.js",
@@ -121,11 +136,11 @@ export function sandboxArgv(layout) {
   const {
     bwrap = "/usr/bin/bwrap",
     checkoutDir, sessionDir, runDir, harnessDir,
-    piRoot, nodeExecutable, configPath, planPath, homeDir, identityDir,
+    piRoot, nodeExecutable, homeDir, identityDir, agentDir, authPath,
   } = layout;
   for (const [name, value] of Object.entries({
     checkoutDir, sessionDir, runDir, harnessDir,
-    piRoot, nodeExecutable, configPath, planPath, homeDir, identityDir,
+    piRoot, nodeExecutable, homeDir, identityDir, agentDir, authPath,
   })) {
     if (typeof value !== "string" || !value.startsWith("/")) {
       throw new Error(`Sandbox layout needs an absolute ${name}`);
@@ -175,10 +190,16 @@ export function sandboxArgv(layout) {
     "--bind", runDir, SANDBOX_PATHS.run,
     "--bind", harnessDir, SANDBOX_PATHS.harness,
     "--bind", homeDir, SANDBOX_PATHS.home,
-    // AFTER the home bind, so it layers inside it rather than being swallowed.
+    // AFTER the home bind, so these layer inside it rather than being swallowed.
+    "--bind", agentDir, SANDBOX_PATHS.agent,
+    // The credential store is the REAL file, read-write, because the token
+    // refreshes during a run and independent per-run snapshots would race. It is
+    // the one thing here the model could read and should not: `bash` is inside the
+    // namespace and so is this file. The read fence denies it as defence in depth,
+    // which is all an in-process guard can be, and the exposure is disclosed
+    // rather than described as closed.
+    "--bind", authPath, SANDBOX_PATHS.auth,
     "--ro-bind", piRoot, SANDBOX_PATHS.pi,
-    "--ro-bind", configPath, SANDBOX_PATHS.config,
-    "--ro-bind", planPath, SANDBOX_PATHS.plan,
     "--chdir", SANDBOX_PATHS.work,
     "--",
     SANDBOX_PATHS.node,
@@ -192,17 +213,42 @@ export function sandboxArgv(layout) {
 // needed instructions, probes or the ledger: it needs the file list to attest the
 // checkout it actually ran on, and the count to know when the assignment ends.
 // Built by whitelist, so a field added to the full plan cannot arrive by default.
+export const SANDBOX_PLAN_KEYS = Object.freeze([
+  "version", "mode", "planSha256", "stageCount", "probeCount", "deliverableCount",
+  "repo", "files",
+]);
+
 export function sandboxPlan(plan) {
   return {
     version: plan.version,
     mode: plan.mode,
     planSha256: plan.planSha256,
     stageCount: plan.stageCount,
-    repo: { commit: plan.repo.commit, treeSha256: plan.repo.treeSha256 },
+    probeCount: plan.probeCount,
+    deliverableCount: plan.deliverableCount,
+    repo: {
+      key: plan.repo.key, url: plan.repo.url,
+      commit: plan.repo.commit, treeSha256: plan.repo.treeSha256,
+    },
     files: plan.stages.flatMap((stage) => stage.files).map((file) => ({
       path: file.path, sha256: file.sha256,
     })),
   };
+}
+
+// The worker cannot run `validateStagePlan` any more, because the plan it holds
+// has no stages: they are rendered by the supervisor and arrive over the stage
+// channel. What it must still prove is that the geometry is the geometry its
+// config pins, and that nothing instructional or graded rode along.
+export function validateSandboxPlan(value) {
+  const ok = value && typeof value === "object" && !Array.isArray(value) &&
+    SANDBOX_PLAN_KEYS.every((key) => key in value) &&
+    Object.keys(value).every((key) => SANDBOX_PLAN_KEYS.includes(key)) &&
+    Number.isSafeInteger(value.stageCount) && value.stageCount > 0 &&
+    Array.isArray(value.files) && value.files.length > 0 &&
+    value.files.every((file) => typeof file?.path === "string" && typeof file?.sha256 === "string");
+  if (!ok) throw new Error("Invalid sandboxed stage plan shape");
+  return value;
 }
 
 // The run config the worker is allowed to hold. `querySeed` is the field that
@@ -210,13 +256,26 @@ export function sandboxPlan(plan) {
 // model that can derive the questions has been told what to remember. The
 // supervisor keeps the seed and delivers the end block as text when the exam
 // starts, which is also the moment the questions stop being a leak.
-export const SANDBOX_CONFIG_WITHHELD = Object.freeze(["querySeed", "planPath", "runDir", "repoDir"]);
+export const SANDBOX_CONFIG_WITHHELD = Object.freeze([
+  "querySeed", "planPath", "runDir", "repoDir", "sessionDir",
+]);
 
-export function sandboxConfig(config) {
+export function sandboxConfig(config, endBlockPrompt) {
   const withheld = new Set(SANDBOX_CONFIG_WITHHELD);
   const carried = Object.fromEntries(
     Object.entries(config).filter(([key]) => !withheld.has(key)));
-  return { ...carried, planPath: SANDBOX_PATHS.plan, runDir: SANDBOX_PATHS.run, repoDir: SANDBOX_PATHS.work };
+  return {
+    ...carried,
+    planPath: SANDBOX_PATHS.plan,
+    runDir: SANDBOX_PATHS.run,
+    repoDir: SANDBOX_PATHS.work,
+    sessionDir: SANDBOX_PATHS.session,
+    // The TEXT, not the seed. The supervisor composes the end block from the
+    // ledger and the frozen query seed on its own side; the worker only reads it
+    // out. A seed plus the ledger geometry is a derivable question list, and a
+    // model that can derive the questions has been told what to remember.
+    ...(endBlockPrompt === undefined ? {} : { endBlockPrompt }),
+  };
 }
 
 // The synthetic account the namespace runs as. bwrap maps the caller's uid, so the

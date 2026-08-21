@@ -35,8 +35,13 @@ import {
   receiptLens,
   validateExperimentManifest,
   validateExperimentRunConfig,
-  validateStagePlan,
 } from "./lib/pi_context_experiment.mjs";
+import {
+  SANDBOX_PATHS,
+  deleteHarnessSource,
+  harnessSourceRemains,
+  validateSandboxPlan,
+} from "./lib/pi_context_sandbox.mjs";
 import {
   assertSanitizedRuntimeEnvironment,
   directoryTreeSha256,
@@ -57,9 +62,17 @@ const configPath = process.argv[2];
 assertExperiment(configPath && existsSync(configPath), "Experiment worker requires a run config path");
 const config = validateExperimentRunConfig(JSON.parse(readFileSync(configPath, "utf8")));
 assertSanitizedRuntimeEnvironment(process.env);
-assertExperiment(process.ppid === config.supervisorPid &&
-  processStartTicks(process.ppid) === config.supervisorStartTicks,
-"Experiment worker is not a direct child of the attested supervisor");
+// INSIDE ITS OWN MOUNT NAMESPACE (Shane 2026-08-21). This used to assert the
+// worker was a direct child of the attested supervisor by pid and start ticks.
+// Inside a PID namespace there is no host pid to compare: the worker is a child
+// of bubblewrap's own init, which is pid 1. The supervisor keeps the stronger
+// half of that proof anyway, because it holds the spawned child handle itself.
+// What is worth asserting HERE is the property the run depends on, that the
+// filesystem this process sees is the one the sandbox builder laid out. A worker
+// that somehow started outside it would see host paths in its own config.
+assertExperiment(process.ppid === 1 && config.runDir === SANDBOX_PATHS.run &&
+  config.repoDir === SANDBOX_PATHS.work && config.sessionDir === SANDBOX_PATHS.session,
+"Experiment worker is not running inside its own mount namespace");
 
 const workerDependencyHashes = {
   piPackageJson: fileSha256(join(PI_ROOT, "package.json")),
@@ -105,13 +118,13 @@ const closedBook = config.sessionType === EXPERIMENT_CLOSED_BOOK_LABEL;
 const armRuntime = closedBook
   ? { activeContextEnabled: false, nativeCompactionEnabled: false, toleratesOverflow: false }
   : armRuntimeConfiguration(config.arm);
-const plan = validateStagePlan(readJson(config.planPath));
+const plan = validateSandboxPlan(readJson(config.planPath));
 assertExperiment(plan.planSha256 === config.planSha256 && plan.mode === config.mode &&
   plan.repo.commit === config.targetCommit, "Stage plan does not match the run config pin");
 
 // Pin the checkout: every byte this run will read is the byte that was staged.
 // A closed-book session has no checkout to pin; its corpus statement is the plan's.
-const stagedFiles = plan.stages.flatMap((stage) => stage.files);
+const stagedFiles = plan.files;
 const observed = closedBook ? [] : stagedFiles.map((file) => {
   const path = join(config.repoDir, file.path);
   assertExperiment(existsSync(path), `Pinned checkout is missing ${file.path}`);
@@ -120,6 +133,18 @@ const observed = closedBook ? [] : stagedFiles.map((file) => {
 const checkoutSha256 = closedBook ? null : corpusManifestSha256(observed);
 assertExperiment(closedBook || checkoutSha256 === config.targetTreeSha256,
   "Pinned checkout does not reproduce the staged corpus fingerprint");
+
+// THE HARNESS DELETES ITS OWN SOURCE (Shane 2026-08-21). Every module above is
+// resident, the plan and config have been read, and the checkout is attested, so
+// nothing reads these bytes again. What goes is a description of the experiment
+// sitting where `grep` can reach it: this file names the arms, the resume
+// contract and the end block, and the config beside it carries the exam's own
+// text. Restoring the stock tool surface is what makes that intolerable, and the
+// model has not taken a turn yet. The mount point itself cannot be removed from
+// inside, so the contents go and an empty directory stays.
+deleteHarnessSource();
+assertExperiment(harnessSourceRemains().length === 0,
+  "The harness source survived its own deletion, so the model can read the protocol");
 
 // NO MEMORY DIRECTION (Shane 2026-08-14). This prompt used to say "keep an exact
 // working memory of the identifiers, paths and line positions you have seen",
@@ -328,7 +353,11 @@ try {
   const model = discoveredModel;
   const systemPrompt = closedBook ? closedBookSystemPrompt() : workloadSystemPrompt();
 
-  manager = SessionManager.create(config.repoDir, config.runDir);
+  // ITS OWN DIRECTORY, holding one file. The session used to land in the run
+  // directory itself, beside the run config that named the plan holding every
+  // graded answer, which is the chain five sealed runs walked. An agent looking
+  // for its own history now finds its own history and nothing else.
+  manager = SessionManager.create(config.repoDir, config.sessionDir);
   const markerId = manager.appendCustomEntry(EXPERIMENT_MARKER_ENTRY, {
     version: 1,
     runId: config.runId,
@@ -500,7 +529,7 @@ try {
       // skips it and fails its own terminal assertions instead.
       if (!closedBook && !deadlineFired && stagesDelivered() === plan.stageCount &&
         modelEndedItsTurn(terminalState)) {
-        await session.prompt(endBlockPrompt(plan.ledger, config.querySeed),
+        await session.prompt(config.endBlockPrompt,
           { expandPromptTemplates: false });
         terminalState = await waitForDurableTerminalQuiescence(manager, session);
       }
@@ -714,7 +743,7 @@ try {
     },
     // The withheld end block's exact bytes, pinned the way the closed-book leg
     // pins its question list: the sealed session states what it was asked.
-    endBlockSha256: sha256Text(endBlockPrompt(plan.ledger, config.querySeed)),
+    endBlockSha256: sha256Text(config.endBlockPrompt ?? ""),
     createdWallMs: config.createdWallMs,
   });
   writeJsonExclusive(join(config.runDir, "run-manifest.json"), manifest);

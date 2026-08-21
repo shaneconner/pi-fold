@@ -13,7 +13,7 @@
 //        [--model-provider openai-codex] [--model-id gpt-5.6-sol] [--effort xhigh]
 
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -33,11 +33,20 @@ import {
   armRuntimeConfiguration,
   assertExperiment,
   corpusManifestSha256,
+  endBlockPrompt,
   stagePayloadText,
   validateExperimentRunConfig,
   validateStagePlan,
   visibleStage,
 } from "./lib/pi_context_experiment.mjs";
+import {
+  HARNESS_SOURCE,
+  SANDBOX_PATHS,
+  sandboxArgv,
+  sandboxConfig,
+  sandboxIdentityFiles,
+  sandboxPlan,
+} from "./lib/pi_context_sandbox.mjs";
 import {
   SOAK_MAX_HEARTBEAT_GAP_MS,
   SOAK_SANITIZED_ENV_MARKER,
@@ -463,11 +472,56 @@ async function run() {
   const configPath = join(runDir, "run-config.json");
   writeJsonExclusive(configPath, config);
   closeSync(openSync(join(runDir, "failure-latch.jsonl"), "wx", 0o600));
+
+  // THE NAMESPACE THE RUN EXECUTES IN (Shane 2026-08-21). Everything the model
+  // must not see is left unmounted rather than denied: the campaign directory and
+  // its plan, docs/ and its frozen ledger seed, .canon, lab/, the verifier, the
+  // user's home and every other session on the machine. See
+  // scripts/lib/pi_context_sandbox.mjs for what the argv builds and why.
+  //
+  // The staging root is a sibling of the run directory, so /run stays the run's
+  // own artifacts. The session directory is INSIDE the run directory because the
+  // seal addresses it relatively, and it holds exactly one file, so an agent that
+  // finds its own history finds nothing else beside it.
+  const sandboxRoot = `${runDir}.sandbox`;
+  const sessionDir = join(runDir, "session");
+  const harnessDir = join(sandboxRoot, "harness");
+  const homeDir = join(sandboxRoot, "home");
+  const agentDir = join(sandboxRoot, "agent");
+  const identityDir = join(sandboxRoot, "identity");
+  for (const dir of [sessionDir, sandboxRoot, harnessDir, homeDir, agentDir, identityDir]) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+  for (const relative of HARNESS_SOURCE) {
+    const target = join(harnessDir, relative);
+    mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+    copyFileSync(join(PROJECT, relative), target);
+  }
+  const identity = sandboxIdentityFiles(process.getuid(), process.getgid());
+  writeFileSync(join(identityDir, "passwd"), identity.passwd, { mode: 0o600 });
+  writeFileSync(join(identityDir, "group"), identity.group, { mode: 0o600 });
+  // Pi's real agent directory holds run-history.jsonl, models.json and the
+  // interactive pi-fold deployment. The namespace gets a rebuilt one carrying the
+  // public model catalogue; the credential store is bound over it separately.
+  copyFileSync(join(RUNTIME_HOME, ".pi", "agent", "models-store.json"),
+    join(agentDir, "models-store.json"));
+  const authPath = join(RUNTIME_HOME, ".pi", "agent", "auth.json");
+  // The plan the worker holds is geometry only, and the config carries the exam as
+  // text rather than the seed that derives it. Both are WRITTEN INTO the harness
+  // copy, so the deletion that removes the harness source removes them too.
+  writeJsonExclusive(join(harnessDir, "plan.json"), sandboxPlan(plan));
+  writeJsonExclusive(join(harnessDir, "config.json"), sandboxConfig(
+    { ...config, sessionDir },
+    closedBook ? undefined : endBlockPrompt(plan.ledger, hiddenMassSeeds.querySeed)));
+
   const stdoutFd = openSync(join(runDir, "worker.stdout.log"), "wx", 0o600);
   const stderrFd = openSync(join(runDir, "worker.stderr.log"), "wx", 0o600);
-  const worker = spawn(process.execPath, [
-    join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), configPath,
-  ], {
+  const sandbox = sandboxArgv({
+    checkoutDir: repoDir, sessionDir, runDir, harnessDir,
+    piRoot: PI_INSTALL_ROOT, nodeExecutable: process.execPath,
+    homeDir, identityDir, agentDir, authPath,
+  });
+  const worker = spawn(sandbox[0], sandbox.slice(1), {
     cwd: PROJECT,
     env: sanitizedChildEnvironment({ PI_FOLD_EXPERIMENT_RUN_ID: runId }),
     detached: false,
@@ -504,8 +558,13 @@ async function run() {
     assertExperiment(workerReady.runId === runId && workerReady.workerPid === worker.pid &&
       workerReady.arm === arm &&
       workerReady.checkoutSha256 === (closedBook ? null : plannedFingerprint) &&
-      workerReady.sessionFile.startsWith(`${runDir}/`),
+      workerReady.sessionFile.startsWith(`${SANDBOX_PATHS.session}/`),
     "Worker readiness identity drifted");
+    // The worker names its session file from inside the namespace. Everything on
+    // this side of the boundary reads the host path for the same inode.
+    workerReady.sessionFile = join(sessionDir, basename(workerReady.sessionFile));
+    assertExperiment(workerReady.sessionFile.startsWith(`${runDir}/`),
+      "The session file landed outside the run directory the seal addresses");
     state.workerStartTicks = workerReady.workerStartTicks;
     appendHeartbeat(state, worker, workerReady.sessionFile);
 

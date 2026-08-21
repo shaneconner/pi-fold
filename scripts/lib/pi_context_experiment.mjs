@@ -2361,6 +2361,14 @@ export const EXPERIMENT_RUN_CONFIG_OPTIONAL_KEYS = Object.freeze([
   "sessionType", "guidance", "foldScheduling", "foldPeekResults", "guidedCuration",
   "providerTotalWindow", "providerInputBudget", "briefGenerator", "transport", "reliabilityLevers",
   "ledgerTasks", "querySeed",
+  // SANDBOX CARRIAGE (Shane 2026-08-21). `sessionDir` names where the session
+  // file lands, which used to be the run directory itself: the transcript sat
+  // beside the run config that named the plan holding every answer. It gets its
+  // own directory now, holding one file, so an agent that finds its own history
+  // finds nothing else. `endBlockPrompt` carries the exam as TEXT, composed by
+  // the supervisor from the ledger and the frozen query seed, because the seed
+  // itself plus the ledger geometry is a derivable question list.
+  "sessionDir", "endBlockPrompt",
 ]);
 
 export function validateExperimentRunConfig(value) {
