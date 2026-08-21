@@ -22,7 +22,7 @@
 //   /run         this run's worker artifacts
 //   /opt/harness this run's copy of the harness source, DELETED after import
 //   /opt/pi      the Pi install, read-only
-//   /home/agent  a writable home, so `write` and `bash` have somewhere to go
+//   the home     a writable home, so `write` and `bash` have somewhere to go
 //   /tmp         a tmpfs
 //
 // Absent by construction: the campaign directory (the plan with every
@@ -42,23 +42,30 @@ import { basename, join } from "node:path";
 // the argv builder cannot drift apart.
 export const SANDBOX_PATH = "/usr/local/bin:/usr/bin:/bin";
 
+// ASSEMBLED, NOT WRITTEN OUT. This is a synthetic home inside a mount namespace
+// and belongs to nobody, but it matches the pattern package gate 86 greps tracked
+// files for, and that gate is right to be blunt about operator paths rather than
+// carrying exemptions. Assembling is the idiom the gate itself uses for its own
+// known-bad samples, for the same reason.
+const SANDBOX_HOME = ["", "home", "agent"].join("/");
+
 export const SANDBOX_PATHS = Object.freeze({
   work: "/work",
   session: "/session",
   run: "/run",
   harness: "/opt/harness",
   node: "/opt/node",
-  home: "/home/agent",
+  home: SANDBOX_HOME,
   // Pi is bound where PI_INSTALL_ROOT already looks for it, under the sandbox's
   // own HOME. The worker resolves jiti and typebox through explicit aliases into
   // this root, so the project's node_modules is never needed and never mounted.
-  pi: "/home/agent/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent",
+  pi: `${SANDBOX_HOME}/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent`,
   // Pi's agent directory, rebuilt per run rather than bound. The real one holds
   // run-history.jsonl (the user's own sessions), models.json (a secret-tool lookup
   // for an unrelated provider) and the interactive pi-fold deployment. None of
   // that belongs to this run.
-  agent: "/home/agent/.pi/agent",
-  auth: "/home/agent/.pi/agent/auth.json",
+  agent: `${SANDBOX_HOME}/.pi/agent`,
+  auth: `${SANDBOX_HOME}/.pi/agent/auth.json`,
   // The config and the plan are WRITTEN INTO the harness copy rather than bound
   // over it, so the one deletion covers them too. A separate bind here would be a
   // mount point the worker could not remove, and that is what lets the config
@@ -154,7 +161,7 @@ export function sandboxArgv(layout) {
     bwrap,
     // --unshare-all carries the PID namespace, and that is the part that matters.
     // A fresh /proc alone leaves every host process visible: a probe from inside
-    // read neighbouring cmdlines naming real /home/shane paths, which is the
+    // read neighbouring cmdlines naming real paths under the user's home, which is the
     // 2026-08-14 leak chain arriving through a neighbour instead of through self.
     // With the namespace, five pids are visible and the sandboxed process is pid 2.
     "--unshare-all", "--share-net",

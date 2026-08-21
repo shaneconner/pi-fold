@@ -4649,19 +4649,22 @@ try {
   // THE SURFACE IS STOCK PI (Shane 2026-08-21), read off Pi's own tool registry
   // rather than restated here, so an upgrade that ships an eighth tool fails this
   // gate instead of quietly reintroducing a subtraction.
-  const toolsDir = join(PI_INSTALL_ROOT, "dist", "core", "tools");
-  const registered = [...new Set(readdirSync(toolsDir)
-    .filter((file) => file.endsWith(".js"))
-    .flatMap((file) => [...readFileSync(join(toolsDir, file), "utf8")
-      .matchAll(/\bname:\s*"([a-z_]+)"/g)].map((match) => match[1])))].sort();
-  assert.deepEqual([...PI_STOCK_TOOLS].sort(), registered,
-    "the arms no longer carry exactly what Pi ships");
+  // Read off Pi by CALLING the factory a stock session calls, not by scanning the
+  // tools directory. The directory holds grep, find and ls too, and scanning it is
+  // how the first pass got this wrong: those three exist in the SDK and no stock
+  // session has them, so a smoke run discovered four tools against an expected
+  // seven and refused to start.
+  const { createCodingTools } = await import(
+    pathToFileURL(join(PI_INSTALL_ROOT, "dist", "index.js")).href);
+  const stockSession = createCodingTools(PROJECT).map((tool) => tool.name).sort();
+  assert.deepEqual([...PI_STOCK_TOOLS].sort(), stockSession,
+    "the arms no longer carry exactly what a stock Pi session ships");
   assert.deepEqual([...EXPERIMENT_ALLOWED_TOOLS],
     [...PI_STOCK_TOOLS, EXPERIMENT_TOOL_NAME, EXPERIMENT_LEDGER_TOOL_NAME],
     "the surface is stock Pi plus the two arm-symmetric harness tools, and nothing else");
   // The law this gate protects is SYMMETRY, not scarcity: no arm may hold a
   // recovery mechanism the other lacks. Restoring six tools to BOTH arms keeps it.
-  assert(EXPERIMENT_ALLOWED_TOOLS.includes("bash") && EXPERIMENT_ALLOWED_TOOLS.includes("grep"),
+  assert(EXPERIMENT_ALLOWED_TOOLS.includes("bash"),
     "the arms cannot page a transcript line over Pi's 50 KiB read cap");
   assert(!EXPERIMENT_PIFOLD_EXTRA_TOOLS.includes(EXPERIMENT_HISTORY_TOOL_NAME),
     "the history tool came back as an arm-specific extra");
@@ -9640,8 +9643,8 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
         pids: readdirSync("/proc").filter((entry) => /^[0-9]+$/.test(entry)).length,
         checkout: existsSync("/work/README"),
         harness: existsSync("/opt/harness/protocol.txt"),
-        runHistory: existsSync("/home/agent/.pi/agent/run-history.jsonl"),
-        otherExtensions: existsSync("/home/agent/.pi/agent/extensions"),
+        runHistory: existsSync(${JSON.stringify(join(SANDBOX_PATHS.agent, "run-history.jsonl"))}),
+        otherExtensions: existsSync(${JSON.stringify(join(SANDBOX_PATHS.agent, "extensions"))}),
       };
       try { writeFileSync("/work/probe", "x"); report.checkoutWritable = true; }
       catch { report.checkoutWritable = false; }

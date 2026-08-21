@@ -388,7 +388,8 @@ export const EXPERIMENT_HISTORY_TOOL_NAME = "session_history";
 export const EXPERIMENT_LEDGER_TOOL_NAME = "ledger_record";
 // STOCK PI, NOT A SUBSET OF IT (Shane 2026-08-21). This list was `read` plus the
 // two harness tools, which meant the experiment never compared native Pi against
-// native Pi plus folding: it compared two subsets of Pi. Pi ships seven tools, and
+// native Pi plus folding: it compared two subsets of Pi. A stock session gets four
+// tools, and
 // the six that were missing are not decoration. `read` pages by physical line and
 // returns nothing at all from a line over 50 KiB; a native session transcript
 // holds 60 to 65 such lines, and in the sealed rep 5 transcript EVERY one of the
@@ -397,7 +398,7 @@ export const EXPERIMENT_LEDGER_TOOL_NAME = "ledger_record";
 // summary. An arm limited to `read` can therefore recover its own answers and not
 // the evidence, which is gate 63's rejection reason one layer down.
 //
-// The six came out for containment, never for measurement: with the answer key on
+// They came out for containment, never for measurement: with the answer key on
 // the same filesystem, `bash` was a way to reach it. It is not on the same
 // filesystem any more (see scripts/lib/pi_context_sandbox.mjs), so the boundary is
 // the mount namespace and the tool surface can be what Pi actually ships. `write`
@@ -405,9 +406,13 @@ export const EXPERIMENT_LEDGER_TOOL_NAME = "ledger_record";
 // compaction nor folding; that is real behaviour on a real machine, no instruction
 // surface asks for it (gate 62), both arms have it, and it is counted and reported
 // rather than designed away.
-export const PI_STOCK_TOOLS = Object.freeze([
-  "bash", "edit", "find", "grep", "ls", "read", "write",
-]);
+// What `createCodingTools` returns, which is what a stock Pi agent session gets.
+// Pi's SDK also exports grep, find and ls, and the first pass at this listed all
+// seven off the tools directory; a smoke run corrected it, discovering exactly
+// these four. Adding the other three would be opting into more than native Pi,
+// which is the same error as the subtraction, pointing the other way. `bash`
+// covers what they do and is the thing a real session actually has.
+export const PI_STOCK_TOOLS = Object.freeze(["read", "bash", "edit", "write"]);
 export const EXPERIMENT_ALLOWED_TOOLS = Object.freeze([
   ...PI_STOCK_TOOLS, EXPERIMENT_TOOL_NAME, EXPERIMENT_LEDGER_TOOL_NAME,
 ]);
