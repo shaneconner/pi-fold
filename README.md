@@ -22,7 +22,7 @@ pi-fold serves the working tier of a four-tier memory stack. [pi-canon](https://
 
 ## What it is
 
-pi-fold registers one tool, `pi_fold_context`, and gives the session's own agent nine actions over its transcript: `status`, `peek`, `fold`, `expand`, `refold`, `protect`, `unprotect`, `rebrief`, and `reboundary`, plus `unmark` under epoch scheduling. It also registers `/pi-fold-context` and `/fold-context` for the human.
+pi-fold registers one tool, `pi_fold_context`, and gives the session's own agent nine actions over its transcript: `status`, `peek`, `fold`, `expand`, `refold`, `protect`, `unprotect`, `rebrief`, and `reboundary`, plus `unmark` under epoch scheduling. It also registers `/fold-status` and `/fold-context` for the human.
 
 A fold takes a contiguous span of session entries and replaces it, in the window only, with a short brief. The entries themselves go to a fold store, byte for byte, addressed by their SHA-256 hash. The brief carries a handle, the handle resolves to the original, and expansion restores the exact bytes after verifying the hash. A fold is therefore a claim the runtime can check, not a claim the reader has to trust.
 
@@ -192,6 +192,8 @@ The design also pairs with Pi's session trees: a fold's collapsed-or-expanded st
 ## Configuration
 
 The package entry calls `registerPiFold(pi)` with the defaults below, and that is the whole surface: four options, and every other name is refused with the replacement named in the message. A host still passing `summarizer` is refused with the deletion message rather than silently ignored. Hosts that call the named `registerPiFold` export directly may pass an options object. Replacement sets replace the defaults; they are not additive.
+
+Three commands ship for the human: `/fold-status` (fold roots and paging state), `/fold-context` (losslessly fold a stale span, or `commit` to apply every eligible mark now), and `/fold-settings` (edit the configuration below from inside the TUI). The settings command reads and writes `~/.config/pi-fold/settings.json`, whose shape is the same two machine-readable options a host may pass in code (`thresholds`, `providerInputBudget`); each edit is applied against the whole current object and re-validated through the same `resolveThresholds` path registration uses, so only a policy that would register is ever written. A missing file means package defaults.
 
 | Option | Default | Effect |
 | --- | --- | --- |

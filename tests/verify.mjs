@@ -18,6 +18,7 @@ const context = await jiti.import(join(projectRoot, "extensions", "active-contex
 const json = await jiti.import(join(projectRoot, "extensions", "json.ts"));
 const piFold = await jiti.import(join(projectRoot, "extensions", "index.js"));
 const evidenceModule = await jiti.import(join(projectRoot, "extensions", "evidence.js"));
+const settingsModule = await jiti.import(join(projectRoot, "extensions", "settings.ts"));
 
 // One synthetic deployment identity, written out in full, so every brand-derived string
 // the runtime renders is asserted against a literal rather than another derivation of
@@ -909,7 +910,7 @@ async function gateRegistration() {
   // unmarked. A non-empty default would be an allow-list wearing the new name.
   assert.deepEqual([...context.AUTO_FOLD_BLACKLIST_DEFAULT], []);
   assert.deepEqual([...defaults.tools.keys()], ["pi_fold_context"]);
-  assert.deepEqual([...defaults.commands.keys()].sort(), ["fold-context", "pi-fold-context"]);
+  assert.deepEqual([...defaults.commands.keys()].sort(), ["fold-context", "fold-status"]);
   await startRuntime(defaults);
 
   const custom = makeRuntime(makeFixture({ turns: 8, resultChars: 10_000, contextWindow: 100_000 }), {
@@ -956,7 +957,7 @@ async function gateNeutralDefaultBranding() {
   const surface = await collectRegistrationSurface({}, "mcp__docs__fetch");
   assert.equal(surface.toolName, "pi_fold_context");
   assert.equal(surface.toolLabel, "pi-fold Active Context");
-  assert.deepEqual(surface.commands, ["fold-context", "pi-fold-context"]);
+  assert.deepEqual(surface.commands, ["fold-context", "fold-status"]);
   assert.deepEqual(surface.initialStatus, {
     key: "pi-fold-active-context",
     text: "pi_fold_context folds: 0 · provider usage unmeasured",
@@ -13000,6 +13001,93 @@ async function gateEphemeralPeek() {
   };
 }
 
+async function gateFoldSettingsRoundTrip() {
+  const scratch = await mkdtemp(join(tmpdir(), "fold-settings-"));
+  const path = join(scratch, "settings.json");
+  try {
+    // A missing settings file means package defaults, not an error.
+    assert.deepEqual(settingsModule.loadFoldSettingsFile(path), {});
+
+    // Round-trip: what /fold-settings saves resolves byte-identically through the SAME
+    // resolveThresholds path registerPiFold validates with. One validation path, no
+    // friendlier shadow rules for the UI to drift against.
+    const wanted = {
+      thresholds: { ...context.DEFAULT_THRESHOLDS, maxTarget: 0.5 },
+      providerInputBudget: 250_000,
+    };
+    settingsModule.saveFoldSettingsFile(path, wanted);
+    const loaded = settingsModule.loadFoldSettingsFile(path);
+    assert.deepEqual(loaded, wanted);
+    assert.deepEqual(context.resolveThresholds(loaded.thresholds), loaded.thresholds);
+
+    // The write is atomic: no temp file survives the rename.
+    const { readdirSync } = await import("node:fs");
+    assert.deepEqual(readdirSync(scratch).sort(), ["settings.json"]);
+
+    // Partial thresholds are refused by name: set whole or not at all holds in the file.
+    const partial = join(scratch, "partial.json");
+    await writeFile(partial, JSON.stringify({ thresholds: { maxTarget: 0.5 } }));
+    assert.throws(() => settingsModule.loadFoldSettingsFile(partial), /must declare/);
+
+    // A proportion that is not a proportion is refused naming its field.
+    const badShare = join(scratch, "bad-share.json");
+    await writeFile(badShare, JSON.stringify({
+      thresholds: { ...context.DEFAULT_THRESHOLDS, maxTarget: 1.5 },
+    }));
+    assert.throws(() => settingsModule.loadFoldSettingsFile(badShare), /maxTarget/);
+
+    // No field beyond the public surface reaches disk through this module either.
+    const alien = join(scratch, "alien.json");
+    await writeFile(alien, JSON.stringify({ summarizer: "luna" }));
+    assert.throws(() => settingsModule.loadFoldSettingsFile(alien), /no summarizer field/);
+
+    // The budget is an already-net positive integer or nothing.
+    const badBudget = join(scratch, "bad-budget.json");
+    await writeFile(badBudget, JSON.stringify({ providerInputBudget: 1.5 }));
+    assert.throws(() => settingsModule.loadFoldSettingsFile(badBudget), /positive integer/);
+
+    // One edit at a time, each applied against the WHOLE draft and re-validated whole.
+    let draft = {};
+    const edit = settingsModule.applyFoldSettingsEdit;
+    draft = edit(draft, "maxTarget", "0.5").draft;
+    assert.equal(draft.thresholds.maxTarget, 0.5);
+    assert.equal(draft.thresholds.minTarget, context.DEFAULT_THRESHOLDS.minTarget,
+     "/an edit fills the rest of the object from the current defaults, never from nothing");
+    assert.deepEqual(context.resolveThresholds(draft.thresholds), draft.thresholds);
+
+    // A cross-field violation leaves the draft unchanged and names the invariant.
+    const held = draft;
+    const refused = edit(draft, "minTarget", "0.9");
+    assert.equal(refused.ok, false);
+    assert(/minTarget/.test(refused.error), `cross-field refusal named the field: ${refused.error}`);
+    assert.deepEqual(draft, held, "a refused edit must not touch the draft");
+
+    // Counts are counts; budgets are integers or auto.
+    assert.equal(edit(draft, "consolidateAfter", "0").ok, false);
+    assert.equal(edit(draft, "providerInputBudget", "1.5").ok, false);
+    const cleared = edit({ providerInputBudget: 250_000 }, "providerInputBudget", "auto");
+    assert.deepEqual(cleared.draft, { providerInputBudget: null });
+
+    // The command exists on the public surface under the family name.
+    const registered = [];
+    settingsModule.registerFoldSettings({
+      registerCommand: (name, definition) => registered.push({ name, definition }),
+    });
+    assert.deepEqual(registered.map((entry) => entry.name), ["fold-settings"]);
+    assert(/pi-fold/.test(registered[0].definition.description),
+      "the settings command description does not name the package");
+
+    return {
+      roundTrip: loaded,
+      editedMaxTarget: draft.thresholds.maxTarget,
+      crossFieldRefusal: refused.error,
+      command: registered[0].name,
+    };
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -13126,6 +13214,7 @@ const gates = [
   [137, "Cache topology names marks and branch returns", gateCacheTopologyAccounting],
   [138, "The steward advisory invites marks one band before the epoch", gateStewardAdvisory],
   [139, "An ephemeral peek is consumed by the reply that follows it", gateEphemeralPeek],
+  [140, "Fold settings round-trip through one validation path", gateFoldSettingsRoundTrip],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

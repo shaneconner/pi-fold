@@ -5,7 +5,7 @@ export const DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX = "pi-fold-active-context"
 export const DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL = "pi-fold Active Context";
 export const DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN = "pi-fold";
 export const DEFAULT_ACTIVE_CONTEXT_COMMAND_NAMES = Object.freeze({
-  status: "pi-fold-context",
+  status: "fold-status",
   fold: "fold-context",
 });
 
