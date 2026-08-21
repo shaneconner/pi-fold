@@ -190,9 +190,13 @@ export function sandboxArgv(layout) {
     // and the host's would name every real user on the box.
     "--ro-bind", join(identityDir, "passwd"), "/etc/passwd",
     "--ro-bind", join(identityDir, "group"), "/etc/group",
-    "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
-    "--ro-bind", "/etc/ssl", "/etc/ssl",
-    "--ro-bind", "/etc/ca-certificates", "/etc/ca-certificates",
+    // -try, because these differ across distributions and a CI runner does not have
+    // all three. A missing TLS bundle is a failure the provider call reports for
+    // itself; a missing bind here would kill the sandbox before it starts, which
+    // says nothing useful.
+    "--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf",
+    "--ro-bind-try", "/etc/ssl", "/etc/ssl",
+    "--ro-bind-try", "/etc/ca-certificates", "/etc/ca-certificates",
     "--proc", "/proc",
     "--dev", "/dev",
     "--tmpfs", "/tmp",

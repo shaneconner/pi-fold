@@ -29,6 +29,18 @@ jobs:
           npm install --global --prefix "$HOME/.npm-global" \
             "@earendil-works/pi-coding-agent@$pi_version" --ignore-scripts --no-audit --no-fund
 
+      # The experiment now runs each arm inside a bubblewrap mount namespace, and
+      # gate 73 drives the real thing rather than matching source: it builds the
+      # argv, starts the sandbox and asks the process inside what it can see. That
+      # needs bubblewrap and unprivileged user namespaces on the runner.
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          bwrap --version
+          bwrap --unshare-all --share-net --dev /dev --proc /proc --ro-bind /usr /usr \
+            --symlink usr/bin /bin -- /bin/true && echo "unprivileged namespaces work"
+
       - name: Lint
         run: npm run lint
 

@@ -9657,6 +9657,11 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
       console.log(JSON.stringify(report));
     `);
     const run = spawnSync(probe[0], probe.slice(1), { encoding: "utf8" });
+    // Name the missing-binary case explicitly. spawnSync leaves stderr undefined
+    // when the executable itself is absent, and "did not start: undefined" sent one
+    // CI run looking in the wrong place.
+    assert(!run.error, `the sandbox could not be launched at all: ${run.error?.message}. ` +
+      "bubblewrap and unprivileged user namespaces are required to run this gate");
     assert.equal(run.status, 0, `the sandbox did not start: ${run.stderr?.slice(0, 400)}`);
     const seen = JSON.parse(run.stdout.trim().split("\n").pop());
     // ABSENT, not denied. `.canon` alone is 219 files whose journal quotes seeded
