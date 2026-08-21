@@ -215,6 +215,16 @@ import {
   summarizeRetrievalRankQueries,
 } from "./probe_retrieval_rank.mjs";
 
+import {
+  HARNESS_SOURCE,
+  SANDBOX_PATHS,
+  deleteHarnessSource,
+  sandboxArgv,
+  sandboxConfig,
+  sandboxPlan,
+  seededTokenCarriers,
+} from "./lib/pi_context_sandbox.mjs";
+
 const PROJECT = dirname(dirname(fileURLToPath(import.meta.url)));
 const source = (relative) => readFileSync(join(PROJECT, relative), "utf8");
 const checks = {};
@@ -9471,6 +9481,139 @@ checks.aStewardCrossingIsTakenOnlyByAnAcceptedAgentMarkInItsWindow = true;
   "the adjudicator does not net and report the abort markers");
 
 checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 73 - the sandbox is the boundary, not the tool list.
+//
+// The arms ran on three tools because Pi's `read` resolves any path against cwd
+// with no guard, the session file sat one level ABOVE the checkout, and the run
+// config named the plan holding every graded answer. Restoring the tool surface
+// stock Pi actually ships (`bash`, `edit`, `find`, `grep`, `ls`, `read`, `write`)
+// is only honest once the key is ABSENT from the namespace rather than denied
+// inside it, because `bash` walks straight past an in-process fence.
+//
+// This gate drives the real thing: it builds the argv, runs bubblewrap, and asks
+// the sandboxed process what it can see. A source match would prove nothing here,
+// since the whole claim is about what the kernel does with those arguments.
+// ---------------------------------------------------------------------------
+{
+  // THE SCAN WORKS BEFORE IT IS TRUSTED. The verifier's own fixtures quote seeded
+  // values verbatim, so it is the proof that an empty result means something.
+  assert(seededTokenCarriers(PROJECT, ["scripts/verify_pi_context_experiment.mjs"]).length === 1,
+    "the seeded-token scan misses a file that carries seeded values, so an empty result is vacuous");
+  assert.deepEqual(seededTokenCarriers(PROJECT), [],
+    "a file copied into the namespace carries seeded ledger values");
+  assert(!HARNESS_SOURCE.includes("scripts/verify_pi_context_experiment.mjs"),
+    "the verifier would be copied into the namespace");
+
+  // THE PLAN THE WORKER HOLDS carries geometry and nothing else. Built by
+  // whitelist, so a field added to the full plan cannot arrive by default.
+  const reduced = sandboxPlan(plan);
+  assert.deepEqual(Object.keys(reduced).sort(),
+    ["files", "mode", "planSha256", "repo", "stageCount", "version"],
+    "the sandboxed plan grew a field");
+  const reducedText = JSON.stringify(reduced);
+  assert(!/expectedAnswer|instructions|probes|deliverable|codeWord|ledger/.test(reducedText),
+    "the sandboxed plan still carries graded or instructional material");
+  assert.equal(reduced.stageCount, plan.stageCount, "the sandboxed plan lost the stage count");
+  assert(reduced.files.length > 0, "the sandboxed plan lost the corpus it must attest");
+
+  // THE CONFIG THE WORKER HOLDS withholds the query seed. With it and the ledger
+  // geometry the end block is derivable, and a model that can derive the questions
+  // has been told what to remember, which is gate 62's leak wearing a seed.
+  const carried = sandboxConfig({
+    arm: "native", querySeed: "seed-must-not-travel", planPath: "/campaign/stages-full.json",
+    runDir: "/host/run", repoDir: "/host/run/repo", stageCount: 64,
+  });
+  assert(!("querySeed" in carried), "the query seed reached the sandbox");
+  assert(!JSON.stringify(carried).includes("seed-must-not-travel"),
+    "the query seed reached the sandbox under another key");
+  assert(!JSON.stringify(carried).includes("stages-full"),
+    "the sandboxed config still names the full plan");
+  assert.equal(carried.planPath, SANDBOX_PATHS.plan);
+  assert.equal(carried.repoDir, SANDBOX_PATHS.work);
+
+  // THE ARGV. A relative path is refused rather than silently bound somewhere odd.
+  assert.throws(() => sandboxArgv({ checkoutDir: "relative" }), /absolute/,
+    "a relative mount source was accepted");
+
+  // THE LIVE NAMESPACE. Everything above is arithmetic until the kernel agrees.
+  const root = mkdtempSync(join(tmpdir(), "pi-fold-sandbox-gate-"));
+  try {
+    for (const dir of ["work", "session", "run", "harness", "home", "identity"]) {
+      mkdirSync(join(root, dir));
+    }
+    writeFileSync(join(root, "work", "README"), "pinned checkout\n");
+    writeFileSync(join(root, "harness", "protocol.txt"), "the experiment's own source\n");
+    // The deleter is exercised from INSIDE the harness copy, which is where the
+    // worker imports it from: the module has to survive its own deletion.
+    writeFileSync(join(root, "harness", "pi_context_sandbox.mjs"),
+      source("scripts/lib/pi_context_sandbox.mjs"));
+    writeFileSync(join(root, "config.json"), "{}\n");
+    writeFileSync(join(root, "plan.json"), "{}\n");
+    writeFileSync(join(root, "identity", "passwd"),
+      `agent:x:${process.getuid()}:${process.getgid()}:agent:${SANDBOX_PATHS.home}:/bin/sh\n`);
+    writeFileSync(join(root, "identity", "group"), `agent:x:${process.getgid()}:\n`);
+    const argv = sandboxArgv({
+      checkoutDir: join(root, "work"), sessionDir: join(root, "session"),
+      runDir: join(root, "run"), harnessDir: join(root, "harness"),
+      piRoot: PI_INSTALL_ROOT, nodeExecutable: process.execPath,
+      identityDir: join(root, "identity"),
+      configPath: join(root, "config.json"), planPath: join(root, "plan.json"),
+      homeDir: join(root, "home"),
+    });
+    // The PID namespace is the part that matters. A fresh /proc alone leaves every
+    // host process visible, and a probe from inside read neighbouring cmdlines
+    // naming real paths under the user's home: the 2026-08-14 leak chain arriving
+    // through a neighbour instead of through self.
+    assert(argv.includes("--unshare-all"), "the sandbox does not unshare the PID namespace");
+    const probe = argv.slice(0, -2);
+    probe.push("--input-type=module", "-e", `
+      import { existsSync, writeFileSync, readdirSync } from "node:fs";
+      const report = {
+        home: existsSync(${JSON.stringify(process.env.HOME ?? "/home")}),
+        canon: existsSync(${JSON.stringify(join(PROJECT, ".canon"))}),
+        project: existsSync(${JSON.stringify(PROJECT)}),
+        campaign: existsSync(${JSON.stringify(root)}),
+        pids: readdirSync("/proc").filter((entry) => /^[0-9]+$/.test(entry)).length,
+        checkout: existsSync("/work/README"),
+        harness: existsSync("/opt/harness/protocol.txt"),
+      };
+      try { writeFileSync("/work/probe", "x"); report.checkoutWritable = true; }
+      catch { report.checkoutWritable = false; }
+      try { writeFileSync("/session/probe", "x"); report.sessionWritable = true; }
+      catch { report.sessionWritable = false; }
+      const { deleteHarnessSource, harnessSourceRemains } = await import(
+        "/opt/harness/pi_context_sandbox.mjs");
+      deleteHarnessSource();
+      report.harnessAfterDelete = harnessSourceRemains();
+      console.log(JSON.stringify(report));
+    `);
+    const run = spawnSync(probe[0], probe.slice(1), { encoding: "utf8" });
+    assert.equal(run.status, 0, `the sandbox did not start: ${run.stderr?.slice(0, 400)}`);
+    const seen = JSON.parse(run.stdout.trim().split("\n").pop());
+    // ABSENT, not denied. `.canon` alone is 219 files whose journal quotes seeded
+    // values and states the whole design; the campaign directory holds the plan.
+    assert.equal(seen.home, false, "the user's home is inside the namespace");
+    assert.equal(seen.canon, false, "the project's own memory is inside the namespace");
+    assert.equal(seen.project, false, "the pi-fold checkout is inside the namespace");
+    assert.equal(seen.campaign, false, "the campaign directory is inside the namespace");
+    assert(seen.pids <= 8, `the namespace shows ${seen.pids} processes, so host cmdlines are readable`);
+    // And the run itself still works.
+    assert.equal(seen.checkout, true, "the pinned checkout is not readable");
+    assert.equal(seen.checkoutWritable, false, "the graded checkout is writable");
+    assert.equal(seen.sessionWritable, true, "the session directory is not writable");
+    // The harness source is a test-disclosure surface: it names the arms, the end
+    // block and the ledger. It is copied in because node must import it, and it
+    // goes once every module is resident, before the model takes a turn.
+    assert.equal(seen.harness, true, "the harness never reached the namespace, so the delete proves nothing");
+    assert.deepEqual(seen.harnessAfterDelete, [], "the harness source survived its own deletion");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  checks.theSandboxIsTheBoundaryRatherThanTheToolList = true;
 }
 
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
