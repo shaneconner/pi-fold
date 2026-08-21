@@ -39,15 +39,15 @@ export interface FoldSettingsFile {
 	providerInputBudget?: number | null;
 }
 
-const SETTING_IDS = [
-	"maxTarget",
-	"minTarget",
-	"freshTail",
-	"consolidateAfter",
-	"providerInputBudget",
-] as const;
-
-export type FoldSettingId = (typeof SETTING_IDS)[number];
+// Written as a union rather than derived from a const array: the array had exactly
+// one consumer, this type, and EDITOR_ROWS below is already the runtime enumeration
+// of which settings exist. Two lists would be the drift.
+export type FoldSettingId =
+	| "maxTarget"
+	| "minTarget"
+	| "freshTail"
+	| "consolidateAfter"
+	| "providerInputBudget";
 
 function readProportion(raw: string, field: string): number {
 	const value = Number(raw);
