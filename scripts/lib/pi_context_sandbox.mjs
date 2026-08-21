@@ -181,11 +181,16 @@ export function sandboxArgv(layout) {
     "--setenv", "PI_FOLD_SANITIZED", "1",
     // A base system with no /etc beyond what TLS and name resolution need. /etc as
     // a whole would carry the machine's identity for no gain.
+    // BOUND, not symlinked. A symlink to usr/lib is right on a merged-/usr
+    // distribution and wrong elsewhere, and getting it wrong costs the dynamic
+    // loader: execve then returns ENOENT naming the PROGRAM, which reads as a
+    // missing binary and is not. Binding resolves on the host, so it works whether
+    // these are real directories or already symlinks into /usr.
     "--ro-bind", "/usr", "/usr",
-    "--symlink", "usr/bin", "/bin",
-    "--symlink", "usr/bin", "/sbin",
-    "--symlink", "usr/lib", "/lib",
-    "--symlink", "usr/lib", "/lib64",
+    "--ro-bind-try", "/bin", "/bin",
+    "--ro-bind-try", "/sbin", "/sbin",
+    "--ro-bind-try", "/lib", "/lib",
+    "--ro-bind-try", "/lib64", "/lib64",
     // A synthetic account, not the machine's. os.userInfo() needs a passwd entry
     // and the host's would name every real user on the box.
     "--ro-bind", join(identityDir, "passwd"), "/etc/passwd",

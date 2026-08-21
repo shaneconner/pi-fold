@@ -43,7 +43,7 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           bwrap --version
           bwrap --unshare-all --share-net --dev /dev --proc /proc --ro-bind /usr /usr \
-            --symlink usr/lib /lib --symlink usr/lib /lib64 --symlink usr/bin /bin \
+            --ro-bind-try /bin /bin --ro-bind-try /lib /lib --ro-bind-try /lib64 /lib64 \
             -- /usr/bin/true && echo "unprivileged namespaces work"
 
       - name: Lint
