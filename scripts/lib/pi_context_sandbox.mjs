@@ -32,6 +32,7 @@
 // gate fixtures quote seeded values), $HOME, and every other session on the
 // machine.
 
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 
@@ -69,6 +70,7 @@ export const SANDBOX_PATHS = Object.freeze({
   // run-history.jsonl (the user's own sessions), models.json (a secret-tool lookup
   // for an unrelated provider) and the interactive pi-fold deployment. None of
   // that belongs to this run.
+  scratch: "/tmp",
   agent: `${SANDBOX_HOME}/.pi/agent`,
   auth: `${SANDBOX_HOME}/.pi/agent/auth.json`,
   // The config and the plan are WRITTEN INTO the harness copy rather than bound
@@ -152,11 +154,11 @@ export function sandboxArgv(layout) {
   const {
     bwrap = "/usr/bin/bwrap",
     checkoutDir, sessionDir, runDir, harnessDir,
-    piRoot, nodeExecutable, homeDir, identityDir, agentDir, authPath,
+    piRoot, nodeExecutable, homeDir, identityDir, agentDir, authPath, scratchDir,
   } = layout;
   for (const [name, value] of Object.entries({
     checkoutDir, sessionDir, runDir, harnessDir,
-    piRoot, nodeExecutable, homeDir, identityDir, agentDir, authPath,
+    piRoot, nodeExecutable, homeDir, identityDir, agentDir, authPath, scratchDir,
   })) {
     if (typeof value !== "string" || !value.startsWith("/")) {
       throw new Error(`Sandbox layout needs an absolute ${name}`);
@@ -204,7 +206,18 @@ export function sandboxArgv(layout) {
     "--ro-bind-try", "/etc/ca-certificates", "/etc/ca-certificates",
     "--proc", "/proc",
     "--dev", "/dev",
-    "--tmpfs", "/tmp",
+    // A REAL DIRECTORY, not a tmpfs (Shane 2026-08-21: "we just need to be sure
+    // they cannot cheat"). With `bash` in the namespace the model can write notes
+    // anywhere it has a filesystem, and a tmpfs vanishes with the namespace, so
+    // those notes would be unauditable by construction. A note file is not
+    // cheating, it is ordinary work a real machine allows, but it IS a recovery
+    // channel that is neither compaction nor folding: the smoke run's native
+    // deliverable ran 2,404 bytes and carried four of the plan's expectedAnswer
+    // values, because a deliverable summarises exactly what the probes ask about.
+    // Binding it means every byte the model writes is captured, hashed and sealed,
+    // so an answer recovered from its own notes can be told apart from one the
+    // mechanism carried instead of being pooled with it invisibly.
+    "--bind", scratchDir, SANDBOX_PATHS.scratch,
     "--ro-bind", nodeExecutable, SANDBOX_PATHS.node,
     // The run. The checkout is read-only because the answer key was computed
     // against the pristine tree: an edit there would drift the graded material
@@ -310,6 +323,32 @@ export function sandboxIdentityFiles(uid, gid) {
     passwd: `agent:x:${uid}:${gid}:agent:${SANDBOX_PATHS.home}:/bin/sh\n`,
     group: `agent:x:${gid}:\n`,
   };
+}
+
+// Everything the model itself put on disk, for the adjudicator to read. The two
+// writable places it has are its home and its scratch; the checkout is read-only
+// and the run directory holds the harness's own artifacts. Returned sorted so a
+// run's manifest is stable, with content hashed rather than carried, because the
+// point is to be able to ASK whether an answer came from here.
+export function modelWrittenFiles(homeDir, scratchDir) {
+  const found = [];
+  const walk = (root, label) => {
+    if (!existsSync(root)) return;
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      const full = join(root, entry.name);
+      if (entry.isDirectory()) { walk(full, `${label}/${entry.name}`); continue; }
+      if (!entry.isFile()) continue;
+      const bytes = readFileSync(full);
+      found.push({
+        path: `${label}/${entry.name}`,
+        bytes: bytes.length,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      });
+    }
+  };
+  walk(homeDir, SANDBOX_PATHS.home);
+  walk(scratchDir, SANDBOX_PATHS.scratch);
+  return found.sort((left, right) => left.path.localeCompare(right.path));
 }
 
 export function sandboxSessionPath(sessionDir, sessionFile) {

@@ -45,6 +45,7 @@ import {
   SANDBOX_WORKER_PID,
   sandboxArgv,
   sandboxConfig,
+  modelWrittenFiles,
   sandboxIdentityFiles,
   sandboxPlan,
 } from "./lib/pi_context_sandbox.mjs";
@@ -494,7 +495,10 @@ async function run() {
   const homeDir = join(sandboxRoot, "home");
   const agentDir = join(sandboxRoot, "agent");
   const identityDir = join(sandboxRoot, "identity");
-  for (const dir of [sessionDir, sandboxRoot, harnessDir, homeDir, agentDir, identityDir]) {
+  // The model's scratch. Bound rather than a tmpfs so everything it writes is
+  // captured: see modelWrittenFiles and the note in the sandbox argv.
+  const scratchDir = join(sandboxRoot, "scratch");
+  for (const dir of [sessionDir, sandboxRoot, harnessDir, homeDir, agentDir, identityDir, scratchDir]) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
   for (const relative of HARNESS_SOURCE) {
@@ -524,7 +528,7 @@ async function run() {
   const sandbox = sandboxArgv({
     checkoutDir: repoDir, sessionDir, runDir, harnessDir,
     piRoot: PI_INSTALL_ROOT, nodeExecutable: process.execPath,
-    homeDir, identityDir, agentDir, authPath,
+    homeDir, identityDir, agentDir, authPath, scratchDir,
   });
   const worker = spawn(sandbox[0], sandbox.slice(1), {
     cwd: PROJECT,
@@ -715,6 +719,16 @@ async function run() {
   ].filter((relative) => existsSync(join(runDir, relative)));
   if (sessionFile && existsSync(sessionFile)) artifactPaths.push(sessionFile.slice(runDir.length + 1));
   artifactPaths.push("failure-latch.jsonl");
+  // WHAT THE MODEL ITSELF WROTE, sealed beside the harness's own artifacts. A note
+  // file is ordinary work, not cheating, but it is a recovery channel that is
+  // neither compaction nor folding, so it has to be visible to adjudication rather
+  // than pooled into the mechanism's result invisibly.
+  writeJsonExclusive(join(runDir, "model-writes.json"), {
+    version: 1,
+    runId,
+    files: modelWrittenFiles(homeDir, scratchDir),
+  });
+  artifactPaths.push("model-writes.json");
   const artifacts = Object.fromEntries(artifactPaths.map((relative) =>
     [relative, artifactStat(join(runDir, relative))]));
   const failureLatchEntries = readJsonLines(join(runDir, "failure-latch.jsonl")).length;

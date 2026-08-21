@@ -223,6 +223,7 @@ import {
   sandboxArgv,
   sandboxConfig,
   SANDBOX_PLAN_KEYS,
+  modelWrittenFiles,
   sandboxPlan,
   seededTokenCarriers,
   validateSandboxPlan,
@@ -9604,7 +9605,8 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
   // THE LIVE NAMESPACE. Everything above is arithmetic until the kernel agrees.
   const root = mkdtempSync(join(tmpdir(), "pi-fold-sandbox-gate-"));
   try {
-    for (const dir of ["work", "session", "run", "harness", "home", "identity", "agent"]) {
+    for (const dir of ["work", "session", "run", "harness", "home", "identity", "agent",
+      "scratch"]) {
       mkdirSync(join(root, dir));
     }
     writeFileSync(join(root, "agent", "auth.json"), "{}\n");
@@ -9625,6 +9627,7 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
       piRoot: PI_INSTALL_ROOT, nodeExecutable: process.execPath,
       identityDir: join(root, "identity"),
       agentDir: join(root, "agent"), authPath: join(root, "agent", "auth.json"),
+      scratchDir: join(root, "scratch"),
       homeDir: join(root, "home"),
     });
     // The PID namespace is the part that matters. A fresh /proc alone leaves every
@@ -9650,6 +9653,12 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
       catch { report.checkoutWritable = false; }
       try { writeFileSync("/session/probe", "x"); report.sessionWritable = true; }
       catch { report.sessionWritable = false; }
+      // The model's two writable places. Both must survive the namespace, because
+      // a note it can write and we cannot read is a recovery channel we cannot see.
+      try { writeFileSync("/tmp/notes.md", "answer: lib/vdns/doh.c"); report.scratchWritable = true; }
+      catch { report.scratchWritable = false; }
+      try { writeFileSync(${JSON.stringify(join(SANDBOX_PATHS.home, "notes.md"))}, "answer: lib/vtls/gtls.c"); report.homeWritable = true; }
+      catch { report.homeWritable = false; }
       const { deleteHarnessSource, harnessSourceRemains } = await import(
         "/opt/harness/pi_context_sandbox.mjs");
       deleteHarnessSource();
@@ -9675,6 +9684,18 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
     assert.equal(seen.checkout, true, "the pinned checkout is not readable");
     assert.equal(seen.checkoutWritable, false, "the graded checkout is writable");
     assert.equal(seen.sessionWritable, true, "the session directory is not writable");
+    // NOTHING THE MODEL WRITES MAY BE INVISIBLE (Shane 2026-08-21: "we just need to
+    // be sure they cannot cheat"). /tmp was a tmpfs, so a note written there died
+    // with the namespace and no adjudication could ever see it. It is a real bind
+    // now, and both writable places are enumerated after the run.
+    assert.equal(seen.scratchWritable, true, "the model has no scratch, so bash has nowhere to work");
+    assert.equal(seen.homeWritable, true, "the model's home is not writable");
+    const written = modelWrittenFiles(join(root, "home"), join(root, "scratch"));
+    assert.deepEqual(written.map((file) => file.path).sort(),
+      [`${SANDBOX_PATHS.home}/notes.md`, `${SANDBOX_PATHS.scratch}/notes.md`],
+      "a file the model wrote inside the namespace did not survive for adjudication");
+    assert(written.every((file) => /^[0-9a-f]{64}$/.test(file.sha256) && file.bytes > 0),
+      "a captured model write carries no usable identity");
     // The harness source is a test-disclosure surface: it names the arms, the end
     // block and the ledger. It is copied in because node must import it, and it
     // goes once every module is resident, before the model takes a turn.

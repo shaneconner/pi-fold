@@ -208,7 +208,17 @@ function probeInstruction() {
 
 function deliverableInstruction(ordinal, referencesStages) {
   return [
-    `Write a short structured note (200-400 words) summarising what you now understand about the`,
+    // IN THE REPLY, not on disk (Shane 2026-08-21: "We're asking for deliverables
+    // rather than an actual conversational workflow almost"). "Write a short
+    // structured note" plus a `write` tool plus the word deliverable is a pull
+    // toward a file, and the smoke run took it: native's attempt on
+    // /work/deliverable-03.md ran 2,404 bytes and carried four of the plan's own
+    // expectedAnswer values, because a summary of the material is a summary of what
+    // the probes ask about. On disk that is a grep-able answer index belonging to
+    // neither mechanism under test. Naming the channel is ordinary task
+    // specification, it is symmetric across arms, and it says nothing about what to
+    // remember or that anything will be asked later.
+    `Reply with a short structured note (200-400 words) summarising what you now understand about the`,
     `components read so far. It MUST cite concrete facts (file paths, identifiers, line positions)`,
     `first seen in stage ${referencesStages.join(" and stage ")}, and it must state how each of`,
     `those earlier facts connects to what you read in stage ${ordinal}.`,
