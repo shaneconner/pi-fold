@@ -279,7 +279,10 @@ async function supervisedWait({ state, worker, sessionFile, predicate, label, ab
   return { workerExited: false };
 }
 
-function parseRequest(path, config, stage, expectedChallenge, worker) {
+// `worker` used to supply the host pid and its start ticks. Inside the namespace the
+// worker reads both from its OWN /proc, so the comparison is against what it
+// reported at readiness: same process, same reading, taken twice.
+function parseRequest(path, config, stage, expectedChallenge, workerIdentity) {
   const request = readJson(path);
   assertExperiment(exactKeys(request, [
     "version", "runId", "stage", "challenge", "challengeSha256", "toolCallId",
@@ -289,7 +292,8 @@ function parseRequest(path, config, stage, expectedChallenge, worker) {
   assertExperiment(request.version === 1 && request.runId === config.runId && request.stage === stage &&
     request.challenge === expectedChallenge &&
     request.challengeSha256 === sha256Text(expectedChallenge) &&
-    request.workerPid === SANDBOX_WORKER_PID && request.workerStartTicks === state.workerStartTicks &&
+    request.workerPid === SANDBOX_WORKER_PID &&
+    request.workerStartTicks === workerIdentity.workerStartTicks &&
     request.requestSha256 === sha256Json(identity),
   `Stage request identity drift ${stage}`);
   return request;
@@ -595,7 +599,7 @@ async function run() {
         tolerateExit: armRuntime.toleratesOverflow,
       });
       if (waited.workerExited) { earlyExit = true; break; }
-      const request = parseRequest(requestPath, config, stage, expectedChallenge, worker);
+      const request = parseRequest(requestPath, config, stage, expectedChallenge, workerReady);
       const releaseAt = previousRelease + config.stageIntervalMs;
       const gated = await supervisedWait({
         state, worker, sessionFile: workerReady.sessionFile,
