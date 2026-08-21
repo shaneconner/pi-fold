@@ -61,6 +61,10 @@ const PI_ROOT = PI_INSTALL_ROOT;
 const configPath = process.argv[2];
 assertExperiment(configPath && existsSync(configPath), "Experiment worker requires a run config path");
 const config = validateExperimentRunConfig(JSON.parse(readFileSync(configPath, "utf8")));
+// Taken now, because the config lives inside the harness copy and that copy is
+// deleted before the model takes a turn. The marker entry still identifies the
+// exact bytes this run was configured with; it just cannot re-read them.
+const configSha256 = fileSha256(configPath);
 assertSanitizedRuntimeEnvironment(process.env);
 // INSIDE ITS OWN MOUNT NAMESPACE (Shane 2026-08-21). This used to assert the
 // worker was a direct child of the attested supervisor by pid and start ticks.
@@ -363,7 +367,7 @@ try {
     runId: config.runId,
     campaignId: config.campaignId,
     arm: config.arm,
-    configSha256: fileSha256(configPath),
+    configSha256,
     planSha256: config.planSha256,
     createdWallMs: Date.now(),
   });
