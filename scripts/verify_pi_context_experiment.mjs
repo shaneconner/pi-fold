@@ -9767,6 +9767,62 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
   checks.aDeliveredStageDoesNotSurviveItsOwnDelivery = true;
 }
 
+// ---------------------------------------------------------------------------
+// GATE 75 - the transpile cache never lands where the model can read it.
+//
+// The harness deletes its own source before the model takes a turn, which is what
+// lets the restored tool surface be safe. jiti defeats that quietly: it writes
+// compiled .ts beside the project's node_modules, and inside the namespace that
+// path does not exist, so it falls back to TMPDIR, which IS the model's scratch.
+//
+// Found by auditing the first full pair at stage 24 of 64, which was killed for it:
+// scripts-pi_context_experiment_extension.<hash>.mjs sat in /tmp/jiti naming pifold
+// ten times, nativefence three and native compaction twice. It carried no seeded
+// value, so this is test-awareness rather than an answer leak, but it is exactly the
+// surface gate 62 denies, and it survived the deletion because jiti had already
+// copied it somewhere the deletion does not reach.
+// ---------------------------------------------------------------------------
+{
+  const worker75 = source("scripts/run_pi_context_experiment_worker.mjs");
+  const options = /createJiti\(import\.meta\.url, \{([\s\S]*?)\n\}\);/.exec(worker75);
+  assert(options, "the sweep cannot read the worker's jiti options, so it is scanning nothing");
+  assert(/\bfsCache:\s*false\b/.test(options[1]),
+    "the worker lets jiti write a transpile cache the model could read");
+
+  // DRIVEN, not asserted. The flag is only worth anything if it actually suppresses
+  // the write, and the same fixture proves the write happens without it, so a jiti
+  // that stopped caching altogether cannot make this pass for the wrong reason.
+  const cacheRoot = mkdtempSync(join(tmpdir(), "pi-fold-jiti-gate-"));
+  try {
+    const { createJiti: make } = await import(
+      pathToFileURL(join(PI_INSTALL_ROOT, "node_modules", "jiti", "lib", "jiti.mjs")).href);
+    const alias = {
+      "@earendil-works/pi-coding-agent": join(PI_INSTALL_ROOT, "dist", "index.js"),
+      typebox: join(PI_INSTALL_ROOT, "node_modules", "typebox", "build", "index.mjs"),
+    };
+    // A throwaway module, because the verifier has already imported the real
+    // extensions through jiti by this point and an in-process hit would transpile
+    // nothing, making the positive case fail for a reason that is not the cache.
+    const target = join(cacheRoot, "fixture.ts");
+    writeFileSync(target, "export const fixture: number = 1;\n");
+    const cached = join(cacheRoot, "cached");
+    mkdirSync(cached);
+    await make(pathToFileURL(join(PROJECT, "scripts", "x.mjs")).href,
+      { alias, fsCache: cached }).import(target);
+    const wrote = existsSync(cached) ? readdirSync(cached).length : 0;
+    assert(wrote > 0, "jiti wrote no cache even when told to, so the negative case proves nothing");
+    const suppressed = join(cacheRoot, "suppressed");
+    mkdirSync(suppressed);
+    await make(pathToFileURL(join(PROJECT, "scripts", "y.mjs")).href,
+      { alias, fsCache: false }).import(target);
+    assert.equal(readdirSync(suppressed).length, 0,
+      "fsCache false still left a compiled copy on disk");
+  } finally {
+    rmSync(cacheRoot, { recursive: true, force: true });
+  }
+  checks.theTranspileCacheNeverLandsWhereTheModelCanRead = true;
+}
+
 assert.deepEqual([...EXPERIMENT_GUIDANCE_PROFILES], ["pressure", "curation", "minimal"]);
 assert.deepEqual([...EXPERIMENT_MODES], ["smoke", "full"]);
 assert(plan, "stage plan fixture did not survive gate 4");

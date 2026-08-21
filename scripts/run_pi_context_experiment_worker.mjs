@@ -99,6 +99,16 @@ const {
 const jitiPath = join(PI_ROOT, "node_modules", "jiti", "lib", "jiti.mjs");
 const { createJiti } = await import(pathToFileURL(jitiPath));
 const jiti = createJiti(import.meta.url, {
+  // NO TRANSPILE CACHE (Shane 2026-08-21). jiti writes compiled .ts next to the
+  // project's node_modules by default, and inside the namespace that path does not
+  // exist, so it falls back to TMPDIR: the model's own scratch. The first full pair
+  // was killed at stage 24 of 64 when the audit found
+  // scripts-pi_context_experiment_extension.<hash>.mjs sitting in /tmp/jiti, naming
+  // pifold ten times, nativefence three and native compaction twice. No seeded value
+  // was in it, so this is test-awareness rather than an answer leak, but it is the
+  // surface gate 62 exists to deny and it survived the harness deletion, because
+  // jiti had already copied it somewhere the deletion does not reach.
+  fsCache: false,
   alias: {
     "@earendil-works/pi-coding-agent": join(PI_ROOT, "dist", "index.js"),
     typebox: join(PI_ROOT, "node_modules", "typebox", "build", "index.mjs"),
