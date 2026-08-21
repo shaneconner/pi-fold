@@ -4,13 +4,15 @@
 // changes the experience: one validation path, an in-TUI editor over a JSON file,
 // and every state that reaches disk already passed resolveThresholds.
 //
-// The editor component is hand-rolled against the raw handleInput contract on
-// purpose: extensions/ is imported by the gate suite under plain jiti, and pi-tui
-// is not hoisted to this package's root. No pi-tui import may reach this file.
+// The editor is built from pi-tui's own SettingsList and Input so it looks and
+// behaves like Pi's native /settings screen, and ALL key handling goes through
+// matchesKey: raw byte matching froze the editor on terminals in application
+// cursor mode, where arrows arrive as SS3 (\x1bOA) rather than CSI (\x1b[A).
 
 import { homedir } from "node:os";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { Container, Input, Key, matchesKey, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import {
 	DEFAULT_CONTEXT_WINDOW,
 	DEFAULT_THRESHOLDS,
@@ -148,112 +150,12 @@ interface EditorRow {
 }
 
 const EDITOR_ROWS: readonly EditorRow[] = [
-	{ id: "maxTarget", label: "Commit trigger (maxTarget)", description: "Occupancy share that fires a fold epoch" },
-	{ id: "minTarget", label: "Post-commit aim (minTarget)", description: "Share the epoch cuts back down toward" },
-	{ id: "freshTail", label: "Fresh tail (freshTail)", description: "Protected recent share that never folds" },
-	{ id: "consolidateAfter", label: "Consolidation divisor (consolidateAfter)", description: "Parents owed per epoch = visible roots divided by this" },
-	{ id: "providerInputBudget", label: "Input budget (providerInputBudget)", description: "Net input tokens the deployment may fill; auto derives it from the model window" },
+	{ id: "maxTarget", label: "Commit trigger", description: "Occupancy share of the budget that fires a fold epoch (maxTarget)" },
+	{ id: "minTarget", label: "Post-commit aim", description: "Share the epoch cuts back down toward (minTarget)" },
+	{ id: "freshTail", label: "Fresh tail", description: "Protected recent share that never folds (freshTail)" },
+	{ id: "consolidateAfter", label: "Consolidation divisor", description: "Parents owed per epoch = visible roots divided by this (consolidateAfter)" },
+	{ id: "providerInputBudget", label: "Input budget", description: "Net input tokens the deployment may fill; empty derives it from the model window (providerInputBudget)" },
 ];
-
-function rowDisplayValue(settings: FoldSettingsFile, id: FoldSettingId, budgetTokens: number): string {
-	if (id === "providerInputBudget") {
-		return settings.providerInputBudget != null ? String(settings.providerInputBudget) : "auto";
-	}
-	const thresholds = settings.thresholds ?? DEFAULT_THRESHOLDS;
-	const value = thresholds[id];
-	if (id === "consolidateAfter") return String(value);
-	return `${value} (~${Math.round(value * budgetTokens).toLocaleString("en-US")} tokens)`;
-}
-
-class FoldSettingsEditor {
-	private readonly rows = EDITOR_ROWS;
-	private selected = 0;
-	private editing = false;
-	private buffer = "";
-	private error: string | null = null;
-	private saved = false;
-
-	constructor(
-		private draft: FoldSettingsFile,
-		private readonly budgetTokens: number,
-		private readonly done: (saved: boolean) => void,
-	) {}
-
-	private submit(): void {
-		const row = this.rows[this.selected];
-		const result = applyFoldSettingsEdit(this.draft, row.id, this.buffer);
-		if (!result.ok) {
-			this.error = result.error;
-			return;
-		}
-		this.draft = result.draft;
-		saveFoldSettingsFile(DEFAULT_FOLD_SETTINGS_PATH, this.draft);
-		this.editing = false;
-		this.buffer = "";
-		this.error = null;
-		this.saved = true;
-	}
-
-	handleInput(data: string): void {
-		if (data === "\x03") {
-			this.done(this.saved);
-			return;
-		}
-		if (this.editing) {
-			if (data === "\r") {
-				this.submit();
-				return;
-			}
-			if (data === "\x1b") {
-				this.editing = false;
-				this.buffer = "";
-				this.error = null;
-				return;
-			}
-			if (data === "\x7f" || data === "\b") {
-				this.buffer = this.buffer.slice(0, -1);
-				return;
-			}
-			if (data.length === 1 && data >= " ") this.buffer += data;
-			return;
-		}
-		if (data === "\x1b[A") {
-			this.selected = (this.selected + this.rows.length - 1) % this.rows.length;
-			return;
-		}
-		if (data === "\x1b[B") {
-			this.selected = (this.selected + 1) % this.rows.length;
-			return;
-		}
-		if (data === "\r") {
-			this.editing = true;
-			this.buffer = rowRawValue(this.draft, this.rows[this.selected].id);
-			return;
-		}
-		if (data === "\x1b") this.done(this.saved);
-	}
-
-	render(width: number): string[] {
-		const lines: string[] = [];
-		lines.push("pi-fold settings");
-		lines.push("");
-		for (const [index, row] of this.rows.entries()) {
-			const cursor = index === this.selected ? "> " : "  ";
-			const value = this.editing && index === this.selected
-				? this.buffer
-				: rowDisplayValue(this.draft, row.id, this.budgetTokens);
-			const label = cursor + row.label;
-			const pad = Math.max(1, width - label.length - value.length - 2);
-			lines.push(label + " ".repeat(pad) + value);
-			if (index === this.selected) lines.push(`    ${row.description}`);
-		}
-		lines.push("");
-		if (this.error) lines.push(`error: ${this.error}`);
-		else if (this.editing) lines.push("Enter to apply · Esc to cancel the edit");
-		else lines.push(this.saved ? "Saved · Enter to edit · Esc to close" : "Enter to edit · Esc to close");
-		return lines.slice(0, Math.max(lines.length, 1));
-	}
-}
 
 function rowRawValue(settings: FoldSettingsFile, id: FoldSettingId): string {
 	if (id === "providerInputBudget") {
@@ -261,6 +163,127 @@ function rowRawValue(settings: FoldSettingsFile, id: FoldSettingId): string {
 	}
 	const thresholds = settings.thresholds ?? DEFAULT_THRESHOLDS;
 	return String(thresholds[id]);
+}
+
+function rowDisplayValue(settings: FoldSettingsFile, id: FoldSettingId, budgetTokens: number): string {
+	if (id === "providerInputBudget") {
+		return settings.providerInputBudget != null ? `${settings.providerInputBudget.toLocaleString("en-US")} tokens` : "auto";
+	}
+	const thresholds = settings.thresholds ?? DEFAULT_THRESHOLDS;
+	const value = thresholds[id];
+	if (id === "consolidateAfter") return String(value);
+	return `${value} (~${Math.round(value * budgetTokens).toLocaleString("en-US")} tok)`;
+}
+
+// The value editor behind a SettingsList submenu: an Input prefilled with the raw
+// value; Enter applies through applyFoldSettingsEdit and only a valid result calls
+// done, so an invalid state can never reach the list, the file, or registration.
+export class FoldValueEditor extends Container {
+	private readonly input = new Input();
+	private readonly errorText = new Text("", 0, 0);
+
+	constructor(
+		private readonly rowLabel: string,
+		initialValue: string,
+		private readonly apply: (raw: string) => { ok: true; display: string } | { ok: false; error: string },
+		private readonly done: (displayValue?: string) => void,
+	) {
+		super();
+		this.addChild(new Text(rowLabel, 0, 0));
+		this.addChild(new Spacer(1));
+		this.input.setValue(initialValue);
+		// setValue parks the cursor at 0; a prefilled editor must start at the end,
+		// or typing inserts at the front and backspace deletes nothing.
+		(this.input as any).cursor = initialValue.length;
+		this.input.onSubmit = () => this.submit();
+		this.input.onEscape = () => this.done();
+		this.addChild(this.input);
+		this.addChild(new Spacer(1));
+		this.addChild(this.errorText);
+		this.addChild(new Text("Enter to apply · Esc to cancel", 0, 0));
+	}
+
+	private submit(): void {
+		const result = this.apply(this.input.getValue());
+		if (!result.ok) {
+			this.errorText.setText(result.error);
+			return;
+		}
+		this.done(result.display);
+	}
+
+	handleInput(data: string): void {
+		this.input.handleInput(data);
+	}
+}
+
+// The /fold-settings screen itself: a SettingsList over the five rows, styled off
+// the live theme, with every applied change persisted immediately the way Pi's own
+// /settings persists.
+export class FoldSettingsEditor extends Container {
+	private readonly settingsList: SettingsList;
+
+	constructor(
+		private draft: FoldSettingsFile,
+		private readonly budgetTokens: number,
+		private readonly settingsPath: string,
+		themeLike: any,
+		private readonly done: (saved: boolean) => void,
+	) {
+		super();
+		this.addChild(new Text(themeLike.fg("accent", "pi-fold settings"), 0, 0));
+		this.addChild(new Spacer(1));
+		const theme = {
+			label: (text: string, selected: boolean) => (selected ? themeLike.fg("accent", text) : text),
+			value: (text: string, selected: boolean) => (selected ? themeLike.fg("accent", text) : themeLike.fg("muted", text)),
+			description: (text: string) => themeLike.fg("dim", text),
+			cursor: themeLike.fg("accent", "→ "),
+			hint: (text: string) => themeLike.fg("dim", text),
+		};
+		this.settingsList = new SettingsList(
+			EDITOR_ROWS.map((row) => ({
+				id: row.id,
+				label: row.label,
+				description: row.description,
+				currentValue: rowDisplayValue(draft, row.id, budgetTokens),
+				submenu: (_current: string, submenuDone: (displayValue?: string) => void) =>
+					new FoldValueEditor(
+						row.label,
+						rowRawValue(draft, row.id),
+						(raw) => this.applyEdit(row.id, raw),
+						submenuDone,
+					),
+			})),
+			EDITOR_ROWS.length,
+			theme,
+			() => {},
+			() => this.done(true),
+		);
+		this.addChild(this.settingsList);
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(themeLike.fg("dim", `Saved immediately to ${settingsPath} · Esc to close`), 0, 0));
+	}
+
+	private applyEdit(id: FoldSettingId, raw: string): { ok: true; display: string } | { ok: false; error: string } {
+		const result = applyFoldSettingsEdit(this.draft, id, raw);
+		if (!result.ok) return result;
+		this.draft = result.draft;
+		saveFoldSettingsFile(this.settingsPath, this.draft);
+		return { ok: true, display: rowDisplayValue(this.draft, id, this.budgetTokens) };
+	}
+
+	handleInput(data: string): void {
+		// An open submenu owns Escape (it cancels the edit, not the screen).
+		if (this.settingsList.submenuComponent) {
+			this.settingsList.handleInput(data);
+			return;
+		}
+		if (matchesKey(data, Key.escape)) {
+			this.done(true);
+			return;
+		}
+		this.settingsList.handleInput(data);
+	}
 }
 
 export function registerFoldSettings(
@@ -277,8 +300,8 @@ export function registerFoldSettings(
 			const draft = loadFoldSettingsFile(settingsPath);
 			const descriptorWindow = ctx.model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
 			const budgetTokens = draft.providerInputBudget ?? servingBudgetTokens(descriptorWindow);
-			await ctx.ui.custom((_tui: unknown, _theme: unknown, _keybindings: unknown, done: (saved: boolean) => void) =>
-				new FoldSettingsEditor(draft, budgetTokens, settingsPath, done));
+			await ctx.ui.custom((tui: unknown, theme: any, _keybindings: unknown, done: (saved: boolean) => void) =>
+				new FoldSettingsEditor(draft, budgetTokens, settingsPath, theme, done));
 		},
 	});
 }

@@ -13077,11 +13077,57 @@ async function gateFoldSettingsRoundTrip() {
     assert(/pi-fold/.test(registered[0].definition.description),
       "the settings command description does not name the package");
 
+    // THE EDITOR ITSELF, driven through its real input path. The first shipped editor
+    // matched raw CSI arrow bytes and FROZE on terminals in application cursor mode
+    // (SS3 \x1bOB): enter and typed characters are identical in every mode, which is
+    // exactly why the user could change a value and then neither escape nor move.
+    // Every key must route through matchesKey, which carries both encodings.
+    const editorPath = join(scratch, "editor.json");
+    let closed = null;
+    const themeLike = { fg: (_role, text) => text };
+    const editor = new settingsModule.FoldSettingsEditor(
+      {}, 251_520, editorPath, themeLike, (saved) => { closed = saved; },
+    );
+    const renders = () => editor.render(90).join("\n");
+    // Both encodings move the cursor; assert the SELECTION moved, not just that no
+    // exception flew, because a dead key handler also throws nothing.
+    editor.handleInput("\x1bOB");
+    assert(renders().includes("→ Post-commit aim"), "SS3 down did not move the selection");
+    editor.handleInput("\x1b[A");
+    assert(renders().includes("→ Commit trigger"), "CSI up did not move the selection back");
+    // Open the submenu, replace the prefilled value, apply: the file lands immediately.
+    editor.handleInput("\r");
+    for (let i = 0; i < 6; i++) editor.handleInput("\x7f");
+    for (const character of "0.5") editor.handleInput(character);
+    editor.handleInput("\r");
+    const savedFile = JSON.parse(readFileSync(editorPath, "utf8"));
+    assert.equal(savedFile.thresholds.maxTarget, 0.5, "an applied edit did not reach disk");
+    assert(renders().includes("0.5"), "the list did not re-render the applied value");
+    // Escape inside an open submenu cancels THE SUBMENU, not the screen.
+    editor.handleInput("\r");
+    assert(renders().includes("Enter to apply"), "the submenu did not open");
+    editor.handleInput("\x1b");
+    assert(closed === null, "escape inside a submenu closed the whole editor");
+    assert(renders().includes("Commit trigger"), "the submenu left the main list");
+    // An invalid value renders the named error and writes nothing.
+    editor.handleInput("\x1b[B");
+    editor.handleInput("\r");
+    for (let i = 0; i < 6; i++) editor.handleInput("\x7f");
+    for (const character of "0.9") editor.handleInput(character);
+    editor.handleInput("\r");
+    assert(renders().includes("must sit below"), "a cross-field violation rendered no error");
+    assert.equal(JSON.parse(readFileSync(editorPath, "utf8")).thresholds.minTarget,
+      context.DEFAULT_THRESHOLDS.minTarget, "a refused submenu edit reached disk");
+    editor.handleInput("\x1b");
+    editor.handleInput("\x1b");
+    assert.equal(closed, true, "escape on the main list did not close the editor");
+
     return {
       roundTrip: loaded,
       editedMaxTarget: draft.thresholds.maxTarget,
       crossFieldRefusal: refused.error,
       command: registered[0].name,
+      editorClosedWith: closed,
     };
   } finally {
     await rm(scratch, { recursive: true, force: true });

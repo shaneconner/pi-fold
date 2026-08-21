@@ -52,5 +52,8 @@
     "extensions": [
       "./extensions"
     ]
+  },
+  "dependencies": {
+    "@earendil-works/pi-tui": "^0.84.2"
   }
 }
