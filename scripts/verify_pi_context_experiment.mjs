@@ -8,7 +8,7 @@
 //   node scripts/verify_pi_context_experiment.mjs
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -94,6 +94,7 @@ import {
   testAwarenessLeaks,
   EXPERIMENT_HISTORY_TOOL_NAME,
   EXPERIMENT_ALLOWED_TOOLS,
+  PI_STOCK_TOOLS,
   EXPERIMENT_TOOL_NAME,
   EXPERIMENT_PIFOLD_EXTRA_TOOLS,
   billedCostFromLedger,
@@ -4643,9 +4644,23 @@ try {
   // The ledger tool is arm-SYMMETRIC: both arms carry the identical workload
   // surface, so its presence changes nothing about this gate's law that no arm
   // holds a recovery mechanism the other lacks.
+  // THE SURFACE IS STOCK PI (Shane 2026-08-21), read off Pi's own tool registry
+  // rather than restated here, so an upgrade that ships an eighth tool fails this
+  // gate instead of quietly reintroducing a subtraction.
+  const toolsDir = join(PI_INSTALL_ROOT, "dist", "core", "tools");
+  const registered = [...new Set(readdirSync(toolsDir)
+    .filter((file) => file.endsWith(".js"))
+    .flatMap((file) => [...readFileSync(join(toolsDir, file), "utf8")
+      .matchAll(/\bname:\s*"([a-z_]+)"/g)].map((match) => match[1])))].sort();
+  assert.deepEqual([...PI_STOCK_TOOLS].sort(), registered,
+    "the arms no longer carry exactly what Pi ships");
   assert.deepEqual([...EXPERIMENT_ALLOWED_TOOLS],
-    ["read", EXPERIMENT_TOOL_NAME, EXPERIMENT_LEDGER_TOOL_NAME],
-    "the primary surface is read, the stage tool and the ledger tool, and nothing else");
+    [...PI_STOCK_TOOLS, EXPERIMENT_TOOL_NAME, EXPERIMENT_LEDGER_TOOL_NAME],
+    "the surface is stock Pi plus the two arm-symmetric harness tools, and nothing else");
+  // The law this gate protects is SYMMETRY, not scarcity: no arm may hold a
+  // recovery mechanism the other lacks. Restoring six tools to BOTH arms keeps it.
+  assert(EXPERIMENT_ALLOWED_TOOLS.includes("bash") && EXPERIMENT_ALLOWED_TOOLS.includes("grep"),
+    "the arms cannot page a transcript line over Pi's 50 KiB read cap");
   assert(!EXPERIMENT_PIFOLD_EXTRA_TOOLS.includes(EXPERIMENT_HISTORY_TOOL_NAME),
     "the history tool came back as an arm-specific extra");
   assert.equal(EXPERIMENT_HISTORY_TOOL_NAME, "session_history",
@@ -9541,9 +9556,10 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
   // THE LIVE NAMESPACE. Everything above is arithmetic until the kernel agrees.
   const root = mkdtempSync(join(tmpdir(), "pi-fold-sandbox-gate-"));
   try {
-    for (const dir of ["work", "session", "run", "harness", "home", "identity"]) {
+    for (const dir of ["work", "session", "run", "harness", "home", "identity", "agent"]) {
       mkdirSync(join(root, dir));
     }
+    writeFileSync(join(root, "agent", "auth.json"), "{}\n");
     writeFileSync(join(root, "work", "README"), "pinned checkout\n");
     writeFileSync(join(root, "harness", "protocol.txt"), "the experiment's own source\n");
     // The deleter is exercised from INSIDE the harness copy, which is where the
@@ -9560,6 +9576,7 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
       runDir: join(root, "run"), harnessDir: join(root, "harness"),
       piRoot: PI_INSTALL_ROOT, nodeExecutable: process.execPath,
       identityDir: join(root, "identity"),
+      agentDir: join(root, "agent"), authPath: join(root, "agent", "auth.json"),
       configPath: join(root, "config.json"), planPath: join(root, "plan.json"),
       homeDir: join(root, "home"),
     });
@@ -9579,6 +9596,8 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
         pids: readdirSync("/proc").filter((entry) => /^[0-9]+$/.test(entry)).length,
         checkout: existsSync("/work/README"),
         harness: existsSync("/opt/harness/protocol.txt"),
+        runHistory: existsSync("/home/agent/.pi/agent/run-history.jsonl"),
+        otherExtensions: existsSync("/home/agent/.pi/agent/extensions"),
       };
       try { writeFileSync("/work/probe", "x"); report.checkoutWritable = true; }
       catch { report.checkoutWritable = false; }
@@ -9607,6 +9626,10 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
     // The harness source is a test-disclosure surface: it names the arms, the end
     // block and the ledger. It is copied in because node must import it, and it
     // goes once every module is resident, before the model takes a turn.
+    // Pi's real agent directory holds the user's own session history and the
+    // interactive deployment. The namespace gets a rebuilt one instead.
+    assert.equal(seen.runHistory, false, "the user's own run history is inside the namespace");
+    assert.equal(seen.otherExtensions, false, "the interactive extension tree is inside the namespace");
     assert.equal(seen.harness, true, "the harness never reached the namespace, so the delete proves nothing");
     assert.deepEqual(seen.harnessAfterDelete, [], "the harness source survived its own deletion");
   } finally {

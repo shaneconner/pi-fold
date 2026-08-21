@@ -385,8 +385,30 @@ export const EXPERIMENT_HISTORY_TOOL_NAME = "session_history";
 // seeded-ledger section below. Registered for every arm, because the workload
 // must be identical across arms for the pairing to be a pairing.
 export const EXPERIMENT_LEDGER_TOOL_NAME = "ledger_record";
+// STOCK PI, NOT A SUBSET OF IT (Shane 2026-08-21). This list was `read` plus the
+// two harness tools, which meant the experiment never compared native Pi against
+// native Pi plus folding: it compared two subsets of Pi. Pi ships seven tools, and
+// the six that were missing are not decoration. `read` pages by physical line and
+// returns nothing at all from a line over 50 KiB; a native session transcript
+// holds 60 to 65 such lines, and in the sealed rep 5 transcript EVERY one of the
+// 27 seeded-value carriers was a `repo_stage` result over that cap while every
+// readable carrier was the model's own assistant text, ledger echo or compaction
+// summary. An arm limited to `read` can therefore recover its own answers and not
+// the evidence, which is gate 63's rejection reason one layer down.
+//
+// The six came out for containment, never for measurement: with the answer key on
+// the same filesystem, `bash` was a way to reach it. It is not on the same
+// filesystem any more (see scripts/lib/pi_context_sandbox.mjs), so the boundary is
+// the mount namespace and the tool surface can be what Pi actually ships. `write`
+// and `bash` let the model keep notes on disk, which is a memory that is neither
+// compaction nor folding; that is real behaviour on a real machine, no instruction
+// surface asks for it (gate 62), both arms have it, and it is counted and reported
+// rather than designed away.
+export const PI_STOCK_TOOLS = Object.freeze([
+  "bash", "edit", "find", "grep", "ls", "read", "write",
+]);
 export const EXPERIMENT_ALLOWED_TOOLS = Object.freeze([
-  "read", EXPERIMENT_TOOL_NAME, EXPERIMENT_LEDGER_TOOL_NAME,
+  ...PI_STOCK_TOOLS, EXPERIMENT_TOOL_NAME, EXPERIMENT_LEDGER_TOOL_NAME,
 ]);
 
 // READ CONTAINMENT (Shane 2026-08-14). Pi's read tool resolves any path against
@@ -1674,6 +1696,20 @@ export const TEST_AWARENESS_PATTERNS = Object.freeze([
   // every request in both arms.
   /you will need later/i,
   /keep an exact working memory/i,
+  // The phrasings Shane named on 2026-08-21, when the restored tool surface made
+  // the instruction surface worth re-reading. A bare /test/ is refused on purpose:
+  // `tests/` is a directory in curl and every stage instruction names real paths.
+  /\bwe (will|'ll) ask\b/i,
+  /\bask(ed)? you (about|later)/i,
+  /\bbeing tested\b/i,
+  /\bthis is a test\b/i,
+  /\bevaluat(ed|ing|ion of) your\b/i,
+  // NOTE-TAKING DIRECTION, the hoarding leak in the clothes the new tools gave it.
+  // Telling the model to write something down names what will be asked for exactly
+  // as plainly as saying it will be asked.
+  /take notes/i,
+  /write (them|this|these|it) down/i,
+  /save (them|these|it) (to|in) a file/i,
 ]);
 
 export function testAwarenessLeaks(text) {

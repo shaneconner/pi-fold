@@ -128,6 +128,13 @@ assertExperiment(closedBook || checkoutSha256 === config.targetTreeSha256,
 // one layer up and reaching far more requests: gate 62 was only scanning stage
 // surfaces and never read this one. What the assignment IS stays; how to remember
 // it is the thing under measurement and is no longer supplied.
+//
+// NO TOOL DIRECTION EITHER (Shane 2026-08-21). This prompt also said "You may use
+// the read tool on files inside this checkout whenever you need to", which named
+// one tool of the seven Pi ships and fenced attention to the checkout. Both were
+// artefacts of the three-tool surface: the model now has stock Pi and a sandbox to
+// navigate, the schemas describe themselves, and which tool it reaches for is part
+// of what the run measures rather than something to supply.
 function workloadSystemPrompt() {
   return [
     "You are a careful software analyst carrying out one continuous repository comprehension",
@@ -142,7 +149,6 @@ function workloadPrompt(firstChallenge) {
     `Begin the staged repository assignment with key ${firstChallenge}.`,
     `Call ${EXPERIMENT_TOOL_NAME} with the current key to receive each stage, carry out that`,
     "stage's instructions in full, and follow each NEXT_KEY until END.",
-    "You may use the read tool on files inside this checkout whenever you need to.",
     "Do not skip, guess, duplicate, or combine stages. Finish with a short closing synthesis.",
     "Complete this as one continuous run.",
   ].join(" ");
