@@ -9528,20 +9528,17 @@ async function gatePublicOptionSurface() {
 }
 
 /**
- * EVERY completed tool batch folds unmarked. The blacklist is the exception, not the rule.
+ * MECHANISM 5. The ladder stands down until commit; the agent owns the epoch.
  *
- * The list ran the other way until 2026-08-10: an allow-list seeded with pi's four
- * built-in readers, so a deployment's own tools were unfoldable by the ladder until
- * someone remembered to name them, and the ladder starved on exactly the results that
- * filled the window. Foldability was never the protection. The pins, the three zones and
- * the fresh tail are, and they hold for a blacklisted tool and an ordinary one alike,
- * which is why the default list is empty and the zone leg below is part of this gate.
- *
- * `bash` is the probe on purpose: it is not one of the four names the old allow-list
- * carried, so every assertion here is one the previous surface would have failed.
+ * Shane, 2026-08-21, dogfooding: the rung staged a mark on every measured response,
+ * every turn end, every message end -- so by the time an agent looked, every eligible
+ * batch was already marked and agent curation was structurally impossible. The law
+ * inverts: between epochs the ladder stages NOTHING, and at an epoch it fills fresh
+ * (topUpMarks) only when the agent staged no marks of its own. The classifier and the
+ * blacklist survive unchanged; what died is the eager staging.
  */
-async function gateEveryToolBatchFoldsUnmarked() {
-  // The classifier, before any ladder: an arbitrary tool is foldable whatever its
+async function gateLadderStandsDownUntilCommit() {
+  // The classifier, unchanged: an arbitrary tool is foldable whatever its
   // arguments look like, and blacklisting it is the only thing that changes the answer.
   assert.equal(context.isAutoFoldableToolCall("bash", { command: "make" }), true);
   assert.equal(context.isAutoFoldableToolCall("write", { path: "x", contents: "y" }), true);
@@ -9549,75 +9546,64 @@ async function gateEveryToolBatchFoldsUnmarked() {
     context.isAutoFoldableToolCall("bash", { command: "make" }, "pi_fold_context", new Set(["bash"])),
     false,
   );
-  // The one carve-out survives the inversion: the context tool's own MUTATING calls are
-  // never auto-foldable, because a tool call may not cause a rewrite of its own batch.
-  // Its read-only actions still are.
+  // The one carve-out survives: the context tool's own MUTATING calls are never
+  // auto-foldable, because a tool call may not cause a rewrite of its own batch.
   assert.equal(context.isAutoFoldableToolCall("pi_fold_context", { action: "fold", ids: "e1" }), false);
   assert.equal(context.isAutoFoldableToolCall("pi_fold_context", { action: "status" }), true);
 
   const shape = { turns: 8, resultChars: 10_000, contextWindow: 100_000, toolName: "bash" };
-  const built = makeFixture(shape);
-  const bashResultIds = built.turnEntries.map((ids) => ids[2]);
-  // The rung selects the stale bash batch with no option set anywhere.
-  const state = context.emptyActiveContextState(built.sessionId);
-  const [candidate] = context.selectAutomaticToolBatch(built.snapshot, state);
-  assert(candidate, "The tool rung selected nothing from an unlisted tool's completed batches");
-  assert.equal(candidate.kind, "tool-result");
-  assert(candidate.sourceRefs.every((ref) => bashResultIds.includes(ref.entryId)));
+  const bashResultIds = (built) => built.turnEntries.map((ids) => ids[2]);
 
-  // Named in the blacklist, the same transcript offers the rung nothing.
-  const blacklisted = context.mapActiveContext({
-    sessionId: built.sessionId,
-    eventMessages: built.messages,
-    contextEntries: built.entries,
-    contextWindow: shape.contextWindow,
-    blacklistAutoFoldTools: new Set(["bash"]),
+  // BETWEEN EPOCHS THE LADDER STAGES NOTHING. A measured response at a fifth of the
+  // budget used to stage a rung mark right here; now it stages nothing at all.
+  const quiet = await epochToolRuntime(shape);
+  await measure(quiet, 20_000, 100_000);
+  const quietStatus = await toolStatus(quiet);
+  assert.equal(quietStatus.details.automatic.scheduling.ladderMarks, 0,
+    "The ladder staged marks between epochs; eager marking survived");
+  assert.equal(quietStatus.details.automatic.scheduling.pending, 0,
+    "Marks appeared without the agent marking anything");
+
+  // AN EPOCH THE AGENT CURATED: the agent's folds apply and the ladder adds nothing.
+  const curated = await epochToolRuntime(shape);
+  const staleBatch = bashResultIds(curated.built)[0];
+  const marked = await toolCall(curated, {
+    action: "fold",
+    ids: [staleBatch],
+    brief: "One completed inspection stays exactly recoverable behind this mark.",
   });
-  assert.deepEqual(context.selectAutomaticToolBatch(blacklisted, state), [],
-    "A blacklisted tool's completed batch was still selected unmarked");
+  assert(!marked.isError, "The agent mark was refused");
+  const curatedEpoch = await runtimeCommit(curated, { tokens: 95_000, contextWindow: 100_000 });
+  assert(curatedEpoch.fired, "The curated epoch did not fire");
+  assert(curatedEpoch.applied.length >= 1, "The agent's mark did not apply");
+  assert(curatedEpoch.applied.every((fold) => fold.origin === "agent"),
+    `The ladder marked alongside the agent: ${JSON.stringify(curatedEpoch.applied.filter((f) => f.origin !== "agent"))}`);
 
-  // The protections did not move. Foldability grants membership, never a waiver: every
-  // ref the rung took sits outside the guaranteed-raw fresh tail, and it took the
-  // stalest batch rather than the freshest.
-  const takenIndices = candidate.sourceRefs.map((ref) =>
-    built.snapshot.mapped.findIndex((item) => item.ref?.entryId === ref.entryId));
-  assert(takenIndices.length && takenIndices.every((index) =>
-    index >= 0 && !built.snapshot.toolProtectedIndices.has(index)),
-  "The ladder reached into the fresh tail once the tool became foldable");
-  assert(!candidate.sourceRefs.some((ref) => ref.entryId === bashResultIds.at(-1)),
-    "The rung took the freshest batch");
-
-  // End to end through the ladder, at the default registration a host gets: the epoch
-  // commits and a tool-result fold covers bash results nobody marked and nobody listed.
-  const runtime = makeRuntime(makeFixture(shape));
-  await startRuntime(runtime);
+  // AN EPOCH THE AGENT IGNORED: the ladder fills fresh at commit time, and the fill
+  // covers the unlisted tool's completed batches.
+  const runtime = await epochToolRuntime(shape);
   await runtimeCommit(runtime, { tokens: 95_000, contextWindow: 100_000 });
   const toolFolds = materialized(runtime).folds.filter((fold) => fold.kind === "tool-result");
-  assert(toolFolds.length, "The running ladder never folded an unlisted tool's batch");
+  assert(toolFolds.length, "The commit-time fill never folded an unlisted tool's batch");
   assert(toolFolds.some((fold) =>
-    fold.parts.some((part) => bashResultIds.includes(part.ref?.entryId))),
-  "The tool-result folds covered something other than the bash results");
-  assert.equal(contextEvents(runtime).filter((record) =>
-    record.kind === "context.fold" && record.origin === "agent").length, 0,
-  "The fold under test was agent-marked rather than automatic");
+    fold.parts.some((part) => bashResultIds(runtime.built).includes(part.ref?.entryId))),
+  "The fill covered something other than the bash results");
 
-  // And with the tool blacklisted, the running ladder claims no tool batch at all. The
-  // chapter rung may still take the span; the tool rung, which is what the list governs,
-  // may not.
-  const barred = makeRuntime(makeFixture(shape), { blacklistAutoFoldTools: new Set(["bash"]) });
-  await startRuntime(barred);
-  await runtimeCommit(barred, { tokens: 95_000, contextWindow: 100_000 });
+  // And with the tool blacklisted, the fill claims no tool batch at all. The chapter
+  // fill may still take the span; the tool fill, which is what the list governs, may not.
+  const barredRuntime = makeRuntime(makeFixture(shape), { blacklistAutoFoldTools: new Set(["bash"]) });
+  await startRuntime(barredRuntime);
+  await runtimeCommit(barredRuntime, { tokens: 95_000, contextWindow: 100_000 });
   assert.deepEqual(
-    materialized(barred).folds.filter((fold) => fold.kind === "tool-result"), [],
-    "The blacklisted tool's results were folded by the tool rung anyway",
+    materialized(barredRuntime).folds.filter((fold) => fold.kind === "tool-result"), [],
+    "The blacklisted tool's results were folded by the fill anyway",
   );
   return {
     defaultBlacklist: [...context.AUTO_FOLD_BLACKLIST_DEFAULT],
-    unlistedToolSelected: candidate.sourceRefs.length,
-    blacklistedToolSelected: 0,
-    selectionOutsideTheFreshTail: true,
-    ladderToolFolds: toolFolds.length,
-    contextToolMutatingActionsFoldable: false,
+    eagerMarksAfterMeasure: quietStatus.details.automatic.scheduling.ladderMarks,
+    curatedEpochOrigins: [...new Set(curatedEpoch.applied.map((fold) => fold.origin))],
+    fillToolFolds: toolFolds.length,
+    blacklistedFillToolFolds: 0,
   };
 }
 
@@ -13249,7 +13235,13 @@ const gates = [
   [98, "The class law is unconditional", gateFenceOpensTheMiddle],
   [101, "Peek copies reclaim with identity", gatePeekReclaimWithIdentity],
   [102, "The public option surface", gatePublicOptionSurface],
-  [105, "Every completed tool batch folds unmarked", gateEveryToolBatchFoldsUnmarked],
+  // 105 is retired, not free: its law inverted. "Every completed tool batch folds
+  // unmarked" staged marks on every measured response and crowded the agent out of
+  // curation entirely -- dogfooding on 2026-08-21 showed an agent unable to mark
+  // anything because the ladder had marked everything first. The ladder now stands
+  // down until commit and fills fresh only in an epoch the agent ignored; gate 141
+  // pins the inversion.
+  [141, "The ladder stands down until commit; the agent owns the epoch", gateLadderStandsDownUntilCommit],
   [103, "Guidance is one boolean, default on", gateGuidanceOption],
   [106, "The boundary commits with no turn ever closed", gateOpenTurnCommits],
   [108, "A folded head never limits reach", gateProjectedStaleBasis],

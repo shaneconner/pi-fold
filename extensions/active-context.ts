@@ -147,7 +147,6 @@ import {
   ephemeralPeekMarks,
   estimatedTokens,
   foldMarkFor,
-  ladderSelectionMark,
   ladderBrief,
   markAccounting,
   markEligibility,
@@ -2147,7 +2146,12 @@ export function registerActiveContext(pi: any, options: {
     const freeingTarget = usedTokens === null || budgetTokens <= 0
       ? 0
       : Math.max(0, (usedTokens - thresholds.minTarget * budgetTokens) / budgetTokens);
-    if (topUp) {
+    // AGENT PRIORITY (Shane, 2026-08-21): if the agent staged any mark, the ladder
+    // adds nothing at this epoch -- no top-up, no backstop, no wedge absorption.
+    // The agent owns the epoch; the ladder is the fallback for the epoch the agent
+    // ignored, and it fills fresh right here rather than ever staging in advance.
+    const agentCurated = pendingMarks(state).some((mark) => mark.origin === "agent");
+    if (topUp && !agentCurated) {
       for (const mark of topUpMarks({
         snapshot,
         state,
@@ -2173,12 +2177,14 @@ export function registerActiveContext(pi: any, options: {
         }
       }
     }
-    const wedges = absorbWedgeMarks({
-      snapshot,
-      state,
-      charsPerToken: projectionCharsPerToken(),
-      excludeRefKeys: guarded,
-    });
+    const wedges = agentCurated
+      ? { state, absorbed: [] as AbsorbedWedge[] }
+      : absorbWedgeMarks({
+        snapshot,
+        state,
+        charsPerToken: projectionCharsPerToken(),
+        excludeRefKeys: guarded,
+      });
     state = wedges.state;
     const accounting = markAccounting(snapshot, state);
     if (!accounting.pending) {
@@ -2451,59 +2457,14 @@ export function registerActiveContext(pi: any, options: {
     }));
   };
 
-  const applyAutomaticRung = async (
-    snapshot: ActiveContextSnapshot,
-    ratio: number,
-    rungOptions: {
-      toolOnly?: boolean;
-      waiverRatio?: number;
-    } = {},
-  ): Promise<Record<string, unknown> | null> => {
-    if (!persistence.state || ladder.automaticFailure || ladder.preparing) return null;
-    const rungSelectionOptions = { toolOnly: rungOptions.toolOnly };
-    const markLadderSelection = (): Record<string, unknown> | null => {
-      if (!persistence.state) return null;
-      const decision = selectAutomaticRung(snapshot, persistence.state, ratio, {
-        ...rungSelectionOptions,
-        claimed: claimedRefKeys(persistence.state),
-        claimedFoldIds: markedFoldIds(persistence.state),
-      });
-      const mark = decision
-        ? ladderSelectionMark({
-          snapshot, state: persistence.state, selection: decision, ordinal: markOrdinal(snapshot),
-        })
-        : null;
-      if (!mark) return null;
-      const addition = addPendingMark(persistence.state, mark);
-      if (!addition.added) return null;
-      persistence.state = addition.state;
-      ladder.pendingContextNote =
-        `Pending ${mark.mark} mark ${mark.id} recorded; no context bytes moved. ` +
-        "It applies at the next commit epoch.";
-      ladder.lastAutomaticAction = {
-        kind: "mark",
-        foldIds: [mark.id],
-        sourceIds: [],
-        markKind: mark.mark,
-        markOrigin: mark.origin,
-        pendingMarks: pendingMarks(persistence.state).length,
-        sourceBytesSaved: 0,
-      };
-      return ladder.lastAutomaticAction;
-    };
-    // MARKING ONLY. Every mutation the rung used to perform inline -- a prepared chapter,
-    // a tool fold, a refold, a consolidation, a chapter split -- now travels as a pending
-    // mark and lands at the boundary, which is the one point the projection changes.
-    // WHAT the rung decides is unchanged; WHEN it takes effect is.
-    return markLadderSelection();
-  };
   /**
-   * The one durable transaction. Whatever it wraps either lands with its state persisted
-   * or leaves the state it entered with, and a failure suspends folding by name rather
-   * than being retried quietly. Marking and committing both go through it, which is why
-   * a commit that vanishes at persistence (gate 122) and a suspension that says nothing
-   * (gate 123) are single properties rather than one per caller.
+   * A COMMIT, THROUGH THE SAME TRANSACTION AND THE SAME QUEUE. Two callers reach it: the
+   * compaction boundary, which is the ordinary one, and the projection fence, which is
+   * the emergency one. The fence cannot wait for a boundary because the request it is
+   * holding does not fit, so it commits in place; that is the one exception, and it is
+   * the exception that already existed.
    */
+
   const runAutomaticTransaction = async (
     snapshot: ActiveContextSnapshot,
     ratio: number,
@@ -2556,25 +2517,6 @@ export function registerActiveContext(pi: any, options: {
     ladder.actionQueue = queued.catch(() => undefined);
     return queued;
   };
-  const attemptAutomaticRung = (
-    snapshot: ActiveContextSnapshot,
-    ratio: number,
-    ctx: any,
-    phase: string,
-    rungOptions: {
-      toolOnly?: boolean;
-      waiverRatio?: number;
-    } = {},
-  ): Promise<Record<string, unknown> | null> => queueAutomatic(
-    snapshot, ratio, ctx, phase, () => applyAutomaticRung(snapshot, ratio, rungOptions),
-  );
-  /**
-   * A COMMIT, THROUGH THE SAME TRANSACTION AND THE SAME QUEUE. Two callers reach it: the
-   * compaction boundary, which is the ordinary one, and the projection fence, which is
-   * the emergency one. The fence cannot wait for a boundary because the request it is
-   * holding does not fit, so it commits in place; that is the one exception, and it is
-   * the exception that already existed.
-   */
   const attemptAutomaticCommit = (
     snapshot: ActiveContextSnapshot,
     ctx: any,
@@ -2760,14 +2702,11 @@ export function registerActiveContext(pi: any, options: {
               return { messages: event.messages };
             }
           }
-          if (selectAutomaticToolBatch(snapshot, persistence.state)[0]) mutationAttempted = true;
-          const action = await attemptAutomaticRung(
-            snapshot, measurements.latestRatio, ctx, "context",
-          );
-          if (action) {
-            mutationAttempted = true;
-            persistedSucceeded = true;
-          }
+          // NO EAGER LADDER MARKING (Shane, 2026-08-21): the rung used to stage a mark
+          // here on every measured response, which crowded the agent out of curation
+          // entirely -- by the time an agent looked, every eligible batch was already
+          // marked. The commit epoch fills fresh at commit time (topUpMarks), which is
+          // the only automatic marking there is.
         } else measurements.lastProviderMeasurement = observedMeasurement;
       } else {
         measurements.latestRatio = contextUsageRatio(measurements.lastProviderMeasurement);
@@ -2863,13 +2802,7 @@ export function registerActiveContext(pi: any, options: {
     if (measurements.latestRatio >= hardFenceRatio(measurement, ctx) && ladder.preparing) await ladder.preparing.promise;
     if (!sessionIdentityStillValid(ctx, capturedSessionId, capturedGeneration) ||
         !durableProviderMeasurementMatches(measurement)) return;
-    const action = await attemptAutomaticRung(
-      authoritativeSnapshotFor(ctx),
-      measurements.latestRatio,
-      ctx,
-      "message-end",
-    );
-    if (!action && measurementStateChanged && persistence.state && persistence.persisted &&
+    if (measurementStateChanged && persistence.state && persistence.persisted &&
         !sameStateProjection(persistence.state, persistence.persisted)) {
       await persistThroughActionQueue(ctx);
     }
@@ -2938,7 +2871,7 @@ export function registerActiveContext(pi: any, options: {
           durableProviderMeasurementMatches(measurements.lastProviderMeasurement)) {
         startPreparation(snapshot, measurements.latestRatio, ctx);
         if (measurements.latestRatio >= hardFenceRatio(snapshot) && ladder.preparing) await ladder.preparing.promise;
-        await attemptAutomaticRung(snapshot, measurements.latestRatio, ctx, "turn-end");
+        // No rung here either: turn end stages nothing (see the context-path note).
       }
       ladder.pendingManual = false;
       if (!ladder.automaticFailure) ladder.boundaryFailure = null;
