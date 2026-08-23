@@ -14030,6 +14030,146 @@ async function gateFoldEditorRendersReadOnly() {
   };
 }
 
+/**
+ * MECHANISM. THE USER LAYS MARKS IN THE EDITOR (Shane, 2026-08-23). Raw entries are
+ * MARK POINTS: `m` anchors one, moving prices the span live in the runtime's own
+ * token arithmetic ("would fold N entries · ~T tokens"), and `m` again stages a
+ * USER mark through stageFoldMarks -- the SAME validated path the tool's fold action
+ * runs, origin "user", so it counts toward the commit's coverage and folds at the
+ * epoch exactly as an agent mark does. The view computes nothing but the arithmetic
+ * it is handed and reports one intent; escape cancels the anchor before it closes
+ * the editor; an all-refused span throws before persisting, so the refusal lands in
+ * the footer instead of a no-op state write.
+ */
+async function gateFoldEditorUserMarks() {
+  const editorModule = await jiti.import(join(projectRoot, "extensions", "lib", "editor-ui.ts"));
+
+  const runtime = await epochToolRuntime({ turns: 6, resultChars: 9_000 });
+  const command = runtime.commands.get("fold-editor");
+  assert(command, "/fold-editor is not registered");
+  await measure(runtime, 40_000, 100_000);
+
+  // Open the REAL handler and drive the REAL view it returns.
+  let view = null;
+  let closedCount = 0;
+  runtime.ctx.ui.custom = async (factory) => {
+    view = factory(null, { fg: (color, text) => `[${color}]${text}[/${color}]` },
+      { matches: (_data, name) => name === currentAction }, () => { closedCount += 1; });
+    return view;
+  };
+  let currentAction = "";
+  await command.handler("", runtime.ctx);
+  await settle();
+  assert(view, "the editor did not open");
+
+  // The window is one raw gap with no folds: expand it and land on its first entry.
+  currentAction = "tui.select.confirm";
+  view.handleInput("\r");
+  currentAction = "tui.select.down";
+  view.handleInput("\x1b[B");
+  const firstEntryRender = view.render(140).join("\n");
+  assert(/· (user|assistant) /.test(firstEntryRender),
+    `the expanded raw block lists no entries: ${firstEntryRender.slice(0, 400)}`);
+
+  // FIRST m ANCHORS. The anchor row wears the diamond; nothing is staged yet.
+  view.handleInput("m");
+  const anchored = view.render(140).join("\n");
+  assert(/\u25c6 start/.test(anchored), "the anchor row carries no diamond marker");
+  assert(!/PROPOSED \(user\)/.test(anchored), "anchoring alone staged a mark");
+
+  // MOVING PRICES THE SPAN LIVE: two entries covered, a token figure present.
+  view.handleInput("\x1b[B");
+  const priced = view.render(140).join("\n");
+  assert(/would fold 2 entries/.test(priced),
+    `the footer does not price the two-entry span: ${priced.slice(-600)}`);
+  assert(/~[\d,]+ tokens/.test(priced), "the footer states no token figure");
+
+  // SECOND m STAGES through the validated path, origin "user". The view reports one
+  // intent; the handler does the staging, persists, and refreshes the data.
+  view.handleInput("m");
+  const deadline = Date.now() + 10_000;
+  while (view.staging && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert(!view.staging, "staging never finished");
+  await settle();
+  const stagedRender = view.render(140).join("\n");
+  assert(/PROPOSED \(user\)/.test(stagedRender),
+    `the staged user mark does not render as a proposed block: ${stagedRender.slice(0, 600)}`);
+  assert(/, 1 you/.test(stagedRender), "the header does not count the user's mark");
+  assert(runtime.notifications.some((notice) => /Staged 1 user mark/.test(notice.message)),
+    "staging did not tell the user what it did");
+
+  // IT IS A REAL PENDING MARK in durable state, not a view fiction.
+  const stateNow = materialized(runtime);
+  assert(stateNow.folds.length === 0, "staging folded something before the commit");
+  const stateEntries = runtime.branch.filter((entry) =>
+    entry.customType === context.ACTIVE_CONTEXT_STATE_ENTRY);
+  assert(stateEntries.length > 0, "staging wrote no durable state entry");
+  const newest = stateEntries.at(-1).data;
+  const pendingFold = (newest.pendingMarks ?? []).find((mark) =>
+    mark.mark === "fold" && mark.origin === "user");
+  assert(pendingFold, `no pending mark with origin "user" in durable state: ${JSON.stringify(newest).slice(0, 300)}`);
+  assert(pendingFold.briefProvenance.kind === "deterministic",
+    "a user mark without a brief did not get the deterministic provenance");
+
+  // ESCAPE CANCELS THE ANCHOR FIRST and closes the editor only on the second press.
+  view.handleInput("\x1b[B");
+  view.handleInput("m");
+  assert(/\u25c6 start/.test(view.render(140).join("\n")), "re-anchoring failed");
+  currentAction = "tui.select.cancel";
+  view.handleInput("\x1b");
+  assert(!view.closed, "escape closed the editor while an anchor was standing");
+  assert(!/\u25c6 start/.test(view.render(140).join("\n")), "escape did not clear the anchor");
+  view.handleInput("\x1b");
+  assert(view.closed && closedCount === 1, "the second escape did not close the editor");
+
+  // THE USER MARK COMMITS WITH THE EPOCH and the fold record carries its origin.
+  const epoch = await runtimeCommit(runtime, { tokens: 95_000, contextWindow: 100_000 });
+  assert(epoch.fired, `the commit did not fire: ${epoch.reason}`);
+  const userFold = epoch.applied.find((mark) => mark.origin === "user");
+  assert(userFold, `the user's mark did not apply at the commit: ${JSON.stringify(epoch.applied)}`);
+  assert(userFold.foldId === pendingFold.id,
+    "the applied user fold is not the mark the user staged");
+
+  // THE VIEW STAYS PURE: no runtime objects, no mutation of its input data.
+  const pureData = Object.freeze({
+    title: "t",
+    occupancy: Object.freeze({ usedTokens: 1_000, budgetTokens: 10_000, commitOccupancy: 0.8, commitDue: false }),
+    blocks: Object.freeze([Object.freeze({
+      type: "raw", id: "raw:0-1", startPosition: 0, endPosition: 1, sourceCount: 2,
+      rolesSummary: "", entries: Object.freeze([
+        Object.freeze({ id: "e0", role: "user", preview: "a", index: 0 }),
+        Object.freeze({ id: "e1", role: "assistant", preview: "b", index: 1 }),
+      ]), children: Object.freeze([]),
+    })]),
+    pending: Object.freeze({ count: 0, agentMarks: 0, ladderMarks: 0, userMarks: 0, freedTokens: 0 }),
+    pinned: Object.freeze([]),
+  });
+  const intents = [];
+  const pureByteKb = {
+    "\r": "tui.select.confirm",
+    "\x1b[B": "tui.select.down",
+  };
+  const pureView = new editorModule.FoldEditorView(pureData, () => {},
+    { matches: (data, name) => pureByteKb[data] === name },
+    null, { spanCost: () => ({ entries: 2, tokens: 777 }) });
+  pureView.handleInput("\r"); // expand the raw block
+  pureView.handleInput("\x1b[B"); // first entry
+  pureView.handleInput("m"); // anchor
+  pureView.handleInput("\x1b[B"); // second entry
+  const pricedPure = pureView.render(140).join("\n");
+  assert(/~777 tokens/.test(pricedPure),
+    `the view did not use the injected spanCost: ${pricedPure.slice(-300)}`);
+  void intents;
+
+  return {
+    anchoredAndPriced: true,
+    stagedThroughValidatedPath: userFold.foldId === pendingFold.id,
+    deterministicBriefForUserMark: pendingFold.briefProvenance.kind === "deterministic",
+    escapeCancelsAnchorFirst: true,
+    committedWithOriginUser: Boolean(userFold),
+  };
+}
+
 const gates = [
   [1, "Registration & parse", gateRegistration],
   [2, "Fold lattice & recovery", gateFoldLattice],
@@ -14167,6 +14307,7 @@ const gates = [
   [142, "The fold editor renders the working window read-only", gateFoldEditorRendersReadOnly],
   [143, "A mark answers with its commit's arithmetic; a pin is a claim", gateMarkAnswersWithCommitArithmetic],
   [144, "The band top commits on its own", gateBandTopCommits],
+  [145, "The user lays marks in the fold editor over the validated path", gateFoldEditorUserMarks],
 ];
 
 const gateFilter = (process.env.GATES ?? "")

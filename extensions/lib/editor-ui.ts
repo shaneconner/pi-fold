@@ -3,9 +3,13 @@
 // not render until their parent is expanded, and an expanded fold exposes its actual
 // MESSAGES as selectable rows, so navigation reaches entry level. Colored bookends
 // carry the structure: theme success opens a fold, theme error closes it, accent/
-// warning mark PROPOSED (staged) blocks, dim renders raw. V2.1 STILL ADDS NO EDIT
-// ACTIONS -- when they land they must be skins over existing validated paths
-// (manualFoldCandidate, protectEvidence, batchedMarkRequests, reboundary).
+// warning mark PROPOSED (staged) blocks, dim renders raw. V2.2: RAW ENTRIES ARE MARK
+// POINTS. `m` anchors one, moving shows the live would-be fold size, and `m` again
+// stages a USER mark through the callback the command handler supplies -- which runs
+// the SAME validated staging path the agent's tool uses, origin "user". The view
+// itself still holds no runtime reference and no mutation path: it computes nothing
+// but the arithmetic it is handed (spanCost) and reports one intent (onStageMark).
+// Everything else must stay skins over existing validated paths.
 //
 // Keys go through the INJECTED keybindings manager (/tree action names), so user
 // rebinding works natively; the global pi-tui manager is the fallback. Raw byte
@@ -17,6 +21,8 @@ export interface FoldEditorEntry {
 	id: string;
 	role: string;
 	preview: string;
+	/** Position in the mapped window; present on raw entries, which are the mark points. */
+	index?: number;
 }
 
 export interface FoldEditorBlock {
@@ -49,6 +55,7 @@ export interface FoldEditorData {
 		count: number;
 		agentMarks: number;
 		ladderMarks: number;
+		userMarks: number;
 		freedTokens: number;
 	};
 	pinned: string[];
@@ -214,6 +221,23 @@ interface RenderRow {
 	toggleId: string | null;
 	/** An entry row: Enter shows its full preview. */
 	entryPreview?: string;
+	/** A raw entry row: a mark point. Carries its mapped index and id for marking. */
+	markable?: boolean;
+	entryIndex?: number;
+	entryId?: string;
+}
+
+/** What laying a mark over a span WOULD commit: the size the user sees before staging. */
+export interface SpanCost {
+	entries: number;
+	tokens: number;
+}
+
+export interface FoldEditorActions {
+	/** Live would-be fold size for a span of mapped indices, any order. */
+	spanCost?: (from: number, to: number) => SpanCost;
+	/** Stage a USER mark over two raw entry ids through the validated path. */
+	onStageMark?: (fromId: string, toId: string) => Promise<void>;
 }
 
 type ThemeFn = (color: string, text: string) => string;
@@ -223,10 +247,17 @@ export class FoldEditorView {
 	private done: () => void;
 	private theme: { fg?: ThemeFn };
 	private kb: { matches(data: string, action: string): boolean };
+	private actions: FoldEditorActions;
 	private selectedKey: string;
 	private expanded: Set<string> = new Set();
 	private detailedEntry: string | null = null;
 	private scroll = 0;
+	/** The anchored mark point: first boundary of a span the user is laying down. */
+	private anchor: { key: string; id: string; index: number } | null = null;
+	/** True while onStageMark is in flight; the view stages nothing itself. */
+	staging = false;
+	/** Last staging outcome, rendered until the next action replaces it. */
+	notice: string | null = null;
 	closed = false;
 
 	constructor(
@@ -234,12 +265,23 @@ export class FoldEditorView {
 		done: () => void,
 		keybindings?: { matches(data: string, action: string): boolean } | null,
 		theme?: unknown,
+		actions?: FoldEditorActions | null,
 	) {
 		this.data = data;
 		this.done = done;
 		this.kb = keybindings ?? getKeybindings();
 		this.theme = (theme as { fg?: ThemeFn }) ?? {};
+		this.actions = actions ?? {};
 		this.selectedKey = this.visibleRows()[0]?.key ?? "";
+	}
+
+	/** Swap in rebuilt data after a stage or an external state change, keeping the
+	 *  selection when the row still exists. The command handler owns rebuilding. */
+	refresh(data: FoldEditorData): void {
+		this.data = data;
+		if (!this.visibleRows().some((row) => row.key === this.selectedKey)) {
+			this.selectedKey = this.visibleRows()[0]?.key ?? "";
+		}
 	}
 
 	private color(color: string, text: string): string {
@@ -319,7 +361,8 @@ export class FoldEditorView {
 			const isOpen = this.expanded.has(block.id);
 			const cursor = this.selectedKey === block.id ? "\u276f" : " ";
 			if (block.type === "proposed") {
-				const color = block.origin === "agent" ? "accent" : "warning";
+				const isLadder = block.origin === "ladder";
+				const color = isLadder ? "warning" : "accent";
 				rows.push({
 					key: block.id,
 					text: `${cursor}${this.color(color, `\u25c7 PROPOSED (${block.origin}) ${shortId(block.id)}`)} \u00d7${block.sourceCount}`,
@@ -356,11 +399,19 @@ export class FoldEditorView {
 						const pinBadge = this.data.pinned.includes(entry.id) ? " \ud83d\udccc" : "";
 						const entryKey = `${block.id}:${entry.id}:r${ordinal}`;
 						ordinal += 1;
+						const cursor = this.selectedKey === entryKey ? "\u276f" : " ";
+						// A RAW ENTRY IS A MARK POINT (V2.2): the anchor wears a diamond, and
+						// every raw entry can become one. Entries without a mapped index are
+						// not markable because their span arithmetic would be a guess.
+						const markable = typeof entry.index === "number";
+						const anchoredHere = this.anchor !== null && this.anchor.key === entryKey;
+						const badge = anchoredHere ? this.color("warning", " \u25c6 start") : "";
 						rows.push({
 							key: entryKey,
-							text: `${this.selectedKey === entryKey ? "\u276f" : " "}    ${this.color("dim", `\u00b7 ${entry.role} ${shortId(entry.id)}${pinBadge}`)}`,
+							text: `${cursor}    ${this.color("dim", `\u00b7 ${entry.role} ${shortId(entry.id)}${pinBadge}`)}${badge}`,
 							toggleId: null,
 							entryPreview: entry.preview,
+							...(markable ? { markable: true, entryIndex: entry.index, entryId: entry.id } : {}),
 						});
 					}
 				}
@@ -391,8 +442,18 @@ export class FoldEditorView {
 	handleInput(data: string): void {
 		if (this.closed || !data) return;
 		if (this.kb.matches(data, "tui.select.cancel")) {
+			// ESCAPE CANCELS THE ANCHOR FIRST: laying down a span must be escapable
+			// stepwise, and closing the editor mid-span would lose nothing but the work.
+			if (this.anchor !== null) {
+				this.anchor = null;
+				return;
+			}
 			this.closed = true;
 			this.done();
+			return;
+		}
+		if (data === "m") {
+			this.handleMarkKey();
 			return;
 		}
 		if (this.kb.matches(data, "tui.select.up")) this.move(-1);
@@ -431,6 +492,41 @@ export class FoldEditorView {
 		return null;
 	}
 
+	/** THE MARK KEY. On a raw entry: first press anchors, second press stages. The
+	 *  view never mutates state -- staging goes through the injected callback, which
+	 *  is the SAME validated path the agent's tool action runs, origin "user". */
+	private handleMarkKey(): void {
+		if (this.staging) return;
+		const row = this.visibleRows().find((candidate) => candidate.key === this.selectedKey);
+		if (!row || !row.markable || row.entryIndex === undefined || !row.entryId) return;
+		if (this.anchor === null) {
+			this.anchor = { key: row.key, id: row.entryId, index: row.entryIndex };
+			this.notice = null;
+			return;
+		}
+		if (this.anchor.key === row.key) {
+			this.anchor = null;
+			return;
+		}
+		if (!this.actions.onStageMark) {
+			this.notice = "staging is not wired in this view";
+			return;
+		}
+		const fromId = this.anchor.id;
+		const toId = row.entryId;
+		this.staging = true;
+		this.notice = null;
+		void this.actions.onStageMark(fromId, toId)
+			.then(() => {
+				this.staging = false;
+				this.anchor = null;
+			})
+			.catch((error: unknown) => {
+				this.staging = false;
+				this.notice = error instanceof Error ? error.message : String(error);
+			});
+	}
+
 	private headerLines(width: number): string[] {
 		const lines: string[] = [];
 		const { occupancy, pending } = this.data;
@@ -446,7 +542,8 @@ export class FoldEditorView {
 			width,
 		));
 		lines.push(truncateToWidth(
-			`staged marks: ${pending.count} (${pending.agentMarks} agent, ${pending.ladderMarks} ladder)` +
+			`staged marks: ${pending.count} (${pending.agentMarks} agent, ${pending.ladderMarks} ladder` +
+			`${pending.userMarks > 0 ? `, ${pending.userMarks} you` : ""})` +
 			` · about ${pending.freedTokens.toLocaleString("en-US")} tokens freed when committed · ` +
 			`pinned: ${this.data.pinned.length}`,
 			width,
@@ -464,11 +561,28 @@ export class FoldEditorView {
 		const body = rows
 			.slice(this.scroll, this.scroll + MAX_VISIBLE_ROWS)
 			.map((row) => truncateToWidth(row.text, width, ""));
+		// THE WOULD-BE FOLD SIZE (Shane, 2026-08-23): while a span is being laid down,
+		// the footer states what the second mark point would commit, in the runtime's
+		// own token arithmetic -- the same numbers the staged mark will answer with.
+		const footers: string[] = [];
+		if (this.anchor !== null && this.actions.spanCost) {
+			const current = rows.find((row) => row.key === this.selectedKey);
+			if (current && current.markable && current.entryIndex !== undefined) {
+				const cost = this.actions.spanCost(this.anchor.index, current.entryIndex);
+				footers.push(truncateToWidth(
+					`\u25c6 mark from ${shortId(this.anchor.id)} \u2192 ${shortId(String(current.entryId))}: ` +
+					`would fold ${cost.entries} ${cost.entries === 1 ? "entry" : "entries"} · ~${cost.tokens.toLocaleString("en-US")} tokens · m:stage`,
+					width, ""));
+			}
+		}
+		if (this.staging) footers.push(truncateToWidth("staging user mark\u2026", width, ""));
+		else if (this.notice) footers.push(truncateToWidth(this.notice, width, ""));
 		return [
 			...header,
 			"",
 			...body,
-			truncateToWidth("enter:expand/detail · arrows:navigate · esc:close", width, ""),
+			...footers,
+			truncateToWidth("enter:expand/detail · arrows:navigate · m:mark raw span · esc:close", width, ""),
 		];
 	}
 }

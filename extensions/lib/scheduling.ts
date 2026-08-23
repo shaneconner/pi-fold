@@ -279,6 +279,7 @@ export interface MarkAccounting {
   pending: number;
   agentMarks: number;
   ladderMarks: number;
+  userMarks: number;
   freedBytes: number;
   freedTokens: number;
   freedBudgetShare: number;
@@ -328,6 +329,7 @@ export function markAccounting(
     pending: marks.length,
     agentMarks: marks.filter((mark) => mark.origin === "agent").length,
     ladderMarks: marks.filter((mark) => mark.origin === "ladder").length,
+    userMarks: marks.filter((mark) => mark.origin === "user").length,
     freedBytes,
     freedTokens,
     freedBudgetShare: snapshot.budgetTokens > 0 ? freedTokens / snapshot.budgetTokens : 0,

@@ -56,7 +56,7 @@ export const PENDING_FOLD_MARK_KEYS = [
   "mark", "id", "kind", "parts", "brief", "briefProvenance", "origin", "ordinal",
 ] as const;
 export const PENDING_REFOLD_MARK_KEYS = ["mark", "id", "origin", "ordinal"] as const;
-export const MARK_ORIGINS = Object.freeze(["agent", "ladder"] as const);
+export const MARK_ORIGINS = Object.freeze(["agent", "ladder", "user"] as const);
 export const STATE_CHECKPOINT_V2_KEYS = [
   "version", "kind", "sessionId", "revision", "foldRefs", "expanded", "protected", "prepared", "stateSha256",
 ] as const;

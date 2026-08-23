@@ -300,7 +300,10 @@ export function peekIsEphemeral(params: Record<string, unknown> | undefined | nu
 
 export const PEEK_READ_ONLY_CONTEXT_ACTIONS: ReadonlySet<string> = new Set(["status", "peek"]);
 
-export type MarkOrigin = "agent" | "ladder";
+/** "user" is a mark laid down by the human through /fold-editor; it stages and
+ *  commits through the same validated path as an agent mark and counts toward the
+ *  commit's coverage the same way. */
+export type MarkOrigin = "agent" | "ladder" | "user";
 
 export interface PendingFoldMark {
   mark: "fold";
