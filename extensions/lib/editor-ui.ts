@@ -35,6 +35,8 @@ export interface FoldEditorBlock {
 	brief?: string;
 	sourceCount?: number;
 	rolesSummary?: string;
+	/** Estimated tokens this staged mark frees at the next commit; proposed blocks only. */
+	tokens?: number;
 	/** Direct source entries of this fold (its messages), for drill-in. */
 	entries: FoldEditorEntry[];
 	/** Folds nested inside this one; hidden until the parent is expanded. */
@@ -186,6 +188,7 @@ export function buildFoldEditorData(
 				endPosition: end,
 				origin: mark.origin,
 				brief: mark.brief,
+				tokens: (mark as { tokens?: number }).tokens,
 				sourceCount: entries.length,
 				entries,
 				children: [],
@@ -225,6 +228,8 @@ interface RenderRow {
 	markable?: boolean;
 	entryIndex?: number;
 	entryId?: string;
+	/** A PROPOSED row: withdrawable with u. */
+	proposedMarkId?: string;
 }
 
 /** What laying a mark over a span WOULD commit: the size the user sees before staging. */
@@ -236,8 +241,13 @@ export interface SpanCost {
 export interface FoldEditorActions {
 	/** Live would-be fold size for a span of mapped indices, any order. */
 	spanCost?: (from: number, to: number) => SpanCost;
-	/** Stage a USER mark over two raw entry ids through the validated path. */
-	onStageMark?: (fromId: string, toId: string) => Promise<void>;
+	/** Stage a USER mark over two raw entry ids through the validated path. The
+	 *  brief is what the user typed; empty means the deterministic brief. */
+	onStageMark?: (fromId: string, toId: string, brief?: string) => Promise<void>;
+	/** Withdraw one staged mark by id (the tool's unmark path). */
+	onWithdrawMark?: (markId: string) => Promise<void>;
+	/** Pin or unpin one raw entry; the handler decides which from current state. */
+	onTogglePin?: (entryId: string) => Promise<void>;
 }
 
 type ThemeFn = (color: string, text: string) => string;
@@ -254,6 +264,10 @@ export class FoldEditorView {
 	private scroll = 0;
 	/** The anchored mark point: first boundary of a span the user is laying down. */
 	private anchor: { key: string; id: string; index: number } | null = null;
+	/** Brief capture: after the second m, the user types an optional brief; Enter
+	 *  stages with it (empty keeps the deterministic brief), Esc returns to the span. */
+	private briefMode = false;
+	private briefBuffer = "";
 	/** True while onStageMark is in flight; the view stages nothing itself. */
 	staging = false;
 	/** Last staging outcome, rendered until the next action replaces it. */
@@ -363,10 +377,12 @@ export class FoldEditorView {
 			if (block.type === "proposed") {
 				const isLadder = block.origin === "ladder";
 				const color = isLadder ? "warning" : "accent";
+				const sizeNote = typeof block.tokens === "number" ? ` · ~${block.tokens.toLocaleString("en-US")} tok` : "";
 				rows.push({
 					key: block.id,
-					text: `${cursor}${this.color(color, `\u25c7 PROPOSED (${block.origin}) ${shortId(block.id)}`)} \u00d7${block.sourceCount}`,
+					text: `${cursor}${this.color(color, `\u25c7 PROPOSED (${block.origin}) ${shortId(block.id)}`)} \u00d7${block.sourceCount}${sizeNote}${this.selectedKey === block.id ? " · u:withdraw" : ""}`,
 					toggleId: block.id,
+					proposedMarkId: block.id,
 				});
 				if (isOpen) {
 					let ordinal = 0;
@@ -441,19 +457,32 @@ export class FoldEditorView {
 
 	handleInput(data: string): void {
 		if (this.closed || !data) return;
-		if (this.kb.matches(data, "tui.select.cancel")) {
-			// ESCAPE CANCELS THE ANCHOR FIRST: laying down a span must be escapable
-			// stepwise, and closing the editor mid-span would lose nothing but the work.
-			if (this.anchor !== null) {
-				this.anchor = null;
-				return;
-			}
-			this.closed = true;
-			this.done();
+		if (this.briefMode) {
+			this.handleBriefInput(data);
+			return;
+		}
+		if (data === "u") {
+			this.handleWithdrawKey();
+			return;
+		}
+		if (data === "p") {
+			this.handlePinKey();
 			return;
 		}
 		if (data === "m") {
 			this.handleMarkKey();
+			return;
+		}
+		if (this.kb.matches(data, "tui.select.cancel")) {
+			// ESCAPE CANCELS WORK FIRST, STEPWISE: the brief line, then the anchor, and
+			// only then the editor. Nothing the user laid down is lost by one press.
+			if (this.anchor !== null) {
+				this.anchor = null;
+				this.notice = null;
+				return;
+			}
+			this.closed = true;
+			this.done();
 			return;
 		}
 		if (this.kb.matches(data, "tui.select.up")) this.move(-1);
@@ -492,9 +521,11 @@ export class FoldEditorView {
 		return null;
 	}
 
-	/** THE MARK KEY. On a raw entry: first press anchors, second press stages. The
-	 *  view never mutates state -- staging goes through the injected callback, which
-	 *  is the SAME validated path the agent's tool action runs, origin "user". */
+	/** THE MARK KEY. On a raw entry: first press anchors, second press opens the BRIEF
+	 *  LINE. Enter stages (typed brief; empty keeps the deterministic one), Esc steps
+	 *  back to the span. The view never mutates state -- staging goes through the
+ *  injected callback, which is the SAME validated path the agent's tool action runs,
+ *  origin "user". */
 	private handleMarkKey(): void {
 		if (this.staging) return;
 		const row = this.visibleRows().find((candidate) => candidate.key === this.selectedKey);
@@ -508,18 +539,93 @@ export class FoldEditorView {
 			this.anchor = null;
 			return;
 		}
-		if (!this.actions.onStageMark) {
-			this.notice = "staging is not wired in this view";
+		// SECOND BOUNDARY LAID DOWN: capture an optional brief before staging.
+		this.briefMode = true;
+		this.briefBuffer = "";
+	}
+
+	private handleBriefInput(data: string): void {
+		if (data === "\r" || data === "\n") {
+			const brief = this.briefBuffer.trim();
+			this.briefMode = false;
+			void this.stageSpan(brief === "" ? undefined : brief);
 			return;
 		}
+		if (data === "\x1b") {
+			this.briefMode = false;
+			this.briefBuffer = "";
+			return;
+		}
+		if (data === "\x7f" || data === "\b") {
+			this.briefBuffer = this.briefBuffer.slice(0, -1);
+			return;
+		}
+		// Printable characters only; multi-byte escape sequences are refused whole.
+		if (data.length === 1 && data >= " " && data !== "\x7f") {
+			if (this.briefBuffer.length < 2_000) this.briefBuffer += data;
+		}
+	}
+
+	private stageSpan(brief?: string): Promise<void> {
+		if (!this.anchor) return Promise.resolve();
+		if (!this.actions.onStageMark) {
+			this.notice = "staging is not wired in this view";
+			return Promise.resolve();
+		}
 		const fromId = this.anchor.id;
-		const toId = row.entryId;
+		// The selection cannot move while the brief line holds it: handleBriefInput
+		// consumes every key, so the selected row IS the span's second boundary.
+		const current = this.visibleRows().find((candidate) => candidate.key === this.selectedKey);
+		const toId = current?.entryId ?? "";
+		if (!toId) return Promise.resolve();
 		this.staging = true;
 		this.notice = null;
-		void this.actions.onStageMark(fromId, toId)
+		return this.actions.onStageMark(fromId, toId, brief)
 			.then(() => {
 				this.staging = false;
 				this.anchor = null;
+			})
+			.catch((error: unknown) => {
+				this.staging = false;
+				this.notice = error instanceof Error ? error.message : String(error);
+			});
+	}
+
+	/** u ON A PROPOSED ROW withdraws that staged mark (the tool's unmark path). */
+	private handleWithdrawKey(): void {
+		if (this.staging || this.briefMode) return;
+		const row = this.visibleRows().find((candidate) => candidate.key === this.selectedKey);
+		if (!row || !row.proposedMarkId) return;
+		if (!this.actions.onWithdrawMark) {
+			this.notice = "withdrawing is not wired in this view";
+			return;
+		}
+		this.staging = true;
+		this.notice = null;
+		void this.actions.onWithdrawMark(row.proposedMarkId)
+			.then(() => {
+				this.staging = false;
+			})
+			.catch((error: unknown) => {
+				this.staging = false;
+				this.notice = error instanceof Error ? error.message : String(error);
+			});
+	}
+
+	/** p ON A RAW ENTRY toggles its pin (the tool's pin/unpin path). */
+	private handlePinKey(): void {
+		if (this.staging || this.briefMode) return;
+		const row = this.visibleRows().find((candidate) => candidate.key === this.selectedKey);
+		if (!row || !row.markable || !row.entryId) return;
+		if (!this.actions.onTogglePin) {
+			this.notice = "pinning is not wired in this view";
+			return;
+		}
+		this.staging = true;
+		this.notice = null;
+		void this.actions.onTogglePin(row.entryId)
+			.then(() => {
+				this.staging = false;
 			})
 			.catch((error: unknown) => {
 				this.staging = false;
@@ -565,7 +671,7 @@ export class FoldEditorView {
 		// the footer states what the second mark point would commit, in the runtime's
 		// own token arithmetic -- the same numbers the staged mark will answer with.
 		const footers: string[] = [];
-		if (this.anchor !== null && this.actions.spanCost) {
+		if (this.anchor !== null && !this.briefMode && this.actions.spanCost) {
 			const current = rows.find((row) => row.key === this.selectedKey);
 			if (current && current.markable && current.entryIndex !== undefined) {
 				const cost = this.actions.spanCost(this.anchor.index, current.entryIndex);
@@ -575,8 +681,12 @@ export class FoldEditorView {
 					width, ""));
 			}
 		}
-		if (this.staging) footers.push(truncateToWidth("staging user mark\u2026", width, ""));
-		else if (this.notice) footers.push(truncateToWidth(this.notice, width, ""));
+		if (this.staging) footers.push(truncateToWidth("staging\u2026", width, ""));
+		else if (this.briefMode) {
+			footers.push(truncateToWidth(
+				`brief: ${this.briefBuffer}\u2588 · Enter:stage${this.briefBuffer ? " with brief" : " deterministic"} · Esc:back to span`,
+				width, ""));
+		} else if (this.notice) footers.push(truncateToWidth(this.notice, width, ""));
 		return [
 			...header,
 			"",

@@ -33,10 +33,49 @@ const DEFAULT_ENTRY_NAMESPACE = entryTypeNamespace(DEFAULT_ACTIVE_CONTEXT_ENTRY_
 export const ACTIVE_CONTEXT_STATE_ENTRY = `${DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX}-state`;
 export const ACTIVE_CONTEXT_FOLD_RECORD_ENTRY = `${DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX}-fold-record`;
 export const PROVIDER_CONTEXT_MEASUREMENT_ENTRY = `${DEFAULT_ENTRY_NAMESPACE}-provider-context-measurement`;
+/**
+ * How many unbriefed pending folds stand before the runtime says so.
+ *
+ * A CONSTANT, not a threshold the deployment can turn (Shane's KISS rule): it is a
+ * batching size, and the only thing a knob here would buy is a deployment that never
+ * speaks. Three is the smallest batch that reads as a batch rather than as a running
+ * commentary on every cut.
+ */
+export const UNBRIEFED_FOLDS_BEFORE_NOTICE = 3;
+
+/**
+ * How many spans the frontier cuts on one projection pass.
+ *
+ * A CONSTANT, and a cost bound rather than a policy. Each cut rescans the window for the
+ * next stalest span, so an unbounded loop is quadratic in the number of spans a window
+ * holds: on a 300-turn fixture it took a gate from 2.5 seconds to 152. A frontier does not
+ * need to catch up in one pass, because a pass costs nothing to repeat and the material it
+ * has not reached yet is still raw and still in front of the agent, which is where the
+ * design wants it. Eight is comfortably ahead of any real arrival rate.
+ */
+export const MAX_FRONTIER_CUTS_PER_PASS = 8;
+
 export const ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
-  "status", "peek", "fold", "expand", "refold", "pin", "unpin",
+  "status", "peek", "brief", "expand", "refold", "pin", "unpin",
   "reboundary", "unmark",
 ] as const);
+/**
+ * FOLD IS DELETED AS AN AGENT VERB (Shane, 2026-08-23), and `brief` is what replaced it.
+ *
+ * The agent used to choose spans from nothing. Measured against real compaction
+ * boundaries on 2026-08-23, that produced a projection byte-identical to the same arm
+ * with no agent at all: six marks, 9,450 characters of briefs, same visible count, same
+ * fold count, same aborts. It marks what the ladder would have taken anyway, because at
+ * the moment it is asked the only information available is staleness and the runtime
+ * already has that.
+ *
+ * So the runtime cuts at the frontier and the agent annotates what it cut, while the
+ * material is still in front of it. `brief` attaches or replaces the brief on a PENDING
+ * fold and refuses on a standing one, which is the rebrief deletion above read from the
+ * other side: a pending mark is not in the window, so writing its brief moves no bytes
+ * and costs no cache, and a standing fold's placeholder is in the window, so writing that
+ * one costs the whole prefix from there on. The name `fold` stays spent.
+ */
 /**
  * REBRIEF IS DELETED (Shane, 2026-08-21). Every rebrief rewrites the projection at its
  * fold's placeholder, which breaks the prefix cache from that point on: sol-20260820
@@ -67,14 +106,11 @@ export const COMMIT_RECLAIM_FLOOR_SHARE = 0.02;
  * deployment's window. The advisory takes the wider of this and one worst recent inflow
  * step, so a single large result cannot step over the whole band unasked.
  */
-export const STEWARD_WARNING_SHARE = 0.10;
-
 export const MAX_PINNED_SHARE = 0.25;
 
 export interface ActiveContextThresholds {
   maxTarget: number;
   minTarget: number;
-  freshTail: number;
   consolidateAfter: number;
   minFoldChars: number;
 }
@@ -118,19 +154,12 @@ export const DEFAULT_THRESHOLDS: Readonly<ActiveContextThresholds> = Object.free
   // so the shortfall is a readable fact per epoch rather than a silent miss. The
   // validation laws below bind exactly as before.
   minTarget: 0.20,
-  // 0.10, up from 0.02 (Shane 2026-08-21). The tail is what the current turn is still
-  // reading, and 2 percent of a 250k budget is 5,000 tokens, roughly one large tool
-  // result. The guard catches what the tail misses, but the guard is a commit-time
-  // decision and the tail is a standing promise, so the promise should be the one a
-  // person can reason about: a tenth of the window stays raw.
-  freshTail: 0.10,
   consolidateAfter: 10,
   minFoldChars: 8_000,
 });
 
 export const MINIMUM_SUPPORTED_BUDGET_TOKENS = 10_000;
 
-export const MINIMUM_FRESH_TAIL_TOKENS = 500;
 
 export class ThresholdPolicyError extends Error {
   readonly invariant: string;
@@ -151,10 +180,10 @@ function thresholdProportion(value: unknown, field: string): number {
 export function resolveThresholds(value: unknown): ActiveContextThresholds {
   if (value === undefined) return { ...DEFAULT_THRESHOLDS };
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new ThresholdPolicyError("shape", "thresholds must be an object with all five fields");
+    throw new ThresholdPolicyError("shape", "thresholds must be an object with all four fields");
   }
   const supplied = value as Record<string, unknown>;
-  const fields = ["maxTarget", "minTarget", "freshTail", "consolidateAfter", "minFoldChars"] as const;
+  const fields = ["maxTarget", "minTarget", "consolidateAfter", "minFoldChars"] as const;
   for (const key of Object.keys(supplied)) {
     if (!(fields as readonly string[]).includes(key)) {
       throw new ThresholdPolicyError("shape", `thresholds has no ${key} field`);
@@ -167,7 +196,6 @@ export function resolveThresholds(value: unknown): ActiveContextThresholds {
   }
   const maxTarget = thresholdProportion(supplied.maxTarget, "maxTarget");
   const minTarget = thresholdProportion(supplied.minTarget, "minTarget");
-  const freshTail = thresholdProportion(supplied.freshTail, "freshTail");
   const consolidateAfter = supplied.consolidateAfter;
   if (typeof consolidateAfter !== "number" || !Number.isInteger(consolidateAfter) || consolidateAfter < 1) {
     throw new ThresholdPolicyError("consolidateAfter", "thresholds.consolidateAfter must be a positive integer count");
@@ -184,36 +212,14 @@ export function resolveThresholds(value: unknown): ActiveContextThresholds {
     throw new ThresholdPolicyError("minTarget<maxTarget",
       "thresholds.minTarget must sit below thresholds.maxTarget, or a commit has no depth to reach");
   }
-  if (!(freshTail < maxTarget)) {
-    throw new ThresholdPolicyError("freshTail<maxTarget",
-      "thresholds.freshTail must sit below thresholds.maxTarget, or the trigger fires on protected mass alone");
-  }
-  if (!(maxTarget - minTarget >= freshTail)) {
-    throw new ThresholdPolicyError("gap>=freshTail",
-      "the hysteresis gap (maxTarget - minTarget) must be at least thresholds.freshTail, " +
-      "or refilling the protected tail alone re-fires the trigger");
-  }
-  const pinned = Math.ceil(MAX_PINNED_SHARE * MINIMUM_SUPPORTED_BUDGET_TOKENS);
-  const fresh = Math.ceil(freshTail * MINIMUM_SUPPORTED_BUDGET_TOKENS);
-  if (!(pinned + fresh < Math.floor(maxTarget * MINIMUM_SUPPORTED_BUDGET_TOKENS))) {
-    throw new ThresholdPolicyError("pinnedPlusFreshTail<maxTarget",
-      `the pin ceiling (${MAX_PINNED_SHARE}) plus thresholds.freshTail must stay below ` +
-      `thresholds.maxTarget at the ${MINIMUM_SUPPORTED_BUDGET_TOKENS}-token minimum supported budget`);
-  }
-  return { maxTarget, minTarget, freshTail, consolidateAfter, minFoldChars };
+  return { maxTarget, minTarget, consolidateAfter, minFoldChars };
 }
 
-export function assertThresholdsServable(thresholds: ActiveContextThresholds, budgetTokens: number): void {
+export function assertThresholdsServable(_thresholds: ActiveContextThresholds, budgetTokens: number): void {
   if (!Number.isFinite(budgetTokens) || budgetTokens < MINIMUM_SUPPORTED_BUDGET_TOKENS) {
     throw new ThresholdPolicyError("minimumBudget",
       `a ${Math.floor(budgetTokens)}-token serving budget is below the ` +
       `${MINIMUM_SUPPORTED_BUDGET_TOKENS}-token minimum this package supports`);
-  }
-  const freshTokens = Math.floor(thresholds.freshTail * budgetTokens);
-  if (freshTokens < MINIMUM_FRESH_TAIL_TOKENS) {
-    throw new ThresholdPolicyError("freshTailTokens",
-      `thresholds.freshTail is ${freshTokens} tokens of a ${Math.floor(budgetTokens)}-token serving budget, ` +
-      `below the ${MINIMUM_FRESH_TAIL_TOKENS}-token minimum one foldable unit needs`);
   }
 }
 
@@ -235,43 +241,20 @@ export const PEEK_MIN_SLICE_BYTES = 1_024;
 
 export const STATUS_DIET_INDEX_ROWS = 5;
 
-export interface ActiveContextGuidance {
-  actionResponses: boolean;
-}
-
-export const DEFAULT_GUIDANCE: ActiveContextGuidance = Object.freeze({
-  actionResponses: true,
-});
-
-const GUIDANCE_KEYS: readonly (keyof ActiveContextGuidance)[] = Object.freeze([
-  "actionResponses",
-]);
-
-export function resolveGuidance(value: unknown): ActiveContextGuidance {
-  if (value === undefined) return DEFAULT_GUIDANCE;
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("guidance must be an object of { actionResponses } booleans");
-  }
-  for (const key of Object.keys(value)) {
-    if (!GUIDANCE_KEYS.includes(key as keyof ActiveContextGuidance)) {
-      throw new Error(`guidance has no ${key} setting: the only keys are ` +
-        `${GUIDANCE_KEYS.join(", ")}, and they are booleans`);
-    }
-  }
-  const resolved = { ...DEFAULT_GUIDANCE } as ActiveContextGuidance;
-  for (const key of GUIDANCE_KEYS) {
-    if (!Object.hasOwn(value, key)) continue;
-    const setting = (value as Record<string, unknown>)[key];
-    if (typeof setting !== "boolean") throw new Error(`guidance.${key} must be a boolean`);
-    resolved[key] = setting;
-  }
-  return Object.freeze(resolved);
-}
 
 export const MAX_CONTEXT_RECEIPTS = 3;
 export const CONTEXT_RECEIPT_BLOCK_BYTES = 900;
 
-export const CONTEXT_MARK_RESPONSE_BYTES = 900;
+/**
+ * The post-fold notice's bound, and its own rather than the receipt block's.
+ *
+ * It is larger because it carries a variable-length list the receipt does not: three
+ * fixed sentences of instruction plus one entry per unbriefed fold, and the pending set
+ * grows past MAX_FRONTIER_CUTS_PER_PASS whenever the frontier stages faster than the
+ * agent answers. 1,200 seats the instruction and roughly eight folds; past that the list
+ * gives way and states how many it could not name.
+ */
+export const FOLD_NOTICE_BYTES = 1_200;
 export const CONTEXT_STATUS_RESPONSE_BYTES = 24_000;
 export const MAX_UNMARKED_CANDIDATES = 3;
 
@@ -497,7 +480,6 @@ export interface ActiveContextSnapshot {
   thresholds: ActiveContextThresholds;
   budgetTokens: number;
   protectedIndices: Set<number>;
-  toolProtectedIndices: Set<number>;
   policy: typeof ACTIVE_CONTEXT_POLICY;
   toolName: string;
   brandNoun: string;

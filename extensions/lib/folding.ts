@@ -28,7 +28,6 @@ import {
   orderedRoots,
   refsInOrder,
   refsProtected,
-  toolRefsProtected,
 } from "./measurement.ts";
 import {
   childFoldIds,
@@ -402,9 +401,7 @@ export async function prepareFold(input: {
   now?: () => number;
 }): Promise<PreparedFold> {
   const { candidate, snapshot, state } = input;
-  const protectedSource = candidate.kind === "tool-result"
-    ? toolRefsProtected(candidate.sourceRefs, state, snapshot)
-    : refsProtected(candidate.sourceRefs, state, snapshot);
+  const protectedSource = refsProtected(candidate.sourceRefs, state, snapshot);
   if (!candidate.sourceRefs.length ||
       refsInOrder(snapshot, candidate.sourceRefs) === null || protectedSource) {
     throw new Error("Fold source is not exact, stale, and unprotected");
@@ -577,13 +574,12 @@ export function preparedFoldError(input: {
   if (prepared.branchSha256 !== branchSha256(snapshot, [
     ...prepared.beforeRefs, ...prepared.sourceRefs, ...prepared.afterRefs,
   ])) return "branch drift";
-  const toolSource = prepared.fold.kind === "tool-result";
-  if (indices.some((index) => toolSource
-    ? snapshot.toolProtectedIndices.has(index)
-    : snapshot.protectedIndices.has(index))) return "fresh-tail drift";
-  if (toolSource
-    ? toolRefsProtected(prepared.sourceRefs, state, snapshot)
-    : refsProtected(prepared.sourceRefs, state, snapshot)) return "source became protected";
+  // One protected set now: an entry is unfoldable because its turn has not completed or
+  // because it carries no evidence ref, and both are validity, not recency. The branch on
+  // fold kind went with fresh-tail protection: it read `toolRefsProtected` on one side,
+  // and once that collapsed onto `refsProtected` both arms were the same call.
+  if (indices.some((index) => snapshot.protectedIndices.has(index))) return "protection drift";
+  if (refsProtected(prepared.sourceRefs, state, snapshot)) return "source became protected";
   if (Object.prototype.hasOwnProperty.call(input, "ratio")) {
     if (input.ratio === null || typeof input.ratio !== "number" || !Number.isFinite(input.ratio)) {
       return "current pressure unavailable";
@@ -734,9 +730,7 @@ export function renderFold(
   const refs = flattenFoldRefs(fold, state);
   const indices = refsInOrder(snapshot, refs);
   if (!indices) return null;
-  const mustReveal = state.expanded.includes(fold.id) || (fold.kind === "tool-result"
-    ? toolRefsProtected(refs, state, snapshot)
-    : refsProtected(refs, state, snapshot));
+  const mustReveal = state.expanded.includes(fold.id) || (refsProtected(refs, state, snapshot));
   if (!mustReveal) {
     const first = snapshot.messages[indices[0]] as Record<string, unknown>;
     const text = foldPlaceholder(fold, state, snapshot);
@@ -876,9 +870,7 @@ export function foldStatusRow(fold: ActiveFold, state: ActiveContextState, snaps
   const refs = flattenFoldRefs(fold, state);
   const allSourceIds = refs.map((ref) => ref.entryId);
   const sourceIds = allSourceIds.slice(0, 64);
-  const blocked = fold.kind === "tool-result"
-    ? toolRefsProtected(refs, state, snapshot)
-    : refsProtected(refs, state, snapshot);
+  const blocked = refsProtected(refs, state, snapshot);
   const projection = state.expanded.includes(fold.id) ? "expanded" : "folded";
   return {
     id: fold.id,
@@ -1006,7 +998,7 @@ export function activeContextStatus(
     stale: !snapshot.protectedIndices.has(item.index),
     protected: snapshot.protectedIndices.has(item.index) || protectedKeys.has(objectRefKey(item.ref)),
     staleToolResult: item.ref.role === "toolResult" &&
-      !snapshot.toolProtectedIndices.has(item.index) && !protectedKeys.has(objectRefKey(item.ref)) &&
+      !snapshot.protectedIndices.has(item.index) && !protectedKeys.has(objectRefKey(item.ref)) &&
       resultCall(snapshot, item.index, true) !== null,
   }] : []);
   const selectedObjects = objects.slice(offset, offset + limit);
@@ -1063,7 +1055,6 @@ export function activeContextStatus(
       endId: eligibleSourceIds.at(-1),
       action: { action: "fold", ids: eligibleEndpoints, brief: "<factual brief, at most 1000 characters>" },
     } : null,
-    rawTailMinimumBytes: zoneBytes(snapshot.thresholds.freshTail, snapshot.budgetTokens),
     currentTurnRequiresBoundary: false,
     actions: {
       status: { action: "status", offset, limit },
@@ -1166,9 +1157,7 @@ export function visibleCollapsedFolds(
   const visit = (fold: ActiveFold): void => {
     const refs = flattenFoldRefs(fold, state);
     if (!foldInterval(fold, state, snapshot)) return;
-    const protectedSource = fold.kind === "tool-result"
-      ? toolRefsProtected(refs, state, snapshot)
-      : refsProtected(refs, state, snapshot);
+    const protectedSource = refsProtected(refs, state, snapshot);
     if (!state.expanded.includes(fold.id) && !protectedSource) {
       output.push(fold);
       return;

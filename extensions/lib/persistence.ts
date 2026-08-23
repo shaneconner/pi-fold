@@ -323,7 +323,9 @@ export function parseActiveContextState(
   const hasPendingMarks = recordLike && Object.prototype.hasOwnProperty.call(value, "pendingMarks");
   const hasPinnedPeeks = recordLike && Object.prototype.hasOwnProperty.call(value, "pinnedPeeks");
   const hasBriefs = recordLike && Object.prototype.hasOwnProperty.call(value, "briefs");
-  const hasRider = recordLike && Object.prototype.hasOwnProperty.call(value, "rider");
+  // Read and dropped, never stored: see legacyRiderStateSha256. A v1 state has no digest
+  // to reproduce, so here the tolerance is the whole of it.
+  const hasLegacyRider = recordLike && Object.prototype.hasOwnProperty.call(value, "rider");
   refuseRetiredStateFields(value);
   const extraKeys = [
     ...(hasPrepared ? ["prepared"] : []),
@@ -333,7 +335,7 @@ export function parseActiveContextState(
     ...(hasPendingMarks ? ["pendingMarks"] : []),
     ...(hasPinnedPeeks ? ["pinnedPeeks"] : []),
     ...(hasBriefs ? ["briefs"] : []),
-    ...(hasRider ? ["rider"] : []),
+    ...(hasLegacyRider ? ["rider"] : []),
   ];
   if (!exactRecord(value, [...ACTIVE_STATE_KEYS, ...extraKeys])) throw new Error("Invalid active-context state keys");
   const folds = denseOwnArrayValues(ownValue(value, "folds"));
@@ -354,9 +356,6 @@ export function parseActiveContextState(
   if (hasPrepared) validatePreparedShape(ownValue(value, "prepared"));
   if (hasAdvisory && !validAdvisoryState(ownValue(value, "advisory"))) {
     throw new Error("Invalid active-context advisory state");
-  }
-  if (hasRider && !validRiderState(ownValue(value, "rider"))) {
-    throw new Error("Invalid active-context rider state");
   }
   if (hasTokensSinceToolFold && !validTokensSinceToolFold(ownValue(value, "tokensSinceToolFold"))) {
     throw new Error("Invalid active-context tool-fold cadence");
@@ -384,7 +383,6 @@ export function parseActiveContextState(
     ...(hasAdvisory
       ? { advisory: clone(source.advisory!) }
       : defaultAdvisory ? { advisory: { highWater: 0, delivered: {} } } : {}),
-    ...(hasRider ? { rider: clone(source.rider!) } : {}),
     ...(hasPrepared ? { prepared: clone(source.prepared!) } : {}),
   };
 }
@@ -436,6 +434,29 @@ export function legacyCadenceOmittedStateSha256(state: ActiveContextState): stri
   const legacy = clone(state) as Partial<ActiveContextState>;
   if (legacy.tokensSinceToolFold === 0) delete legacy.tokensSinceToolFold;
   if (legacy.leases && Object.keys(legacy.leases).length === 0) delete legacy.leases;
+  return sha256Value(legacy);
+}
+
+/**
+ * THE DIGEST A RIDER-ERA BUILD WROTE, reproduced without the subsystem.
+ *
+ * `semanticStateSha256` hashes the materialized state object, and `stableStringify` walks
+ * own keys in INSERTION order, so a field that is gone changes the digest even though it
+ * changed nothing else. The rider sat immediately before `prepared` in the materialized
+ * literal, and last when there was no prepared, so that is where it goes back for the one
+ * moment it is needed. It joins the two legacy derivations already here, which exist for
+ * exactly this reason: a state stays verifiable across the build that stopped writing it.
+ *
+ * Consulted ONLY when the wire actually carried a rider, so a current state whose digest
+ * has genuinely drifted still fails rather than finding a second way to pass.
+ */
+export function legacyRiderStateSha256(state: ActiveContextState, rider: unknown): string {
+  const legacy: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(state)) {
+    if (key === "prepared") legacy.rider = rider;
+    legacy[key] = value;
+  }
+  if (!Object.prototype.hasOwnProperty.call(legacy, "rider")) legacy.rider = rider;
   return sha256Value(legacy);
 }
 
@@ -501,13 +522,11 @@ export function validateV2ProjectionFields(
   leasesValue: unknown,
   pendingMarksValue?: unknown,
   briefsValue?: unknown,
-  riderValue?: unknown,
 ): {
   expanded: string[];
   protected: EvidenceRef[];
   prepared?: PreparedFold;
   advisory?: NonNullable<ActiveContextState["advisory"]>;
-  rider?: NonNullable<ActiveContextState["rider"]>;
   tokensSinceToolFold: number;
   leases: Record<string, number>;
   pendingMarks: PendingMark[];
@@ -525,9 +544,6 @@ export function validateV2ProjectionFields(
   if (advisoryValue !== undefined && !validAdvisoryState(advisoryValue)) {
     throw new Error("Invalid active-context v2 advisory state");
   }
-  if (riderValue !== undefined && !validRiderState(riderValue)) {
-    throw new Error("Invalid active-context v2 rider state");
-  }
   if (tokensSinceToolFoldValue !== undefined && !validTokensSinceToolFold(tokensSinceToolFoldValue)) {
     throw new Error("Invalid active-context v2 tool-fold cadence");
   }
@@ -540,9 +556,6 @@ export function validateV2ProjectionFields(
     ...(preparedValue === null ? {} : { prepared: clone(preparedValue) as PreparedFold }),
     ...(advisoryValue === undefined ? {} : {
       advisory: clone(advisoryValue) as NonNullable<ActiveContextState["advisory"]>,
-    }),
-    ...(riderValue === undefined ? {} : {
-      rider: clone(riderValue) as NonNullable<ActiveContextState["rider"]>,
     }),
     tokensSinceToolFold: tokensSinceToolFoldValue === undefined ? 0 : Number(tokensSinceToolFoldValue),
     leases,
@@ -573,7 +586,7 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     Object.prototype.hasOwnProperty.call(value, "addBriefs"));
   const hasRemoveBriefIds = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "removeBriefIds"));
-  const hasRider = Boolean(value && typeof value === "object" &&
+  const hasLegacyRider = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "rider"));
   refuseRetiredStateFields(value);
   const optionalKeys = [
@@ -587,7 +600,9 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     ...(hasBriefs ? ["briefs"] : []),
     ...(hasAddBriefs ? ["addBriefs"] : []),
     ...(hasRemoveBriefIds ? ["removeBriefIds"] : []),
-    ...(hasRider ? ["rider"] : []),
+    // Carried no further than the digest check in `materializeStatePersistence`, which is
+    // the only thing on a load that the rider's absence can change.
+    ...(hasLegacyRider ? ["rider"] : []),
   ];
   const checkpoint = kind === "checkpoint" &&
     exactRecord(value, [...STATE_CHECKPOINT_V2_KEYS, ...optionalKeys]);
@@ -603,7 +618,6 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     ownValue(value, "expanded"), ownValue(value, "protected"), ownValue(value, "prepared"),
     ownValue(value, "advisory"), ownValue(value, "tokensSinceToolFold"), ownValue(value, "leases"),
     ownValue(value, "pendingMarks"), ownValue(value, "briefs"),
-    ownValue(value, "rider"),
   );
   if (checkpoint) {
     const refs = denseOwnArrayValues(ownValue(value, "foldRefs"));
@@ -698,7 +712,7 @@ export function stateFromFoldRefs(
   wire: Pick<
     ActiveContextCheckpointV2,
     "sessionId" | "revision" | "expanded" | "protected" | "prepared" | "advisory" |
-      "tokensSinceToolFold" | "leases" | "pendingMarks" | "briefs" | "rider"
+      "tokensSinceToolFold" | "leases" | "pendingMarks" | "briefs"
   >,
   refs: FoldRecordRef[],
   records: Map<string, FoldRecordEntry>,
@@ -721,7 +735,6 @@ export function stateFromFoldRefs(
     ...(wire.pendingMarks?.length ? { pendingMarks: clone(wire.pendingMarks) } : {}),
     ...(wire.briefs && Object.keys(wire.briefs).length ? { briefs: clone(wire.briefs) } : {}),
     ...(wire.advisory === undefined ? {} : { advisory: clone(wire.advisory) }),
-    ...(wire.rider === undefined ? {} : { rider: clone(wire.rider) }),
     ...(wire.prepared === null || wire.prepared === undefined ? {} : { prepared: clone(wire.prepared) }),
   };
   return parseActiveContextState(state, wire.sessionId, false);
@@ -791,6 +804,14 @@ export function materializeStatePersistence(
     },
   };
   let stateSha256 = semanticStateSha256(state);
+  // WHAT THE LAST ACCEPTED ENTRY ACTUALLY RECORDED, when that is not what this build
+  // would compute. A state accepted through one of the legacy derivations below was
+  // written by a build that hashed it differently, and the delta that follows it names
+  // its base by THAT digest, so a chain of them is unreadable unless the reading carries
+  // both: the modern digest for what this build writes next, and the written one for what
+  // the next entry will name. Null whenever they agree, which is every state this build
+  // wrote itself, so the chain check below is unchanged for them.
+  let writtenSha256: string | null = null;
   let stateStart = -1;
   let checkpointIndex = -1;
   let v2Seen = false;
@@ -843,7 +864,8 @@ export function materializeStatePersistence(
     if (wire.kind === "checkpoint") {
       state = stateFromFoldRefs(wire, wire.foldRefs, records);
     } else {
-      if (wireVersion === 0 || wire.baseRevision !== state.revision || wire.baseStateSha256 !== stateSha256 ||
+      if (wireVersion === 0 || wire.baseRevision !== state.revision ||
+          (wire.baseStateSha256 !== stateSha256 && wire.baseStateSha256 !== writtenSha256) ||
           wire.revision <= wire.baseRevision) {
         throw new Error("Broken active-context delta chain");
       }
@@ -914,13 +936,17 @@ export function materializeStatePersistence(
       );
     }
     const calculated = semanticStateSha256(state);
+    const legacyRider = (wire as { rider?: unknown }).rider;
     if (calculated !== wire.stateSha256 &&
         legacyCadenceOmittedStateSha256(state) !== wire.stateSha256 &&
-        legacyReplayOrderStateSha256(state) !== wire.stateSha256) {
+        legacyReplayOrderStateSha256(state) !== wire.stateSha256 &&
+        (legacyRider === undefined ||
+          legacyRiderStateSha256(state, legacyRider) !== wire.stateSha256)) {
       throw new Error("Active-context v2 state digest drift");
     }
     wireVersion = 2;
     stateSha256 = calculated;
+    writtenSha256 = wire.stateSha256 === calculated ? null : wire.stateSha256;
     rememberProjection();
   }
   return { state, wireVersion, records, stateSha256, projectionFingerprints };
@@ -964,7 +990,6 @@ export function makeStateCheckpoint(state: ActiveContextState): ActiveContextChe
     ...(state.pendingMarks?.length ? { pendingMarks: clone(state.pendingMarks) } : {}),
     ...(state.briefs && Object.keys(state.briefs).length ? { briefs: clone(state.briefs) } : {}),
     ...(state.advisory ? { advisory: clone(state.advisory) } : {}),
-    ...(state.rider ? { rider: clone(state.rider) } : {}),
     stateSha256: semanticStateSha256(state),
   }, state.sessionId) as ActiveContextCheckpointV2;
 }
@@ -1037,7 +1062,6 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
     ...(Object.keys(addBriefs).length ? { addBriefs } : {}),
     ...(removeBriefIds.length ? { removeBriefIds } : {}),
     ...(next.advisory ? { advisory: clone(next.advisory) } : {}),
-    ...(next.rider ? { rider: clone(next.rider) } : {}),
     stateSha256: semanticStateSha256(next),
   }, next.sessionId) as ActiveContextDeltaV2;
 }
@@ -1054,12 +1078,13 @@ export const ADVISORY_MILESTONES = Object.freeze(
   ["orientation", "notice", "tools", "chapters", "urgent"] as AdvisoryMilestone[],
 );
 
-export const MAX_RIDER_TEXT_BYTES = 4_096;
-
 /**
  * THE RETIRED STATE FIELDS, REFUSED BY NAME.
  *
- * `lastCall` and `notices` were the occupancy thermostat's two announcements. Nothing
+ * `lastCall` and `notices` were the occupancy thermostat's two announcements, and `rider`
+ * was the post-commit invitation to create marks, deleted 2026-08-23 with the curation
+ * redesign: the runtime cuts and the agent edits, so an invitation to create is a carrier
+ * with nothing left to invite. Nothing
  * writes them any more and nothing reads them, so a durable state that still carries one
  * was written by a build that had them, and the exact-record readers would reject it with
  * "Invalid active-context state keys" -- true, and useless to whoever has to act on it.
@@ -1069,6 +1094,15 @@ export const MAX_RIDER_TEXT_BYTES = 4_096;
  * that comes back is not the state that was written. Gate 17 already states the wire's
  * policy in the other direction -- an older exact-record reader rejects newer fields, and
  * a bump is explicit -- and this is that same policy read from the newer side.
+ *
+ * `rider` IS NOT ON THIS LIST, and the distinction is the whole point of the list. The
+ * refusal's own reason is "a state it cannot reproduce", so a field the build CAN
+ * reproduce is out of its scope: the rider was projection carrier text, it changed no
+ * fold, no ref and no brief, and the only thing it ever touched that survives a load is
+ * the state digest. So it is read, spent on the digest, and dropped, which is what
+ * `legacyRiderStateSha256` below is for. Retiring it by name instead made every state the
+ * sol-20260815-hidden campaign sealed unreadable and cost the hidden-mass result its 102
+ * attributed carriage rows, which is a high price for a field that carried no behaviour.
  */
 const RETIRED_STATE_FIELDS: readonly string[] = Object.freeze(["lastCall", "notices", "surfacing"]);
 
@@ -1084,13 +1118,6 @@ export function refuseRetiredStateFields(value: unknown): void {
   );
 }
 
-export function validRiderState(value: unknown): value is NonNullable<ActiveContextState["rider"]> {
-  if (!exactRecord(value, ["epoch", "text"])) return false;
-  const epoch = ownValue(value, "epoch");
-  const text = ownValue(value, "text");
-  return Number.isSafeInteger(epoch) && Number(epoch) >= 0 &&
-    typeof text === "string" && text.length > 0 && text.length <= MAX_RIDER_TEXT_BYTES;
-}
 
 export function validAdvisoryState(value: unknown): value is NonNullable<ActiveContextState["advisory"]> {
   const hasArmed = Boolean(value && typeof value === "object" &&

@@ -12,6 +12,7 @@ import {
   prepareFold,
   renderFold,
   renderFoldParts,
+  selectAutomaticChapter,
   selectAutomaticSpan,
   setFoldProjectionState,
 } from "./folding.ts";
@@ -24,7 +25,6 @@ import {
   orderedRoots,
   protectedStaleMass,
   refsProtected,
-  toolRefsProtected,
 } from "./measurement.ts";
 import {
   childFoldIds,
@@ -38,6 +38,7 @@ import { currentTurnRefKeys } from "./transcript.ts";
 import {
   ESTIMATED_BYTES_PER_TOKEN,
   ESTIMATED_PLACEHOLDER_OVERHEAD_BYTES,
+  MAX_FRONTIER_CUTS_PER_PASS,
   MAX_PENDING_MARKS,
   MAX_UNMARKED_CANDIDATES,
 } from "./policy.ts";
@@ -269,9 +270,7 @@ export function markEligibility(
   if (!refs.length) return "unfulfillable";
   const mapped = new Set(snapshot.mapped.flatMap((item) => item.ref ? [objectRefKey(item.ref)] : []));
   if (refs.some((ref) => !mapped.has(objectRefKey(ref)))) return "unfulfillable";
-  const blocked = mark.kind === "tool-result"
-    ? toolRefsProtected(refs, state, snapshot)
-    : refsProtected(refs, state, snapshot);
+  const blocked = refsProtected(refs, state, snapshot);
   return blocked ? "protected" : "eligible";
 }
 
@@ -445,7 +444,7 @@ export function ephemeralPeekMarks(input: {
     if (!peeked) continue;
     if (peeked.some((id) => state.expanded.includes(id) || peekedFoldProtected(snapshot, state, id))) continue;
     if (refs.some((ref) => claimed.has(objectRefKey(ref))) ||
-        toolRefsProtected(refs, state, snapshot)) continue;
+        refsProtected(refs, state, snapshot)) continue;
     const candidate: FoldCandidate = {
       kind: "tool-result",
       parts: refs.map((ref) => ({ kind: "raw" as const, ref })),
@@ -470,9 +469,7 @@ function peekedFoldProtected(
   const fold = state.folds.find((item) => item.id === foldId);
   if (!fold) return false;
   const refs = flattenFoldRefs(fold, state);
-  return fold.kind === "tool-result"
-    ? toolRefsProtected(refs, state, snapshot)
-    : refsProtected(refs, state, snapshot);
+  return refsProtected(refs, state, snapshot);
 }
 
 export function claimedRefKeys(state: ActiveContextState): Set<string> {
@@ -490,6 +487,8 @@ export function claimedRefKeys(state: ActiveContextState): Set<string> {
 export interface UnmarkedRemainder {
   spans: number;
   tokens: number;
+  /** Raw bytes, which is what the fold frontier measures itself against. */
+  chars: number;
   share: number;
   candidates: Array<{ id: string; tokens: number }>;
 }
@@ -506,6 +505,33 @@ export function unmarkedRemainder(
   for (const batch of automaticToolBatches(snapshot, state)) {
     for (const index of batch.indices) members.add(index);
   }
+  // CHAPTERS ARE FOLDABLE MASS TOO (Shane, 2026-08-23).
+  //
+  // The population used to be tool batches alone, while `selectAutomaticSpan` proposes a
+  // chapter whenever no batch is available, so on a chapter-heavy session this reported a
+  // remainder of zero over material automatic folding was about to take. It is the reading
+  // a deferred commit uses to say whether its mass is HELD or simply absent, which is the
+  // one distinction that record exists to draw, and it was answering "absent" for mass in
+  // plain view. It also broke the frontier's first cut, which gated on this number before
+  // the threshold moved into the selector where it belongs.
+  //
+  // Walked with the selector rather than re-derived, so the population is what automatic
+  // folding can actually reach and cannot drift from it. Walked from an EMPTY claim set,
+  // because this is the DENOMINATOR: a chapter already claimed by a mark is still foldable
+  // mass, it is just mass that is already spoken for, and the numerator below is what
+  // subtracts it. Bounded by the mapped length, which no terminating walk can exceed since
+  // every pass claims at least one ref.
+  const indexed = mappedByKey(snapshot);
+  const walked = new Set<string>();
+  for (let pass = 0; pass < snapshot.mapped.length; pass += 1) {
+    const chapter = selectAutomaticChapter(snapshot, state, walked);
+    if (!chapter) break;
+    for (const ref of chapter.sourceRefs) {
+      walked.add(objectRefKey(ref));
+      const item = indexed.get(objectRefKey(ref));
+      if (item) members.add(item.index);
+    }
+  }
   const candidates: Array<{ id: string; tokens: number }> = [];
   let unmarkedBytes = 0;
   let memberBytes = 0;
@@ -521,9 +547,66 @@ export function unmarkedRemainder(
   return {
     spans: candidates.length,
     tokens: Math.ceil(unmarkedBytes / perToken),
+    chars: unmarkedBytes,
     share: memberBytes > 0 ? unmarkedBytes / memberBytes : 0,
     candidates: candidates.slice(0, Math.max(0, limit)),
   };
+}
+
+/**
+ * THE FOLD FRONTIER: THE RUNTIME CUTS, AND THE AGENT EDITS WHAT IT CUT
+ * (Shane, 2026-08-23).
+ *
+ * The ladder used to stage nothing between commits, and before that it staged a mark on
+ * every measured response. Both were answers to the same question, WHEN SHOULD THE AGENT
+ * CURATE, and both got it wrong in the same way: they asked the agent to CHOOSE SPANS.
+ * Eager staging chose them first and crowded the agent out; standing down left the choice
+ * open until the commit, by which time the material was long out of view and the only
+ * information available was staleness, which the runtime already has.
+ *
+ * So the choice moves. As raw material accumulates past `minFoldChars`, the runtime cuts
+ * it, stalest first, exactly as a commit would. The cut is a PENDING MARK and pending
+ * marks are byte-inert: nothing moves, the projection does not change, the prefix cache is
+ * untouched, and the agent keeps seeing the raw material until a commit applies it. What
+ * the agent gets is a fold to annotate while the content is still fresh, which is the one
+ * thing it knows that the runtime does not.
+ *
+ * The loop bounds itself twice over. It stops when the unmarked remainder falls under the
+ * threshold, and it stops when the selector runs out of members, so a window whose whole
+ * remainder is pinned or blacklisted stages nothing and says so by returning empty rather
+ * than spinning.
+ */
+export function frontierMarks(input: {
+  snapshot: ActiveContextSnapshot;
+  state: ActiveContextState;
+  ordinal: number;
+}): PendingFoldMark[] {
+  const { snapshot } = input;
+  const claimed = claimedRefKeys(input.state);
+  const marks: PendingFoldMark[] = [];
+  let state = input.state;
+  while (marks.length < MAX_FRONTIER_CUTS_PER_PASS) {
+    // THE THRESHOLD IS THE SELECTOR'S OWN, which is `minFoldChars`, and it is read there
+    // rather than counted here. The first cut of this measured the unmarked remainder
+    // instead, and that reads TOOL BATCHES ONLY: a chapter-only session had a remainder of
+    // zero however much raw prose it held, so the frontier never fired on it at all and
+    // gate 7's fixture produced no cut. One threshold, in the one place that knows every
+    // span kind.
+    const candidate = selectAutomaticSpan(snapshot, state, claimed);
+    if (!candidate) break;
+    const mark = foldMarkFor({
+      candidate,
+      ...automaticMarkBrief(snapshot, state, candidate),
+      origin: "ladder",
+      ordinal: input.ordinal,
+    });
+    const addition = addPendingMark(state, mark);
+    if (!addition.added) break;
+    state = addition.state;
+    marks.push(mark);
+    for (const ref of candidate.sourceRefs) claimed.add(objectRefKey(ref));
+  }
+  return marks;
 }
 
 /**
@@ -890,6 +973,21 @@ export async function commitPendingMarks(input: {
   retainIneligible?: boolean;
   guardCurrentTurn?: boolean;
   guardWaiver?: number;
+  /**
+   * How many bytes this commit needs to free. Marks past it are RETAINED, not applied.
+   *
+   * This bound did not exist before the frontier (Shane, 2026-08-23), and it did not need
+   * to: staging was sized to the drop by `topUpMarks`, so every pending mark was one the
+   * commit had already decided it wanted. The frontier stages as material ARRIVES, which
+   * is the whole point of it, so by the time a commit fires the pending set is everything
+   * the window holds. Applying all of it would cut the window to nothing at the first
+   * commit, which is neither what the budget asks for nor what the agent is owed: what it
+   * is owed is that material stays raw for as long as there is room for it.
+   *
+   * Undefined means no bound, which is what the emergency lanes want: a fence or a
+   * rollback is not housekeeping and takes everything it can.
+   */
+  applyTargetBytes?: number;
 }): Promise<CommitEpochResult> {
   const marks = pendingMarks(input.state);
   const retained: PendingMark[] = [];
@@ -974,6 +1072,40 @@ export async function commitPendingMarks(input: {
     placed.add(key);
     ordered.push(mark);
   };
+  // THE DEPTH CUT, STALEST FIRST. `base` is already in span order, so taking a prefix of
+  // it takes the oldest material and leaves the newest raw, which is the ordering the
+  // agent would choose if it were asked. A mark left over here is RETAINED rather than
+  // refused: it is still pending, still briefable, still editable, and the next commit
+  // that needs depth will reach it.
+  const bounded: PendingMark[] = [];
+  if (input.applyTargetBytes !== undefined && input.applyTargetBytes > 0) {
+    let freed = 0;
+    for (const mark of base) {
+      if (freed >= input.applyTargetBytes) {
+        bounded.push(mark);
+        continue;
+      }
+      freed += markFreedBytes(input.snapshot, input.state, mark);
+    }
+    if (bounded.length) {
+      const spare = new Set(bounded.map((mark) => pendingMarkKey(mark)));
+      const kept = base.filter((mark) => !spare.has(pendingMarkKey(mark)));
+      base.length = 0;
+      base.push(...kept);
+      for (const mark of bounded) {
+        retained.push(mark);
+        refused.push({
+          mark: mark.mark,
+          id: mark.id,
+          origin: mark.origin,
+          reason: "the commit reached its target before this mark; it stays pending and " +
+            "the span stays raw until a later commit needs the depth",
+          retained: true,
+        });
+      }
+      state = withPendingMarks(input.state, retained);
+    }
+  }
   for (const mark of base) place(mark);
   for (const mark of ordered) {
     try {
@@ -1006,9 +1138,7 @@ export async function commitPendingMarks(input: {
         continue;
       }
       const sourceRefs = span.refs;
-      const blocked = mark.kind === "tool-result"
-        ? toolRefsProtected(sourceRefs, state, input.snapshot)
-        : refsProtected(sourceRefs, state, input.snapshot);
+      const blocked = refsProtected(sourceRefs, state, input.snapshot);
       if (blocked) {
         throw new Error(
           `pending fold mark ${mark.id} covers protected or fresh evidence; ` +

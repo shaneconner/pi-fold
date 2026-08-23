@@ -1,164 +1,71 @@
 import { boundReceiptText } from "./measurement.ts";
 import {
   contextBrand,
-  CONTEXT_MARK_RESPONSE_BYTES,
   CONTEXT_RECEIPT_BLOCK_BYTES,
+  FOLD_NOTICE_BYTES,
   DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
   MAX_CONTEXT_RECEIPTS,
 } from "./policy.ts";
 
 /**
- * WHERE THE AGENT STANDS AGAINST THE NEXT COMMIT (Shane, 2026-08-22).
+ * THE POST-FOLD NOTICE: THE ONE MOMENT THE AGENT KNOWS SOMETHING THE RUNTIME DOES NOT.
  *
- * The answer to every mark is the arithmetic of the epoch it is heading for: what the
- * commit has to free, what these marks will free when it runs, and what the ladder will
- * take by staleness if nothing else is marked. Ten to seventeen spans is a whole epoch's
- * drop at a real serving budget, and one call carries sixty-four, so the number is worth
- * stating: it turns marking from a gesture into something an agent can finish.
+ * The runtime has just cut folds behind the agent, out of material the agent is still
+ * looking at. It knows the spans, the sizes and the staleness; it does not know why any
+ * of it mattered. So the notice states what was cut and asks for exactly one thing, a
+ * brief, and it states the price of answering, which is nothing: the folds it names are
+ * PENDING, so a brief written now is stored outside the projection and reaches the window
+ * only when the commit writes that placeholder for the first time.
+ *
+ * It is batched rather than continuous. One notice per cut is noise, and noise is how
+ * guidance gets ignored; this one appears when enough folds are standing unbriefed to be
+ * worth a turn's attention, and it is ephemeral, so it never accumulates.
  */
-export function markAwarenessText(input: {
-  held: ReadonlyArray<{ id: string; kind: string; tokens: number }>;
-  remainder: { spans: number; tokens: number; share: number; candidates: ReadonlyArray<{ id: string; tokens: number }> };
-  coverage?: { targetTokens: number; markedTokens: number; remainingTokens: number; covered: boolean };
-  claims?: { pinnedTokens: number; pinnedRefs: number; unclaimedTokens: number };
+export function foldNoticeText(input: {
+  unbriefed: ReadonlyArray<{ id: string; kind: string; tokens: number }>;
+  pending: number;
   toolName: string;
   brandNoun?: string;
 }): string {
   const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
-  const { remainder, coverage, claims } = input;
-  const held = input.held.length
-    ? input.held.map((span) => `${span.id} (${span.kind}, about ${span.tokens} tokens)`).join("; ")
-    : "none";
-  const candidates = remainder.candidates.length
-    ? remainder.candidates.map((item) => `${item.id} (about ${item.tokens} tokens)`).join("; ")
-    : "none";
-  const lines = [
-    `[${brand} marks] Held until they age out or the next fold event: ${held}.`,
-  ];
-  if (coverage && coverage.targetTokens > 0) {
-    lines.push(coverage.covered
-      ? `Your marks cover the next commit: it needs to free about ${coverage.targetTokens} tokens ` +
-        `and they free about ${coverage.markedTokens}, so nothing will be folded automatically ` +
-        "unless the window grows before then."
-      : `The next commit must free about ${coverage.targetTokens} tokens; your marks free about ` +
-        `${coverage.markedTokens}, leaving about ${coverage.remainingTokens} tokens the ladder ` +
-        "will take from the stale end with deterministic briefs. Both numbers are as of now and " +
-        "rise as new results arrive.");
+  // THE INSTRUCTION IS SEATED BEFORE THE LIST, and the list is what gives when the
+  // notice runs out of room. The first cut of this built one string with the ids in the
+  // opening line and handed the whole thing to the bound, so a seven-fold batch spent its
+  // budget on ids and lost "here is how to answer" off the end: the agent was told which
+  // folds were unbriefed and not told that briefing them was free, which is the only fact
+  // in here it cannot work out for itself. Fold count grows without limit and the
+  // instruction does not, so the instruction is fixed and the ids are the variable part.
+  const head = [
+    `[${brand} folds] ${input.unbriefed.length} of your ${input.pending} pending fold(s) carry ` +
+      "no brief yet. These spans are cut but NOT folded: every byte they cover is still in " +
+      "front of you exactly as it was, and they enter your window only when a commit " +
+      "applies them.",
+    `Give each one a sentence: ${input.toolName} {"action":"brief","id":"<fold-id>","brief":"..."}. ` +
+      "You know why the span mattered and what you will want back from it; the automatic " +
+      "brief reads the span alone and does not. Writing it now costs your window nothing, " +
+      "because the fold is not in your window yet.",
+    `Wrong boundary? ${input.toolName} {"action":"reboundary","ids":[...]} re-cuts it. ` +
+      `Should not be taken at all? ${input.toolName} {"action":"unmark","ids":["<fold-id>"]}.`,
+  ].join("\n");
+  // WHAT IT COULD NOT NAME, IT COUNTS (gate 136's law, and gate 115's shape one level
+  // out): a list that stops early and says nothing reads as a complete list.
+  const entries = input.unbriefed
+    .map((fold) => `${fold.id} (${fold.kind}, ~${fold.tokens} tokens)`);
+  const overflowText = (seated: number) =>
+    `${input.toolName} {"action":"status"} lists the other ${input.unbriefed.length - seated}.`;
+  let seated = entries.length;
+  let list = `Unbriefed: ${entries.join("; ")}.`;
+  while (seated > 0 && Buffer.byteLength(`${head}\n${list}`, "utf8") > FOLD_NOTICE_BYTES) {
+    seated -= 1;
+    list = seated === 0
+      ? overflowText(0)
+      : `Unbriefed: ${entries.slice(0, seated).join("; ")}. ${overflowText(seated)}`;
   }
-  if (claims && claims.pinnedTokens > 0) {
-    lines.push(
-      `Pinned and held raw: about ${claims.pinnedTokens} tokens across ${claims.pinnedRefs} entry(s). ` +
-        "A pin keeps a span expanded and out of every fold, and it frees nothing, so the drop " +
-        "above still has to come from what is left.");
-  }
-  lines.push(
-    `Unmarked remainder: ${remainder.spans} span(s), about ${remainder.tokens} tokens of stale mass, ` +
-      `${Math.round(remainder.share * 100)}% of the non-fresh window.`,
-    `Largest unmarked by reclaim value: ${candidates}.`,
-    `Mark several spans in one ${input.toolName} call, and pin anything you want kept expanded: ` +
-      `${input.toolName} {"action":"pin","ids":["<entry-id>"]}. One call either way, and this ` +
-      "whole picture comes back with it.",
-  );
-  return boundReceiptText(lines.join("\n"), CONTEXT_MARK_RESPONSE_BYTES,
-    `[${brand} marks] Held; the remainder is unavailable this pass.`);
+  return boundReceiptText(`${head}\n${list}`, FOLD_NOTICE_BYTES,
+    `[${brand} folds] Pending folds are waiting for briefs; the list is unavailable this pass.`);
 }
 
-export function contextRiderText(input: {
-  toolName: string;
-  brandNoun?: string;
-  pendingAgentMarks: number;
-  eligibleMarks: number;
-  freedTokens: number;
-  eligibleFreedTokens: number;
-  anchors: string[];
-  pinnedShare: number;
-  maxPinnedShare: number;
-}): string {
-  const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
-  const anchors = input.anchors.length
-    ? input.anchors.slice(0, 3).join(", ")
-    : "none";
-  const pinnedPercent = Math.round(input.pinnedShare * 100);
-  const capPercent = Math.round(input.maxPinnedShare * 100);
-  return boundReceiptText(
-    [
-      `[${brand} notice] A fold commit just landed; the next one will batch every pending mark ` +
-        "into one rewrite, and marks are free until then.",
-      "Mark FINISHED units at their clean boundaries; batches beat singles: " +
-        `${input.toolName} {"action":"fold","marks":[{"ids":["<start>","<end>"],"brief":"<factual brief>"}]} ` +
-        "carries several decisions into that single rewrite, each keeping your brief instead of a " +
-        `generated one. ${input.pendingAgentMarks} of your mark(s) pending; ` +
-        `${input.eligibleMarks} mark(s) eligible now, freeing about ${input.eligibleFreedTokens} ` +
-        `of the ${input.freedTokens} marked token(s).`,
-      `Completed units ready to mark, largest first: ${anchors}.`,
-      `Pinning: ${input.toolName} {"action":"pin","ids":["<entry-id>"]} holds entries raw through ` +
-        `every fold, and {"action":"unpin"} releases them. Pinned context is ${pinnedPercent}% of ` +
-        `the working window against a ${capPercent}% cap; at the cap, protect refuses until ` +
-        "something is released.",
-    ].join("\n"),
-    2_048,
-    `[${brand} notice] Post-commit curation details are unavailable this pass.`,
-  );
-}
 
-export function stewardAdvisoryText(input: {
-  toolName: string;
-  brandNoun?: string;
-  usedTokens: number;
-  budgetTokens: number;
-  /** Occupancy at which the epoch fires, which is what "imminent" is measured against. */
-  triggerTokens: number;
-  inflowTokens: number;
-  candidates: ReadonlyArray<{ id: string; tokens: number }>;
-  coverage?: { targetTokens: number; markedTokens: number; remainingTokens: number; covered: boolean };
-  claims?: { pinnedTokens: number; pinnedRefs: number; unclaimedTokens: number };
-  pendingAgentMarks: number;
-  eligibleMarks: number;
-}): string {
-  const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
-  const headroom = Math.max(0, input.triggerTokens - input.usedTokens);
-  const coverage = input.coverage;
-  const lines = [
-    `[${brand} steward] A fold commit is imminent: about ${headroom} tokens of room remain ` +
-      `before it fires, and recent requests have grown by about ${input.inflowTokens} tokens each, ` +
-      "so this may be your last turn to choose what folds and what its brief says.",
-  ];
-  if (coverage && coverage.targetTokens > 0) {
-    lines.push(coverage.covered
-      ? `That commit must free about ${coverage.targetTokens} tokens and your marks already cover ` +
-        "it, so nothing will be chosen for you unless the window grows first."
-      : `That commit must free about ${coverage.targetTokens} tokens. Your marks cover about ` +
-        `${coverage.markedTokens}; the remaining ${coverage.remainingTokens} will be taken from the ` +
-        "stale end by age, with briefs written by the runtime rather than by you.");
-  }
-  if (input.candidates.length) {
-    lines.push(
-      "Finished units you have not marked, largest first: " +
-        input.candidates.map((item) => `${item.id} (about ${item.tokens} tokens)`).join("; ") + ".",
-      "Mark them now, as many as you like in ONE call, each with the brief you want its " +
-        `placeholder to carry: ${input.toolName} ` +
-        '{"action":"fold","marks":[{"ids":["<start>","<end>"],"brief":"<factual brief>"},' +
-        '{"ids":["<start>","<end>"],"brief":"<factual brief>"}]}. ' +
-        "A brief you write is what you will read later; a brief the runtime writes is a summary " +
-        "of shape rather than of meaning. Peek returns any fold's exact bytes afterwards, so " +
-        "marking loses nothing.",
-      `Anything you want to keep EXPANDED, pin instead: ${input.toolName} ` +
-        '{"action":"pin","ids":["<entry-id>"]} holds those entries raw through every fold. ' +
-        "A pin frees nothing, so the commit still takes its drop from whatever is left.",
-    );
-  }
-  if (input.claims && input.claims.pinnedTokens > 0) {
-    lines.push(`Already pinned and held raw: about ${input.claims.pinnedTokens} tokens ` +
-      `across ${input.claims.pinnedRefs} entry(s).`);
-  }
-  lines.push(
-    `${input.pendingAgentMarks} of your mark(s) pending; ${input.eligibleMarks} mark(s) eligible now.`);
-  return boundReceiptText(
-    lines.join("\n"),
-    2_048,
-    `[${brand} steward] A fold commit is imminent; details are unavailable this pass.`,
-  );
-}
 
 export interface ContextReceipt {
   kind: string;

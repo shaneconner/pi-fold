@@ -10,7 +10,7 @@ export {
 } from "./settings.ts";
 
 const PUBLIC_OPTIONS = Object.freeze([
-  "thresholds", "providerInputBudget", "blacklistAutoFoldTools", "guidance",
+  "thresholds", "providerInputBudget", "blacklistAutoFoldTools",
 ]);
 
 const GENERATOR_DELETED = "the model brief generator is deleted (2026-08-14): across 15 sealed " +
@@ -24,6 +24,11 @@ const INVERTED_AUTO_FOLD_LIST = "renamed blacklistAutoFoldTools, and the sense i
   "it meant to permit";
 
 const REFUSED_OPTIONS = Object.freeze({
+  guidance: "deleted 2026-08-23: it switched the copy that taught the agent to " +
+    "CHOOSE SPANS, and the agent does not choose spans. The runtime cuts at the frontier and " +
+    "the agent annotates what it cut, so the guidance it switched is replaced wholesale by " +
+    "the post-fold notice, which is not optional: a fold the agent is never told about is one " +
+    "it can never brief",
   toolName: "the deployment identity is hardwired to pi-fold: the tool is pi_fold_context",
   toolLabel: "the deployment identity is hardwired to pi-fold",
   brandNoun: "the deployment identity is hardwired to pi-fold",

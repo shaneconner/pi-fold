@@ -38,13 +38,12 @@ export interface FoldSettingsFile {
 	thresholds?: ActiveContextThresholds;
 }
 
-// The five settings, named once. This was a hand-written union until the migration
+// The four settings, named once. This was a hand-written union until the migration
 // below needed the same names at runtime; deriving the type from the array is what
 // keeps the two readings from drifting apart.
 const THRESHOLD_FIELDS = [
 	"maxTarget",
 	"minTarget",
-	"freshTail",
 	"consolidateAfter",
 	"minFoldChars",
 ] as const;
@@ -64,7 +63,7 @@ function readProportion(raw: string, field: string): number {
 
 // One edit, applied against the WHOLE draft: the merged thresholds object is
 // re-validated through resolveThresholds so cross-field invariants
-// (minTarget < maxTarget, gap >= freshTail) hold at every saved state, never
+// (minTarget < maxTarget) hold at every saved state, never
 // only in the file's final form. Returns the next whole draft or a named error.
 export function applyFoldSettingsEdit(
 	draft: FoldSettingsFile,
@@ -207,7 +206,6 @@ interface EditorRow {
 const EDITOR_ROWS: readonly EditorRow[] = [
 	{ id: "maxTarget", label: "Commit trigger", description: "Occupancy share of the budget that fires a fold epoch (maxTarget)" },
 	{ id: "minTarget", label: "Post-commit aim", description: "Share the epoch cuts back down toward (minTarget)" },
-	{ id: "freshTail", label: "Fresh tail", description: "Protected recent share that never folds (freshTail)" },
 	{ id: "consolidateAfter", label: "Consolidation divisor", description: "Parents owed per epoch = visible roots divided by this (consolidateAfter)" },
 	{ id: "minFoldChars", label: "Minimum fold size", description: "Characters a fold must reach to be worth making; a smaller gap between folds is absorbed by the fold beside it (minFoldChars)" },
 ];
@@ -215,10 +213,9 @@ const EDITOR_ROWS: readonly EditorRow[] = [
 // The cycle lattices. Shares step in cents so no float drift reaches a threshold;
 // each row's list is FILTERED against the current draft before display, which is
 // what makes an invalid combination unselectable rather than an error message.
-const SHARE_STEPS: Record<"maxTarget" | "minTarget" | "freshTail", { min: number; max: number; step: number }> = {
+const SHARE_STEPS: Record<"maxTarget" | "minTarget", { min: number; max: number; step: number }> = {
 	maxTarget: { min: 0.40, max: 0.95, step: 0.05 },
 	minTarget: { min: 0.05, max: 0.60, step: 0.05 },
-	freshTail: { min: 0.01, max: 0.15, step: 0.01 },
 };
 
 const CONSOLIDATE_CHOICES = [2, 3, 4, 5, 6, 8, 10, 12, 15, 20];
@@ -228,7 +225,7 @@ const CONSOLIDATE_CHOICES = [2, 3, 4, 5, 6, 8, 10, 12, 15, 20];
 // enforces, below which a placeholder can cost more than the source it replaces.
 const MIN_FOLD_CHOICES = [2_000, 4_000, 6_000, 8_000, 12_000, 16_000, 24_000, 32_000];
 
-function shareCandidates(id: "maxTarget" | "minTarget" | "freshTail"): number[] {
+function shareCandidates(id: "maxTarget" | "minTarget"): number[] {
 	const { min, max, step } = SHARE_STEPS[id];
 	const values: number[] = [];
 	for (let cents = Math.round(min * 100); cents <= Math.round(max * 100); cents += Math.round(step * 100)) {
@@ -240,15 +237,10 @@ function shareCandidates(id: "maxTarget" | "minTarget" | "freshTail"): number[] 
 function allowedValues(id: FoldSettingId, thresholds: ActiveContextThresholds, budgetTokens: number): string[] {
 	if (id === "consolidateAfter") return CONSOLIDATE_CHOICES.map(String);
 	if (id === "minFoldChars") return MIN_FOLD_CHOICES.map((value) => `${value.toLocaleString("en-US")} chars`);
-	const { minTarget, maxTarget, freshTail } = thresholds;
-	let candidates: number[];
-	if (id === "maxTarget") {
-		candidates = shareCandidates("maxTarget").filter((v) => v > minTarget && v - minTarget >= freshTail && v > freshTail);
-	} else if (id === "minTarget") {
-		candidates = shareCandidates("minTarget").filter((v) => v < maxTarget && maxTarget - v >= freshTail);
-	} else {
-		candidates = shareCandidates("freshTail").filter((v) => v < maxTarget && maxTarget - v >= freshTail);
-	}
+	const { minTarget, maxTarget } = thresholds;
+	const candidates = id === "maxTarget"
+		? shareCandidates("maxTarget").filter((v) => v > minTarget)
+		: shareCandidates("minTarget").filter((v) => v < maxTarget);
 	// Entries carry the SAME display format as currentValue: SettingsList cycles by
 	// indexOf(currentValue), so a format mismatch wraps every first press to the head.
 	return candidates.map((v) => `${v.toFixed(2)} · ${Math.round(v * budgetTokens).toLocaleString("en-US")} tok`);

@@ -323,7 +323,14 @@ export function unsafeChapterIndices(messages: unknown[]): Set<number> {
   return unsafe;
 }
 
-export function freshBoundary(messages: unknown[], turns: CompleteTurn[], freshBytes: number): number {
+/**
+ * The first index of an unfinished user turn, or the end of the transcript when the last
+ * turn completed. Folding into an unfinished turn leaves a user message whose tool calls are
+ * unanswered, which is malformed for every provider, so this is a validity boundary rather
+ * than a curation preference. The fresh-tail byte walk that used to sit here is deleted:
+ * nothing decided on it, and stale-first ordering already leaves recent material last.
+ */
+export function freshBoundary(messages: unknown[], turns: CompleteTurn[]): number {
   if (!messages.length) return 0;
   let unfinishedUser = messages.length;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -335,36 +342,7 @@ export function freshBoundary(messages: unknown[], turns: CompleteTurn[], freshB
     unfinishedUser = complete ? messages.length : index;
     break;
   }
-  const leading = leadingCompactionContinuation(messages);
-  let boundary = Math.min(messages.length, unfinishedUser);
-  while (boundary > 0) {
-    const suffix: unknown[] = [];
-    for (let index = boundary; index < messages.length; index += 1) suffix.push(messages[index]);
-    if (bytes(suffix) >= freshBytes) break;
-    let previous: CompleteTurn | null = null;
-    for (let turnIndex = 0; turnIndex < turns.length; turnIndex += 1) {
-      if (turns[turnIndex].start < boundary) previous = turns[turnIndex];
-    }
-    if (!previous) { boundary = leading?.end ?? 0; break; }
-    boundary = previous.start;
-  }
-  return boundary;
-}
-
-export function toolFreshIndices(
-  messages: unknown[],
-  _turns: CompleteTurn[],
-  freshBytes: number,
-): Set<number> {
-  const protectedIndices = new Set<number>();
-  let tailBytes = 0;
-  let boundary = messages.length;
-  while (boundary > 0 && tailBytes < freshBytes) {
-    boundary -= 1;
-    tailBytes += bytes(messages[boundary]);
-  }
-  for (let index = boundary; index < messages.length; index += 1) protectedIndices.add(index);
-  return protectedIndices;
+  return Math.min(messages.length, unfinishedUser);
 }
 
 type EntryEvidence = { message: unknown; ref: BranchObject["ref"] };
@@ -492,17 +470,13 @@ export function mapActiveContext(input: {
   const budgetTokens = input.netBudget === true
     ? (reportedContextWindow ?? DEFAULT_CONTEXT_WINDOW)
     : servingBudgetTokens(reportedContextWindow ?? DEFAULT_CONTEXT_WINDOW);
-  const freshBytes = zoneBytes(thresholds.freshTail, budgetTokens);
   const turns = completeTurns(input.eventMessages);
-  const boundary = freshBoundary(input.eventMessages, turns, freshBytes);
+  const boundary = freshBoundary(input.eventMessages, turns);
   const protectedIndices = unsafeChapterIndices(input.eventMessages);
-  const toolProtectedIndices = toolFreshIndices(input.eventMessages, turns, freshBytes);
-  for (const index of toolProtectedIndices) protectedIndices.add(index);
   for (let mappedIndex = 0; mappedIndex < mapped.length; mappedIndex += 1) {
     const item = mapped[mappedIndex];
     if (item.ref) continue;
     protectedIndices.add(item.index);
-    toolProtectedIndices.add(item.index);
   }
   const snapshot: ActiveContextSnapshot = {
     sessionId: input.sessionId,
@@ -514,7 +488,6 @@ export function mapActiveContext(input: {
     thresholds,
     budgetTokens,
     protectedIndices,
-    toolProtectedIndices,
     policy,
     toolName: input.toolName ?? DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
     brandNoun: input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,

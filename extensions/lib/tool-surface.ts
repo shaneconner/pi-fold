@@ -37,8 +37,8 @@ export function buildActiveContextTool(input: {
   const pinGuidance = input.allowedActions.includes("pin")
     ? " Pin with ids holds folds or entries against automatic folding, consolidation and refolding until unpin releases them, so an expanded span you still need stays expanded. Pin reveals nothing on its own: a folded span stays folded, just held. Pinning moves no context bytes, and fold receipts report how much mass you have pinned."
     : "";
-  const epochGuidance = input.allowedActions.includes("unmark")
-    ? " Fold scheduling is epoch mode: fold records pending marks and moves no context bytes, and the runtime applies every pending mark in one rewrite when the fold event fires. Mark SEVERAL spans in one call: marks carries several {ids, brief} pairs, and one call answers with your whole picture, every span now held plus the unmarked remainder and what share of the non-fresh window it is. Between fold events nothing else in your context changes, so that result is where the picture lives. Write the brief when you mark: every fold carries one, and the one you supply is kept verbatim while a span you leave briefless gets a deterministic brief built from its own bytes. A mark stays editable until it commits, so marking the same span again simply replaces it, brief and all, at no cost; unmark withdraws one you no longer want. Mark freely as you work; when to fold is the runtime's to decide."
+  const epochGuidance = input.allowedActions.includes("brief")
+    ? " THE RUNTIME CUTS THE FOLDS AND YOU ANNOTATE THEM. As raw material piles up it is cut into pending folds behind you, stalest first. A pending fold moves NO context bytes: you keep seeing the raw material exactly as it is, and the fold reaches your window only when a commit applies it. You are told when folds are cut and which ones carry no brief yet. Answer with brief, one id and one sentence: you know why the span mattered and what you will want back from it, and the deterministic brief that fills the gap reads the span alone and does not. Writing a brief on a pending fold is FREE, because the fold is not in your window yet; briefing a standing fold is refused, because its placeholder is in your window and rewriting it rewrites your context from that point on. reboundary re-cuts a span the runtime got wrong, unmark withdraws a cut you do not want taken, and when to commit stays the runtime's to decide."
     : "";
   const recoveryGuidance = input.allowedActions.includes("expand")
     ? " A fold brief is an index entry, not the source: when a question or task depends on material that is folded, peek or expand that fold and answer from the exact bytes, never from memory of them. Recalling folded detail without reopening it is how specifics get misremembered."
@@ -48,8 +48,8 @@ export function buildActiveContextTool(input: {
     name: input.name,
     label: input.label,
     description: input.fullSurface
-      ? `Page, peek, fold, expand, refold, pin, or re-cut exact Pi active-context evidence.${peekGuidance}${correctionGuidance}${pinGuidance}${epochGuidance}${recoveryGuidance}${standingGuidance} Mutations persist immediately and affect the next model call inside the same continuing turn; no turn boundary is required. Supplied fold briefs have a hard ${input.maxBriefChars}-character maximum.`
-      : `Use only the configured active-context actions: ${input.allowedActions.join(", ")}.${peekGuidance}${correctionGuidance}${pinGuidance}${epochGuidance}${recoveryGuidance}${standingGuidance} Call fold only by copying the exact eligibleChapter.action returned by status; if status has no eligibleChapter, continue the task without folding. Supplied fold briefs have a hard ${input.maxBriefChars}-character maximum.`,
+      ? `Page, peek, brief, expand, refold, pin, or re-cut exact Pi active-context evidence.${peekGuidance}${correctionGuidance}${pinGuidance}${epochGuidance}${recoveryGuidance}${standingGuidance} Mutations persist immediately and affect the next model call inside the same continuing turn; no turn boundary is required. Supplied fold briefs have a hard ${input.maxBriefChars}-character maximum.`
+      : `Use only the configured active-context actions: ${input.allowedActions.join(", ")}.${peekGuidance}${correctionGuidance}${pinGuidance}${epochGuidance}${recoveryGuidance}${standingGuidance} Supplied fold briefs have a hard ${input.maxBriefChars}-character maximum.`,
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -58,33 +58,13 @@ export function buildActiveContextTool(input: {
         action: { type: "string", enum: input.allowedActions },
         ids: { type: "array", minItems: 1, maxItems: 64, items: { type: "string", minLength: 1 } },
         id: { type: "string", minLength: 1 },
-        marks: {
-          type: "array",
-          minItems: 1,
-          maxItems: 64,
-          description: "Fold only: several spans with their own briefs in one call, which is the shape to prefer. An invalid or overlapping span is corrected to the nearest valid edge and the correction is reported back.",
-          items: {
-            type: "object",
-            additionalProperties: false,
-            required: ["ids"],
-            properties: {
-              ids: { type: "array", minItems: 1, maxItems: 64, items: { type: "string", minLength: 1 } },
-              brief: {
-                type: "string",
-                minLength: 1,
-                maxLength: input.maxBriefChars,
-                description: "Write one for every span you mark. You know why the span mattered and " +
-                  "what you will want back from it; the deterministic brief that fills the gap " +
-                  "reads the span alone and does not.",
-              },
-            },
-          },
-        },
         brief: {
           type: "string",
           minLength: 1,
           maxLength: input.maxBriefChars,
-          description: `Factual fold brief, at most ${input.maxBriefChars} characters.`,
+          description: "Brief only: what this pending fold covers and what you will want " +
+            `back from it, at most ${input.maxBriefChars} characters. Free to write, ` +
+            "because the fold it names is not in your window yet.",
         },
         offset: { type: "integer", minimum: 0 },
         ephemeral: {

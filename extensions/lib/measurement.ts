@@ -325,6 +325,12 @@ export function explicitProtectedKeys(state: ActiveContextState): Set<string> {
   return new Set(state.protected.map(objectRefKey));
 }
 
+/**
+ * Held against folding: pinned by name, or unfoldable for validity (an unfinished turn, an
+ * entry with no evidence ref). There used to be a second reading of this for tool spans,
+ * differing only in which protected set it consulted; the two sets collapsed into one when
+ * fresh-tail was deleted, and the two functions were byte-identical after that.
+ */
 export function refsProtected(
   refs: EvidenceRef[],
   state: ActiveContextState,
@@ -334,18 +340,6 @@ export function refsProtected(
   return refs.some((ref) => {
     const item = exactMapped(snapshot, ref);
     return !item || explicit.has(objectRefKey(ref)) || snapshot.protectedIndices.has(item.index);
-  });
-}
-
-export function toolRefsProtected(
-  refs: EvidenceRef[],
-  state: ActiveContextState,
-  snapshot: ActiveContextSnapshot,
-): boolean {
-  const explicit = explicitProtectedKeys(state);
-  return refs.some((ref) => {
-    const item = exactMapped(snapshot, ref);
-    return !item || explicit.has(objectRefKey(ref)) || snapshot.toolProtectedIndices.has(item.index);
   });
 }
 

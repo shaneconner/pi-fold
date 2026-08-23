@@ -16,7 +16,6 @@ import {
   orderedRoots,
   refsInOrder,
   refsProtected,
-  toolRefsProtected,
   visibleCollapsedRoots,
 } from "./measurement.ts";
 import {
@@ -502,9 +501,7 @@ export function pinnedChildFold(
     const child = byId.get(part.foldId);
     if (!child) continue;
     const refs = flattenFoldRefs(child, state);
-    const pinned = child.kind === "tool-result"
-      ? toolRefsProtected(refs, state, snapshot)
-      : refsProtected(refs, state, snapshot);
+    const pinned = refsProtected(refs, state, snapshot);
     if (pinned) return child;
   }
   return null;
@@ -733,7 +730,7 @@ export function automaticToolBatches(
         refs.some((ref) => !ref || ref.role !== "toolResult")) continue;
     const exactRefs = refs as EvidenceRef[];
     const size = group.reduce((total, { item }) => total + bytes(item.message), 0);
-    if (toolRefsProtected(exactRefs, state, snapshot) || refsInOrder(snapshot, exactRefs) === null ||
+    if (refsProtected(exactRefs, state, snapshot) || refsInOrder(snapshot, exactRefs) === null ||
         size < snapshot.thresholds.minFoldChars) continue;
     batches.push({ refs: exactRefs, indices: group.map(({ item }) => item.index), bytes: size });
   }
@@ -767,9 +764,7 @@ export function selectAutomaticRefold(
     if (claimedFoldIds.has(id)) return [];
     const fold = state.folds.find((item) => item.id === id);
     const interval = fold ? foldInterval(fold, state, snapshot) : null;
-    const protectedSource = fold && (fold.kind === "tool-result"
-      ? toolRefsProtected(flattenFoldRefs(fold, state), state, snapshot)
-      : refsProtected(flattenFoldRefs(fold, state), state, snapshot));
+    const protectedSource = fold && (refsProtected(flattenFoldRefs(fold, state), state, snapshot));
     return fold && interval && !protectedSource && !state.leases[id]
       ? [{ id, ...interval }]
       : [];
@@ -1009,7 +1004,7 @@ export function manualFoldCandidate(
   options: { allowProtected?: boolean } = {},
 ): FoldCandidate {
   const blockedTool = (refs: EvidenceRef[]): boolean =>
-    !options.allowProtected && toolRefsProtected(refs, state, snapshot);
+    !options.allowProtected && refsProtected(refs, state, snapshot);
   const blocked = (refs: EvidenceRef[]): boolean =>
     !options.allowProtected && refsProtected(refs, state, snapshot);
   const owners = directFoldOwners(state.folds);

@@ -56,7 +56,6 @@ import {
   providerTokens,
   refsProtected,
   stringIds,
-  toolRefsProtected,
   toolPayload,
 } from "./lib/measurement.ts";
 import type {
@@ -89,6 +88,7 @@ import {
   activeContextSource,
   ACTIVE_CONTEXT_POLICY,
   ACTIVE_CONTEXT_TOOL_ACTIONS,
+  UNBRIEFED_FOLDS_BEFORE_NOTICE,
   contextBrand,
   DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
   DEFAULT_ACTIVE_CONTEXT_COMMAND_NAMES,
@@ -96,10 +96,8 @@ import {
   DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   COMMIT_RECLAIM_FLOOR_SHARE,
-  STEWARD_WARNING_SHARE,
   CONTEXT_RECEIPT_BLOCK_BYTES,
   DEFAULT_CONTEXT_WINDOW,
-  resolveGuidance,
   assertThresholdsServable,
   resolveThresholds,
   servingBudgetTokens,
@@ -116,7 +114,6 @@ import {
   USER_RESCUE_MAX_SOURCE_CHARS,
 } from "./lib/policy.ts";
 import type {
-  ActiveContextGuidance,
   ActiveContextSnapshot,
   ActiveContextState,
   ActiveContextThresholds,
@@ -133,10 +130,8 @@ import {
 } from "./lib/scheduling.ts";
 import {
   contextReceipt,
-  contextRiderText,
-  markAwarenessText,
+  foldNoticeText,
   receiptBlockText,
-  stewardAdvisoryText,
   withReceipt,
 } from "./lib/curation.ts";
 import type {
@@ -165,6 +160,7 @@ import {
   refoldMarks,
   schedulingStatus,
   topUpMarks,
+  frontierMarks,
   withPendingMarks,
 } from "./lib/scheduling.ts";
 import {
@@ -260,7 +256,6 @@ export function registerActiveContext(pi: any, options: {
   blacklistAutoFoldTools?: ReadonlySet<string>;
   providerInputBudget?: number;
   thresholds?: ActiveContextThresholds;
-  guidance?: Partial<ActiveContextGuidance>;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
 } {
@@ -293,6 +288,13 @@ export function registerActiveContext(pi: any, options: {
         "tools it meant to permit");
     }
   }
+  if (Object.hasOwn(options, "guidance")) {
+    throw new Error("guidance is no longer an option: it switched the copy that taught the " +
+      "agent to CHOOSE SPANS, and the agent does not choose spans. The runtime cuts at the " +
+      "frontier and the agent annotates what it cut, so the guidance it switched has been " +
+      "replaced wholesale by the post-fold notice, which is not optional because a fold the " +
+      "agent is never told about is one it can never brief");
+  }
   if (Object.hasOwn(options, "commandPrefix")) {
     throw new Error("commandPrefix is no longer an option: give whole names with commandNames");
   }
@@ -322,14 +324,12 @@ export function registerActiveContext(pi: any, options: {
   }
   const thresholds = resolveThresholds(options.thresholds);
   assertThresholdsServable(thresholds, providerInputBudget ?? servingBudgetTokens(DEFAULT_CONTEXT_WINDOW));
-  const guidance = resolveGuidance(options.guidance);
   const stateEntryType = `${entryTypePrefix}-state`;
   const foldRecordEntryType = `${entryTypePrefix}-fold-record`;
   const milestoneProjectionType = `${entryTypePrefix}-milestone`;
   const advisoryProjectionType = `${entryTypePrefix}-advisory`;
+  const foldNoticeProjectionType = `${entryTypePrefix}-fold-notice`;
   const receiptProjectionType = `${entryTypePrefix}-receipts`;
-  const riderProjectionType = `${entryTypePrefix}-rider`;
-  const stewardProjectionType = `${entryTypePrefix}-steward`;
   const curationProjectionType = `${entryTypePrefix}-curation`;
   const entryNamespace = entryTypeNamespace(entryTypePrefix);
   const providerMeasurementEntryType = `${entryNamespace}-provider-context-measurement`;
@@ -359,6 +359,10 @@ export function registerActiveContext(pi: any, options: {
   };
 
   const ladder = {
+    /** The provider measurement the last band-top commit ran against; one commit per one. */
+    bandTopMeasurement: null as unknown,
+    /** The snapshot-and-state key whose frontier scan came back empty; see advanceFoldFrontier. */
+    frontierEmptyKey: null as string | null,
     pendingManual: false,
     preparing: null as { id: string; controller: AbortController; promise: Promise<void> } | null,
     lastPreparationError: null as string | null,
@@ -471,7 +475,6 @@ export function registerActiveContext(pi: any, options: {
     hardFenceNoticeKey: null as string | null,
     hardFenceReleaseSessionId: null as string | null,
     hardFenceReleasedProjectionKeys: new Set<string>(),
-    stewardCrossingActive: false,
   };
 
   // EPHEMERAL PEEK (Build 4b): tool call ids whose peek asked for one-read
@@ -1221,7 +1224,6 @@ export function registerActiveContext(pi: any, options: {
       policy: snapshot ? {
         maxTarget: snapshot.thresholds.maxTarget,
         minTarget: snapshot.thresholds.minTarget,
-        freshTail: snapshot.thresholds.freshTail,
         hardFenceRatio: hardFenceRatio(snapshot),
       } : null,
     });
@@ -1536,11 +1538,164 @@ export function registerActiveContext(pi: any, options: {
   // budget, so "one commit per pass while over" is what this produces. A pass that finds
   // nothing to fold says so in the stream, which is a state worth seeing rather than one
   // worth suppressing.
+  /**
+   * Cut the raw material that has piled up past the last fold, and say so.
+   *
+   * This is the whole of "the runtime cuts": no commit, no bytes moved, no persistence
+   * boundary. It stages pending marks the same way a commit's own top-up does, through
+   * the same selector and the same brief builder, so a frontier cut and a commit fill are
+   * the same object and the agent cannot tell them apart except by when it heard.
+   */
+  const advanceFoldFrontier = (snapshot: ActiveContextSnapshot): number => {
+    if (!persistence.state) return 0;
+    if (ladder.automaticFailure !== null) return 0;
+    // A SCAN THAT FOUND NOTHING IS NOT RE-RUN UNTIL SOMETHING CHANGES. Exhausting the
+    // selector costs one window scan per staged cut and one more to come back empty, and
+    // once everything foldable is staged EVERY later pass pays that last scan to be told
+    // the same thing. Measured on the 90-projection loop inside gate 50's instrumentation
+    // claim: 137ms of a 460ms pass, 30 percent of the runtime's own per-request cost, for
+    // an answer that cannot have changed.
+    //
+    // The key is the one `authoritativeSnapshotFor` already trusts for the snapshot
+    // itself, plus the two pieces of state the selector reads: the revision, which moves
+    // on every durable write, and the pending-mark count, which moves when the agent
+    // withdraws one. It is only consulted when the last scan staged NOTHING; a scan that
+    // staged something changed the state, so its key is stale by construction.
+    const frontierKey = `${snapshot.messages.length}:${snapshot.mapped.length}:` +
+      `${persistence.state.revision}:${pendingMarks(persistence.state).length}`;
+    if (ladder.frontierEmptyKey === frontierKey) return 0;
+    // CONSOLIDATION IS ANNOUNCED THE SAME WAY (Shane, 2026-08-23). When standing folds
+    // reach `consolidateAfter` the parent that will absorb them is staged HERE rather than
+    // being computed inside the commit, for exactly the reason the frontier exists: a
+    // parent's brief indexes ten children, it is the entry the agent will navigate by, and
+    // the agent knows what mattered in those children while the commit only knows their
+    // order. Staged, it is byte-inert like any other pending mark and rides the same
+    // notice, so there is one mechanism and not two.
+    const marks = [
+      ...frontierMarks({
+        snapshot,
+        state: persistence.state,
+        ordinal: instrumentation.requests,
+      }),
+      ...consolidationMarks({
+        snapshot,
+        state: persistence.state,
+        ordinal: instrumentation.requests,
+      }),
+    ];
+    let state = persistence.state;
+    const staged: ReturnType<typeof frontierMarks> = [];
+    for (const mark of marks) {
+      const addition = addPendingMark(state, mark);
+      if (!addition.added) continue;
+      state = addition.state;
+      staged.push(mark);
+    }
+    // NOTHING STAGED, so this key is answered and the next pass under it can skip the
+    // scan. Read from `staged` rather than from `marks`, because a candidate the pending
+    // set already holds comes back from the selector every pass and is refused every
+    // pass: keying on `marks` left the skip unreachable in exactly the steady state it
+    // was built for, and half its measured saving on the floor.
+    if (!staged.length) {
+      ladder.frontierEmptyKey = frontierKey;
+      return 0;
+    }
+    persistence.state = state;
+    emit("context.frontier", {
+      cut: staged.length,
+      pending_marks: (state.pendingMarks ?? []).length,
+      min_fold_chars: thresholds.minFoldChars,
+    });
+    // NO PERSISTENCE BOUNDARY OF ITS OWN, deliberately. A cut is DERIVED: the mark id
+    // comes from the span, so a restart that lost these re-cuts exactly the same spans
+    // with exactly the same ids, and the only thing that has to survive is a brief the
+    // agent WROTE, which its own action persists along with the marks it rides with.
+    // Persisting here instead cost a durable write on every projection pass, and the
+    // branch entry it appended rebuilt the projection: gates 110 and 111 caught it as an
+    // occupancy anchor that stopped reading the provider's own count.
+    return staged.length;
+  };
+
+  /**
+   * Tell the agent what was cut, once there is enough of it to be worth a turn.
+   *
+   * It is built from LIVE state, so it names what is unbriefed at the pass it speaks on,
+   * and it is admitted ONCE per frozen projection, so a pass that adds material leaves it
+   * buried at its own index rather than moving it to the tail. Those two together mean it
+   * is a snapshot rather than a running tally: cuts staged after it spoke wait for the
+   * next pass that rebuilds the projection anyway, and that is the trade being made. A
+   * carrier that re-renders to stay current has to move, moving costs the occupancy
+   * anchor its provider count, and an anchor is worth more than a fold id arriving one
+   * epoch early. What it must never do is ask twice for a brief the agent has written,
+   * and it does not: the rebuild reads the marks, not its own last text.
+   */
+  const appendFoldNotice = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
+    if (!persistence.state) return projected;
+    const held = pendingMarks(persistence.state);
+    const unbriefed = held.filter((mark) => mark.briefProvenance?.kind !== "supplied");
+    // BATCHED, AND APPENDED ONCE. A notice per cut is noise, and noise is how guidance
+    // gets ignored; the frontier cuts often and this speaks only when a batch has built
+    // up. `carrierAdmitted` is what makes it an APPEND rather than a rewrite: once the
+    // carrier is in the frozen projection it is not pushed again, so raw material
+    // arriving afterwards lands after it and the prefix in front of it never moves.
+    //
+    // The first cut of this withdrew the carrier and re-pushed it at the tail every pass,
+    // the way the steward band had to because a band must be able to stand down. That is
+    // exactly wrong for this one: re-pushing moved the notice past each newly arrived
+    // message, so the byte at its old index changed on a pass where nothing else had, and
+    // gates 110 and 111 read the whole projection as rewritten and dropped the occupancy
+    // anchor back to the estimate. A carrier that moves on a quiet pass costs the cache,
+    // which is the one thing this design exists to avoid.
+    if (unbriefed.length < UNBRIEFED_FOLDS_BEFORE_NOTICE) return projected;
+    if (!carrierAdmitted("fold-notice")) return projected;
+    const text = foldNoticeText({
+      unbriefed: unbriefed.map((mark) => ({
+        id: mark.id,
+        kind: mark.kind,
+        tokens: estimatedTokens(markFreedBytes(snapshot, persistence.state!, mark)),
+      })),
+      pending: held.length,
+      toolName,
+      brandNoun,
+    });
+    emit("context.frontier", {
+      cut: 0,
+      pending_marks: held.length,
+      unbriefed: unbriefed.length,
+      notice_chars: text.length,
+    });
+    projected.push({
+      role: "custom",
+      customType: foldNoticeProjectionType,
+      content: text,
+      display: false,
+      details: { source: activeContextSource(entryTypePrefix), ephemeral: true },
+      timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
+        ? ownValue(snapshot.messages.at(-1), "timestamp")
+        : 0,
+    });
+    return projected;
+  };
+
   const enforceBandTop = async (
     snapshot: ActiveContextSnapshot,
     ctx: any,
   ): Promise<boolean> => {
     if (!epochCommitDue(snapshot, measurements.latestRatio)) return false;
+    // ONE COMMIT PER MEASUREMENT, which is what "one commit per crossing" means once the
+    // commit stops taking everything. There was no latch here and none was needed: the
+    // band-top commit folded every span the class law offered, so the next pass found
+    // nothing proposable and deferred. The 2026-08-23 depth bound ends that, on purpose,
+    // and without this the parked window commits a SLICE on every pass at the same
+    // declared occupancy, which is a prefix rewrite per pass and the exact cache cost the
+    // one-commit rule exists to prevent. Occupancy is anchored to the provider's own
+    // count, so a new count is the only evidence that the window actually moved; the
+    // latch is keyed to that measurement and nothing else.
+    if (ladder.bandTopMeasurement !== null &&
+        ladder.bandTopMeasurement === measurements.lastProviderMeasurement) {
+      return false;
+    }
+    ladder.bandTopMeasurement = measurements.lastProviderMeasurement;
     let action: Record<string, unknown> | null = null;
     try {
       // NULL WAIVER RATIO, deliberately. The band top is routine housekeeping at a stated
@@ -1747,159 +1902,6 @@ export function registerActiveContext(pi: any, options: {
     return projected;
   };
 
-  const appendRider = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
-    const rider = persistence.state?.rider;
-    if (!rider) return projected;
-    if (!carrierAdmitted("rider")) return projected;
-    projected.push({
-      role: "custom",
-      customType: riderProjectionType,
-      content: rider.text,
-      display: false,
-      details: {
-        source: activeContextSource(entryTypePrefix),
-        ephemeral: true,
-        riderEpoch: rider.epoch,
-      },
-      timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
-        ? ownValue(snapshot.messages.at(-1), "timestamp")
-        : 0,
-    });
-    return projected;
-  };
-
-  const stewardReading = (
-    snapshot: ActiveContextSnapshot,
-  ): { text: string; facts: Record<string, unknown> } | null => {
-    const capacity = servingCapacity(snapshot.contextWindow);
-    const used = capacity.usedTokens;
-    const budget = capacity.budgetTokens;
-    const inflow = expectedWallInflowTokens();
-    if (used === null || !(budget > 0)) return null;
-    // THE BAND IS ANCHORED TO THE COMMIT TRIGGER, NOT THE BUDGET (Shane, 2026-08-22).
-    //
-    // It used to sit one inflow step below the SERVING BUDGET, which on any real
-    // deployment is above the trigger rather than below it: at a 251,520-token budget
-    // with maxTarget 0.80 the epoch fires at 201,216 while the old band opened around
-    // 226,520, so the advisory arrived after the commit was already due. That is the
-    // mechanical half of why the sealed corpus recorded zero voluntary folds across 30
-    // runs; the agent was told to mark at a moment when marking could no longer matter.
-    //
-    // The warning distance is Shane's ten percent of the budget, or one worst recent
-    // inflow step if that is wider. The floor is what a person can reason about; the
-    // inflow term is what stops the band being JUMPED, since a single large result can
-    // step the window from under a fixed band to over the trigger in one arrival, and a
-    // band nothing lands inside is a band that never asks.
-    //
-    // It stands from there until the budget rather than yielding inside the wall band.
-    // Yielding was the old law and it is exactly backwards: the wall band is where the
-    // commit's forward look fires, which is the last moment marking still changes what
-    // gets folded. Past the budget the request is already being refused and the recovery
-    // lanes own it, so that is where the advisory stops.
-    const trigger = thresholds.maxTarget * budget;
-    const warning = Math.max(STEWARD_WARNING_SHARE * budget, inflow);
-    if (used < trigger - warning) return null;
-    if (used > budget) return null;
-    const state = persistence.state!;
-    const remainder = unmarkedRemainder(snapshot, state, projectionCharsPerToken());
-    // THE UNMARKED REMAINDER IS THE LIVE CHANNEL AGAIN (2026-08-21). It was
-    // permanently empty in production (sol-20260820-steward rep 2: 111 folds,
-    // zero unclaimed candidates at every band moment, every rider's anchors 0)
-    // because the eager ladder had already claimed every completed batch before
-    // the band was reached. Nothing stages between commits now, so what the band
-    // sees is exactly what the agent has not marked, which is what the advisory
-    // was built to name. The rebrief invitation that replaced it is deleted with
-    // the action: it cost a full prefix rewrite at the fold's placeholder.
-    if (!remainder.candidates.length) return null;
-    const accounting = markAccounting(snapshot, state);
-    const coverage = commitCoverage({ snapshot, state, usedTokens: used, budgetTokens: budget });
-    const claims = windowClaims({
-      snapshot, state, budgetTokens: budget, charsPerToken: projectionCharsPerToken(),
-    });
-    const text = stewardAdvisoryText({
-      toolName,
-      brandNoun,
-      usedTokens: used,
-      budgetTokens: budget,
-      triggerTokens: Math.round(trigger),
-      inflowTokens: inflow,
-      candidates: remainder.candidates,
-      coverage,
-      claims,
-      pendingAgentMarks: accounting.agentMarks,
-      eligibleMarks: accounting.eligibleMarks,
-    });
-    return {
-      text,
-      facts: {
-        used_tokens: used,
-        budget_tokens: budget,
-        inflow_tokens: inflow,
-        unmarked_spans: remainder.spans,
-        unmarked_tokens: remainder.tokens,
-        largest_candidate: remainder.candidates[0]?.id ?? null,
-        trigger_tokens: Math.round(trigger),
-        warning_tokens: Math.round(warning),
-        commit_target_tokens: coverage.targetTokens,
-        marked_toward_commit_tokens: coverage.markedTokens,
-        unmarked_against_commit_tokens: coverage.remainingTokens,
-        pinned_tokens: claims.pinnedTokens,
-        pinned_refs: claims.pinnedRefs,
-        pending_agent_marks: accounting.agentMarks,
-        eligible_marks: accounting.eligibleMarks,
-        chars: text.length,
-      },
-    };
-  };
-
-  const appendSteward = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
-    // Unlike the rider, which persists until the next epoch replaces it, the
-    // steward must be able to STAND DOWN: a frozen pass reuses the prior
-    // projection as its prefix, so declining to append is not enough. Any
-    // standing advisory is withdrawn first, and re-appended only while the
-    // band condition still holds, which is the one-request carrier shape the
-    // sealed ephemeral probe promoted.
-    const reading = stewardReading(snapshot);
-    for (let index = projected.length - 1; index >= 0; index -= 1) {
-      if (ownValue(projected[index], "customType") === stewardProjectionType) {
-        projected.splice(index, 1);
-      }
-    }
-    if (!reading) {
-      advisory.stewardCrossingActive = false;
-      return projected;
-    }
-    if (!advisory.stewardCrossingActive) {
-      advisory.stewardCrossingActive = true;
-      // The DIRECTED TURN is deleted (sol-20260820 reps 5-7, kill line fired
-      // 2026-08-20): a followUp curation turn queued at this crossing elicited
-      // 0, 1 and 9 rebriefs across three sealed reps on the same workload, the
-      // engaged reps were the campaign's most expensive ($27.03 and $36.29
-      // against an $18-21 advisory-era band) with the campaign's worst cache
-      // share on the max-engagement rep (0.812, because every rebrief rewrites
-      // the projection at its fold's placeholder), rep 7's nine rebriefs were
-      // one end-of-session burst after the work they could have served, and no
-      // measured outcome moved: the end block read 10/10 in every pifold rep
-      // with or without them, because lossless peek already carries recall.
-      // The crossing, its event and the appended advisory STAY as costless
-      // instrumentation; a future model's voluntary uptake reads for free.
-      emit("context.steward", reading.facts);
-    }
-    projected.push({
-      role: "custom",
-      customType: stewardProjectionType,
-      content: reading.text,
-      display: false,
-      details: {
-        source: activeContextSource(entryTypePrefix),
-        ephemeral: true,
-      },
-      timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
-        ? ownValue(snapshot.messages.at(-1), "timestamp")
-        : 0,
-    });
-    return projected;
-  };
 
   const holdFrozen = (projected: unknown[]): unknown[] => {
     freeze.projection = [...projected];
@@ -1919,7 +1921,7 @@ export function registerActiveContext(pi: any, options: {
   // this pass's body prefix against the previous one and reuses the previous
   // PROJECTION when they match, and a withdrawal edits a body index inside
   // that prefix, so the comparison failed and the whole projection was rebuilt
-  // from the body. The rebuild drops every receipt and rider the freeze had
+  // from the body. The rebuild drops every receipt the freeze had
   // buried mid-array over the session, which moves divergence back to the
   // FIRST buried carrier rather than leaving it at the withdrawn index. That
   // is the opposite of what this mechanism is for: a tail edit was rewriting
@@ -1976,8 +1978,8 @@ export function registerActiveContext(pi: any, options: {
     const body = projectActiveContext(snapshot, persistence.state!).filter((message) => {
       const customType = ownValue(message, "customType");
       return customType !== milestoneProjectionType && customType !== advisoryProjectionType &&
-        customType !== receiptProjectionType && customType !== stewardProjectionType &&
-        customType !== riderProjectionType && customType !== curationProjectionType;
+        customType !== receiptProjectionType && customType !== curationProjectionType &&
+        customType !== foldNoticeProjectionType;
     });
     const withdrawn = withdrawConsumedEphemeralPeeks(body);
     if (withdrawn.size && freeze.body) {
@@ -1995,8 +1997,7 @@ export function registerActiveContext(pi: any, options: {
     freeze.body = body;
     freeze.bodyText = stableStringify(body);
     appendReceipts(projected, snapshot);
-    appendRider(projected, snapshot);
-    appendSteward(projected, snapshot);
+    appendFoldNotice(projected, snapshot);
     return holdFrozen(projected);
   };
   const noteProjection = (projected: unknown[]): void => {
@@ -2213,11 +2214,15 @@ export function registerActiveContext(pi: any, options: {
         if (addition.added) { state = addition.state; refoldAdded += 1; }
       }
     };
+    let backstopFired = false;
     if (topUp) {
       fill(freeingTarget, false);
       const reachedShare = markAccounting(snapshot, state).eligibleFreedBudgetShare;
       const shallow = reachedShare < Math.max(commitDepthFloorShare(snapshot), freeingTarget);
-      if (shallow && atOrAboveBackstop(snapshot, waiverRatio)) fill(1, true);
+      if (shallow && atOrAboveBackstop(snapshot, waiverRatio)) {
+        backstopFired = true;
+        fill(1, true);
+      }
     }
     const wedges = absorbWedgeMarks({
       snapshot,
@@ -2253,6 +2258,14 @@ export function registerActiveContext(pi: any, options: {
         eligible_marks: accounting.eligibleMarks,
         eligible_freed_share: accounting.eligibleFreedBudgetShare,
         reclaim_floor_share: COMMIT_RECLAIM_FLOOR_SHARE,
+        // THE REMAINDER RIDES EVERY DEFERRAL, not just the empty one. It was on
+        // `nothing-proposable` alone, which was the only starved shape while staging
+        // happened at commit time. The frontier cuts ahead of the commit, so a starved
+        // pass now usually arrives holding a mark it cannot apply and lands HERE instead,
+        // and "below the reclaim floor" without the remainder does not tell a reader
+        // whether the mass is held or simply absent. That is the distinction the whole
+        // record exists to draw.
+        unmarked_stale_spans: unmarkedRemainder(snapshot, state, projectionCharsPerToken()).spans,
         window_tokens: snapshot.contextWindow,
       });
       return null;
@@ -2268,6 +2281,19 @@ export function registerActiveContext(pi: any, options: {
         !markTouchesCurrentTurn(state, mark, guarded) &&
         markEligibility(snapshot, state, mark) === "eligible").length,
     });
+    // THE COMMIT CUTS ONLY AS DEEP AS THE BUDGET ASKS (Shane, 2026-08-23). The frontier
+    // stages as material arrives, so by now the pending set is most of the window; without
+    // this bound the first commit would fold all of it. `freeingTarget` is a share of the
+    // budget and the bound is bytes, so it is converted once, here, through the same ratio
+    // the projection weighs itself with.
+    //
+    // It binds on the ROUTINE path only, which is the same line the guard waiver is drawn
+    // on: a null waiver ratio is the band top, ordinary housekeeping at a stated
+    // threshold, and that is where "only as deep as it needs" belongs. The fence and the
+    // compaction boundary carry a ratio because something has already gone wrong there,
+    // and a lane holding a request that will not fit is not the place to leave depth on
+    // the table. The backstop is exempt for the same reason: it fires only when the commit
+    // is already starving.
     let result = await commitPendingMarks({
       snapshot,
       state,
@@ -2275,6 +2301,9 @@ export function registerActiveContext(pi: any, options: {
       retainIneligible: true,
       guardCurrentTurn: true,
       guardWaiver,
+      ...(backstopFired || waiverRatio !== null ? {} : {
+        applyTargetBytes: Math.ceil(freeingTarget * budgetTokens * projectionCharsPerToken()),
+      }),
     });
     for (;;) {
       let closing = result.state;
@@ -2345,36 +2374,6 @@ export function registerActiveContext(pi: any, options: {
     instrumentation.mutationsSinceHandoff += 1;
     instrumentation.lastMutationRequest = instrumentation.requests;
     instrumentation.lastMutationTokens = usedTokens;
-    const riderEpoch = commitEvent.seq;
-    if (persistence.state.rider?.epoch !== riderEpoch) {
-      const postAccounting = markAccounting(snapshot, persistence.state);
-      const remainder = unmarkedRemainder(snapshot, persistence.state, projectionCharsPerToken());
-      const pinnedMass = explicitProtectedMass(snapshot, persistence.state);
-      const pinnedShare = budgetTokens > 0
-        ? estimatedTokens(pinnedMass.bytes) / budgetTokens
-        : 0;
-      const riderText = contextRiderText({
-        toolName,
-        brandNoun,
-        pendingAgentMarks: postAccounting.agentMarks,
-        eligibleMarks: postAccounting.eligibleMarks,
-        freedTokens: postAccounting.freedTokens,
-        eligibleFreedTokens: postAccounting.eligibleFreedTokens,
-        anchors: remainder.candidates.slice(0, 3).map((candidate) => candidate.id),
-        pinnedShare,
-        maxPinnedShare: MAX_PINNED_SHARE,
-      });
-      persistence.state = { ...persistence.state, rider: { epoch: riderEpoch, text: riderText } };
-      emit("context.rider", {
-        epoch: riderEpoch,
-        chars: riderText.length,
-        anchors: Math.min(3, remainder.candidates.length),
-        pending_agent_marks: postAccounting.agentMarks,
-        eligible_marks: postAccounting.eligibleMarks,
-        pinned_share: pinnedShare,
-        max_pinned_share: MAX_PINNED_SHARE,
-      });
-    }
     let foldedToolResults = 0;
     let foldedSpans = 0;
     for (const applied of result.applied) {
@@ -2771,6 +2770,11 @@ export function registerActiveContext(pi: any, options: {
         updateStatus(ctx);
         return { messages: event.messages };
       }
+      // THE FRONTIER CUTS FIRST, and it costs the projection nothing to do so: a pending
+      // mark moves no bytes, so this runs BEFORE the band top and the fence and changes
+      // neither of their inputs. What it changes is WHEN the agent learns a fold exists,
+      // which is now while the material it covers is still in front of it.
+      advanceFoldFrontier(snapshot);
       // BEFORE the fence, so an ordinary crossing is an ordinary commit and the fence is
       // left holding only the requests that genuinely will not fit.
       if (await enforceBandTop(snapshot, ctx)) {
@@ -3264,6 +3268,58 @@ export function registerActiveContext(pi: any, options: {
    * counts toward the commit's coverage, answers with its commit arithmetic, and
    * folds at the epoch exactly as an agent mark does.
    */
+  /**
+   * THE WITHDRAWAL PATH, shared by the tool's unmark action and the editor's
+   * withdraw intent: same refusal for an unknown id, same persist, same status.
+   */
+  const withdrawMarks = async (ids: string[], ctx: any): Promise<Array<Record<string, unknown>>> => {
+    const requested = new Set(ids);
+    const before = pendingMarks(persistence.state!);
+    const kept = before.filter((mark) => !requested.has(mark.id));
+    const removed = before.filter((mark) => requested.has(mark.id));
+    const unknown = ids.filter((id) => !before.some((mark) => mark.id === id));
+    if (unknown.length) throw new Error(`No pending mark named ${unknown.join(", ")}`);
+    await persistManual(withPendingMarks(persistence.state!, kept), "unmark", ctx);
+    updateStatus(ctx);
+    return removed as Array<Record<string, unknown>>;
+  };
+
+  /**
+   * THE PIN CHANGE PATH, shared by the tool's pin/unpin actions and the editor's
+   * pin toggle: the pinned-share cap, protectEvidence, the canonical event, persist.
+   */
+  const applyProtectionChange = async (
+    snapshot: ActiveContextSnapshot,
+    ids: string[],
+    pin: boolean,
+    ctx: any,
+  ): Promise<void> => {
+    const refsBefore = persistence.state!.protected.length;
+    const nextProtection = protectEvidence(snapshot, persistence.state!, ids, pin);
+    if (pin) {
+      const capacity = servingCapacity(snapshot.contextWindow);
+      const prospectiveShare = capacity.budgetTokens > 0
+        ? estimatedTokens(explicitProtectedMass(snapshot, nextProtection).bytes) / capacity.budgetTokens
+        : 0;
+      if (prospectiveShare > MAX_PINNED_SHARE) {
+        throw new Error(
+          `protect refused: these pins would hold ${Math.round(prospectiveShare * 100)}% of the ` +
+          `working window raw, past the ${Math.round(MAX_PINNED_SHARE * 100)}% pinned-share cap. ` +
+          'Release earlier pins with {"action":"unpin","ids":["<entry-id>"]} first; ' +
+          "folding keeps entries exactly recoverable without pinning them.");
+      }
+    }
+    await persistManual(nextProtection, pin ? "pin" : "unpin", ctx);
+    emit("context.pin", {
+      pin,
+      ids: ids.join(","),
+      id_count: ids.length,
+      protected_refs_before: refsBefore,
+      protected_refs_after: persistence.state!.protected.length,
+    });
+    updateStatus(ctx);
+  };
+
   const stageFoldMarks = async (
     requests: BatchedMarkRequest[],
     origin: MarkOrigin,
@@ -3312,7 +3368,7 @@ export function registerActiveContext(pi: any, options: {
           fold.id === foldIdFor(candidate.kind, candidate.parts));
         const deferred = refsProtected(candidate.sourceRefs, staged, snapshot) ||
           (candidate.kind === "tool-result" &&
-            toolRefsProtected(candidate.sourceRefs, staged, snapshot));
+            refsProtected(candidate.sourceRefs, staged, snapshot));
         // A MARK IS EDITABLE UNTIL IT COMMITS (Shane, 2026-08-21). Marking a span you
         // already marked REPLACES the mark, so a brief written in haste is corrected by
         // writing it again: the span is identical, the id derives from the span, and no
@@ -3459,7 +3515,6 @@ export function registerActiveContext(pi: any, options: {
           hardFenceRatio: hardFenceRatio(snapshot),
           thresholds: { ...snapshot.thresholds },
           zones: {
-            freshBoundary: snapshot.freshBoundary,
             budgetTokens: snapshot.budgetTokens,
           },
           responseReserve: currentCapacity(ctx).outputReservation,
@@ -3524,6 +3579,19 @@ export function registerActiveContext(pi: any, options: {
             state: persistence.state,
             ratio: measurements.latestRatio,
           }),
+          // WHAT THE RUNTIME HAS CUT AND NOT YET FOLDED, by name, because the agent needs
+          // an id to brief one and a notice it saw two turns ago is not a reference. Read
+          // from the LIVE state rather than the durable record: a frontier cut is derived
+          // from its span and is not written on its own, so the durable record is behind
+          // by design and only a brief or a commit brings it forward.
+          pendingFolds: pendingMarks(persistence.state).map((mark) => ({
+            id: mark.id,
+            kind: mark.kind,
+            tokens: estimatedTokens(markFreedBytes(snapshot, persistence.state!, mark)),
+            briefed: mark.briefProvenance?.kind === "supplied",
+            brief: mark.brief ?? null,
+            briefProvenance: mark.briefProvenance ? clone(mark.briefProvenance) : null,
+          })),
           nativeSummaries: "disabled",
           instrumentation: {
             enabled: true,
@@ -3743,31 +3811,8 @@ export function registerActiveContext(pi: any, options: {
     }
     if (action === "pin" || action === "unpin") {
       const ids = stringIds(params.ids);
-      const refsBefore = persistence.state.protected.length;
-      const nextProtection = protectEvidence(snapshot, persistence.state, ids, action === "pin");
-      if (action === "pin") {
-        const capacity = servingCapacity(snapshot.contextWindow);
-        const prospectiveShare = capacity.budgetTokens > 0
-          ? estimatedTokens(explicitProtectedMass(snapshot, nextProtection).bytes) / capacity.budgetTokens
-          : 0;
-        if (prospectiveShare > MAX_PINNED_SHARE) {
-          throw new Error(
-            `protect refused: these pins would hold ${Math.round(prospectiveShare * 100)}% of the ` +
-            `working window raw, past the ${Math.round(MAX_PINNED_SHARE * 100)}% pinned-share cap. ` +
-            'Release earlier pins with {"action":"unpin","ids":["<entry-id>"]} first; ' +
-            "folding keeps entries exactly recoverable without pinning them.");
-        }
-      }
-      await persistManual(nextProtection, action, ctx);
-      const refsAfter = persistence.state.protected.length;
-      emit("context.pin", {
-        pin: action === "pin",
-        ids: ids.join(","),
-        id_count: ids.length,
-        protected_refs_before: refsBefore,
-        protected_refs_after: refsAfter,
-      });
-      updateStatus(ctx);
+      await applyProtectionChange(snapshot, ids, action === "pin", ctx);
+      const refsAfter = persistence.state!.protected.length;
       // A PIN IS A CLAIM ON THE WINDOW, so it answers with the same picture a mark does.
       // It never pays the drop, and saying so here is what stops an agent pinning its way
       // to a coverage it does not have.
@@ -3807,16 +3852,8 @@ export function registerActiveContext(pi: any, options: {
       });
     }
     if (action === "unmark") {
-      const ids = stringIds(params.ids);
-      const requested = new Set(ids);
-      const before = pendingMarks(persistence.state);
-      const kept = before.filter((mark) => !requested.has(mark.id));
-      const removed = before.filter((mark) => requested.has(mark.id));
-      const unknown = ids.filter((id) => !before.some((mark) => mark.id === id));
-      if (unknown.length) throw new Error(`No pending mark named ${unknown.join(", ")}`);
-      await persistManual(withPendingMarks(persistence.state, kept), action, ctx);
-      updateStatus(ctx);
-      const accounting = markAccounting(snapshot, persistence.state);
+      const removed = await withdrawMarks(stringIds(params.ids), ctx);
+      const accounting = markAccounting(snapshot, persistence.state!);
       return toolPayload({
         version: 1,
         action,
@@ -3828,87 +3865,67 @@ export function registerActiveContext(pi: any, options: {
         activation: "the withdrawn marks will never be applied; no context bytes moved",
       });
     }
-    if (action === "fold") {
-      const { marks, corrections, staged } = await stageFoldMarks(
-        batchedMarkRequests(params), "agent", signal as AbortSignal, ctx, snapshot);
-      await persistManual(staged, action, ctx);
+    if (action === "brief") {
+      // THE ONE EDIT THAT IS FREE. A pending mark is not in the window, so writing its
+      // brief moves no bytes and costs no prefix cache; the brief reaches the projection
+      // only when the commit writes that placeholder for the first time. A STANDING fold
+      // is the opposite case and is refused by name: its placeholder is already in the
+      // window, and rewriting it breaks the cache from that point on, which is the
+      // rebrief deletion of 2026-08-21 read from the other side.
+      const id = String(params.id ?? "").trim();
+      if (!id) throw new Error("brief needs the id of a pending fold");
+      const standing = persistence.state!.folds.find((fold) => fold.id === id);
+      if (standing) {
+        throw new Error(
+          `${id} is a standing fold, not a pending one, so its brief is already in your ` +
+          "window and rewriting it would rewrite the projection from that placeholder on. " +
+          `Read it with ${toolName} {"action":"peek","id":"${id}"}, or re-cut the span with ` +
+          `${toolName} {"action":"reboundary","ids":[...]} if the boundary is wrong.`,
+        );
+      }
+      const held = pendingMarks(persistence.state!);
+      const target = held.find((mark) => mark.id === id);
+      if (!target) {
+        const names = held.slice(0, 5).map((mark) => mark.id).join(", ");
+        throw new Error(
+          `No pending fold ${id}. ${held.length
+            ? `The folds waiting for a brief are: ${names}${held.length > 5 ? ", ..." : ""}.`
+            : "Nothing is pending right now, so there is nothing to brief."}`,
+        );
+      }
+      const text = String(params.brief ?? "").trim();
+      const complaint = briefContractComplaint(text, snapshot.policy.maxBriefChars, snapshot.toolName);
+      if (complaint !== null) throw new Error(`Supplied brief rejected. ${complaint}`);
+      const nextState = {
+        ...persistence.state!,
+        revision: persistence.state!.revision + 1,
+        pendingMarks: held.map((mark) => mark.id === id
+          ? { ...mark, brief: text, briefProvenance: { kind: "supplied" as const } }
+          : mark),
+      };
+      persistence.state = nextState;
+      await persistManual(nextState, action, ctx);
       updateStatus(ctx);
-      const accounting = markAccounting(snapshot, persistence.state);
-      const held = pendingMarks(persistence.state).map((mark) => ({
-        id: mark.id,
-        kind: mark.kind,
-        tokens: estimatedTokens(markFreedBytes(snapshot, persistence.state!, mark)),
-      }));
-      const remainder = unmarkedRemainder(snapshot, persistence.state, projectionCharsPerToken());
-      // WHERE THIS LEAVES THE NEXT COMMIT. The agent is being asked to govern its own
-      // window, and it cannot aim at a drop nobody states, so every mark comes back with
-      // the arithmetic of the epoch it is heading for.
-      const markCapacity = servingCapacity(snapshot.contextWindow);
-      const coverage = commitCoverage({
-        snapshot,
-        state: persistence.state,
-        usedTokens: markCapacity.usedTokens,
-        budgetTokens: markCapacity.budgetTokens,
-      });
-      // THREE BUCKETS, so a gap is visible as a gap. Marked pays the drop, pinned is a
-      // deliberate hold that pays nothing, unclaimed is what the ladder takes by age.
-      const claims = windowClaims({
-        snapshot,
-        state: persistence.state,
-        budgetTokens: markCapacity.budgetTokens,
-        charsPerToken: projectionCharsPerToken(),
-      });
-      const only = marks.length === 1 && marks[0].ok === true ? marks[0] : null;
+      emit("context.brief", { id, chars: text.length, origin: "agent" });
+      const accounting = markAccounting(snapshot, persistence.state!);
+      const remainder = unmarkedRemainder(snapshot, persistence.state!, projectionCharsPerToken());
       return toolPayload({
         version: 1,
         action,
-        scheduling: "epoch",
-        ok: marks.some((mark) => mark.ok === true),
-        deferredMarks: marks.filter((mark) => mark.deferred === true).length,
-        ...(only
-          ? {
-            id: only.id,
-            kind: only.kind,
-            brief: only.brief,
-            provenance: only.provenance,
-            deferred: only.deferred,
-            ...(only.replaced ? { replaced: true } : {}),
-            ...(only.scheduled ? { scheduled: only.scheduled } : {}),
-          }
-          : {}),
-        marks,
-        corrections,
+        id,
+        kind: target.kind,
+        brief: text,
+        provenance: "agent",
         argumentsSha256: executionArgumentsSha256,
-        durableRevision: persistence.state.revision,
+        durableRevision: persistence.state!.revision,
         pendingMarks: accounting.pending,
-        eligibleMarks: accounting.eligibleMarks,
-        retainedMarks: accounting.retainedMarks,
-        estimatedFreedWindowShare: accounting.freedBudgetShare,
-        estimatedEligibleWindowShare: accounting.eligibleFreedBudgetShare,
-        estimatedRewriteTokens: accounting.rewriteTokens,
-        held,
-        heldNote: "held until it ages out or the next fold event",
+        unbriefed: pendingMarks(persistence.state!)
+          .filter((mark) => mark.briefProvenance?.kind !== "supplied").map((mark) => mark.id),
         unmarkedSpans: remainder.spans,
         unmarkedTokens: remainder.tokens,
-        unmarkedShare: remainder.share,
-        unmarkedCandidates: remainder.candidates,
-        commitTargetTokens: coverage.targetTokens,
-        markedTowardCommitTokens: coverage.markedTokens,
-        unmarkedAgainstCommitTokens: coverage.remainingTokens,
-        commitCovered: coverage.covered,
-        pinnedTokens: claims.pinnedTokens,
-        pinnedRefs: claims.pinnedRefs,
-        pinnedShare: claims.pinnedShare,
-        unclaimedTokens: claims.unclaimedTokens,
-        ...(guidance.actionResponses ? {
-          awareness: markAwarenessText({ held, remainder, coverage, claims, toolName, brandNoun }),
-          activation: "accepted as pending marks; no context bytes moved, and nothing else in your " +
-            "context changed either. They apply together at the next commit epoch, which the runtime " +
-            "opens at the fold event. " +
-            "A mark over a still-fresh span is held, not refused: it is scheduled, and it folds at the " +
-            "first commit after that span ages out of the fresh window. " +
-            "Mark several spans in one call: this whole picture comes back with each one.",
-        } : {}),
+        activation: "durable immediately, and it costs your window nothing: this fold is " +
+          "pending, so the brief you just wrote is stored outside the projection and " +
+          "reaches it only when the commit folds this span. Nothing in your context moved.",
       });
     }
     throw new Error(`Unknown ${toolName} action '${action}'`);
@@ -4158,6 +4175,11 @@ export function registerActiveContext(pi: any, options: {
               id: mark.id,
               origin: String(mark.origin),
               brief: String(mark.brief ?? ""),
+              // WHAT THE STAGED MARK FREES, so a PROPOSED row states its size the
+              // way the footer prices an unstaged span.
+              ...(typeof markFreedBytes(snapshot, state, mark) === "number"
+                ? { tokens: estimatedTokens(markFreedBytes(snapshot, state, mark)) }
+                : {}),
               entryIds: markSpanRefs(state, mark).refs
                 .map((ref) => ref.entryId)
                 .filter((entryId): entryId is string => Boolean(entryId)),
@@ -4201,13 +4223,24 @@ export function registerActiveContext(pi: any, options: {
     };
 
     let view: FoldEditorView | null = null;
+    const runQueued = async (work: () => Promise<void>): Promise<void> => {
+      const operation = ladder.actionQueue.then(work);
+      ladder.actionQueue = operation.catch(() => undefined);
+      await operation;
+    };
+    const refreshAfter = (): void => {
+      if (view) view.refresh(buildData());
+    };
     const editorActions = {
       spanCost,
-      onStageMark: async (fromId: string, toId: string): Promise<void> => {
-        const operation = ladder.actionQueue.then(async () => {
+      onStageMark: async (fromId: string, toId: string, brief?: string): Promise<void> => {
+        await runQueued(async () => {
           const fresh = authoritativeSnapshotFor(ctx);
+          const request = brief && brief.trim()
+            ? { ids: [fromId, toId], brief: brief.trim() }
+            : { ids: [fromId, toId] };
           const { marks, staged } = await stageFoldMarks(
-            batchedMarkRequests({ ids: [fromId, toId] }), "user",
+            batchedMarkRequests(request), "user",
             new AbortController().signal, ctx, fresh);
           // Refuse BEFORE persisting: an all-refused batch leaves state untouched and
           // persisting it would be a no-op write against the same-state projection.
@@ -4218,13 +4251,29 @@ export function registerActiveContext(pi: any, options: {
           }
           await persistManual(staged, "fold", ctx);
           updateStatus(ctx);
-          return marks;
         });
-        ladder.actionQueue = operation.catch(() => undefined);
-        const marks = await operation as Array<Record<string, unknown>>;
-        const stagedCount = marks.filter((mark) => mark.ok === true).length;
-        safeNotify(ctx, `Staged ${stagedCount} user mark(s); they apply at the next commit epoch.`, "info");
-        if (view) view.refresh(buildData());
+        safeNotify(ctx, "Staged user mark(s); they apply at the next commit epoch.", "info");
+        refreshAfter();
+      },
+      onWithdrawMark: async (markId: string): Promise<void> => {
+        let removed: Array<Record<string, unknown>> = [];
+        await runQueued(async () => {
+          removed = await withdrawMarks([markId], ctx) as Array<Record<string, unknown>>;
+        });
+        safeNotify(ctx,
+          `Withdrew ${removed.length} staged mark(s); no context bytes moved.`, "info");
+        refreshAfter();
+      },
+      onTogglePin: async (entryId: string): Promise<void> => {
+        const pinnedAlready = persistence.state!.protected
+          .some((ref: any) => ref.entryId === entryId);
+        await runQueued(async () => {
+          await applyProtectionChange(authoritativeSnapshotFor(ctx), [entryId], !pinnedAlready, ctx);
+        });
+        safeNotify(ctx, pinnedAlready
+          ? "Unpinned: the released entries rejoin the next commit's candidates."
+          : "Pinned raw: held through every fold; frees nothing toward the drop.", "info");
+        refreshAfter();
       },
     };
     await ctx.ui.custom((
