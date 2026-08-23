@@ -3026,10 +3026,10 @@ async function gateEpochQuotaTopUp() {
   assert(epoch.sourceBytesSaved > 0);
   // The freeing target IS the hysteresis, on one denominator: what is used, less where
   // the thermostat lands, over the serving budget. The separate window-share floor is
-  // gone, so this asserts equality rather than a maximum against a number that could
-  // never bind: at maxTarget 0.80 and minTarget 0.20 the hysteresis share bottoms out
-  // at 0.60 of budget, and the retired floor was 0.40 of the WINDOW (0.405 of budget at
-  // the fixture's 90,000-token budget behind a 100,000-token window).
+  // gone, so there is one number to assert and this asserts equality rather than a
+  // maximum. The gap it bottoms out at moves with the thermostat, 0.60 of budget at the
+  // 2026-08-14 setting and 0.40 at the 2026-08-23 one, which is why the bound is
+  // derived from the constants below rather than written as a literal here.
   assert.equal(epoch.targetBudgetShare, epoch.hysteresisTargetShare);
   near(epoch.targetBudgetShare,
     Math.max(0, (epoch.occupancyTokensBefore - context.DEFAULT_THRESHOLDS.minTarget * 90_000) / 90_000),
@@ -4112,9 +4112,12 @@ async function gatePinnedMassBackstop() {
 
   // The starvation itself: marks the commit cannot apply inflate the freed share the
   // top-up measures against, so the top-up concludes its work is already done.
-  // Eleven marked results, up from eight (2026-08-14): the adequacy floor below is
-  // the hysteresis gap, and minTarget 0.35 -> 0.20 widened it 0.45 -> 0.60, so the
-  // fixture owes more marked mass to stay a starvation proof rather than a shortfall.
+  // Eleven marked results, up from eight (2026-08-14): the adequacy floor below is the
+  // hysteresis gap, and minTarget 0.35 -> 0.20 widened it 0.45 -> 0.60, so the fixture
+  // owed more marked mass to stay a starvation proof rather than a shortfall. The
+  // 2026-08-23 retune narrows the gap again to 0.40, so eleven now clears it with
+  // margin; the count stays where the widest setting put it, because a fixture sized to
+  // the loosest bound proves the same thing under every tighter one.
   const wide = makeFixture({ turns: 24, resultChars: 26_000, contextWindow: 100_000 });
   const wideSnapshot = wide.snapshot;
   let starved = context.emptyActiveContextState(wide.sessionId);
@@ -6328,11 +6331,17 @@ async function gateQuietRuntimeStormReplay() {
   // The retune itself, and the parts of the thermostat that did NOT move. The two
   // occupancy constants are fields of the declared object now; their values are the
   // proven ones, unchanged.
+  // 0.80 held at the retune (Shane 2026-08-23) on the corpus reading: across 19 mature
+  // sealed runs the peak occupancy lands a median 36,000 tokens ABOVE the trigger, so
+  // this share already puts the top of the band at 237,399 of a 251,520 budget, and
+  // raising it toward that number directly would push the median peak into the fence.
   assert.equal(context.DEFAULT_THRESHOLDS.maxTarget, 0.80);
-  // 0.20 (Shane 2026-08-14): the cut depth sets the epoch cadence, and a commit
-  // costs nearly the same however deep it cuts, so cutting deeper buys the same
-  // relief with fewer full-prefix rewrites.
-  assert.equal(context.DEFAULT_THRESHOLDS.minTarget, 0.20);
+  // 0.40, up from 0.20 (Shane 2026-08-23): the same corpus put 153 of 206 commit
+  // landings below 100,000 tokens, and the floor is what he was buying. It is also the
+  // first aim above MAX_PINNED_SHARE, so a fully pinned session can now reach it.
+  assert.equal(context.DEFAULT_THRESHOLDS.minTarget, 0.40);
+  assert(context.DEFAULT_THRESHOLDS.minTarget > context.MAX_PINNED_SHARE,
+    "The commit aims below what a fully pinned session legally holds");
   assert.equal(context.COMMIT_RECLAIM_FLOOR_SHARE, 0.02);
 
   // Plain epoch scheduling is unchanged: the cadence trigger is the guided-mode deletion.
@@ -8964,12 +8973,17 @@ async function gateVanishedCommitAnnouncesItself() {
   //    it as "nothing changed". `sameStateProjection` normalizes the revision away, which is
   //    precisely why the comparison cannot tell a real no-op from a commit that evaporated.
   //    Only the fold sets are compared here; the surrounding bookkeeping a commit also moves
-  //    (briefs, ledgers) is not what makes the two states look alike in the live failure.
+  //    (briefs, ledgers, and since the 2026-08-23 retune a staged frontier mark the
+  //    shallower aim left pending) is not what makes the two states look alike in the
+  //    live failure, so it is stripped alongside the folds rather than proven equal.
+  const foldless = (state) => {
+    const bare = { ...state, folds: [], expanded: [] };
+    delete bare.pendingMarks;
+    delete bare.briefs;
+    return bare;
+  };
   assert.equal(
-    context.sameStateProjection(
-      { ...stranded, folds: [], expanded: [] },
-      { ...committed, folds: [], expanded: [] },
-    ),
+    context.sameStateProjection(foldless(stranded), foldless(committed)),
     true,
     "Stripping the folds did not make the stranded write look like its predecessor",
   );
@@ -12132,6 +12146,31 @@ async function gateFoldSettingsRoundTrip() {
     assert.equal(budgetLoad.migrated, true);
     assert.deepEqual(Object.keys(JSON.parse(await readFile(budgetFile, "utf8"))), ["thresholds"],
       "the retired key survived the migration it should have been dropped by");
+
+    // The same law one level down: a retired THRESHOLD field is dropped, not refused.
+    // freshTail was the fifth setting until fresh-tail protection was deleted
+    // (2026-08-23), so a stored file carrying it is a file /fold-settings itself wrote,
+    // and refusing it whole reverted maxTarget and minTarget to defaults over a key the
+    // person never chose. The exact live shape: Shane's own deployment file.
+    const tailFile = join(scratch, "fresh-tail.json");
+    await writeFile(tailFile, JSON.stringify({
+      thresholds: { maxTarget: 0.4, minTarget: 0.1, freshTail: 0.05, consolidateAfter: 10, minFoldChars: 8000 },
+    }));
+    const tailLoad = settingsModule.readFoldSettingsFile(tailFile);
+    assert.equal(tailLoad.refusal, null, `a fresh-tail era file was refused: ${tailLoad.refusal}`);
+    assert.equal(tailLoad.migrated, true, "a fresh-tail era file loaded without migrating");
+    assert.equal(tailLoad.settings.thresholds.maxTarget, 0.4,
+      "the migration lost a tuned value while dropping the retired field");
+    assert.equal(tailLoad.settings.thresholds.minTarget, 0.1);
+    const tailWritten = JSON.parse(await readFile(tailFile, "utf8")).thresholds;
+    assert.equal(Object.hasOwn(tailWritten, "freshTail"), false,
+      "the retired threshold field survived the write-back");
+    assert.deepEqual(tailWritten, tailLoad.settings.thresholds,
+      "the migrated fresh-tail file was not written back whole");
+    // And the registration path still refuses it by name: the drop is the FILE READER's
+    // repair, not a loosening of the one validation law.
+    assert.throws(() => context.resolveThresholds({ ...context.DEFAULT_THRESHOLDS, freshTail: 0.05 }),
+      /no freshTail field/);
 
     // A file that is genuinely INVALID reverts to package defaults with the reason kept
     // for the settings screen, and is left exactly as the person wrote it, because

@@ -265,5 +265,31 @@ The binding stays one equality.
 `unmarkedRemainder` enumerates `automaticToolBatches` only, while `selectAutomaticSpan`
 also proposes chapters. On a chapter-heavy session the remainder therefore under-reports
 what is actually foldable. This is pre-existing, it is what broke the frontier's first cut,
-and gate 106 records it rather than papering over it. It has not been fixed here because
-the fix belongs to the selector and this build's scope was the frontier.
+and gate 106 records it rather than papering over it. Fixed the day after this was written:
+the remainder now walks `selectAutomaticChapter` alongside the tool batches, and gate 141's
+`remainderCountsChapters` claim pins a chapter-only session reporting 27 spans and 137,813
+chars where the old definition reported zero.
+
+## The thermostat, retuned to the corpus (2026-08-23)
+
+Shane asked for a working band of roughly 100k to 250k tokens on the Codex Sol window.
+The window was verified first: the descriptor is 272,000 and Pi derives the output ceiling
+from it, the provider's real wall sits just above 372,000, and past 272,000 every request
+bills at 2x input and 1.5x output, so 272,000 is a price cliff rather than a wall and the
+band has to live under it.
+
+Read against the 19 mature sealed pifold runs sharing the 251,520-token budget, the top of
+the band was already delivered: the 0.80 trigger fires at 201,216 and the session runs a
+median 36,000 tokens past it before the commit lands, peaking at a median 237,399 and a p90
+of 247,551. Raising `maxTarget` toward 250k directly would have pushed the median peak over
+the budget and into the fence. So the trigger stays at 0.80 and the overshoot is the
+mechanism that reaches 250k.
+
+The floor was the miss: 153 of 206 commit landings came to rest below 100,000 tokens, at a
+median of 79,034, because the 0.20 aim sat far under the requested band and under
+`MAX_PINNED_SHARE` besides, so a fully pinned session could never legally reach it.
+`minTarget` moves 0.20 to 0.40, which is 102,246 tokens against the default descriptor.
+Landings sit above the aim, so the observed floor lands near 100k rather than at 40% exactly.
+The cost is the 2026-08-14 cadence argument running backwards, about a fifth more epochs for
+the same session shape, bought deliberately: the floor is what holds 100k of raw recent
+context across the whole cycle.

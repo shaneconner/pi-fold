@@ -1107,8 +1107,8 @@ export function boundStatusPayload(
   shrink(instrumentation, "events", "context event(s)", true);
   if (shrink(payload, "sourceMap", "source map row(s)") > 0) payload.sourceMapTruncated = true;
   shrink(payload, "topFolds", "top fold row(s)");
-  // The last epoch's receipt lists grow with commit depth (a 0.20 minTarget epoch
-  // applies dozens of marks). They are the commit's own receipt, so they outlast
+  // The last epoch's receipt lists grow with commit depth (a deep epoch applies dozens
+  // of marks). They are the commit's own receipt, so they outlast
   // every other diagnostic, but they still page away before any listing row the
   // caller actually asked for: on the detail pages, where none of the diagnostics
   // above exist, they are the mass that made one fold row miss the cap.

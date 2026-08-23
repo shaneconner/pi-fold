@@ -98,6 +98,14 @@ export function applyFoldSettingsEdit(
 // user surface on 2026-08-21 and stayed a registration option for the harness.
 const RETIRED_FILE_KEYS: readonly string[] = ["providerInputBudget"];
 
+// Threshold fields this package's own surface used to write. freshTail was the fifth
+// setting until 2026-08-23, when fresh-tail protection was deleted outright: nothing
+// decided on it, and stale-first ordering already leaves recent material last. A stored
+// file carrying it is a file /fold-settings itself wrote, so the field is dropped in
+// migration, keeping every value the person actually tuned, rather than refused whole,
+// which reverted maxTarget and minTarget to defaults over a key the person never chose.
+const RETIRED_THRESHOLD_KEYS: readonly string[] = ["freshTail"];
+
 export interface FoldSettingsLoad {
 	settings: FoldSettingsFile;
 	// Why the stored file was not used. Null when it was, including after a migration.
@@ -169,7 +177,10 @@ export function readFoldSettingsFile(path: string = DEFAULT_FOLD_SETTINGS_PATH):
 	if (!stored || typeof stored !== "object" || Array.isArray(stored)) {
 		return refused("fold settings thresholds must be an object");
 	}
-	const supplied = stored as Record<string, unknown>;
+	const supplied = { ...(stored as Record<string, unknown>) };
+	for (const key of RETIRED_THRESHOLD_KEYS) {
+		if (Object.prototype.hasOwnProperty.call(supplied, key)) { delete supplied[key]; dropped = true; }
+	}
 	const missing = THRESHOLD_FIELDS.filter((field) =>
 		!Object.prototype.hasOwnProperty.call(supplied, field));
 	try {

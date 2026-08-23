@@ -141,19 +141,38 @@ export const MINIMUM_FOLD_CHARS_FLOOR = 2_000;
 
 export const DEFAULT_THRESHOLDS: Readonly<ActiveContextThresholds> = Object.freeze({
   maxTarget: 0.80,
-  // 0.20, down from 0.35 (Shane 2026-08-14). The cut depth is what sets the epoch
-  // cadence: every commit rewrites the prefix from the earliest folded byte, so the
-  // cost of an epoch is nearly flat in how deep it cuts, while the relief it buys is
-  // the whole distance to the trigger. sol-20260814-traps rep 1 ran six commits, each
-  // freeing to 0.35 and refilling in two to three stages; at 0.20 the same run shape
-  // owes roughly a quarter fewer epochs, which is a quarter fewer full-prefix
-  // rewrites, the dominant self-inflicted cache break. The floor is a target the
-  // class law outranks, not a guarantee: a session pinned to the 0.25 ceiling
-  // beside the 0.02 fresh tail legally holds 0.27 and lands above this number,
-  // and the epoch receipt reports targetBudgetShare beside actualFreedBudgetShare
-  // so the shortfall is a readable fact per epoch rather than a silent miss. The
-  // validation laws below bind exactly as before.
-  minTarget: 0.20,
+  // 0.40, up from 0.20 (Shane 2026-08-23: "we change the thresholds to what hits that
+  // 100k/250k or so"). This is the only threshold that moved, because the corpus says
+  // the top of the band was already where he wants it and only the floor was wrong.
+  //
+  // Read against the 19 mature sealed pifold runs that share a 251,520-token budget,
+  // where the trigger sat at 0.80 of it, 201,216 tokens. Peak occupancy per run came in
+  // at a median 237,399, a 0.944 share, p90 247,551, max 257,117: a session runs roughly
+  // 36,000 tokens PAST its own trigger before the commit it fired takes effect, because
+  // the trigger fires at a measurement and inflow continues while the epoch is computed.
+  // So 0.80 already delivers a 250k top, and raising it toward 250k directly would put
+  // the median peak over the budget and into the fence.
+  //
+  // The floor was the miss. Across 206 commit landings the session came to rest at a
+  // median 79,034 tokens, and 153 of the 206 landed below 100,000. Landings sit ABOVE
+  // the aim rather than at it, since the class law and the available material both
+  // outrank it, so moving the aim to 0.40 sets a floor near where it lands rather than
+  // far under it: 102,246 tokens against a default 272,000-token descriptor, 100,608
+  // against the harness budget.
+  //
+  // 0.40 also makes the aim reachable for the first time. MAX_PINNED_SHARE is 0.25, so a
+  // fully pinned session legally holds more than a 0.20 aim asks for and the target was
+  // a number the class law outranked by construction. The epoch receipt still reports
+  // targetBudgetShare beside actualFreedBudgetShare, so any remaining shortfall stays a
+  // readable fact per epoch rather than a silent miss.
+  //
+  // The cost is paid in cadence and it is the 2026-08-14 argument running backwards: a
+  // shallower cut buys less runway for nearly the same commit, so the refill distance
+  // goes from the observed 0.314 -> 0.80 to 0.40 -> 0.80 and the same session shape owes
+  // about a fifth more epochs, which is a fifth more full-prefix rewrites. Shane bought
+  // that deliberately: 100k of raw context held across the whole cycle is what he is
+  // paying for. The validation laws below bind exactly as before.
+  minTarget: 0.40,
   consolidateAfter: 10,
   minFoldChars: 8_000,
 });
