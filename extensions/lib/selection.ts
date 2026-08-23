@@ -28,7 +28,6 @@ import {
 import {
   ACTIVE_CONTEXT_POLICY,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
-  MAX_FOLD_SPAN_CHARS,
 } from "./policy.ts";
 import type {
   ActiveContextSnapshot,
@@ -513,7 +512,7 @@ export function pinnedChildFold(
 
 export function pinnedNestingRefusal(pinned: ActiveFold, toolName: string): string {
   return `fold refused: ${pinned.id} is pinned, and nesting it would hide context you asked to keep. ` +
-    `Release it with ${toolName} {"action":"unprotect","ids":["${pinned.id}"]} first, ` +
+    `Release it with ${toolName} {"action":"unpin","ids":["${pinned.id}"]} first, ` +
     "or name a span that stops at its boundary.";
 }
 
@@ -676,7 +675,6 @@ function consolidationCandidate(
   if (refsProtected(raw, state, snapshot)) return null;
   if (raw.some((ref) => claims.refKeys.has(objectRefKey(ref)))) return null;
   const sourceRefs = candidateSourceRefs(parts, state);
-  if (sourceRefs.length > snapshot.policy.maxFoldSourceRefs) return null;
   return { kind: "consolidation", parts, sourceRefs };
 }
 
@@ -735,9 +733,8 @@ export function automaticToolBatches(
         refs.some((ref) => !ref || ref.role !== "toolResult")) continue;
     const exactRefs = refs as EvidenceRef[];
     const size = group.reduce((total, { item }) => total + bytes(item.message), 0);
-    if (exactRefs.length > snapshot.policy.maxFoldSourceRefs ||
-        toolRefsProtected(exactRefs, state, snapshot) || refsInOrder(snapshot, exactRefs) === null ||
-        size < snapshot.policy.minToolChars) continue;
+    if (toolRefsProtected(exactRefs, state, snapshot) || refsInOrder(snapshot, exactRefs) === null ||
+        size < snapshot.thresholds.minFoldChars) continue;
     batches.push({ refs: exactRefs, indices: group.map(({ item }) => item.index), bytes: size });
   }
   return batches;
@@ -805,45 +802,7 @@ export function resolveFoldInputIds(
 export function chapterRangeIsUnitAligned(snapshot: ActiveContextSnapshot, start: number, end: number): boolean {
   const units = chapterUnits(snapshot).filter((unit) => unit.end > start && unit.start <= end);
   if (!units.length || units[0].start !== start || units.at(-1)!.end !== end + 1) return false;
-  if (new Set(units.map((unit) => unit.turnStart)).size > snapshot.policy.maxChapterTurns) return false;
   return units.every((unit, index) => index === 0 || unit.start === units[index - 1].end);
-}
-
-export function splitCandidateBySize(
-  snapshot: ActiveContextSnapshot,
-  state: ActiveContextState,
-  candidate: FoldCandidate,
-  maxChars: number = MAX_FOLD_SPAN_CHARS,
-): FoldCandidate[] {
-  if (candidate.kind !== "chapter") return [candidate];
-  const refs = candidate.sourceRefs.length ? candidate.sourceRefs : candidateSourceRefs(candidate.parts, state);
-  const indices = refs.map((ref) => exactMapped(snapshot, ref)?.index ?? -1);
-  if (!indices.length || indices.some((index) => index < 0)) return [candidate];
-  const start = Math.min(...indices);
-  const end = Math.max(...indices);
-  if (spanBytes(snapshot, start, end + 1) <= maxChars) return [candidate];
-  const units = chapterUnits(snapshot).filter((unit) => unit.start >= start && unit.end <= end + 1);
-  if (units.length < 2) return [candidate];
-  const split: FoldCandidate[] = [];
-  const emit = (from: number, to: number): boolean => {
-    const parts = partsForRange(snapshot, state, from, to, new Set<FoldKind>(["tool-result"]));
-    if (!parts) return false;
-    split.push({ kind: "chapter", parts, sourceRefs: candidateSourceRefs(parts, state) });
-    return true;
-  };
-  let runStart = units[0].start;
-  let runBytes = 0;
-  for (const unit of units) {
-    const size = spanBytes(snapshot, unit.start, unit.end);
-    if (runBytes > 0 && runBytes + size > maxChars) {
-      if (!emit(runStart, unit.start - 1)) return [candidate];
-      runStart = unit.start;
-      runBytes = 0;
-    }
-    runBytes += size;
-  }
-  if (runBytes > 0 && !emit(runStart, units.at(-1)!.end - 1)) return [candidate];
-  return split.length ? split : [candidate];
 }
 
 export function candidateSpanChars(
@@ -1001,23 +960,6 @@ export function snapSpanIds(
       end = endUnit.end - 1;
       note("span ended mid-unit; corrected to the end of its closed user/assistant/tool unit");
     }
-    const covered = units.filter((unit) => unit.start >= start && unit.end <= end + 1);
-    if (covered.length) {
-      const turns: number[] = [];
-      let clamped = end;
-      for (const unit of covered) {
-        if (!turns.includes(unit.turnStart)) {
-          if (turns.length >= snapshot.policy.maxChapterTurns) break;
-          turns.push(unit.turnStart);
-        }
-        clamped = unit.end - 1;
-      }
-      if (clamped < end) {
-        end = clamped;
-        note(`span covered more than the ${snapshot.policy.maxChapterTurns}-turn chapter limit; ` +
-          "corrected to the last turn that fits");
-      }
-    }
     if (start === passStart && end === passEnd) break;
   }
   if (!corrections.length || end < start ||
@@ -1072,9 +1014,6 @@ export function manualFoldCandidate(
     !options.allowProtected && refsProtected(refs, state, snapshot);
   const owners = directFoldOwners(state.folds);
   const bounded = (candidate: FoldCandidate): FoldCandidate => {
-    if (candidate.sourceRefs.length > snapshot.policy.maxFoldSourceRefs) {
-      throw new Error(`Folds may include at most ${snapshot.policy.maxFoldSourceRefs} exact source references`);
-    }
     for (const part of candidate.parts) {
       if (part.kind !== "raw") continue;
       const ownerId = owners.get(objectRefKey(part.ref));

@@ -84,7 +84,7 @@ export interface ContextEvent {
 export type ContextEventKind =
   | "context.attempt"
   | "context.correction"
-  | "context.protect"
+  | "context.pin"
   | "context.capacity"
   | "context.receipt"
   | "context.rider"

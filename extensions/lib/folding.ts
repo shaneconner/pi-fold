@@ -85,7 +85,6 @@ import {
 export function selectAutomaticChapter(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
-  maximumSourceRefs: number = snapshot.policy.maxFoldSourceRefs,
   claimed: ReadonlySet<string> = new Set<string>(),
 ): FoldCandidate | null {
   const units = chapterUnits(snapshot);
@@ -93,24 +92,22 @@ export function selectAutomaticChapter(
   for (let unitIndex = 0; unitIndex < units.length; unitIndex += 1) {
     const first = units[unitIndex];
     let best: FoldCandidate | null = null;
-    const turnStarts = new Set<number>();
     for (let endIndex = unitIndex; endIndex < units.length; endIndex += 1) {
       const unit = units[endIndex];
       if (endIndex > unitIndex && unit.start !== units[endIndex - 1].end) break;
-      turnStarts.add(unit.turnStart);
-      if (turnStarts.size > snapshot.policy.maxChapterTurns) break;
       const coherentSegment = endIndex > unitIndex || first.end - first.start > 1;
       if (!coherentSegment) continue;
       const parts = partsForRange(snapshot, state, first.start, unit.end - 1, allowedChildren);
       if (!parts || parts.some((part) => part.kind === "fold" && state.expanded.includes(part.foldId))) continue;
       const refs = candidateSourceRefs(parts, state);
-      if (refs.length > maximumSourceRefs) break;
       if (claimed.size && refs.some((ref) => claimed.has(objectRefKey(ref)))) continue;
       if (refsProtected(refs, state, snapshot)) continue;
       const size = bytes(encodedFoldSource(snapshot, state, parts, "chapter"));
-      if (size > snapshot.policy.maxChapterChars && endIndex > unitIndex) break;
       const biteSized = size <= MAX_FOLD_SPAN_CHARS || endIndex === unitIndex;
-      if (size >= snapshot.policy.minChapterChars && biteSized) best = { kind: "chapter", parts, sourceRefs: refs };
+      // ACCUMULATE UNTIL OVER, never cut to hit the number. The walk grows the span one
+      // whole unit at a time and records the first one that carries it past the floor,
+      // so a fold is always at least minFoldChars and always ends on a message boundary.
+      if (size >= snapshot.thresholds.minFoldChars && biteSized) best = { kind: "chapter", parts, sourceRefs: refs };
       if (size > MAX_FOLD_SPAN_CHARS) break;
     }
     if (best) return best;
@@ -123,7 +120,7 @@ export function selectAutomaticStaleSpan(
   state: ActiveContextState,
   claimed: ReadonlySet<string> = new Set<string>(),
 ): FoldCandidate | null {
-  const chapter = selectAutomaticChapter(snapshot, state, snapshot.policy.maxFoldSourceRefs, claimed);
+  const chapter = selectAutomaticChapter(snapshot, state, claimed);
   const folds = selectAutomaticConsolidations(snapshot, state)[0] ?? null;
   if (!chapter || !folds) return chapter ?? folds;
   const at = (candidate: FoldCandidate): number =>
@@ -173,7 +170,7 @@ export function selectAutomaticRung(
   const claimedFoldIds = options.claimedFoldIds ?? new Set<string>();
   if (!options.toolOnly && state.prepared) {
     if (!Number.isFinite(ratio) || ratio < hardFenceRatio(snapshot)) return null;
-    const candidate = selectAutomaticChapter(snapshot, state, snapshot.policy.maxFoldSourceRefs, claimed);
+    const candidate = selectAutomaticChapter(snapshot, state, claimed);
     return candidate ? { kind: "prepared-chapter", candidate } : null;
   }
   const tool = selectAutomaticToolBatch(snapshot, state, claimed)[0] ?? null;
@@ -408,7 +405,7 @@ export async function prepareFold(input: {
   const protectedSource = candidate.kind === "tool-result"
     ? toolRefsProtected(candidate.sourceRefs, state, snapshot)
     : refsProtected(candidate.sourceRefs, state, snapshot);
-  if (!candidate.sourceRefs.length || candidate.sourceRefs.length > snapshot.policy.maxFoldSourceRefs ||
+  if (!candidate.sourceRefs.length ||
       refsInOrder(snapshot, candidate.sourceRefs) === null || protectedSource) {
     throw new Error("Fold source is not exact, stale, and unprotected");
   }
@@ -686,7 +683,7 @@ export function protectEvidence(
   if (byKey.size > MAX_ACTIVE_PROTECTED) {
     throw new Error(
       `Protecting ${ids.join(", ")} would hold ${byKey.size} refs, over the ${MAX_ACTIVE_PROTECTED}-ref cap; ` +
-        "unprotect something first",
+        "unpin something first",
     );
   }
   return clearPrepared({
@@ -905,7 +902,7 @@ export function foldStatusRow(fold: ActiveFold, state: ActiveContextState, snaps
         : { action: "refold", id: fold.id },
       expand: { action: "expand", id: fold.id },
       refold: { action: "refold", id: fold.id },
-      protect: { action: "protect", ids: [fold.id] },
+      pin: { action: "pin", ids: [fold.id] },
     },
   };
 }
@@ -995,7 +992,6 @@ export function activeContextStatus(
   state: ActiveContextState,
   offset = 0,
   limit = 40,
-  maximumChapterSourceRefs = Number.MAX_SAFE_INTEGER,
   statusOptions: { diet?: boolean; indexRows?: number } = {},
 ): Record<string, unknown> {
   const roots = orderedRoots(state, snapshot).map((item) => item.fold.id);
@@ -1014,7 +1010,7 @@ export function activeContextStatus(
       resultCall(snapshot, item.index, true) !== null,
   }] : []);
   const selectedObjects = objects.slice(offset, offset + limit);
-  const eligibleChapter = selectAutomaticChapter(snapshot, state, maximumChapterSourceRefs);
+  const eligibleChapter = selectAutomaticChapter(snapshot, state);
   const eligibleSourceIds = eligibleChapter?.sourceRefs.map((ref) => ref.entryId) ?? [];
   const eligibleEndpoints = eligibleSourceIds.length
     ? [...new Set([eligibleSourceIds[0], eligibleSourceIds.at(-1)!])]
@@ -1072,7 +1068,7 @@ export function activeContextStatus(
     actions: {
       status: { action: "status", offset, limit },
       fold: { action: "fold", ids: ["<source-or-fold-id>"], brief: "<optional factual brief, at most 1000 characters>" },
-      protect: { action: "protect", ids: ["<source-or-fold-id>"] },
+      pin: { action: "pin", ids: ["<source-or-fold-id>"] },
     },
   };
 }
@@ -1352,7 +1348,7 @@ export function peekFoldSource(input: {
       ...(children.length ? { child: { action: "peek", id: children[0] } } : {}),
     },
     ...(truncated
-      ? { wider: { action: "peek", id: fold.id, bytes: Math.min(sourceBytes, ACTIVE_CONTEXT_POLICY.maxChapterChars) } }
+      ? { wider: { action: "peek", id: fold.id, bytes: Math.min(sourceBytes, ACTIVE_CONTEXT_POLICY.maxSourceChars) } }
       : {}),
     lifetime: "these bytes stay in the window exactly as returned, like any other tool result, and " +
       `nothing rewrites this result in place. It is a COPY of fold ${fold.id}'s stored source, so the ` +
@@ -1372,7 +1368,7 @@ export function peekFoldSource(input: {
           "bytes were NOT shown" +
           (view.omittedBytes ? " (the middle; the head and tail are both above)" : " (everything after this slice)") +
           `. Widen with {"action":"peek","id":"${fold.id}","bytes":${
-            Math.min(sourceBytes, ACTIVE_CONTEXT_POLICY.maxChapterChars)}}` +
+            Math.min(sourceBytes, ACTIVE_CONTEXT_POLICY.maxSourceChars)}}` +
           (nextOffset === null ? "" : ` or read on with {"action":"peek","id":"${fold.id}","offset":${nextOffset}}`) +
           ".",
       }

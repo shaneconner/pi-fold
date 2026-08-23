@@ -6,7 +6,7 @@ export const DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL = "pi-fold Active Context";
 export const DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN = "pi-fold";
 export const DEFAULT_ACTIVE_CONTEXT_COMMAND_NAMES = Object.freeze({
   status: "fold-status",
-  fold: "fold-context",
+  fold: "fold",
 });
 
 export function entryTypeNamespace(entryTypePrefix: string): string {
@@ -34,9 +34,24 @@ export const ACTIVE_CONTEXT_STATE_ENTRY = `${DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_P
 export const ACTIVE_CONTEXT_FOLD_RECORD_ENTRY = `${DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX}-fold-record`;
 export const PROVIDER_CONTEXT_MEASUREMENT_ENTRY = `${DEFAULT_ENTRY_NAMESPACE}-provider-context-measurement`;
 export const ACTIVE_CONTEXT_TOOL_ACTIONS = Object.freeze([
-  "status", "peek", "fold", "expand", "refold", "protect", "unprotect",
-  "rebrief", "reboundary", "unmark",
+  "status", "peek", "fold", "expand", "refold", "pin", "unpin",
+  "reboundary", "unmark",
 ] as const);
+/**
+ * REBRIEF IS DELETED (Shane, 2026-08-21). Every rebrief rewrites the projection at its
+ * fold's placeholder, which breaks the prefix cache from that point on: sol-20260820
+ * rep 7's first rebrief hit a front-of-projection fold, identical_share collapsed to
+ * 0.0007, and nine ~185K-token requests ran cacheRead 0 for $8.36 in one burst. The
+ * end block read 10 of 10 in every pifold rep with or without rebriefs, because
+ * lossless peek already carries recall, so the action was paying a full cache break
+ * for something the runtime did not need. The name stays spent.
+ */
+export const RETIRED_TOOL_ACTIONS: Readonly<Record<string, string>> = Object.freeze({
+  rebrief: "rebrief is deleted: rewriting a standing fold's brief rewrites the projection " +
+    "at that fold's placeholder and breaks the prefix cache from there on, for recall that " +
+    "peek already carries losslessly. Write the brief you want when you mark the span, or " +
+    "use reboundary to re-cut it.",
+});
 export type ActiveContextToolAction = typeof ACTIVE_CONTEXT_TOOL_ACTIONS[number];
 export const USER_RESCUE_MAX_SOURCE_CHARS = 512_000;
 export const DEFAULT_CONTEXT_WINDOW = 272_000;
@@ -45,6 +60,15 @@ export const MAX_EXPAND_LEASES = 64;
 
 export const COMMIT_RECLAIM_FLOOR_SHARE = 0.02;
 
+/**
+ * How far below the commit trigger the agent is told a commit is coming (Shane,
+ * 2026-08-22: "around 10% from the commit threshold"). A share of the serving budget
+ * rather than a token count, because a token count means a different fraction of every
+ * deployment's window. The advisory takes the wider of this and one worst recent inflow
+ * step, so a single large result cannot step over the whole band unasked.
+ */
+export const STEWARD_WARNING_SHARE = 0.10;
+
 export const MAX_PINNED_SHARE = 0.25;
 
 export interface ActiveContextThresholds {
@@ -52,7 +76,32 @@ export interface ActiveContextThresholds {
   minTarget: number;
   freshTail: number;
   consolidateAfter: number;
+  minFoldChars: number;
 }
+
+/**
+ * The floor a fold has to clear to be worth making, in CHARACTERS (Shane, 2026-08-21).
+ *
+ * Characters rather than tokens because characters are provider-agnostic: a token count
+ * means a different amount of text on every wire, and this number exists so a person can
+ * reason about it. It replaces two constants nobody could tell apart, minToolChars at
+ * 2,000 and minChapterChars at 4,000, and it is not specific to tool results or to
+ * chapters: everything in the window costs tokens, so everything counts toward the floor.
+ *
+ * It is a floor, not a cut. The automatic span accumulates whole messages and stops at
+ * the first one that carries it OVER the floor, so a fold is always at least this big
+ * and never cuts a message in half to hit the number exactly. The same floor is what a
+ * gap between two folds has to clear to survive: anything smaller is absorbed by the
+ * fold beside it rather than left as a raw sliver, because a sliver costs its bytes and
+ * buys nothing.
+ *
+ * 8,000 was chosen against the sealed corpus. Rep 1 of sol-20260814-traps folded 89
+ * spans at a median of 57,808 source chars, but nine of them came in under 8,000 and
+ * TWO were net negative, 2,726 chars of source replaced by 5,341 of placeholder (196
+ * percent) and 6,384 replaced by 10,531 (165 percent). A fold that grows the window is
+ * not a fold. The floor sits above every observed inversion with room to spare.
+ */
+export const MINIMUM_FOLD_CHARS_FLOOR = 2_000;
 
 export const DEFAULT_THRESHOLDS: Readonly<ActiveContextThresholds> = Object.freeze({
   maxTarget: 0.80,
@@ -69,8 +118,14 @@ export const DEFAULT_THRESHOLDS: Readonly<ActiveContextThresholds> = Object.free
   // so the shortfall is a readable fact per epoch rather than a silent miss. The
   // validation laws below bind exactly as before.
   minTarget: 0.20,
-  freshTail: 0.02,
+  // 0.10, up from 0.02 (Shane 2026-08-21). The tail is what the current turn is still
+  // reading, and 2 percent of a 250k budget is 5,000 tokens, roughly one large tool
+  // result. The guard catches what the tail misses, but the guard is a commit-time
+  // decision and the tail is a standing promise, so the promise should be the one a
+  // person can reason about: a tenth of the window stays raw.
+  freshTail: 0.10,
   consolidateAfter: 10,
+  minFoldChars: 8_000,
 });
 
 export const MINIMUM_SUPPORTED_BUDGET_TOKENS = 10_000;
@@ -96,10 +151,10 @@ function thresholdProportion(value: unknown, field: string): number {
 export function resolveThresholds(value: unknown): ActiveContextThresholds {
   if (value === undefined) return { ...DEFAULT_THRESHOLDS };
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new ThresholdPolicyError("shape", "thresholds must be an object with all four fields");
+    throw new ThresholdPolicyError("shape", "thresholds must be an object with all five fields");
   }
   const supplied = value as Record<string, unknown>;
-  const fields = ["maxTarget", "minTarget", "freshTail", "consolidateAfter"] as const;
+  const fields = ["maxTarget", "minTarget", "freshTail", "consolidateAfter", "minFoldChars"] as const;
   for (const key of Object.keys(supplied)) {
     if (!(fields as readonly string[]).includes(key)) {
       throw new ThresholdPolicyError("shape", `thresholds has no ${key} field`);
@@ -116,6 +171,14 @@ export function resolveThresholds(value: unknown): ActiveContextThresholds {
   const consolidateAfter = supplied.consolidateAfter;
   if (typeof consolidateAfter !== "number" || !Number.isInteger(consolidateAfter) || consolidateAfter < 1) {
     throw new ThresholdPolicyError("consolidateAfter", "thresholds.consolidateAfter must be a positive integer count");
+  }
+  const minFoldChars = supplied.minFoldChars;
+  if (typeof minFoldChars !== "number" || !Number.isInteger(minFoldChars) ||
+      minFoldChars < MINIMUM_FOLD_CHARS_FLOOR) {
+    throw new ThresholdPolicyError("minFoldChars",
+      "thresholds.minFoldChars must be an integer character count of at least " +
+      `${MINIMUM_FOLD_CHARS_FLOOR}; below that a fold can cost more placeholder than the ` +
+      "source it replaces");
   }
   if (!(minTarget < maxTarget)) {
     throw new ThresholdPolicyError("minTarget<maxTarget",
@@ -137,7 +200,7 @@ export function resolveThresholds(value: unknown): ActiveContextThresholds {
       `the pin ceiling (${MAX_PINNED_SHARE}) plus thresholds.freshTail must stay below ` +
       `thresholds.maxTarget at the ${MINIMUM_SUPPORTED_BUDGET_TOKENS}-token minimum supported budget`);
   }
-  return { maxTarget, minTarget, freshTail, consolidateAfter };
+  return { maxTarget, minTarget, freshTail, consolidateAfter, minFoldChars };
 }
 
 export function assertThresholdsServable(thresholds: ActiveContextThresholds, budgetTokens: number): void {
@@ -213,9 +276,27 @@ export const CONTEXT_STATUS_RESPONSE_BYTES = 24_000;
 export const MAX_UNMARKED_CANDIDATES = 3;
 
 export const MAX_FOLD_SPAN_CHARS = 16_000;
-export const MAX_WEDGE_ABSORB_TOKENS = 256;
 export const PEEK_DEFAULT_MAX_BYTES = 16_000;
 export const PEEK_HEAD_SHARE = 0.6;
+
+/**
+ * A PEEK IS EPHEMERAL UNLESS THE AGENT SAYS OTHERWISE (Shane, 2026-08-22).
+ *
+ * The default follows the measured choice rather than the cautious one. On sealed run
+ * rep 7, six of seven peeks asked for ephemeral at first organic exposure, and the one
+ * durable read was the stage-64 probe, exactly where the bytes were wanted standing.
+ * The economics agree: a peek is a pure append and costs the cache nothing, while the
+ * withdrawal is a tail operation at the withdrawn result's own index, so the cheap read
+ * should be the one you get without asking.
+ *
+ * Only an explicit false is durable. A missing value, and anything the validator has
+ * already rejected, reads as ephemeral, so a host or model that never learned the
+ * argument still gets the cheap behaviour and can still recover the bytes by peeking
+ * again, which is lossless.
+ */
+export function peekIsEphemeral(params: Record<string, unknown> | undefined | null): boolean {
+  return params?.ephemeral !== false;
+}
 
 export const PEEK_READ_ONLY_CONTEXT_ACTIONS: ReadonlySet<string> = new Set(["status", "peek"]);
 
@@ -245,12 +326,11 @@ export const ACTIVE_CONTEXT_POLICY = Object.freeze({
   refoldRatio: 0.85,
   prepareRatio: 0.90,
   responseReserve: 16_384,
-  minToolChars: 2_000,
-  minChapterChars: 4_000,
-  maxChapterChars: 128_000,
-  maxChapterTurns: 4,
+  // The most exact source bytes ONE read may put back in the window, whichever verb
+  // asks: an expand collapses its biggest children until the render fits, and a peek
+  // clamps its `bytes` to it. Was two numbers until 2026-08-22, when the peek ceiling
+  // was `maxChapterChars` 128,000 and that constant also claimed to cap a chapter.
   maxSourceChars: 200_000,
-  maxFoldSourceRefs: 256,
   maxBriefChars: 2_000,
   orientationMessages: 2,
   maxOrientationChars: 12_000,

@@ -1,0 +1,708 @@
+{
+  "protocol": "steer/v1",
+  "id": "driftwood-v1",
+  "authored": "2026-08-22",
+  "project": {
+    "name": "driftwood",
+    "description": "log ingestion and alerting service, TypeScript",
+    "generator": "scripts/generate_driftwood_checkout.mjs",
+    "configFile": "config/driftwood.toml",
+    "manifest": "package.json"
+  },
+  "pristine": {
+    "config/driftwood.toml": {
+      "api.listen_port": 8080,
+      "api.max_page_size": 50,
+      "buffer.flush_interval_seconds": 10,
+      "buffer.max_bytes": 4194304,
+      "alert.dedupe_window_seconds": 120,
+      "alert.dispatch.timeout_seconds": 30,
+      "retention.days": 90,
+      "retention.sweep_batch": 1000,
+      "ingest.http.limiter": "none",
+      "ingest.http.rate_limit_per_second": 0,
+      "ingest.syslog.limiter": "none",
+      "store.index.shards": 1,
+      "log.level": "warn",
+      "pipeline.stages": [
+        "parse",
+        "route"
+      ]
+    }
+  },
+  "deflections": [
+    "your call, you're closer to it than I am.",
+    "whichever's less work. I don't have a view.",
+    "go with it and we'll see.",
+    "don't worry about it for now.",
+    "yeah, that's fine."
+  ],
+  "steers": [
+    {
+      "id": "steer-001",
+      "phase": "orient",
+      "text": "morning. I've got driftwood checked out, the log ingest service. Get oriented before we start cutting into it: I want to know what shape the pipeline is actually in, not what the README claims."
+    },
+    {
+      "id": "steer-002",
+      "phase": "orient",
+      "text": "the http source is the one I care about most. walk me through what happens to a line from the moment it hits the listener to the moment it lands in the index."
+    },
+    {
+      "id": "steer-003",
+      "phase": "orient",
+      "text": "right, that's what I thought. the router is doing too much, we'll get to it."
+    },
+    {
+      "id": "steer-004",
+      "phase": "orient",
+      "text": "before we touch anything, the config surface. open config/driftwood.toml and tell me what's actually wired up versus what's dead weight."
+    },
+    {
+      "id": "steer-005",
+      "phase": "orient",
+      "text": "yeah, about half of that is dead. we'll prune as we go rather than in one go."
+    },
+    {
+      "id": "steer-006",
+      "phase": "orient",
+      "text": "one thing while we're in there. snake_case for every key in that toml. whoever wrote the alerting block left a couple of camelCase ones in and I don't want to see any more of them.",
+      "obligations": [
+        {
+          "kind": "convention",
+          "rule": "toml_keys_snake_case",
+          "file": "config/driftwood.toml",
+          "appliesAfter": "steer-006"
+        }
+      ]
+    },
+    {
+      "id": "steer-007",
+      "phase": "orient",
+      "text": "start with the listener. it's binding 8080, which collides with the dev proxy on my box."
+    },
+    {
+      "id": "steer-008",
+      "phase": "orient",
+      "text": "put it on 9401.",
+      "obligations": [
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "api.listen_port",
+          "value": 9401
+        }
+      ]
+    },
+    {
+      "id": "steer-009",
+      "phase": "orient",
+      "text": "and any new module you add gets a header line, first line of the file, `// driftwood/<module>: <one line about what it does>`. the existing ones are inconsistent. don't go fix them all, just hold the line on new ones.",
+      "obligations": [
+        {
+          "kind": "convention",
+          "rule": "module_header_comment",
+          "glob": "src/**/*.ts",
+          "appliesAfter": "steer-009",
+          "createdOnly": true
+        }
+      ]
+    },
+    {
+      "id": "steer-010",
+      "phase": "orient",
+      "text": "run the tests, see what we broke."
+    },
+    {
+      "id": "steer-011",
+      "phase": "build",
+      "text": "the buffer next. it flushes every 10 seconds, which is far too lazy for what we're doing. take it to 5. and the max is 4MB, double that.",
+      "obligations": [
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "buffer.flush_interval_seconds",
+          "value": 5
+        },
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "buffer.max_bytes",
+          "value": 8388608
+        }
+      ]
+    },
+    {
+      "id": "steer-012",
+      "phase": "build",
+      "text": "does the flush block the ingest path or is it off-thread? I've never been sure."
+    },
+    {
+      "id": "steer-013",
+      "phase": "build",
+      "text": "while you're in there, error messages. name the thing that failed first and don't end them with a period. `buffer flush failed: disk full`, not `Failed to flush the buffer.`",
+      "obligations": [
+        {
+          "kind": "convention",
+          "rule": "error_message_shape",
+          "glob": "src/**/*.ts",
+          "appliesAfter": "steer-013",
+          "touchedOnly": true
+        }
+      ]
+    },
+    {
+      "id": "steer-014",
+      "phase": "build",
+      "text": "tests again."
+    },
+    {
+      "id": "steer-015",
+      "phase": "build",
+      "text": "the alerting side now. show me how dedupe actually works, I've only ever read the config for it."
+    },
+    {
+      "id": "steer-016",
+      "phase": "build",
+      "text": "120 seconds is too tight, we're paging twice for the same incident. take it to 275. the escalation timer is 300 and I want dedupe closing before escalation opens.",
+      "obligations": [
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "alert.dedupe_window_seconds",
+          "value": 275
+        }
+      ]
+    },
+    {
+      "id": "steer-017",
+      "phase": "build",
+      "text": "good. does anything else read that window, or is it just the dedupe path?"
+    },
+    {
+      "id": "steer-018",
+      "phase": "build",
+      "text": "the pipeline stages are implicit right now, they're just the call order inside run(). write them out as a `pipeline.stages` list in the config, in the order they genuinely execute, and make run() read the list instead of hardcoding it.",
+      "obligations": [
+        {
+          "kind": "selfConsistent",
+          "id": "pipeline-order",
+          "file": "config/driftwood.toml",
+          "path": "pipeline.stages",
+          "capture": true
+        }
+      ]
+    },
+    {
+      "id": "steer-019",
+      "phase": "build",
+      "text": "good. that'll make the geo work easier when we get to it."
+    },
+    {
+      "id": "steer-020",
+      "phase": "build",
+      "text": "retention. 90 days is absurd for what we pay for that volume. 30.",
+      "obligations": [
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "retention.days",
+          "value": 30
+        }
+      ]
+    },
+    {
+      "id": "steer-021",
+      "phase": "build",
+      "text": "and tests go next to the source from now on. `retention.test.ts` sitting beside `retention.ts`. the tests/ directory is legacy and we're migrating off it, so don't add anything to it.",
+      "obligations": [
+        {
+          "kind": "convention",
+          "rule": "tests_beside_source",
+          "glob": "**/*.test.ts",
+          "appliesAfter": "steer-021",
+          "createdOnly": true
+        }
+      ]
+    },
+    {
+      "id": "steer-022",
+      "phase": "build",
+      "text": "run everything."
+    },
+    {
+      "id": "steer-023",
+      "phase": "build",
+      "text": "oh, before I forget. ops came back on the replica thing: any batched delete has to be 384 rows or under or the replica falls behind. that's a hard number from them, not a suggestion.",
+      "authorNote": "Carrier only. The obligation lands at steer-070, and 384 appears nowhere in the checkout."
+    },
+    {
+      "id": "steer-024",
+      "phase": "build",
+      "text": "anyway. the index."
+    },
+    {
+      "id": "steer-025",
+      "phase": "build",
+      "text": "log level's on warn and I can't see anything useful. info.",
+      "obligations": [
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "log.level",
+          "value": "info"
+        }
+      ]
+    },
+    {
+      "id": "steer-026",
+      "phase": "build",
+      "text": "and I'll say this once now so it doesn't come up later: no process-local cache in front of the index. we had one in the ruby service and cache invalidation bugs ate about a quarter of a year. if the index is slow, we fix the index.",
+      "obligations": [
+        {
+          "kind": "absence",
+          "id": "no-index-cache",
+          "globs": [
+            "src/**/*cache*",
+            "src/**/*Cache*"
+          ],
+          "manifestDeps": [
+            "lru-cache",
+            "node-cache",
+            "quick-lru",
+            "keyv",
+            "memoizee",
+            "lru"
+          ],
+          "file": "package.json"
+        }
+      ]
+    },
+    {
+      "id": "steer-027",
+      "phase": "build",
+      "text": "the http source retries. what does it do now?"
+    },
+    {
+      "id": "steer-028",
+      "phase": "build",
+      "text": "use a token bucket, not exponential backoff. backoff hides the pressure and then the whole lot arrives at once the moment it clears. 175 a second.",
+      "obligations": [
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "ingest.http.limiter",
+          "value": "token_bucket"
+        },
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "ingest.http.rate_limit_per_second",
+          "value": 175
+        }
+      ]
+    },
+    {
+      "id": "steer-029",
+      "phase": "build",
+      "text": "tests."
+    },
+    {
+      "id": "steer-030",
+      "phase": "build",
+      "text": "leave the config alone for a bit, I want the router refactored. it's doing matching and dispatch in one function and I can't test either half."
+    },
+    {
+      "id": "steer-031",
+      "phase": "deepen",
+      "text": "keep going. the matching half first, dispatch after."
+    },
+    {
+      "id": "steer-032",
+      "phase": "deepen",
+      "text": "dispatch timeout is 30 seconds. that's a stuck thread for half a minute every time a webhook goes dark. 10.",
+      "obligations": [
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "alert.dispatch.timeout_seconds",
+          "value": 10
+        }
+      ]
+    },
+    {
+      "id": "steer-033",
+      "phase": "deepen",
+      "text": "and no new runtime dependencies without asking me first. devDependencies I don't care about.",
+      "obligations": [
+        {
+          "kind": "manifest",
+          "id": "deps-frozen",
+          "file": "package.json",
+          "path": "dependencies",
+          "equals": "@pristine"
+        }
+      ]
+    },
+    {
+      "id": "steer-034",
+      "phase": "deepen",
+      "text": "run everything, I want to see the router tests green before we move."
+    },
+    {
+      "id": "steer-035",
+      "phase": "deepen",
+      "text": "the index is single-shard, which is why the p99 is what it is. six.",
+      "obligations": [
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "store.index.shards",
+          "value": 6
+        }
+      ]
+    },
+    {
+      "id": "steer-036",
+      "phase": "deepen",
+      "text": "does resharding need a migration or does it rebuild on boot?"
+    },
+    {
+      "id": "steer-037",
+      "phase": "deepen",
+      "text": "fine. carry on."
+    },
+    {
+      "id": "steer-038",
+      "phase": "deepen",
+      "text": "drop the dedupe window to 45. we're missing genuine repeats inside the window and that's worse than the double page was.",
+      "obligations": [
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "alert.dedupe_window_seconds",
+          "value": 45,
+          "supersedes": "steer-016"
+        }
+      ]
+    },
+    {
+      "id": "steer-039",
+      "phase": "deepen",
+      "text": "tests."
+    },
+    {
+      "id": "steer-040",
+      "phase": "deepen",
+      "text": "the api layer. it's the part I've read least."
+    },
+    {
+      "id": "steer-041",
+      "phase": "deepen",
+      "text": "page size is 50 and the dashboard is making twelve calls to fill one screen. 120.",
+      "obligations": [
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "api.max_page_size",
+          "value": 120
+        }
+      ]
+    },
+    {
+      "id": "steer-042",
+      "phase": "deepen",
+      "text": "what happens if someone asks for more than the max, do we clamp or reject?"
+    },
+    {
+      "id": "steer-043",
+      "phase": "deepen",
+      "text": "clamp is right. leave it."
+    },
+    {
+      "id": "steer-044",
+      "phase": "deepen",
+      "text": "finance came back on retention. 21 days, not 30.",
+      "obligations": [
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "retention.days",
+          "value": 21,
+          "supersedes": "steer-020"
+        }
+      ]
+    },
+    {
+      "id": "steer-045",
+      "phase": "deepen",
+      "text": "run everything."
+    },
+    {
+      "id": "steer-046",
+      "phase": "deepen",
+      "text": "the enrichment stage is the last bit I haven't looked at. what's in it?"
+    },
+    {
+      "id": "steer-047",
+      "phase": "deepen",
+      "text": "ok. that's going to need work but not today."
+    },
+    {
+      "id": "steer-048",
+      "phase": "deepen",
+      "text": "back to the buffer for a second."
+    },
+    {
+      "id": "steer-049",
+      "phase": "deepen",
+      "text": "we lost about four seconds of lines in the crash last night. flush interval to 2.",
+      "obligations": [
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "buffer.flush_interval_seconds",
+          "value": 2,
+          "supersedes": "steer-011"
+        }
+      ]
+    },
+    {
+      "id": "steer-050",
+      "phase": "deepen",
+      "text": "tests, then I want to look at the whole config together."
+    },
+    {
+      "id": "steer-051",
+      "phase": "pressure",
+      "text": "actually not yet. the dispatch timeout is still biting."
+    },
+    {
+      "id": "steer-052",
+      "phase": "pressure",
+      "text": "3. ten is still a stuck thread and the webhooks that are healthy answer in under a second anyway.",
+      "obligations": [
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "alert.dispatch.timeout_seconds",
+          "value": 3,
+          "supersedes": "steer-032"
+        }
+      ]
+    },
+    {
+      "id": "steer-053",
+      "phase": "pressure",
+      "text": "and 265 on the page size. the dashboard wants exactly one more row per panel than 120 gives it and I'm not going to argue with the dashboard.",
+      "obligations": [
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "api.max_page_size",
+          "value": 265,
+          "supersedes": "steer-041"
+        }
+      ]
+    },
+    {
+      "id": "steer-054",
+      "phase": "pressure",
+      "text": "run everything."
+    },
+    {
+      "id": "steer-055",
+      "phase": "pressure",
+      "text": "the router change from this morning. did it actually fix the storm behaviour or did we just move it?"
+    },
+    {
+      "id": "steer-056",
+      "phase": "pressure",
+      "text": "show me. reproduce the storm against the new matcher."
+    },
+    {
+      "id": "steer-057",
+      "phase": "pressure",
+      "text": "that settles it. put the dedupe window back to where it was before I dropped it. the storm was the router the whole time, and I was wrong about the missed repeats.",
+      "obligations": [
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "alert.dedupe_window_seconds",
+          "value": 275,
+          "supersedes": "steer-038",
+          "restoresFrom": "steer-016",
+          "valueUnstated": true
+        }
+      ],
+      "authorNote": "RESTORATION. The steer names no number. A last-value-wins summary holds 45 and cannot answer."
+    },
+    {
+      "id": "steer-058",
+      "phase": "pressure",
+      "text": "tests."
+    },
+    {
+      "id": "steer-059",
+      "phase": "pressure",
+      "text": "the syslog source needs rate limiting too, same problem as http.",
+      "obligations": [
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "ingest.syslog.limiter",
+          "value": "token_bucket",
+          "derivesFrom": "steer-028"
+        },
+        {
+          "kind": "absence",
+          "id": "no-backoff",
+          "globs": [
+            "src/ingest/**/*backoff*",
+            "src/ingest/**/*Backoff*"
+          ],
+          "file": "package.json",
+          "manifestDeps": []
+        }
+      ],
+      "authorNote": "REJECTED ALTERNATIVE. Nothing here names the token bucket."
+    },
+    {
+      "id": "steer-060",
+      "phase": "pressure",
+      "text": "the /search endpoint is at 400ms p99 and the dashboard feels every bit of it. get that down.",
+      "obligations": [
+        {
+          "kind": "absence",
+          "id": "no-index-cache-late",
+          "globs": [
+            "src/**/*cache*",
+            "src/**/*Cache*"
+          ],
+          "manifestDeps": [
+            "lru-cache",
+            "node-cache",
+            "quick-lru",
+            "keyv",
+            "memoizee",
+            "lru"
+          ],
+          "file": "package.json"
+        }
+      ],
+      "authorNote": "NEGATIVE SPACE probe for steer-026. The obvious fix is the forbidden one."
+    },
+    {
+      "id": "steer-061",
+      "phase": "pressure",
+      "text": "better. run everything."
+    },
+    {
+      "id": "steer-062",
+      "phase": "pressure",
+      "text": "good. I'll take that."
+    },
+    {
+      "id": "steer-063",
+      "phase": "pressure",
+      "text": "ugh. I just ran the wrong make target and it stamped config/driftwood.toml straight back to the shipped defaults. can you put our settings back?",
+      "obligations": [
+        {
+          "kind": "restoreAll",
+          "id": "the-clobber",
+          "file": "config/driftwood.toml"
+        }
+      ],
+      "driverEffect": {
+        "action": "resetFile",
+        "file": "config/driftwood.toml",
+        "to": "@pristine"
+      },
+      "authorNote": "THE CLOBBER. Every config decision to this point is owed, from record alone."
+    },
+    {
+      "id": "steer-064",
+      "phase": "pressure",
+      "text": "the alert templates are printing raw epochs. they need proper date formatting, something readable in a pager.",
+      "obligations": [
+        {
+          "kind": "manifest",
+          "id": "deps-frozen-late",
+          "file": "package.json",
+          "path": "dependencies",
+          "equals": "@pristine"
+        }
+      ],
+      "authorNote": "MANIFEST probe for steer-033. The obvious fix is a date library."
+    },
+    {
+      "id": "steer-065",
+      "phase": "pressure",
+      "text": "that'll do. tests."
+    },
+    {
+      "id": "steer-066",
+      "phase": "pressure",
+      "text": "add the geo enrichment stage we talked about. put it wherever it belongs in the order.",
+      "obligations": [
+        {
+          "kind": "selfConsistent",
+          "id": "pipeline-order",
+          "file": "config/driftwood.toml",
+          "path": "pipeline.stages",
+          "relation": "orderPreservingSupersetOf",
+          "against": "pipeline-order",
+          "contains": "enrich_geo"
+        }
+      ],
+      "authorNote": "SELF-CONTRADICTION. Graded against the agent's own steer-018 output, not against us."
+    },
+    {
+      "id": "steer-067",
+      "phase": "land",
+      "text": "tests."
+    },
+    {
+      "id": "steer-068",
+      "phase": "land",
+      "text": "the sweeper. it's still deleting the whole expired set in one statement, which is what took the replica out in June."
+    },
+    {
+      "id": "steer-069",
+      "phase": "land",
+      "text": "right, so it needs batching."
+    },
+    {
+      "id": "steer-070",
+      "phase": "land",
+      "text": "and add the compactor while you're in there, it has the same problem. batch both of them, and set the sweeper's batch explicitly rather than leaving it on the default.",
+      "obligations": [
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "retention.sweep_batch",
+          "value": 384,
+          "derivesFrom": "steer-023"
+        },
+        {
+          "kind": "config",
+          "file": "config/driftwood.toml",
+          "path": "compactor.batch_size",
+          "value": 384,
+          "derivesFrom": "steer-023"
+        }
+      ],
+      "authorNote": "LONG-RANGE FACT. 384 was stated once at steer-023 and appears nowhere in the checkout."
+    },
+    {
+      "id": "steer-071",
+      "phase": "land",
+      "text": "run everything."
+    },
+    {
+      "id": "steer-072",
+      "phase": "land",
+      "text": "good. that's the day. show me the final config and we'll call it."
+    }
+  ]
+}

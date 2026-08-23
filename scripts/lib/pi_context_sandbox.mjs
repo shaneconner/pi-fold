@@ -104,6 +104,7 @@ export const HARNESS_SOURCE = Object.freeze([
   "extensions/settings.ts",
   "extensions/lib/canonical.ts",
   "extensions/lib/curation.ts",
+  "extensions/lib/editor-ui.ts",
   "extensions/lib/folding.ts",
   "extensions/lib/instrumentation.ts",
   "extensions/lib/measurement.ts",
@@ -114,6 +115,14 @@ export const HARNESS_SOURCE = Object.freeze([
   "extensions/lib/selection.ts",
   "extensions/lib/tool-surface.ts",
   "extensions/lib/transcript.ts",
+]);
+
+// What a STEER run needs on top of the v4 list: its own worker and that worker's library.
+// Both have to be importable before the harness deletion runs.
+export const STEER_HARNESS_SOURCE = Object.freeze([
+  ...HARNESS_SOURCE,
+  "scripts/run_steer_session_worker.mjs",
+  "scripts/lib/steer_session.mjs",
 ]);
 
 // A seeded ledger value is `lv-` and hex; a code word is `cw-` and hex. Any file
@@ -155,6 +164,11 @@ export function sandboxArgv(layout) {
     bwrap = "/usr/bin/bwrap",
     checkoutDir, sessionDir, runDir, harnessDir,
     piRoot, nodeExecutable, homeDir, identityDir, agentDir, authPath, scratchDir,
+    // The steer protocol grades the tree the agent LEAVES BEHIND, so its checkout has
+    // to be writable and its worker is a different script. Both default to the v4
+    // shape, because a sealed campaign must keep running exactly as it ran.
+    workWritable = false,
+    workerScript = "run_pi_context_experiment_worker.mjs",
   } = layout;
   for (const [name, value] of Object.entries({
     checkoutDir, sessionDir, runDir, harnessDir,
@@ -219,11 +233,13 @@ export function sandboxArgv(layout) {
     // mechanism carried instead of being pooled with it invisibly.
     "--bind", scratchDir, SANDBOX_PATHS.scratch,
     "--ro-bind", nodeExecutable, SANDBOX_PATHS.node,
-    // The run. The checkout is read-only because the answer key was computed
-    // against the pristine tree: an edit there would drift the graded material
-    // rather than escape anything, which makes this a measurement guard and not
-    // a containment one.
-    "--ro-bind", checkoutDir, SANDBOX_PATHS.work,
+    // The run. Under v4 the checkout is read-only because the answer key was computed
+    // against the pristine tree: an edit there would drift the graded material rather
+    // than escape anything, which makes this a measurement guard and not a containment
+    // one. Under the steer protocol the edited tree IS the graded material, so it is
+    // bound read-write and the pristine copy the grader diffs against never enters the
+    // namespace at all.
+    workWritable ? "--bind" : "--ro-bind", checkoutDir, SANDBOX_PATHS.work,
     "--bind", sessionDir, SANDBOX_PATHS.session,
     "--bind", runDir, SANDBOX_PATHS.run,
     "--bind", harnessDir, SANDBOX_PATHS.harness,
@@ -241,7 +257,7 @@ export function sandboxArgv(layout) {
     "--chdir", SANDBOX_PATHS.work,
     "--",
     SANDBOX_PATHS.node,
-    join(SANDBOX_PATHS.harness, "scripts", "run_pi_context_experiment_worker.mjs"),
+    join(SANDBOX_PATHS.harness, "scripts", workerScript),
     SANDBOX_PATHS.config,
   ];
 }

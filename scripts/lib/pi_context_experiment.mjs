@@ -4347,7 +4347,7 @@ export function contextEventMetrics(entries) {
   // finding (the agent never called the context tool at all) was discovered by hand
   // after the run; every question of that class must be a reported number here.
   const attempts = events.filter((event) => event.kind === "context.attempt");
-  const protects = events.filter((event) => event.kind === "context.protect");
+  const protects = events.filter((event) => event.kind === "context.pin");
   const foldEvents = events.filter((event) => event.kind === "context.fold");
   const byActionUsage = {};
   for (const attempt of attempts) {
@@ -4402,6 +4402,11 @@ export function contextEventMetrics(entries) {
         break;
       }
     }
+    // READ-SIDE ONLY. `rebrief` was deleted from the runtime on 2026-08-21, so no
+    // session recorded from that build forward can carry one. Sealed campaigns from
+    // before it can and do, and the corpus is immutable, so the lens keeps reading the
+    // action: dropping it here would silently re-score every steward-era run to zero
+    // uptake. The same applies to top_rebrief_target below. Do not "clean this up".
     const acceptedCuration = (from, to) => events.slice(from, to).filter((event) =>
       event.kind === "context.attempt" && event.ok === true &&
       (event.action === "fold" || event.action === "rebrief"));

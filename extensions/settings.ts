@@ -1,6 +1,6 @@
 // /fold-settings: user-facing configuration for the deployment options that are
 // otherwise code. The storage stays exactly what registerPiFold accepts (the
-// thresholds object set whole, providerInputBudget already net); this module only
+// thresholds object set whole); this module only
 // changes the experience: one validation path, an in-TUI editor over a JSON file,
 // and every state that reaches disk already passed resolveThresholds.
 //
@@ -36,18 +36,20 @@ export const DEFAULT_FOLD_SETTINGS_PATH = join(
 
 export interface FoldSettingsFile {
 	thresholds?: ActiveContextThresholds;
-	providerInputBudget?: number | null;
 }
 
-// Written as a union rather than derived from a const array: the array had exactly
-// one consumer, this type, and EDITOR_ROWS below is already the runtime enumeration
-// of which settings exist. Two lists would be the drift.
-export type FoldSettingId =
-	| "maxTarget"
-	| "minTarget"
-	| "freshTail"
-	| "consolidateAfter"
-	| "providerInputBudget";
+// The five settings, named once. This was a hand-written union until the migration
+// below needed the same names at runtime; deriving the type from the array is what
+// keeps the two readings from drifting apart.
+const THRESHOLD_FIELDS = [
+	"maxTarget",
+	"minTarget",
+	"freshTail",
+	"consolidateAfter",
+	"minFoldChars",
+] as const;
+
+export type FoldSettingId = typeof THRESHOLD_FIELDS[number];
 
 function readProportion(raw: string, field: string): number {
 	const value = Number(raw);
@@ -70,31 +72,14 @@ export function applyFoldSettingsEdit(
 	rawValue: string,
 ): { ok: true; draft: FoldSettingsFile } | { ok: false; error: string } {
 	try {
-		if (id === "providerInputBudget") {
-			const text = rawValue.trim();
-			if (text === "" || text.toLowerCase() === "auto") {
-				return { ok: true, draft: { ...draft, providerInputBudget: null } };
-			}
-			const value = Number(text);
-			if (!Number.isSafeInteger(value) || value <= 0) {
-				return {
-					ok: false,
-					error: "providerInputBudget must be a positive integer token count (or empty for auto)",
-				};
-			}
-			return { ok: true, draft: { ...draft, providerInputBudget: value } };
-		}
-		if (id === "consolidateAfter") {
+		if (id === "consolidateAfter" || id === "minFoldChars") {
 			const value = Number(rawValue.trim());
-			if (!Number.isSafeInteger(value) || value < 1) {
-				return {
-					ok: false,
-					error: "thresholds.consolidateAfter must be a positive integer count",
-				};
+			if (!Number.isSafeInteger(value)) {
+				return { ok: false, error: `thresholds.${id} must be a whole number` };
 			}
 			const thresholds = resolveThresholds({
 				...(draft.thresholds ?? DEFAULT_THRESHOLDS),
-				consolidateAfter: value,
+				[id]: value,
 			});
 			return { ok: true, draft: { ...draft, thresholds } };
 		}
@@ -110,38 +95,103 @@ export function applyFoldSettingsEdit(
 	}
 }
 
-export function loadFoldSettingsFile(path: string = DEFAULT_FOLD_SETTINGS_PATH): FoldSettingsFile {
+// Keys this package's own settings screen used to write. providerInputBudget left the
+// user surface on 2026-08-21 and stayed a registration option for the harness.
+const RETIRED_FILE_KEYS: readonly string[] = ["providerInputBudget"];
+
+export interface FoldSettingsLoad {
+	settings: FoldSettingsFile;
+	// Why the stored file was not used. Null when it was, including after a migration.
+	refusal: string | null;
+	// Fields the file predated were filled from the defaults and written back whole.
+	migrated: boolean;
+}
+
+/**
+ * A STORED FILE MAY NOT STOP THE AGENT (2026-08-22).
+ *
+ * The deployment calls this at module scope and hands the result to registerPiFold, so
+ * anything thrown here is a pi that does not start: "Failed to load extension ... :
+ * thresholds must declare minFoldChars". That is what shipping minFoldChars did to a
+ * settings file written the day before, and a user's own config is data rather than
+ * code: it may be refused, but it may not brick the session it configures.
+ *
+ * Two outcomes, and the split is deliberate.
+ *
+ * A file that is merely OLDER than the surface is MIGRATED. Fields it does not carry
+ * are filled from the defaults, the whole object is validated the ordinary way, and the
+ * result is written back so the file on disk is whole again, pinned at the value it was
+ * migrated with. That keeps the values the person actually tuned and keeps the
+ * whole-or-not-at-all law honest: a partial object never survives to be re-read against
+ * a later set of defaults. A failed write-back is not fatal either; the migration stands
+ * in memory and repeats harmlessly on the next boot.
+ *
+ * Anything else INVALID is refused by name and the package defaults are used, with the
+ * reason kept for /fold-settings to state. The limit is stated rather than hidden: a
+ * refused file reverts to defaults, and the settings screen is the only place that says
+ * so, so a person who never opens it sees defaults without being told why.
+ */
+export function readFoldSettingsFile(path: string = DEFAULT_FOLD_SETTINGS_PATH): FoldSettingsLoad {
 	let raw: string;
 	try {
 		raw = readFileSync(path, "utf8");
 	} catch (error: any) {
-		if (error?.code === "ENOENT") return {};
-		throw error;
+		if (error?.code === "ENOENT") return { settings: {}, refusal: null, migrated: false };
+		return { settings: {}, refusal: `fold settings file at ${path} could not be read: ${error?.message ?? error}`, migrated: false };
 	}
-	const parsed = JSON.parse(raw) as Record<string, unknown>;
+	const refused = (reason: string): FoldSettingsLoad => ({
+		settings: {},
+		refusal: `${reason}. Package defaults are in force; /fold-settings writes a valid file.`,
+		migrated: false,
+	});
+	let parsed: Record<string, unknown>;
+	try {
+		parsed = JSON.parse(raw) as Record<string, unknown>;
+	} catch (error: any) {
+		return refused(`fold settings file at ${path} is not valid JSON: ${error?.message ?? error}`);
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return refused(`fold settings file at ${path} must be a JSON object`);
+	}
+	// A key the surface RETIRED is dropped rather than refused: /fold-settings itself
+	// wrote providerInputBudget until 2026-08-21, so refusing it would revert a file
+	// this package created. A key that was never on the surface is still a refusal.
+	let dropped = false;
 	for (const key of Object.keys(parsed)) {
-		if (key !== "thresholds" && key !== "providerInputBudget") {
-			throw new Error(`fold settings file has no ${key} field: the surface is thresholds, providerInputBudget`);
-		}
+		if (key === "thresholds") continue;
+		if (RETIRED_FILE_KEYS.includes(key)) { delete parsed[key]; dropped = true; continue; }
+		return refused(`fold settings file has no ${key} field: the surface is thresholds`);
 	}
-	const settings: FoldSettingsFile = {};
-	if (parsed.thresholds !== undefined) {
-		settings.thresholds = resolveThresholds(parsed.thresholds);
+	if (parsed.thresholds === undefined) {
+		if (dropped) { try { saveFoldSettingsFile(path, {}); } catch { } }
+		return { settings: {}, refusal: null, migrated: dropped };
 	}
-	if (parsed.providerInputBudget !== undefined && parsed.providerInputBudget !== null) {
-		const value = parsed.providerInputBudget;
-		if (!Number.isSafeInteger(value) || value <= 0) {
-			throw new Error("providerInputBudget must be a positive integer token count");
-		}
-		settings.providerInputBudget = value;
+	const stored = parsed.thresholds;
+	if (!stored || typeof stored !== "object" || Array.isArray(stored)) {
+		return refused("fold settings thresholds must be an object");
 	}
-	return settings;
+	const supplied = stored as Record<string, unknown>;
+	const missing = THRESHOLD_FIELDS.filter((field) =>
+		!Object.prototype.hasOwnProperty.call(supplied, field));
+	try {
+		const thresholds = resolveThresholds(missing.length
+			? { ...Object.fromEntries(missing.map((field) => [field, DEFAULT_THRESHOLDS[field]])), ...supplied }
+			: supplied);
+		const migrated = missing.length > 0 || dropped;
+		if (migrated) { try { saveFoldSettingsFile(path, { thresholds }); } catch { } }
+		return { settings: { thresholds }, refusal: null, migrated };
+	} catch (error: any) {
+		return refused(`fold settings file at ${path} is invalid: ${error?.message ?? error}`);
+	}
+}
+
+export function loadFoldSettingsFile(path: string = DEFAULT_FOLD_SETTINGS_PATH): FoldSettingsFile {
+	return readFoldSettingsFile(path).settings;
 }
 
 export function saveFoldSettingsFile(path: string, settings: FoldSettingsFile): void {
 	const clean: FoldSettingsFile = {};
 	if (settings.thresholds !== undefined) clean.thresholds = settings.thresholds;
-	if (settings.providerInputBudget != null) clean.providerInputBudget = settings.providerInputBudget;
 	mkdirSync(dirname(path), { recursive: true });
 	const temporary = `${path}.tmp`;
 	writeFileSync(temporary, `${JSON.stringify(clean, null, 2)}\n`);
@@ -159,7 +209,7 @@ const EDITOR_ROWS: readonly EditorRow[] = [
 	{ id: "minTarget", label: "Post-commit aim", description: "Share the epoch cuts back down toward (minTarget)" },
 	{ id: "freshTail", label: "Fresh tail", description: "Protected recent share that never folds (freshTail)" },
 	{ id: "consolidateAfter", label: "Consolidation divisor", description: "Parents owed per epoch = visible roots divided by this (consolidateAfter)" },
-	{ id: "providerInputBudget", label: "Input budget", description: "Net input tokens the deployment may fill; empty derives it from the model window (providerInputBudget)" },
+	{ id: "minFoldChars", label: "Minimum fold size", description: "Characters a fold must reach to be worth making; a smaller gap between folds is absorbed by the fold beside it (minFoldChars)" },
 ];
 
 // The cycle lattices. Shares step in cents so no float drift reaches a threshold;
@@ -173,6 +223,11 @@ const SHARE_STEPS: Record<"maxTarget" | "minTarget" | "freshTail", { min: number
 
 const CONSOLIDATE_CHOICES = [2, 3, 4, 5, 6, 8, 10, 12, 15, 20];
 
+// Characters, not tokens: a token means a different amount of text on every wire, and
+// this is a number a person picks. The list starts at the hard floor the validator
+// enforces, below which a placeholder can cost more than the source it replaces.
+const MIN_FOLD_CHOICES = [2_000, 4_000, 6_000, 8_000, 12_000, 16_000, 24_000, 32_000];
+
 function shareCandidates(id: "maxTarget" | "minTarget" | "freshTail"): number[] {
 	const { min, max, step } = SHARE_STEPS[id];
 	const values: number[] = [];
@@ -184,7 +239,7 @@ function shareCandidates(id: "maxTarget" | "minTarget" | "freshTail"): number[] 
 
 function allowedValues(id: FoldSettingId, thresholds: ActiveContextThresholds, budgetTokens: number): string[] {
 	if (id === "consolidateAfter") return CONSOLIDATE_CHOICES.map(String);
-	if (id === "providerInputBudget") return [];
+	if (id === "minFoldChars") return MIN_FOLD_CHOICES.map((value) => `${value.toLocaleString("en-US")} chars`);
 	const { minTarget, maxTarget, freshTail } = thresholds;
 	let candidates: number[];
 	if (id === "maxTarget") {
@@ -200,19 +255,14 @@ function allowedValues(id: FoldSettingId, thresholds: ActiveContextThresholds, b
 }
 
 function rowRawValue(settings: FoldSettingsFile, id: FoldSettingId): string {
-	if (id === "providerInputBudget") {
-		return settings.providerInputBudget != null ? String(settings.providerInputBudget) : "";
-	}
 	const thresholds = settings.thresholds ?? DEFAULT_THRESHOLDS;
 	return String(thresholds[id]);
 }
 
 function rowDisplayValue(settings: FoldSettingsFile, id: FoldSettingId, budgetTokens: number): string {
-	if (id === "providerInputBudget") {
-		return settings.providerInputBudget != null ? `${settings.providerInputBudget.toLocaleString("en-US")} tokens` : "auto";
-	}
 	const raw = rowRawValue(settings, id);
 	if (id === "consolidateAfter") return raw;
+	if (id === "minFoldChars") return `${Number(raw).toLocaleString("en-US")} chars`;
 	// toFixed(2) matches the cycle entries exactly; String(0.8) renders "0.8" while
 	// the cycle list carries "0.80", and SettingsList cycles by indexOf(currentValue).
 	return `${Number(raw).toFixed(2)} · ${Math.round(Number(raw) * budgetTokens).toLocaleString("en-US")} tok`;
@@ -290,12 +340,17 @@ export class FoldSettingsEditor extends Container {
 		private readonly settingsPath: string,
 		private readonly themeLike: any,
 		private readonly done: (saved: boolean) => void,
+		// Why the stored file was not used, when it was not. This screen is the only
+		// place a refused file is ever named, so it says so before showing the
+		// defaults that took its place.
+		notice: string | null = null,
 	) {
 		super();
 		const theme = this.themeLike;
 		this.addChild(new SettingsBorder((text) => theme.fg("border", text)));
 		this.addChild(new Text(theme.bold(theme.fg("accent", "pi-fold settings")), 0, 0));
 		this.addChild(new Text(theme.fg("muted", "Shares are of the serving budget; edits save immediately. ←→ steps · Enter types an exact value."), 0, 0));
+		if (notice) this.addChild(new Text(theme.fg("error", notice), 0, 0));
 		this.addChild(new Spacer(1));
 		// SettingsList takes its own theme shape; adapt it off the live theme.
 		const listTheme = {
@@ -336,9 +391,9 @@ export class FoldSettingsEditor extends Container {
 	// filtered against the CURRENT draft, so stepping can never leave the policy
 	// surface; an exact off-lattice value arrives only through Enter's editor.
 	private step(id: FoldSettingId, direction: number): void {
-		if (id === "providerInputBudget") return;
 		const thresholds = this.draft.thresholds ?? DEFAULT_THRESHOLDS;
-		const candidates = allowedValues(id, thresholds).map((entry) => Number.parseFloat(entry));
+		const candidates = allowedValues(id, thresholds).map((entry) =>
+			Number.parseFloat(entry.replace(/,/g, "")));
 		const current = Number(rowRawValue(this.draft, id));
 		const target = direction > 0
 			? candidates.find((candidate) => candidate > current + 1e-9)
@@ -391,16 +446,23 @@ export function registerFoldSettings(
 ): void {
 	const settingsPath = options.settingsPath ?? DEFAULT_FOLD_SETTINGS_PATH;
 	pi.registerCommand("fold-settings", {
-		description: "Configure pi-fold: commit trigger, post-commit aim, fresh tail, consolidation divisor, input budget",
+		description: "Configure pi-fold: commit trigger, post-commit aim, fresh tail, consolidation divisor, minimum fold size",
 		handler: async (_args: string, ctx: any) => {
 			if (typeof ctx.ui?.custom !== "function") {
 				throw new Error("/fold-settings needs an interactive UI; set thresholds in the settings file instead");
 			}
-			const draft = loadFoldSettingsFile(settingsPath);
+			const stored = readFoldSettingsFile(settingsPath);
 			const descriptorWindow = ctx.model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
-			const budgetTokens = draft.providerInputBudget ?? servingBudgetTokens(descriptorWindow);
+			// SHARES APPLY TO THE MODEL WINDOW (Shane, 2026-08-21): providerInputBudget is
+			// off the user surface, so what a share means is derived from the descriptor's
+			// own window and nothing else. The registration option still exists for the
+			// experiment harness, which declares a budget so runs stay comparable across
+			// descriptor changes; no person has to know that to read this screen.
+			const budgetTokens = servingBudgetTokens(descriptorWindow);
 			await ctx.ui.custom((_tui: unknown, theme: any, _keybindings: unknown, done: (saved: boolean) => void) =>
-				new FoldSettingsEditor(draft, budgetTokens, settingsPath, theme, done));
+				new FoldSettingsEditor(
+					stored.settings, budgetTokens, settingsPath, theme, done, stored.refusal,
+				));
 		},
 	});
 }

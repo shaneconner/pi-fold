@@ -4,6 +4,7 @@ import { registerEvidenceIngestion } from "./evidence.js";
 export {
   applyFoldSettingsEdit,
   loadFoldSettingsFile,
+  readFoldSettingsFile,
   registerFoldSettings,
   saveFoldSettingsFile,
 } from "./settings.ts";
@@ -29,9 +30,9 @@ const REFUSED_OPTIONS = Object.freeze({
   entryTypePrefix: "the deployment identity is hardwired to pi-fold: durable state lives " +
     "under pi-fold-active-context, and moving it would strand every fold already written",
   commandPrefix: "the deployment identity is hardwired to pi-fold: the commands are " +
-    "/fold-status, /fold-context and /fold-settings",
+    "/fold, /fold-editor, /fold-status and /fold-settings",
   commandNames: "the deployment identity is hardwired to pi-fold: the commands are " +
-    "/fold-status, /fold-context and /fold-settings",
+    "/fold, /fold-editor, /fold-status and /fold-settings",
   isMcpTool: "MCP tools are recognized by the mcp__server__tool naming convention. The " +
     "predicate defaulted to false, so conventionally named MCP tools were never classified " +
     "unless a host supplied one, which is a documented feature that never ran",

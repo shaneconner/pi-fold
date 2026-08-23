@@ -261,8 +261,11 @@ function curation({ entries, foldRecords, contextToolName, workerEvents = [], wo
       pendingAgentMarks: workerReport?.foldSummary?.pendingAgentMarks ?? null,
     },
     expandCalls: byAction.expand ?? 0,
-    protectCalls: byAction.protect ?? 0,
-    unprotectCalls: byAction.unprotect ?? 0,
+    // The verbs were renamed protect/unprotect -> pin/unpin (Shane 2026-08-21: the
+    // guidance already called it pinning). Both names are read so a sealed run from
+    // either era counts, and no run recorded the old verb anyway (corpus sweep: 0).
+    pinCalls: (byAction.pin ?? 0) + (byAction.protect ?? 0),
+    unpinCalls: (byAction.unpin ?? 0) + (byAction.unprotect ?? 0),
     refoldCalls: byAction.refold ?? 0,
     peekCalls: byAction.peek ?? 0,
     // totalFolds counts fold RECORDS written by the runtime. It is NOT a count of prefix
@@ -498,7 +501,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     ? curation({ entries: runEntries, foldRecords, contextToolName, workerEvents, workerReport: worker })
     : { contextToolCalls: 0, byAction: {}, totalFolds: 0, totalFoldsCounts: "fold-records",
       headlineMutationMetric: "usage.mutations", voluntaryFolds: 0, automaticFolds: 0,
-      voluntaryFoldShare: null, expandCalls: 0, protectCalls: 0, unprotectCalls: 0,
+      voluntaryFoldShare: null, expandCalls: 0, pinCalls: 0, unpinCalls: 0,
       refoldCalls: 0, peekCalls: 0, foldKinds: {},
       // The same lens on an arm that folds nothing: it reads the empty run rather than
       // stating a hand-written zero, so the two arms can never report different shapes.

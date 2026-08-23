@@ -1860,9 +1860,9 @@ try {
       error: "No exact source spans matched" }),
     custom({ kind: "context.attempt", ordinal: 8, action: "protect", ok: true,
       tool_call_id: "call_3", marks_requested: 0, corrections_applied: 0, error: null }),
-    custom({ kind: "context.protect", ordinal: 8, protect: true, ids: "fold_1",
+    custom({ kind: "context.pin", ordinal: 8, protect: true, ids: "fold_1",
       id_count: 1, protected_refs_before: 0, protected_refs_after: 3 }),
-    custom({ kind: "context.protect", ordinal: 9, protect: true, ids: "fold_1",
+    custom({ kind: "context.pin", ordinal: 9, protect: true, ids: "fold_1",
       id_count: 1, protected_refs_before: 3, protected_refs_after: 3 }),
     custom({ kind: "context.commit", ordinal: 10, deferred: false, pending_marks: 2 }),
     custom({ kind: "context.fold", ordinal: 10, fold_id: "fold_2", origin: "agent",
@@ -3735,15 +3735,22 @@ try {
     "a failed automatic transaction no longer reaches the suspension announcement");
   assert(!/outcome: "retrying"/.test(transaction),
     "a failed automatic transaction still has an outcome that is not a suspension");
-  // And BOTH automatic callers are inside it. Marking and committing are one
-  // transaction, so a commit that vanishes at persistence restores the state it entered
-  // with and announces itself for the same reason a mark does. The boundary used to
-  // persist outside it, which left a discarded commit with nothing to roll back to.
+  // And EVERY automatic caller is inside it. A commit that vanishes at persistence has
+  // to restore the state it entered with and announce itself, and the boundary used to
+  // persist outside the transaction, which left a discarded commit with nothing to roll
+  // back to. The callers are DISCOVERED rather than listed, so a new one added outside
+  // the block fails here instead of being missed; the list used to name
+  // attemptAutomaticRung beside the commit, and that caller was deleted on 2026-08-21
+  // with eager staging, leaving the commit as the only automatic mutation there is.
   const queue = runtimeSource.slice(
     runtimeSource.indexOf("const queueAutomatic = ("),
     runtimeSource.indexOf("const projectionCandidates = ("),
   );
-  for (const caller of ["attemptAutomaticRung", "attemptAutomaticCommit"]) {
+  const automaticCallers = [...runtimeSource.matchAll(/const (attemptAutomatic\w+) = \(/g)]
+    .map((match) => match[1]);
+  assert(automaticCallers.length >= 1,
+    "no automatic caller was found at all, so this check proves nothing");
+  for (const caller of automaticCallers) {
     assert(new RegExp(`const ${caller} = \\([\\s\\S]*?queueAutomatic\\(`).test(queue),
       `${caller} reaches the ladder outside the durable transaction`);
   }
@@ -3869,15 +3876,18 @@ try {
       `a receipt delivery is followed by ${JSON.stringify(next)} rather than by the return, ` +
       "so the commit can do more work after paying and a missing receipt stops meaning a throw");
   }
-  // And the rung itself no longer pays one, because it no longer folds: it marks, and a
-  // mark moves no bytes for a receipt to describe.
-  const rung = runtimeSource.slice(
-    runtimeSource.indexOf("const applyAutomaticRung = async ("),
-    runtimeSource.indexOf("const runAutomaticTransaction = async ("),
-  );
-  assert(rung.length > 0, "the automatic rung application was not found where it is pinned");
-  assert(!/noteAutomaticReceipt\(/.test(rung),
-    "the rung pays a receipt for a mark, which moves no bytes for one to describe");
+  // And NOTHING ELSE in the runtime pays one. A receipt describes bytes that moved, and
+  // the commit is the only thing that moves bytes, so a second payer would be describing
+  // a rewrite that did not happen. This used to be stated as "the rung pays no receipt",
+  // naming applyAutomaticRung; that function was deleted on 2026-08-21 along with eager
+  // staging, and counting the calls says the same thing without naming a caller.
+  const withoutDeclaration = runtimeSource.replace("const noteAutomaticReceipt = (", "");
+  const callSites = [...withoutDeclaration.matchAll(/noteAutomaticReceipt\(/g)].length;
+  const commitCallSites = [...commitEpoch.matchAll(/noteAutomaticReceipt\(/g)].length;
+  assert(commitCallSites >= 1, "the commit epoch pays no receipt at all");
+  assert.equal(callSites, commitCallSites,
+    `${callSites - commitCallSites} receipt(s) are paid outside the commit epoch, and only ` +
+    "the commit moves bytes for one to describe");
 
   checks.anAppliedCommitOwesAReceipt = true;
 }
@@ -9310,6 +9320,9 @@ checks.aBreakpointRetestAttributesAcceptanceOnlyOverAHealthyEnvelope = true;
 // past the commit and the take share read 0 over a real uptake). A directed
 // crossing therefore also reads an ANSWER window to the next directed
 // crossing; absorbed, advisory-only, and pre-directed crossings read null.
+// READ-SIDE ONLY, as of 2026-08-21: `rebrief` is deleted from the runtime, so no
+// session recorded from that build forward carries one. Every steward-era campaign
+// does, and the corpus is immutable, so the lens and these fixtures keep the action.
 // ---------------------------------------------------------------------------
 {
   const event = (kind, data = {}) => ({

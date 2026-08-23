@@ -78,7 +78,7 @@ export function branchTo(entries, leafId) {
 // Walk the same fold forest the runtime projects. A revealed parent does not
 // reveal a collapsed child: renderFoldParts routes that child back through
 // renderFold, so the child's brief is visible and its source stays recoverable.
-// Protection can reveal either level independently, and a rebrief override is
+// Protection can reveal either level independently, and a brief override is
 // the visible brief because foldBrief is the runtime's one accessor.
 export function projectionCarriers({ runtime, state, snapshot }) {
   const byId = new Map(state.folds.map((fold) => [fold.id, fold]));

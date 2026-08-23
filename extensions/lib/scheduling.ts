@@ -22,6 +22,7 @@ import {
   hardFenceRatio,
   mappedByKey,
   orderedRoots,
+  protectedStaleMass,
   refsProtected,
   toolRefsProtected,
 } from "./measurement.ts";
@@ -36,7 +37,6 @@ import {
 import { currentTurnRefKeys } from "./transcript.ts";
 import {
   ESTIMATED_BYTES_PER_TOKEN,
-  MAX_WEDGE_ABSORB_TOKENS,
   ESTIMATED_PLACEHOLDER_OVERHEAD_BYTES,
   MAX_PENDING_MARKS,
   MAX_UNMARKED_CANDIDATES,
@@ -58,6 +58,7 @@ import {
   partsForRange,
   peekedSourceFoldIds,
   selectAutomaticConsolidations,
+  selectAutomaticRefold,
   spanBytes,
   deterministicChapterCandidateBrief,
   deterministicConsolidationBrief,
@@ -442,7 +443,6 @@ export function ephemeralPeekMarks(input: {
     if (!peeked) continue;
     if (peeked.some((id) => state.expanded.includes(id) || peekedFoldProtected(snapshot, state, id))) continue;
     if (refs.some((ref) => claimed.has(objectRefKey(ref))) ||
-        refs.length > snapshot.policy.maxFoldSourceRefs ||
         toolRefsProtected(refs, state, snapshot)) continue;
     const candidate: FoldCandidate = {
       kind: "tool-result",
@@ -524,6 +524,131 @@ export function unmarkedRemainder(
   };
 }
 
+/**
+ * The pending mark that already holds a piece of this evidence, if any.
+ *
+ * The commit fills from the stale end and the current-turn guard can retain what it
+ * marked, so a ladder mark occasionally outlives the commit that made it. An agent
+ * marking the same evidence afterwards would stand a second owner over one span and
+ * lose at apply time with a forest invariant for a message. Refusing at the tool says
+ * so while the agent can still act on it.
+ */
+export function markClaimingRef(
+  state: ActiveContextState,
+  refs: readonly EvidenceRef[],
+): { markId: string; entryId: string } | null {
+  for (const mark of pendingMarks(state)) {
+    if (mark.mark !== "fold") continue;
+    const claimed = new Set(markSpanRefs(state, mark).refs.map(objectRefKey));
+    for (const ref of refs) {
+      if (claimed.has(objectRefKey(ref))) return { markId: mark.id, entryId: ref.entryId };
+    }
+  }
+  return null;
+}
+
+export interface WindowClaims {
+  /** Tokens standing marks will free at the next commit. */
+  markedTokens: number;
+  /** Tokens the agent pinned raw: a claim that frees nothing and is never taken. */
+  pinnedTokens: number;
+  pinnedRefs: number;
+  /** Pinned mass as a share of the serving budget, against its cap. */
+  pinnedShare: number;
+  /** Completed units neither marked nor pinned: what the ladder takes by age. */
+  unclaimedTokens: number;
+  unclaimedSpans: number;
+}
+
+/**
+ * A PIN IS A CLAIM, NOT A FOLD (Shane, 2026-08-22: "if they do a pin on raw span I think
+ * we also treat that as a marked fold but a pinned one").
+ *
+ * Read as accounting, that is exactly right and already half true: pinned evidence is
+ * refused to every automatic rung, skipped by wedge absorption, and excluded from the
+ * unmarked remainder, so the ladder cannot take it and it is never reported as an
+ * oversight. What was missing is that the agent could not SEE it, and the whole point of
+ * asking an agent to account for its window is that the gaps become visible.
+ *
+ * A pin cannot count toward the DROP, and that is not a technicality. Pinned bytes stay
+ * in the window, so they free nothing; if they counted, an agent could "cover" a commit
+ * with pins, the commit would still be short, and it would fold something else anyway.
+ * The number would be a lie at the moment it mattered most. So the three buckets are
+ * reported side by side and only one of them pays.
+ */
+export function windowClaims(input: {
+  snapshot: ActiveContextSnapshot;
+  state: ActiveContextState;
+  budgetTokens: number;
+  charsPerToken: number;
+}): WindowClaims {
+  const { snapshot, state, budgetTokens } = input;
+  const accounting = markAccounting(snapshot, state);
+  const remainder = unmarkedRemainder(snapshot, state, input.charsPerToken);
+  const pinned = protectedStaleMass(snapshot, state);
+  const pinnedTokens = estimatedTokens(pinned.bytes);
+  return {
+    markedTokens: Math.round(accounting.eligibleFreedBudgetShare * budgetTokens),
+    pinnedTokens,
+    pinnedRefs: pinned.refs,
+    pinnedShare: budgetTokens > 0 ? pinnedTokens / budgetTokens : 0,
+    unclaimedTokens: remainder.tokens,
+    unclaimedSpans: remainder.spans,
+  };
+}
+
+export interface CommitCoverage {
+  /** The share of the serving budget the next commit is sized to free. */
+  targetShare: number;
+  targetTokens: number;
+  /** What the standing marks will actually free when that commit runs. */
+  markedShare: number;
+  markedTokens: number;
+  /** What the ladder will take by staleness unless the agent marks it first. */
+  remainingTokens: number;
+  covered: boolean;
+}
+
+/**
+ * WHAT THE NEXT COMMIT NEEDS, AND HOW MUCH OF IT THE AGENT HAS COVERED.
+ *
+ * One definition, read by three callers that used to reason about the drop separately:
+ * the commit fill that sizes itself to it, the advisory that warns before it, and the
+ * mark response that tells the agent where it stands. An agent asked to govern its own
+ * context cannot do it against a number nobody tells it.
+ *
+ * The marked side is the ELIGIBLE share, not every standing mark, because a mark the
+ * current-turn guard will retain frees nothing at this commit however good it is. That
+ * makes `remainingTokens` the honest answer to "what will fold without me".
+ *
+ * `targetShare` moves as the window grows: it is measured from occupancy NOW, and two
+ * large results landing after the reading raise it again. Callers that render it say so.
+ */
+export function commitCoverage(input: {
+  snapshot: ActiveContextSnapshot;
+  state: ActiveContextState;
+  usedTokens: number | null;
+  budgetTokens: number;
+}): CommitCoverage {
+  const { snapshot, state, usedTokens, budgetTokens } = input;
+  const targetShare = usedTokens === null || !(budgetTokens > 0)
+    ? 0
+    : Math.max(0, (usedTokens - snapshot.thresholds.minTarget * budgetTokens) / budgetTokens);
+  const accounting = markAccounting(snapshot, state);
+  const markedShare = accounting.eligibleFreedBudgetShare;
+  const targetTokens = Math.round(targetShare * budgetTokens);
+  const markedTokens = Math.round(markedShare * budgetTokens);
+  const remainingTokens = Math.max(0, targetTokens - markedTokens);
+  return {
+    targetShare,
+    targetTokens,
+    markedShare,
+    markedTokens,
+    remainingTokens,
+    covered: remainingTokens === 0,
+  };
+}
+
 export function markedFoldIds(state: ActiveContextState): Set<string> {
   const ids = new Set<string>();
   for (const mark of pendingMarks(state)) if (mark.mark === "refold") ids.add(mark.id);
@@ -581,6 +706,50 @@ export function topUpMarks(input: {
   return marks;
 }
 
+/**
+ * REFOLD AS THE LAST FILL, NOT THE FIRST (Shane, 2026-08-21).
+ *
+ * An expanded fold is stale mass sitting in the window, so the commit may reclaim it,
+ * but only after raw stale material has been spent. An agent that expands a fold is
+ * reading it; taking it back while there is still unfolded material to take is hostile
+ * for no gain. Pin holds a span past that point, and a live lease holds it for the
+ * generations right after the expand. Stalest first, and never past the freeing target.
+ */
+export function refoldMarks(input: {
+  snapshot: ActiveContextSnapshot;
+  state: ActiveContextState;
+  ordinal: number;
+  targetShare: number;
+  eligibleOnly?: boolean;
+}): PendingMark[] {
+  const { snapshot } = input;
+  const marks: PendingMark[] = [];
+  let state = input.state;
+  const claimedFoldIds = markedFoldIds(state);
+  const progress = (value: ActiveContextState): number => {
+    const accounting = markAccounting(snapshot, value);
+    return input.eligibleOnly ? accounting.eligibleFreedBudgetShare : accounting.freedBudgetShare;
+  };
+  let share = progress(state);
+  while (share < input.targetShare) {
+    const foldId = selectAutomaticRefold(snapshot, state, claimedFoldIds);
+    if (!foldId) break;
+    const mark: PendingMark = {
+      mark: "refold",
+      id: foldId,
+      origin: "ladder",
+      ordinal: input.ordinal,
+    };
+    const addition = addPendingMark(state, mark);
+    if (!addition.added) break;
+    state = addition.state;
+    marks.push(mark);
+    claimedFoldIds.add(foldId);
+    share = progress(state);
+  }
+  return marks;
+}
+
 export interface AbsorbedWedge {
   intoMarkId: string;
   fromMarkId: string;
@@ -588,6 +757,7 @@ export interface AbsorbedWedge {
   endId: string;
   entries: number;
   tokens: number;
+  chars: number;
 }
 
 export function absorbWedgeMarks(input: {
@@ -631,8 +801,16 @@ export function absorbWedgeMarks(input: {
       const gapEnd = interval.start - 1;
       if (gapStart < 0 || gapEnd < gapStart) continue;
       if (absorbed.some((item) => item.intoMarkId === mark.id)) continue;
-      const gapTokens = Math.ceil(spanBytes(snapshot, gapStart, gapEnd + 1) / charsPerToken);
-      if (gapTokens > MAX_WEDGE_ABSORB_TOKENS) continue;
+      // THE GAP FLOOR IS THE FOLD FLOOR (Shane, 2026-08-21). A gap between two folds
+      // that could not stand as a fold on its own has no business staying raw: it costs
+      // its own bytes and buys nothing, and the neighbour beside it can hold it for the
+      // price of one sentence in the brief. So anything under minFoldChars is absorbed
+      // and anything at or over it is left alone, because at that size it is a fold the
+      // ladder will take on its own terms. This replaced MAX_WEDGE_ABSORB_TOKENS, a
+      // separate 256-token constant that let 1,024-char slivers survive between folds.
+      const gapBytes = spanBytes(snapshot, gapStart, gapEnd + 1);
+      if (gapBytes >= snapshot.thresholds.minFoldChars) continue;
+      const gapTokens = Math.ceil(gapBytes / charsPerToken);
       const gapRefs = [];
       let usable = true;
       for (let index = gapStart; index <= gapEnd; index += 1) {
@@ -669,6 +847,7 @@ export function absorbWedgeMarks(input: {
         endId: gapRefs.at(-1)!.entryId,
         entries: gapRefs.length,
         tokens: gapTokens,
+        chars: gapBytes,
       });
       applied = true;
       break;
@@ -831,7 +1010,7 @@ export async function commitPendingMarks(input: {
       if (blocked) {
         throw new Error(
           `pending fold mark ${mark.id} covers protected or fresh evidence; ` +
-          "unprotect that evidence and mark it again",
+          "unpin that evidence and mark it again",
         );
       }
       const prepared = await prepareFold({

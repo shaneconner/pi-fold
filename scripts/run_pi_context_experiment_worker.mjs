@@ -111,6 +111,9 @@ const jiti = createJiti(import.meta.url, {
   fsCache: false,
   alias: {
     "@earendil-works/pi-coding-agent": join(PI_ROOT, "dist", "index.js"),
+    // The fold editor's renderer imports Pi's TUI package. It resolves normally in the
+    // checkout, and inside the namespace only aliased names resolve at all.
+    "@earendil-works/pi-tui": join(PI_ROOT, "node_modules", "@earendil-works", "pi-tui", "dist", "index.js"),
     typebox: join(PI_ROOT, "node_modules", "typebox", "build", "index.mjs"),
   },
 });

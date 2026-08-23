@@ -22,6 +22,7 @@ import {
   descendantIds,
   encodedFoldSource,
   foldCandidatesDetail,
+  foldIndexRow,
   foldTreeDetail,
   peekFoldSource,
   prepareFold,
@@ -29,7 +30,6 @@ import {
   projectionSlateCandidates,
   protectEvidence,
   requireActiveFold,
-  selectAutomaticChapter,
   selectAutomaticRung,
   setFoldProjectionState,
   withExpandLease,
@@ -70,7 +70,6 @@ import {
   clearPrepared,
   deriveFoldParents,
   flattenFoldRefs,
-  foldBrief,
   foldIdFor,
   makeFoldRecordEntry,
   makeStateCheckpoint,
@@ -97,6 +96,7 @@ import {
   DEFAULT_ACTIVE_CONTEXT_TOOL_LABEL,
   DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
   COMMIT_RECLAIM_FLOOR_SHARE,
+  STEWARD_WARNING_SHARE,
   CONTEXT_RECEIPT_BLOCK_BYTES,
   DEFAULT_CONTEXT_WINDOW,
   resolveGuidance,
@@ -107,10 +107,11 @@ import {
   entryTypeNamespace,
   MAX_FOLD_SPAN_CHARS,
   MAX_PINNED_SHARE,
-  MAX_WEDGE_ABSORB_TOKENS,
   PEEK_DEFAULT_MAX_BYTES,
+  peekIsEphemeral,
   PEEK_MIN_SLICE_BYTES,
   PEEK_READ_ONLY_CONTEXT_ACTIONS,
+  RETIRED_TOOL_ACTIONS,
   AUTO_FOLD_BLACKLIST_DEFAULT,
   USER_RESCUE_MAX_SOURCE_CHARS,
 } from "./lib/policy.ts";
@@ -127,6 +128,7 @@ import type {
 } from "./lib/policy.ts";
 import {
   absorbWedgeMarks,
+  markSpanRefs,
 } from "./lib/scheduling.ts";
 import {
   contextReceipt,
@@ -141,10 +143,12 @@ import type {
 } from "./lib/curation.ts";
 import {
   addPendingMark,
-  claimedRefKeys,
+  commitCoverage,
+  windowClaims,
   commitPendingMarks,
   consolidationMarks,
   ephemeralPeekMarks,
+  epochCommitDue,
   estimatedTokens,
   foldMarkFor,
   ladderBrief,
@@ -153,22 +157,20 @@ import {
   markFreedBytes,
   unmarkedRemainder,
   guardWaiverCount,
-  markedFoldIds,
+  markClaimingRef,
   markOrdinal,
-  pendingMarks,
   markTouchesCurrentTurn,
+  pendingMarks,
+  refoldMarks,
   schedulingStatus,
   topUpMarks,
   withPendingMarks,
 } from "./lib/scheduling.ts";
 import {
-  candidateSpanChars,
   manualFoldCandidate,
   peekedSourceFoldIds,
-  selectAutomaticToolBatch,
   snapFoldCandidate,
   snapToFoldBoundaries,
-  splitCandidateBySize,
 } from "./lib/selection.ts";
 import type { SpanCorrection } from "./lib/selection.ts";
 import {
@@ -187,6 +189,7 @@ import type {
   ProjectionChange,
 } from "./lib/instrumentation.ts";
 import { buildActiveContextCommands, buildActiveContextTool } from "./lib/tool-surface.ts";
+import { buildFoldEditorData, FoldEditorView } from "./lib/editor-ui.ts";
 import {
   currentTurnRefKeys,
   mapActiveContext,
@@ -1512,6 +1515,45 @@ export function registerActiveContext(pi: any, options: {
     ctx.abort();
   };
 
+  // THE BAND TOP COMMITS ON ITS OWN (Shane, 2026-08-22).
+  //
+  // `maxTarget` is what the settings panel calls the commit trigger, and until now it
+  // fired nothing. There were two commit sites: the fence below, which measures against
+  // the WHOLE serving budget plus a margin, and the compaction boundary, which is Pi's
+  // own threshold near the top of the window. A live 1M-window session sat at 571,367
+  // tokens against a stated trigger of 516,096 with `folds: 0`, because neither site was
+  // anywhere near. On a 251,520-token budget the fence sits close enough behind the
+  // boundary to hide it; at 1M the two are half a million tokens apart.
+  //
+  // Shane, on the shape of the fix: "if the context is over our max, we commit. I don't
+  // think that should be anything like once it crosses this threshold or anything like
+  // that, it should just be an if statement. That way there isn't much room for error, if
+  // it's over we fold." So there is no latch and no crossing to detect. Every projection
+  // pass asks one question and acts on the answer. Occupancy only moves when the provider
+  // measures, and a second attempt inside one handoff already defers on the mutation
+  // budget, so "one commit per pass while over" is what this produces. A pass that finds
+  // nothing to fold says so in the stream, which is a state worth seeing rather than one
+  // worth suppressing.
+  const enforceBandTop = async (
+    snapshot: ActiveContextSnapshot,
+    ctx: any,
+  ): Promise<boolean> => {
+    if (!epochCommitDue(snapshot, measurements.latestRatio)) return false;
+    let action: Record<string, unknown> | null = null;
+    try {
+      // NULL WAIVER RATIO, deliberately. The band top is routine housekeeping at a stated
+      // threshold, not an emergency, and `guardWaiverCount` returns 0 for a null ratio. It
+      // therefore never spends the OPEN turn's own evidence: every current-turn mark is
+      // retained and waits. The fence and the compaction boundary keep the waiver, because
+      // they are the two places where something has already gone wrong.
+      action = await attemptAutomaticCommit(snapshot, ctx, "band-top", null);
+    } catch (error) {
+      suspendAutomatic(error, "band-top", ctx);
+      return false;
+    }
+    return action !== null;
+  };
+
   const enforceProjectionBudget = async (
     snapshot: ActiveContextSnapshot,
     projected: unknown[],
@@ -1731,77 +1773,57 @@ export function registerActiveContext(pi: any, options: {
     const used = capacity.usedTokens;
     const budget = capacity.budgetTokens;
     const inflow = expectedWallInflowTokens();
-    if (used === null || !(budget > 0) || !(inflow > 0)) return null;
-    // The steward band sits one inflow step ahead of the wall's own: the agent gets
-    // roughly one request's worth of room to mark finished units with its own briefs
-    // before the band-top epoch takes the remainder with deterministic ones. Inside
-    // the wall band and past the budget the existing lanes own the moment, so the
-    // advisory stands down exactly where they stand up, and with no measured inflow
-    // pairing there is no band at all.
-    if (used + inflow > budget) return null;
-    if (used + 2 * inflow <= budget) return null;
+    if (used === null || !(budget > 0)) return null;
+    // THE BAND IS ANCHORED TO THE COMMIT TRIGGER, NOT THE BUDGET (Shane, 2026-08-22).
+    //
+    // It used to sit one inflow step below the SERVING BUDGET, which on any real
+    // deployment is above the trigger rather than below it: at a 251,520-token budget
+    // with maxTarget 0.80 the epoch fires at 201,216 while the old band opened around
+    // 226,520, so the advisory arrived after the commit was already due. That is the
+    // mechanical half of why the sealed corpus recorded zero voluntary folds across 30
+    // runs; the agent was told to mark at a moment when marking could no longer matter.
+    //
+    // The warning distance is Shane's ten percent of the budget, or one worst recent
+    // inflow step if that is wider. The floor is what a person can reason about; the
+    // inflow term is what stops the band being JUMPED, since a single large result can
+    // step the window from under a fixed band to over the trigger in one arrival, and a
+    // band nothing lands inside is a band that never asks.
+    //
+    // It stands from there until the budget rather than yielding inside the wall band.
+    // Yielding was the old law and it is exactly backwards: the wall band is where the
+    // commit's forward look fires, which is the last moment marking still changes what
+    // gets folded. Past the budget the request is already being refused and the recovery
+    // lanes own it, so that is where the advisory stops.
+    const trigger = thresholds.maxTarget * budget;
+    const warning = Math.max(STEWARD_WARNING_SHARE * budget, inflow);
+    if (used < trigger - warning) return null;
+    if (used > budget) return null;
     const state = persistence.state!;
     const remainder = unmarkedRemainder(snapshot, state, projectionCharsPerToken());
-    // Under real pressure the ladder has already claimed every completed batch
-    // by the time the band is reached (sol-20260820-steward rep 2: 111 folds,
-    // zero unclaimed candidates at every band moment, every rider's anchors 0),
-    // so the durable invitation is the one the agent can always act on: the
-    // newest standing folds whose briefs are not the agent's own, correctable
-    // through rebrief. Newest first, because a brief worth writing needs the
-    // agent to still remember what the fold holds; an expanded fold is visible
-    // raw and needs no brief right now.
-    // Only a fold whose BRIEF actually renders is worth rebriefing: the offline
-    // brief-function study (2026-08-20) measured visible carriage at 43 percent
-    // natural and ZERO seeded because consolidation parents dilute their
-    // children's briefs to subject lines, so a hidden child's brief carries
-    // nothing however good it is. The walk mirrors the projection's own render
-    // rule: a collapsed fold shows its brief; a revealed one shows its parts.
-    const visibleBriefFolds: ActiveFold[] = [];
-    const byFoldId = new Map(state.folds.map((fold) => [fold.id, fold]));
-    const walkVisible = (fold: ActiveFold): void => {
-      const refs = flattenFoldRefs(fold, state);
-      const revealed = state.expanded.includes(fold.id) || (fold.kind === "tool-result"
-        ? toolRefsProtected(refs, state, snapshot)
-        : refsProtected(refs, state, snapshot));
-      if (!revealed) {
-        visibleBriefFolds.push(fold);
-        return;
-      }
-      for (const part of fold.parts) {
-        if (part.kind !== "raw") {
-          const child = byFoldId.get(part.foldId);
-          if (child) walkVisible(child);
-        }
-      }
-    };
-    for (const fold of state.folds) if (fold.parentId === null) walkVisible(fold);
-    // Largest first: the fold covering the most source has the most diluted
-    // brief (a consolidation parent's 2,000 chars divide across about ten
-    // children per level), so it is where a rebrief buys the most carriage.
-    // Consolidation parents are by construction the largest, which is exactly
-    // the study's re-aim. Ties break newest first, while the agent still
-    // remembers what the span holds.
-    const rebriefTargets = visibleBriefFolds
-      .map((fold, index) => ({ fold, index, refs: flattenFoldRefs(fold, state).length }))
-      .filter(({ fold }) => !state.briefs?.[fold.id] &&
-        foldProvenance(fold, state).kind !== "agent")
-      .sort((a, b) => b.refs - a.refs || b.index - a.index)
-      .slice(0, 3)
-      .map(({ fold }) => ({
-        id: fold.id,
-        kind: fold.kind,
-        briefHead: String(foldBrief(fold, state) ?? "").slice(0, 200),
-      }));
-    if (!remainder.candidates.length && !rebriefTargets.length) return null;
+    // THE UNMARKED REMAINDER IS THE LIVE CHANNEL AGAIN (2026-08-21). It was
+    // permanently empty in production (sol-20260820-steward rep 2: 111 folds,
+    // zero unclaimed candidates at every band moment, every rider's anchors 0)
+    // because the eager ladder had already claimed every completed batch before
+    // the band was reached. Nothing stages between commits now, so what the band
+    // sees is exactly what the agent has not marked, which is what the advisory
+    // was built to name. The rebrief invitation that replaced it is deleted with
+    // the action: it cost a full prefix rewrite at the fold's placeholder.
+    if (!remainder.candidates.length) return null;
     const accounting = markAccounting(snapshot, state);
+    const coverage = commitCoverage({ snapshot, state, usedTokens: used, budgetTokens: budget });
+    const claims = windowClaims({
+      snapshot, state, budgetTokens: budget, charsPerToken: projectionCharsPerToken(),
+    });
     const text = stewardAdvisoryText({
       toolName,
       brandNoun,
       usedTokens: used,
       budgetTokens: budget,
+      triggerTokens: Math.round(trigger),
       inflowTokens: inflow,
       candidates: remainder.candidates,
-      rebriefTargets,
+      coverage,
+      claims,
       pendingAgentMarks: accounting.agentMarks,
       eligibleMarks: accounting.eligibleMarks,
     });
@@ -1814,8 +1836,13 @@ export function registerActiveContext(pi: any, options: {
         unmarked_spans: remainder.spans,
         unmarked_tokens: remainder.tokens,
         largest_candidate: remainder.candidates[0]?.id ?? null,
-        rebrief_targets: rebriefTargets.length,
-        top_rebrief_target: rebriefTargets[0]?.id ?? null,
+        trigger_tokens: Math.round(trigger),
+        warning_tokens: Math.round(warning),
+        commit_target_tokens: coverage.targetTokens,
+        marked_toward_commit_tokens: coverage.markedTokens,
+        unmarked_against_commit_tokens: coverage.remainingTokens,
+        pinned_tokens: claims.pinnedTokens,
+        pinned_refs: claims.pinnedRefs,
         pending_agent_marks: accounting.agentMarks,
         eligible_marks: accounting.eligibleMarks,
         chars: text.length,
@@ -2116,6 +2143,7 @@ export function registerActiveContext(pi: any, options: {
     let state = persistence.state!;
     let peekAdded = 0;
     let topUpAdded = 0;
+    let refoldAdded = 0;
     let consolidationAdded = 0;
     let closingAdded = 0;
     for (const mark of ephemeralPeekMarks({ snapshot, state, ordinal })) {
@@ -2143,48 +2171,58 @@ export function registerActiveContext(pi: any, options: {
       });
       return null;
     }
-    const freeingTarget = usedTokens === null || budgetTokens <= 0
-      ? 0
-      : Math.max(0, (usedTokens - thresholds.minTarget * budgetTokens) / budgetTokens);
-    // AGENT PRIORITY (Shane, 2026-08-21): if the agent staged any mark, the ladder
-    // adds nothing at this epoch -- no top-up, no backstop, no wedge absorption.
-    // The agent owns the epoch; the ladder is the fallback for the epoch the agent
-    // ignored, and it fills fresh right here rather than ever staging in advance.
-    const agentCurated = pendingMarks(state).some((mark) => mark.origin === "agent");
-    if (topUp && !agentCurated) {
-      for (const mark of topUpMarks({
-        snapshot,
-        state,
-        ordinal,
-        eligibleOnly: true,
-        targetShare: freeingTarget,
-      })) {
+    // ONE DEFINITION OF THE DROP. The fill sizes itself to it, the advisory warns
+    // against it, and the mark response answers "how much more" with it.
+    const freeingTarget = commitCoverage({ snapshot, state, usedTokens, budgetTokens }).targetShare;
+    // ONE COMMIT, SIZED BEFORE IT RUNS (Shane, 2026-08-21). At the threshold we know how
+    // far the window has to come down: `freeingTarget` is the distance from what is used
+    // now to the minTarget floor. The agent's marks count toward that distance first and
+    // the ladder fills the remainder from the stale end, so an agent that marked 30k of a
+    // 100k drop leaves 70k for the fill and both land in the SAME commit.
+    //
+    // Three rules decide the fill, and each replaced something that was tried first:
+    //
+    // The ladder does not STAND DOWN when the agent has marked. Standing down commits at
+    // whatever depth the agent happened to reach, so one small mark commits a barely-moved
+    // window and the next fence pass fires a second commit in the same cycle, which is the
+    // cache cost the one-commit rule exists to prevent. `topUpMarks` measures progress
+    // against the state it is handed, so agent marks are counted rather than displaced,
+    // and `claimedRefKeys` keeps the fill off spans the agent already took.
+    //
+    // Raw stale material is spent BEFORE expanded folds, so an agent reading an expanded
+    // fold keeps it while anything else can cover the drop. This is also the only route
+    // to the refold rung now that nothing stages between commits.
+    //
+    // The fill measures progress over EVERY mark it makes, not just the ones this commit
+    // will apply. Measuring the eligible share alone is what a starved commit needs and it
+    // is wrong here: a mark the current-turn guard will retain moves the eligible share by
+    // nothing, so the loop kept marking and walked a whole 24-batch open excursion chasing
+    // a target it could not reach that way. Counting everything bounds the fill at the drop
+    // it was asked for, and the guard holds back what belongs to the open turn for the next
+    // commit. The backstop still reads the eligible share, because starvation is the one
+    // state where the difference is the point.
+    const fill = (targetShare: number, eligibleOnly: boolean): void => {
+      for (const mark of topUpMarks({ snapshot, state, ordinal, eligibleOnly, targetShare })) {
         const addition = addPendingMark(state, mark);
         if (addition.added) { state = addition.state; topUpAdded += 1; }
       }
+      for (const mark of refoldMarks({ snapshot, state, ordinal, eligibleOnly, targetShare })) {
+        const addition = addPendingMark(state, mark);
+        if (addition.added) { state = addition.state; refoldAdded += 1; }
+      }
+    };
+    if (topUp) {
+      fill(freeingTarget, false);
       const reachedShare = markAccounting(snapshot, state).eligibleFreedBudgetShare;
       const shallow = reachedShare < Math.max(commitDepthFloorShare(snapshot), freeingTarget);
-      if (shallow && atOrAboveBackstop(snapshot, waiverRatio)) {
-        for (const mark of topUpMarks({
-          snapshot,
-          state,
-          ordinal,
-          eligibleOnly: true,
-          targetShare: 1,
-        })) {
-          const addition = addPendingMark(state, mark);
-          if (addition.added) { state = addition.state; topUpAdded += 1; }
-        }
-      }
+      if (shallow && atOrAboveBackstop(snapshot, waiverRatio)) fill(1, true);
     }
-    const wedges = agentCurated
-      ? { state, absorbed: [] as AbsorbedWedge[] }
-      : absorbWedgeMarks({
-        snapshot,
-        state,
-        charsPerToken: projectionCharsPerToken(),
-        excludeRefKeys: guarded,
-      });
+    const wedges = absorbWedgeMarks({
+      snapshot,
+      state,
+      charsPerToken: projectionCharsPerToken(),
+      excludeRefKeys: guarded,
+    });
     state = wedges.state;
     const accounting = markAccounting(snapshot, state);
     if (!accounting.pending) {
@@ -2289,6 +2327,7 @@ export function registerActiveContext(pi: any, options: {
       ladder_marks: accounting.ladderMarks,
       peek_marks: peekAdded,
       topup_marks: topUpAdded,
+      refold_marks: refoldAdded,
       consolidation_marks: consolidationAdded,
       closing_consolidation_marks: closingAdded,
       absorbed_wedges: wedges.absorbed.length,
@@ -2364,7 +2403,8 @@ export function registerActiveContext(pi: any, options: {
         end_id: wedge.endId,
         entries: wedge.entries,
         tokens: wedge.tokens,
-        threshold_tokens: MAX_WEDGE_ABSORB_TOKENS,
+        chars: wedge.chars,
+        threshold_chars: thresholds.minFoldChars,
       });
     }
     const epoch = {
@@ -2376,6 +2416,7 @@ export function registerActiveContext(pi: any, options: {
       ladderMarks: accounting.ladderMarks,
       peekMarks: peekAdded,
       topUpMarks: topUpAdded,
+      refoldMarks: refoldAdded,
       consolidationMarks: consolidationAdded,
       closingMarks: closingAdded,
       absorbedWedges: wedges.absorbed.length,
@@ -2727,6 +2768,18 @@ export function registerActiveContext(pi: any, options: {
       if (abortUnsafeHardContext(snapshot, ctx, true)) {
         updateStatus(ctx);
         return { messages: event.messages };
+      }
+      // BEFORE the fence, so an ordinary crossing is an ordinary commit and the fence is
+      // left holding only the requests that genuinely will not fit.
+      if (await enforceBandTop(snapshot, ctx)) {
+        mutationAttempted = true;
+        persistedSucceeded = true;
+        try { projected = projectWithAdvisory(snapshot); }
+        catch (error) {
+          suspendAutomatic(error, "projection", ctx);
+          abortUnsafeHardContext(snapshot, ctx);
+          return { messages: event.messages };
+        }
       }
       const budgeted = await enforceProjectionBudget(snapshot, projected, ctx);
       projected = budgeted.projected;
@@ -3209,6 +3262,11 @@ export function registerActiveContext(pi: any, options: {
     if (!persistence.state) persistence.state = emptyActiveContextState(ctx.sessionManager.getSessionId());
     const executionArgumentsSha256 = sha256Value(params);
     const action = String(params.action ?? "");
+    // A deleted action is refused BY NAME rather than by "not enabled": the two are
+    // different facts, and an agent told a verb is merely off will keep offering it.
+    if (Object.prototype.hasOwnProperty.call(RETIRED_TOOL_ACTIONS, action)) {
+      throw new Error(RETIRED_TOOL_ACTIONS[action]);
+    }
     if (!allowedToolActionSet.has(action)) {
       throw new Error(`${toolName} action '${action}' is not enabled in this runtime`);
     }
@@ -3237,7 +3295,6 @@ export function registerActiveContext(pi: any, options: {
           persistence.state,
           statusOffset,
           statusLimit,
-          snapshot.policy.maxFoldSourceRefs,
           { diet: !paged },
         ),
         headroomTokens: currentCapacity(ctx).headroomTokens,
@@ -3359,7 +3416,7 @@ export function registerActiveContext(pi: any, options: {
         params.bytes,
         PEEK_DEFAULT_MAX_BYTES,
         PEEK_MIN_SLICE_BYTES,
-        snapshot.policy.maxChapterChars,
+        snapshot.policy.maxSourceChars,
         "bytes",
       );
       const target = persistence.state.folds.find((item) => item.id === id);
@@ -3381,36 +3438,14 @@ export function registerActiveContext(pi: any, options: {
           offset,
           toolName,
         }),
-        ...(params.ephemeral === true ? {
+        ...(peekIsEphemeral(params) ? {
           ephemeral: "this result rides your context exactly until your next message; " +
-            "carry forward what matters in your reply, which takes over its place",
-        } : {}),
+            "extract what your current task needs into that reply, which takes over its " +
+            "place. Peeking again is lossless and cheap; pass ephemeral false when you " +
+            "need these bytes standing for several turns",
+        } : { durable: "this result stays in your context like any other tool result" }),
       });
       return payload;
-    }
-    if (action === "rebrief") {
-      const id = String(params.id ?? "").trim();
-      if (!id) throw new Error("rebrief requires id");
-      const brief = typeof params.brief === "string" ? params.brief.trim() : "";
-      if (!brief) throw new Error("rebrief requires a nonempty brief");
-      if (brief.length > snapshot.policy.maxBriefChars) {
-        throw new Error(`rebrief brief must be at most ${snapshot.policy.maxBriefChars} characters`);
-      }
-      const fold = requireActiveFold(snapshot, persistence.state, id);
-      const previous = foldBrief(fold, persistence.state);
-      const briefs = { ...(persistence.state.briefs ?? {}), [id]: brief };
-      await persistManual({ ...persistence.state, revision: persistence.state.revision + 1, briefs }, action, ctx);
-      updateStatus(ctx);
-      return toolPayload({
-        version: 1,
-        action,
-        id,
-        brief,
-        previousBrief: previous,
-        durableRevision: persistence.state.revision,
-        activation: "the fold's placeholder and index rows now carry your brief; " +
-          "the exact source and its fold record are untouched.",
-      });
     }
     if (action === "reboundary") {
       if (params.ids !== undefined) {
@@ -3438,7 +3473,10 @@ export function registerActiveContext(pi: any, options: {
         const recut = manualFoldCandidate(snapshot, persistence.state, snapped.ids, { allowProtected: true });
         const created: Array<Record<string, unknown>> = [];
         const correctedBriefs: Record<string, string> = {};
-        for (const part of splitCandidateBySize(snapshot, persistence.state, recut)) {
+        // Re-cut whole, for the same reason a mark is taken whole: the agent named this
+        // boundary, and splitting it hands one brief to several folds that each hold a
+        // fraction of what it describes.
+        for (const part of [recut]) {
           const durable = persistence.persistedFoldRecords.get(foldIdFor(part.kind, part.parts));
           const { preparedFold, nextState } = await prepareAndCommitExplicit({
             snapshot, candidate: part, brief: durable ? durable.fold.brief : supplied, ctx, signal,
@@ -3556,11 +3594,11 @@ export function registerActiveContext(pi: any, options: {
         activation: "durable immediately; projected on the next model call in this same turn",
       });
     }
-    if (action === "protect" || action === "unprotect") {
+    if (action === "pin" || action === "unpin") {
       const ids = stringIds(params.ids);
       const refsBefore = persistence.state.protected.length;
-      const nextProtection = protectEvidence(snapshot, persistence.state, ids, action === "protect");
-      if (action === "protect") {
+      const nextProtection = protectEvidence(snapshot, persistence.state, ids, action === "pin");
+      if (action === "pin") {
         const capacity = servingCapacity(snapshot.contextWindow);
         const prospectiveShare = capacity.budgetTokens > 0
           ? estimatedTokens(explicitProtectedMass(snapshot, nextProtection).bytes) / capacity.budgetTokens
@@ -3569,26 +3607,56 @@ export function registerActiveContext(pi: any, options: {
           throw new Error(
             `protect refused: these pins would hold ${Math.round(prospectiveShare * 100)}% of the ` +
             `working window raw, past the ${Math.round(MAX_PINNED_SHARE * 100)}% pinned-share cap. ` +
-            'Release earlier pins with {"action":"unprotect","ids":["<entry-id>"]} first; ' +
+            'Release earlier pins with {"action":"unpin","ids":["<entry-id>"]} first; ' +
             "folding keeps entries exactly recoverable without pinning them.");
         }
       }
       await persistManual(nextProtection, action, ctx);
       const refsAfter = persistence.state.protected.length;
-      emit("context.protect", {
-        protect: action === "protect",
+      emit("context.pin", {
+        pin: action === "pin",
         ids: ids.join(","),
         id_count: ids.length,
         protected_refs_before: refsBefore,
         protected_refs_after: refsAfter,
       });
       updateStatus(ctx);
+      // A PIN IS A CLAIM ON THE WINDOW, so it answers with the same picture a mark does.
+      // It never pays the drop, and saying so here is what stops an agent pinning its way
+      // to a coverage it does not have.
+      const pinCapacity = servingCapacity(snapshot.contextWindow);
+      const pinClaims = windowClaims({
+        snapshot,
+        state: persistence.state,
+        budgetTokens: pinCapacity.budgetTokens,
+        charsPerToken: projectionCharsPerToken(),
+      });
+      const pinCoverage = commitCoverage({
+        snapshot,
+        state: persistence.state,
+        usedTokens: pinCapacity.usedTokens,
+        budgetTokens: pinCapacity.budgetTokens,
+      });
       return toolPayload({
         version: 1,
         action,
         ids,
         protectedRefs: refsAfter,
-        activation: "durable immediately; projected on the next model call in this same turn",
+        pinnedTokens: pinClaims.pinnedTokens,
+        pinnedShare: pinClaims.pinnedShare,
+        maxPinnedShare: MAX_PINNED_SHARE,
+        markedTowardCommitTokens: pinClaims.markedTokens,
+        unclaimedTokens: pinClaims.unclaimedTokens,
+        commitTargetTokens: pinCoverage.targetTokens,
+        unmarkedAgainstCommitTokens: pinCoverage.remainingTokens,
+        activation: action === "pin"
+          ? "durable immediately; projected on the next model call in this same turn. " +
+            "Pinned entries stay RAW and are never folded, automatically or by a mark, so " +
+            "this is how you keep a span expanded. It frees nothing: the next commit still " +
+            "has to reach its drop from what is left, so pinned mass makes the rest of the " +
+            "window fold sooner rather than later."
+          : "durable immediately; projected on the next model call in this same turn. The " +
+            "released entries are foldable again and rejoin the next commit's candidates.",
       });
     }
     if (action === "unmark") {
@@ -3623,37 +3691,29 @@ export function registerActiveContext(pi: any, options: {
       }> = [];
       for (const request of requested) {
         const snapped = snapFoldCandidate(snapshot, persistence.state, request.ids, { allowProtected: true });
-        const spanChars = candidateSpanChars(snapshot, persistence.state, snapped.candidate);
-        const parts = splitCandidateBySize(snapshot, persistence.state, snapped.candidate);
-        for (const [index, part] of parts.entries()) {
-          resolved.push({
-            candidate: part,
-            brief: request.brief,
-            corrections: index === 0
-              ? [
-                ...snapped.corrections,
-                ...(parts.length > 1
-                  ? [{
-                    from: request.ids,
-                    to: [],
-                    reason: `span was ${spanChars} chars, over the ${MAX_FOLD_SPAN_CHARS}-char bite-size cap; ` +
-                      `split into ${parts.length} sequential folds, each with its own brief`,
-                  }]
-                  : []),
-              ]
-              : [],
-            splitFrom: parts.length > 1 && index === 0 ? spanChars : 0,
-          });
-        }
-        if (parts.length > 1) {
-          emit("context.split", {
-            source: "agent",
-            span_chars: spanChars,
-            parts: parts.length,
-            cap_chars: MAX_FOLD_SPAN_CHARS,
-            fold_ids: "",
-          });
-        }
+        // AN AGENT'S SPAN IS TAKEN WHOLE (Shane, 2026-08-22). The bite-size cap was
+        // applied to manual marks too, and it was the only caller: the ladder never
+        // splits, because `selectAutomaticChapter` stops accumulating at the cap on its
+        // own. So the split existed solely to second-guess the one judgement the design
+        // wants to encourage, and it charged for it twice. One intended fold became five
+        // or ten placeholders, and every piece was handed the SAME brief, so each one
+        // claimed to describe a span it held a fraction of, while the correction text
+        // said "each with its own brief", which was never true.
+        //
+        // The cap stays for the ladder, where it was earned (2026-08-06 rep 6: one
+        // 60,432-byte chapter hid the fact the run needed). The difference is who chose
+        // the boundary. A ladder fold is a span nobody vouched for, so it is kept small
+        // enough to read back cheaply. An agent fold is a span the agent cut and wrote a
+        // brief for, and it stays navigable by a route that did not exist in 2026-08:
+        // peek takes offset and bytes, states the omitted middle, and reads any child id,
+        // so a large fold has a narrow read. An expand that will not fit is refused with
+        // a peek offered instead, so size costs a refusal rather than a window.
+        resolved.push({
+          candidate: snapped.candidate,
+          brief: request.brief,
+          corrections: snapped.corrections,
+          splitFrom: 0,
+        });
       }
       const corrections = resolved.flatMap((item) => item.corrections);
       const marks: Array<Record<string, unknown>> = [];
@@ -3665,6 +3725,27 @@ export function registerActiveContext(pi: any, options: {
         const deferred = refsProtected(candidate.sourceRefs, staged, snapshot) ||
           (candidate.kind === "tool-result" &&
             toolRefsProtected(candidate.sourceRefs, staged, snapshot));
+        // A MARK IS EDITABLE UNTIL IT COMMITS (Shane, 2026-08-21). Marking a span you
+        // already marked REPLACES the mark, so a brief written in haste is corrected by
+        // writing it again: the span is identical, the id derives from the span, and no
+        // byte has moved yet, so the correction costs nothing at all. After the commit
+        // the fold is standing and there is no rewrite verb, because rewriting a
+        // standing brief rewrites the projection at its placeholder; `reboundary`
+        // re-cuts the span instead, which was going to rewrite anyway.
+        const replacing = foldIdFor(candidate.kind, candidate.parts);
+        const claimed = markClaimingRef(staged, candidate.sourceRefs);
+        if (claimed && claimed.markId !== replacing) {
+          marks.push({
+            id: replacing,
+            kind: candidate.kind,
+            ok: false,
+            deferred: false,
+            reason: `Evidence ${claimed.entryId} is already held by pending mark ${claimed.markId}, ` +
+              `which folds at the next commit. Unmark ${claimed.markId} first if you want to ` +
+              "mark this span differently.",
+          });
+          continue;
+        }
         const suppliedComplaint = item.brief === undefined
           ? null
           : briefContractComplaint(item.brief.trim(), snapshot.policy.maxBriefChars, snapshot.toolName);
@@ -3697,6 +3778,15 @@ export function registerActiveContext(pi: any, options: {
           origin: "agent",
           ordinal: markOrdinal(snapshot),
         });
+        // Drop the standing mark over this exact span before adding, so a re-mark is a
+        // replacement rather than a duplicate refusal. `claimed` is this same mark by the
+        // check above, and the id is derived from the span, so the state after is the
+        // state a first mark with the new brief would have produced.
+        const replaced = claimed !== null;
+        if (replaced) {
+          staged = withPendingMarks(staged,
+            pendingMarks(staged).filter((standing) => standing.id !== replacing));
+        }
         const addition = addPendingMark(staged, mark);
         if (!addition.added) {
           marks.push({ id: mark.id, kind: mark.kind, ok: false, deferred: false, reason: addition.reason });
@@ -3708,6 +3798,7 @@ export function registerActiveContext(pi: any, options: {
           kind: mark.kind,
           ok: true,
           deferred,
+          ...(replaced ? { replaced: true } : {}),
           ...(deferred
             ? {
               scheduled: "the span is still in the fresh window; this mark is held and folds at the " +
@@ -3727,6 +3818,24 @@ export function registerActiveContext(pi: any, options: {
         tokens: estimatedTokens(markFreedBytes(snapshot, persistence.state!, mark)),
       }));
       const remainder = unmarkedRemainder(snapshot, persistence.state, projectionCharsPerToken());
+      // WHERE THIS LEAVES THE NEXT COMMIT. The agent is being asked to govern its own
+      // window, and it cannot aim at a drop nobody states, so every mark comes back with
+      // the arithmetic of the epoch it is heading for.
+      const markCapacity = servingCapacity(snapshot.contextWindow);
+      const coverage = commitCoverage({
+        snapshot,
+        state: persistence.state,
+        usedTokens: markCapacity.usedTokens,
+        budgetTokens: markCapacity.budgetTokens,
+      });
+      // THREE BUCKETS, so a gap is visible as a gap. Marked pays the drop, pinned is a
+      // deliberate hold that pays nothing, unclaimed is what the ladder takes by age.
+      const claims = windowClaims({
+        snapshot,
+        state: persistence.state,
+        budgetTokens: markCapacity.budgetTokens,
+        charsPerToken: projectionCharsPerToken(),
+      });
       const only = marks.length === 1 && marks[0].ok === true ? marks[0] : null;
       return toolPayload({
         version: 1,
@@ -3741,6 +3850,7 @@ export function registerActiveContext(pi: any, options: {
             brief: only.brief,
             provenance: only.provenance,
             deferred: only.deferred,
+            ...(only.replaced ? { replaced: true } : {}),
             ...(only.scheduled ? { scheduled: only.scheduled } : {}),
           }
           : {}),
@@ -3760,8 +3870,16 @@ export function registerActiveContext(pi: any, options: {
         unmarkedTokens: remainder.tokens,
         unmarkedShare: remainder.share,
         unmarkedCandidates: remainder.candidates,
+        commitTargetTokens: coverage.targetTokens,
+        markedTowardCommitTokens: coverage.markedTokens,
+        unmarkedAgainstCommitTokens: coverage.remainingTokens,
+        commitCovered: coverage.covered,
+        pinnedTokens: claims.pinnedTokens,
+        pinnedRefs: claims.pinnedRefs,
+        pinnedShare: claims.pinnedShare,
+        unclaimedTokens: claims.unclaimedTokens,
         ...(guidance.actionResponses ? {
-          awareness: markAwarenessText({ held, remainder, toolName, brandNoun }),
+          awareness: markAwarenessText({ held, remainder, coverage, claims, toolName, brandNoun }),
           activation: "accepted as pending marks; no context bytes moved, and nothing else in your " +
             "context changed either. They apply together at the next commit epoch, which the runtime " +
             "opens at the fold event. " +
@@ -3798,7 +3916,7 @@ export function registerActiveContext(pi: any, options: {
           marks_requested: requestedMarkCount(params),
           corrections_applied: corrections.length,
           arguments_sha256: sha256Value(params ?? {}),
-          ...(action === "peek" && params?.ephemeral === true ? { ephemeral: true } : {}),
+          ...(action === "peek" ? { ephemeral: peekIsEphemeral(params) } : {}),
         });
         for (const correction of corrections) {
           const from = denseOwnArrayValues(ownValue(correction, "from")) ?? [];
@@ -3818,7 +3936,7 @@ export function registerActiveContext(pi: any, options: {
         const result = await executeAction(params, signal, ctx);
         const corrections = denseOwnArrayValues(ownValue(ownValue(result, "details"), "corrections"));
         attempt(true, null, (corrections ?? []) as Array<Record<string, unknown>>);
-        if (action === "peek" && params?.ephemeral === true) ephemeralPeeks.add(toolCallId);
+        if (action === "peek" && peekIsEphemeral(params)) ephemeralPeeks.add(toolCallId);
         return result;
       } catch (error) {
         attempt(false, error instanceof Error ? error.message : String(error), []);
@@ -3852,7 +3970,11 @@ export function registerActiveContext(pi: any, options: {
       if (!lifecycle.latestSnapshot) lifecycle.latestSnapshot = snapshot;
       const divider = args.indexOf(" -- ");
       const selector = (divider >= 0 ? args.slice(0, divider) : args).trim();
-      if (selector === "commit") {
+      // BARE /fold IS THE COMMIT (Shane, dogfooding 2026-08-22): staging is the
+      // normal accumulation and applying it is the default verb. The old bare behavior
+      // rescue-folded an auto-offered chapter, which read as the command ignoring the
+      // staged pile; a rescue now needs explicit ids.
+      if (!selector || selector === "commit") {
         const capacity = servingCapacity(snapshot.contextWindow);
         const occupancy = capacity.usedTokens !== null && capacity.budgetTokens > 0
           ? capacity.usedTokens / capacity.budgetTokens
@@ -3882,9 +4004,13 @@ export function registerActiveContext(pi: any, options: {
       }
       const supplied = (divider >= 0 ? args.slice(divider + 4) : "").trim() || undefined;
       const ids = selector ? selector.replace(/\.\./g, " ").split(/[\s,]+/).filter(Boolean) : [];
-      const candidate = ids.length
-        ? manualFoldCandidate(snapshot, persistence.state!, ids)
-        : selectAutomaticChapter(snapshot, persistence.state!) ?? selectAutomaticToolBatch(snapshot, persistence.state!)[0] ?? null;
+      if (!ids.length) {
+        throw new Error(
+          "Nothing to rescue without ids: /fold with no arguments commits every staged mark; " +
+            "name the span to fold now (/fold <start-id> [end-id] -- brief)",
+        );
+      }
+      const candidate = manualFoldCandidate(snapshot, persistence.state!, ids);
       if (!candidate) throw new Error("No exact stale rescue span is currently eligible");
       const stateBefore = persistence.state!;
       const persistedBefore = persistence.persisted ? clone(persistence.persisted) : null;
@@ -3931,6 +4057,109 @@ export function registerActiveContext(pi: any, options: {
     }
   };
 
+  /**
+   * /fold-editor, V1 READ-ONLY. The handler assembles a plain data snapshot of the
+   * working window and hands it to the view; the view holds no runtime reference and
+   * no mutation path, so opening it cannot move a byte. Every edit action that lands
+   * in later versions must come through an existing validated tool path.
+   */
+  const foldEditorCommandHandler = async (_args: string, ctx: any): Promise<void> => {
+    if (typeof ctx.ui?.custom !== "function") {
+      throw new Error("/fold-editor needs an interactive UI; use /fold-status for the text form");
+    }
+    const snapshot = lifecycle.latestSnapshot
+      ? authoritativeSnapshotFor(ctx)
+      : snapshotForEvent(ctx, ctx.sessionManager.buildSessionContext().messages);
+    if (!lifecycle.latestSnapshot) lifecycle.latestSnapshot = snapshot;
+    const state = persistence.state;
+    if (!state) throw new Error("The context window is empty; there is nothing to show yet");
+    const capacity = servingCapacity(snapshot.contextWindow);
+    const occupancy = capacity.usedTokens !== null && capacity.budgetTokens > 0
+      ? capacity.usedTokens / capacity.budgetTokens
+      : null;
+    const accounting = markAccounting(snapshot, state);
+    await ctx.ui.custom((
+      _tui: unknown,
+      theme: any,
+      keybindings: { matches(data: string, action: string): boolean } | null,
+      done: () => void,
+    ) =>
+      new FoldEditorView({
+        title: `pi-fold context editor · ${snapshot.sessionId.slice(0, 8)}`,
+        occupancy: {
+          usedTokens: capacity.usedTokens,
+          budgetTokens: capacity.budgetTokens,
+          commitOccupancy: thresholds.maxTarget,
+          commitDue: occupancy !== null && occupancy >= thresholds.maxTarget,
+        },
+        blocks: buildFoldEditorData(snapshot, state, {
+          foldRows: () => (state.folds ?? []).map((fold: any) => {
+            const row = foldIndexRow(fold, state, snapshot);
+            const entries = flattenFoldRefs(fold, state)
+              .map((ref) => {
+                const item = exactMapped(snapshot, ref);
+                const message = item?.message as Record<string, unknown> | undefined;
+                const role = String(item?.ref?.role ?? message?.role ?? "entry");
+                const content = message?.content;
+                let preview = "";
+                if (typeof content === "string") preview = content.slice(0, 300);
+                else if (Array.isArray(content)) {
+                  const firstText = content.find((part) => part?.type === "text");
+                  preview = typeof firstText?.text === "string" ? firstText.text.slice(0, 300) : "";
+                }
+                return { id: ref.entryId, role, preview: preview.replace(/\s+/g, " ") };
+              });
+            return {
+              id: String(row.id),
+              kind: String(row.kind ?? ""),
+              brief: String(row.brief ?? ""),
+              sourceCount: Number(row.sourceCount ?? 0),
+              startPosition: Number(row.startPosition),
+              endPosition: Number(row.endPosition),
+              entries,
+            };
+          }),
+          pendingMarkRefs: () => pendingMarks(state)
+            .filter((mark) => mark.mark === "fold")
+            .map((mark) => ({
+              id: mark.id,
+              origin: String(mark.origin),
+              brief: String(mark.brief ?? ""),
+              entryIds: markSpanRefs(state, mark).refs
+                .map((ref) => ref.entryId)
+                .filter((entryId): entryId is string => Boolean(entryId)),
+            })),
+          mappedRange: (from: number, to: number) => {
+            const out: Array<{ id: string; role: string; preview: string }> = [];
+            for (let index = from; index <= to; index += 1) {
+              const item = snapshot.mapped[index];
+              if (!item) continue;
+              const message = item.message as Record<string, unknown> | undefined;
+              const role = String(item.ref?.role ?? message?.role ?? "entry");
+              const content = message?.content;
+              let preview = "";
+              if (typeof content === "string") preview = content.slice(0, 48);
+              else if (Array.isArray(content)) {
+                const firstText = content.find((part) => part?.type === "text");
+                preview = typeof firstText?.text === "string" ? firstText.text.slice(0, 48) : "";
+              }
+              out.push({ id: item.ref?.entryId ?? String(index), role, preview: preview.replace(/\s+/g, " ") });
+            }
+            return out;
+          },
+          entryCount: snapshot.mapped.length,
+        }),
+        pending: {
+          count: pendingMarks(state).length,
+          agentMarks: accounting.agentMarks,
+          ladderMarks: accounting.ladderMarks,
+          freedTokens: accounting.freedTokens,
+        },
+        pinned: state.protected.map((ref) => ref.entryId),
+      }, done, keybindings, theme));
+    updateStatus(ctx);
+  };
+
   pi.registerTool(buildActiveContextTool({
     name: toolName,
     label: toolLabel,
@@ -3945,8 +4174,10 @@ export function registerActiveContext(pi: any, options: {
   for (const command of buildActiveContextCommands({
     statusName: commandNames.status,
     foldName: commandNames.fold,
+    editorName: "fold-editor",
     statusHandler: statusCommandHandler,
     foldHandler: foldCommandHandler,
+    editorHandler: foldEditorCommandHandler,
   })) {
     pi.registerCommand(command.name, {
       description: command.description,

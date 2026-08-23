@@ -91,8 +91,7 @@ export function validPendingMark(value: unknown): value is PendingMark {
   const kind = ownValue(value, "kind");
   const parts = denseOwnArrayValues(ownValue(value, "parts"));
   return (kind === "tool-result" || kind === "chapter" || kind === "consolidation") &&
-    Boolean(parts?.length) && parts!.length <= ACTIVE_CONTEXT_POLICY.maxFoldSourceRefs &&
-    parts!.every(validFoldPart) && structurallyValidBrief(ownValue(value, "brief")) &&
+    Boolean(parts?.length) && parts!.every(validFoldPart) && structurallyValidBrief(ownValue(value, "brief")) &&
     validProvenance(ownValue(value, "briefProvenance")) &&
     id === foldIdFor(kind as FoldKind, parts as FoldPart[]);
 }
@@ -210,7 +209,6 @@ export function validFoldShape(value: unknown): value is ActiveFold {
   return (kind === "tool-result" || kind === "chapter" || kind === "consolidation") &&
     typeof ownValue(value, "id") === "string" && Boolean(ownValue(value, "id")) &&
     (parentId === null || typeof parentId === "string") && Boolean(parts?.length) &&
-    parts!.length <= ACTIVE_CONTEXT_POLICY.maxFoldSourceRefs &&
     parts!.every(validFoldPart) && structurallyValidBrief(ownValue(value, "brief")) &&
     validProvenance(ownValue(value, "provenance")) && typeof sourceSha256 === "string" &&
     /^[a-f0-9]{64}$/.test(sourceSha256) && Number.isSafeInteger(ownValue(value, "sourceChars")) &&

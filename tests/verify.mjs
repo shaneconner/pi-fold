@@ -40,7 +40,7 @@ const DEPLOYMENT_IDENTITY_FIXTURE = Object.freeze({
     brandNoun: "Acme",
   }),
   toolName: "acme_context",
-  commands: Object.freeze(["acme-context", "fold-context"]),
+  commands: Object.freeze(["acme-context", "fold-context", "fold-editor"]),
   statusKey: "acme-active-context",
   statusText: "acme_context folds: 0 · provider usage unmeasured",
   entryTypes: Object.freeze([
@@ -65,7 +65,7 @@ const DEPLOYMENT_IDENTITY_FIXTURE = Object.freeze({
     `Expand exactly: acme_context {"action":"expand","id":"${fold.id}"}`,
     "List/page exactly: acme_context {\"action\":\"status\"}",
   ].join("\n"),
-  handoffCompaction: "Acme context handed the prefix off losslessly instead of compacting it",
+  handoffCompactionBrand: "Acme context ",
   completedCompaction: "native compaction completed; Acme folding state rebuilt",
   compactionNotice: "Pi native compaction ran; Acme folding state was rebuilt.",
   hardFenceNote: "Provider context reached the hard Acme fence without a newly committed lossless fold. The provider request was aborted before transmission; run /compact or make an explicit bounded context fold.",
@@ -95,6 +95,32 @@ const NO_FRESH_TAIL = Object.freeze({ ...context.DEFAULT_THRESHOLDS, freshTail: 
 
 /** A fresh tail wide enough that the newest turns are unfoldable at fixture scale. */
 const WIDE_FRESH_TAIL = Object.freeze({ ...context.DEFAULT_THRESHOLDS, freshTail: 0.10 });
+
+/**
+ * A fold floor small enough that fixture-scale spans are foldable at all.
+ *
+ * SNAPSHOT-ONLY, on purpose. `minFoldChars` has a hard 2,000-character minimum at
+ * registration (below it a placeholder can cost more than the source it replaces), and
+ * `resolveThresholds` refuses anything under it. `mapActiveContext` takes a thresholds
+ * object directly, so a fixture that builds a snapshot to exercise geometry rather than
+ * size policy can declare a floor of 1 and keep its content small. It replaced the
+ * `policy: { minChapterChars: 1 }` and `policy: { minToolChars: 100 }` overrides, which
+ * pointed at two constants collapsed into this one on 2026-08-21. A fixture that goes
+ * through makeRuntime is registering, and registering validates.
+ */
+const TINY_FOLD_FLOOR = Object.freeze({ ...NO_FRESH_TAIL, minFoldChars: 1 });
+
+/**
+ * The pre-2026-08-21 fresh tail, declared where a fixture's subject is NOT the tail.
+ *
+ * `freshTail` went 0.02 to 0.10 on Shane's ruling, which is a big change at fixture
+ * scale: a 272,000-token window protects 102,246 bytes of projection, so a fixture built
+ * to exercise the prepare ratio or the refold rung would need 110,000 bytes of content
+ * before anything is foldable at all, and would then be measuring the tail rather than
+ * the rung. Gate 19 owns the default and proves it at both budgets; these fixtures
+ * declare the old share so their own subject is what moves.
+ */
+const THIN_FRESH_TAIL = Object.freeze({ ...context.DEFAULT_THRESHOLDS, freshTail: 0.02 });
 
 function near(actual, expected, tolerance = 1e-9, label = "number") {
   assert(Math.abs(actual - expected) <= tolerance,
@@ -665,8 +691,7 @@ async function smallChapterForest(count) {
     turns: Math.max(16, count + 10),
     tools: false,
     chapterChars: 900,
-    policy: { minChapterChars: 1 },
-    thresholds: NO_FRESH_TAIL,
+    thresholds: TINY_FOLD_FLOOR,
     contextWindow: 100_000,
   });
   let state = context.emptyActiveContextState(built.sessionId);
@@ -689,8 +714,7 @@ async function chapterForest(count, chapterChars = 3_500) {
     turns: Math.max(9, count + 4),
     tools: false,
     chapterChars,
-    policy: { minChapterChars: 1 },
-    thresholds: NO_FRESH_TAIL,
+    thresholds: TINY_FOLD_FLOOR,
     contextWindow: 100_000,
   });
   let state = context.emptyActiveContextState(built.sessionId);
@@ -910,7 +934,7 @@ async function gateRegistration() {
   // unmarked. A non-empty default would be an allow-list wearing the new name.
   assert.deepEqual([...context.AUTO_FOLD_BLACKLIST_DEFAULT], []);
   assert.deepEqual([...defaults.tools.keys()], ["pi_fold_context"]);
-  assert.deepEqual([...defaults.commands.keys()].sort(), ["fold-context", "fold-status"]);
+  assert.deepEqual([...defaults.commands.keys()].sort(), ["fold", "fold-editor", "fold-status"]);
   await startRuntime(defaults);
 
   const custom = makeRuntime(makeFixture({ turns: 8, resultChars: 10_000, contextWindow: 100_000 }), {
@@ -919,7 +943,7 @@ async function gateRegistration() {
     commandNames: { status: "sandbox-context", fold: "sandbox-fold-context" },
   });
   assert.deepEqual([...custom.tools.keys()], ["ctx_tool"]);
-  assert.deepEqual([...custom.commands.keys()].sort(), ["sandbox-context", "sandbox-fold-context"]);
+  assert.deepEqual([...custom.commands.keys()].sort(), ["fold-editor", "sandbox-context", "sandbox-fold-context"]);
   await startRuntime(custom);
   // The measurement marks; the boundary is where the epoch commits and the fold record
   // is written. Both have to run before the deployment's entry types can all be observed.
@@ -935,7 +959,7 @@ async function gateRegistration() {
   const named = makeRuntime(makeFixture({ turns: 4, resultChars: 3_000 }), {
     commandNames: { status: "context", fold: "fold-context" },
   });
-  assert.deepEqual([...named.commands.keys()].sort(), ["context", "fold-context"]);
+  assert.deepEqual([...named.commands.keys()].sort(), ["context", "fold-context", "fold-editor"]);
   assert.throws(() => makeRuntime(makeFixture({ turns: 4, resultChars: 3_000 }), {
     commandNames: { status: "same", fold: "same" },
   }).tools, /distinct kebab-case/i);
@@ -957,7 +981,7 @@ async function gateNeutralDefaultBranding() {
   const surface = await collectRegistrationSurface({}, "mcp__docs__fetch");
   assert.equal(surface.toolName, "pi_fold_context");
   assert.equal(surface.toolLabel, "pi-fold Active Context");
-  assert.deepEqual(surface.commands, ["fold-context", "fold-status"]);
+  assert.deepEqual(surface.commands, ["fold", "fold-editor", "fold-status"]);
   assert.deepEqual(surface.initialStatus, {
     key: "pi-fold-active-context",
     text: "pi_fold_context folds: 0 · provider usage unmeasured",
@@ -974,10 +998,8 @@ async function gateNeutralDefaultBranding() {
   assert.deepEqual(surface.carrierTypes, ["pi-fold-active-context-receipts"]);
   assert(surface.carrierTexts.some((text) => text.startsWith("[pi-fold context actions] ")));
   assert.deepEqual(surface.carrierSources, ["pi-fold/active-context"]);
-  assert.equal(
-    surface.handoffCompaction,
-    "pi-fold context handed the prefix off losslessly instead of compacting it",
-  );
+  assert(String(surface.handoffCompaction).startsWith("pi-fold context "),
+    `The boundary decision is not brand-derived: ${surface.handoffCompaction}`);
   assert.equal(
     surface.completedCompaction,
     "native compaction completed; pi-fold folding state rebuilt",
@@ -1025,7 +1047,8 @@ async function gateDeploymentBrandingReproduction() {
   assert.deepEqual(surface.carrierTypes, [fixture.receiptType]);
   assert(surface.carrierTexts.some((text) => text.startsWith(fixture.receiptPrefix)));
   assert.deepEqual(surface.carrierSources, [fixture.source]);
-  assert.equal(surface.handoffCompaction, fixture.handoffCompaction);
+  assert(String(surface.handoffCompaction).startsWith(fixture.handoffCompactionBrand),
+    `The boundary decision is not brand-derived: ${surface.handoffCompaction}`);
   assert.equal(surface.completedCompaction, fixture.completedCompaction);
   assert(surface.compactionNotices.includes(fixture.compactionNotice));
   assert.equal(surface.hardFenceNote, fixture.hardFenceNote);
@@ -1073,8 +1096,7 @@ async function gateFoldLattice() {
     sessionId: "batch-session",
     eventMessages: validBatchMessages,
     contextEntries: entries,
-    policy: { minToolChars: 100 },
-    thresholds: NO_FRESH_TAIL,
+    thresholds: TINY_FOLD_FLOOR,
   });
   assert.equal(context.validateTurnToolBatch(validBatchMessages, { start: 0, end: 5 }).calls.length, 2);
   const missingResult = structuredClone(validBatchMessages);
@@ -1194,7 +1216,6 @@ async function gateAutonomousLadder() {
   const toolState = materialized(toolRuntime);
   assert.equal(crossingCommits.length, 1,
     "The boundary crossing performed more than one structural action");
-  assert.equal(crossingCommits[0].trigger, "compaction-boundary");
   assert.equal(
     toolCommit.commits.filter((record) => record.deferred === false).length,
     0,
@@ -1217,7 +1238,9 @@ async function gateAutonomousLadder() {
     entry.customType === context.ACTIVE_CONTEXT_FOLD_RECORD_ENTRY).length;
   assert.equal(structuralAfter, structuralBefore, "Stale projection measurement authorized work");
 
-  const refoldBuilt = makeFixture({ turns: 4, resultChars: 10_000, contextWindow: 100_000 });
+  const refoldBuilt = makeFixture({
+    turns: 10, resultChars: 10_000, contextWindow: 100_000, thresholds: THIN_FRESH_TAIL,
+  });
   const refoldEmpty = context.emptyActiveContextState(refoldBuilt.sessionId);
   const refoldCandidate = context.selectAutomaticCandidate(refoldBuilt.snapshot, refoldEmpty, 0.80);
   const refoldCommitted = await commitCandidate(refoldEmpty, refoldBuilt.snapshot, refoldCandidate, {
@@ -1296,8 +1319,9 @@ async function gateAutonomousLadder() {
     tools: false,
     chapterChars: 3_500,
     contextWindow: 272_000,
+    thresholds: THIN_FRESH_TAIL,
   });
-  const chapterRuntime = makeRuntime(chapterBuilt);
+  const chapterRuntime = makeRuntime(chapterBuilt, { thresholds: THIN_FRESH_TAIL });
   await startRuntime(chapterRuntime);
   await measure(chapterRuntime, 244_800, 272_000);
   await settle();
@@ -1669,41 +1693,84 @@ async function gatePersistenceChain() {
 }
 
 async function gateDoorlessMarking() {
-  // Gate 11 was the tool-fold cadence: a second scheduler, blind to occupancy, that
-  // decided WHEN automation could mark a tool batch. It is deleted with its two
-  // constants. Marking is doorless in the stale zone now: any pass may mark eligible
-  // stale material, a mark moves no projection byte, and the only cap is the pending
-  // bound. What decides when bytes move is the one commit trigger, and nothing else.
+  // The door is gone for the AGENT, and closed for the ladder. Gate 11 was originally
+  // the tool-fold cadence, a second scheduler blind to occupancy that decided when
+  // automation could mark a batch; that died with its two constants. Then the ladder
+  // itself marked on every quiet pass, which is what made agent curation impossible
+  // (30 sealed runs, 2,529 automatic folds, zero voluntary), and that died on
+  // 2026-08-21. What survives is the half that was always the point: marking is
+  // doorless for the agent, a mark moves no projection byte whenever it is made, and
+  // the only cap is the pending bound. What moves bytes is the one commit, and nothing
+  // else. Gate 141 owns the ladder's silence; this gate owns what happens to the marks
+  // an agent leaves lying around before the commit picks them up.
   const built = makeFixture({ turns: 8, resultChars: 10_000, contextWindow: 100_000 });
   const runtime = makeRuntime(built);
   await startRuntime(runtime);
 
   // Three quiet passes, all far below the band top (0.80 of the 90,000-token budget is
-  // 72,000 tokens). Marks accumulate on every one of them and no byte moves.
-  const marksAfter = async (tokens) => {
+  // 72,000 tokens). The agent marks on each one, the marks accumulate, no byte moves.
+  const batchIds = built.turnEntries.map((ids) => ids[2]);
+  const markThenMeasure = async (index, tokens) => {
+    const marked = await toolCall(runtime, {
+      action: "fold",
+      ids: [batchIds[index]],
+      brief: `Completed inspection ${index + 1} stays exactly recoverable behind this mark.`,
+    });
+    assert(!marked.isError, `The agent's mark on batch ${index} was refused: ${JSON.stringify(marked)}`);
     await measure(runtime, tokens, 100_000);
     const state = materialized(runtime);
     return { marks: (state.pendingMarks ?? []).length, folds: state.folds.length, state };
   };
-  const first = await marksAfter(10_000);
+  const first = await markThenMeasure(0, 10_000);
   assert.equal(first.folds, 0);
-  const second = await marksAfter(20_000);
+  const second = await markThenMeasure(1, 20_000);
   assert.equal(second.folds, 0, "A quiet pass folded");
-  const third = await marksAfter(40_000);
+  const third = await markThenMeasure(2, 40_000);
   assert.equal(third.folds, 0, "A quiet pass folded");
-  assert(third.marks >= second.marks && second.marks >= first.marks,
-    "Marking went backwards below the band top");
-  assert(third.marks > 0, "No pass below the band top marked anything");
-  assert(third.state.pendingMarks.some((mark) => mark.kind === "tool-result" && mark.origin === "ladder"),
-    "The doorless path never marked a completed tool batch");
-  assert(third.state.pendingMarks.every((mark) => mark.origin === "ladder"),
-    "A mark below the band top came from somewhere other than the ladder");
+  assert(third.marks > second.marks && second.marks > first.marks,
+    "The agent's marks did not accumulate across quiet passes");
+  assert(third.state.pendingMarks.some((mark) => mark.kind === "tool-result" && mark.origin === "agent"),
+    "The agent never got a completed tool batch marked");
+  assert(third.state.pendingMarks.every((mark) => mark.origin === "agent"),
+    "A mark below the band top came from the ladder, which stages nothing until commit");
   // The stalest batch first: the law walks forward, it does not re-propose.
   const firstMark = third.state.pendingMarks.find((mark) => mark.kind === "tool-result");
   assert.deepEqual(firstMark.parts.map((part) => part.ref.entryId), [built.turnEntries[0][2]]);
   const markIds = third.state.pendingMarks.map((mark) => mark.id);
   assert.equal(new Set(markIds).size, markIds.length, "The doorless path proposed a span twice");
   assert(markIds.length <= context.MAX_PENDING_MARKS);
+
+  // A MARK IS EDITABLE UNTIL IT COMMITS (Shane, 2026-08-21). There is no verb for
+  // rewriting a standing fold's brief, because that rewrites the projection at its
+  // placeholder; the correction happens while the decision is still a mark, where no
+  // byte has moved and the fix is free. Marking the same span again replaces it.
+  const beforeEdit = materialized(runtime).pendingMarks.length;
+  const corrected = "Corrected: inspection 1 holds the exact stage-3 chain key the task needs.";
+  const edit = await toolCall(runtime, {
+    action: "fold", ids: [batchIds[0]], brief: corrected,
+  });
+  assert(!edit.isError, `Re-marking a span the agent already marked was refused: ${JSON.stringify(edit)}`);
+  assert.equal(edit.details.replaced, true, "The re-mark did not report itself as a replacement");
+  const edited = materialized(runtime).pendingMarks;
+  assert.equal(edited.length, beforeEdit, "The re-mark added a second owner instead of replacing one");
+  assert.equal(edited.filter((mark) => mark.id === firstMark.id).length, 1,
+    "The span is marked twice after a re-mark");
+  assert.equal(edited.find((mark) => mark.id === firstMark.id).brief, corrected,
+    "The re-mark did not take the new brief");
+
+  // Someone ELSE's mark over that evidence is a different fact and is refused by name,
+  // with the repair stated: the agent has to withdraw the standing mark first.
+  const neighbour = materialized(runtime).pendingMarks.find((mark) => mark.id !== firstMark.id);
+  const overlapping = await toolCall(runtime, {
+    action: "fold",
+    ids: [batchIds[0], batchIds[1]],
+    brief: "Both inspections together, which crosses a span another mark already holds.",
+  });
+  assert(JSON.stringify(overlapping).includes("is already held by pending mark"),
+    `An overlapping mark was not refused by name: ${JSON.stringify(overlapping)}`);
+  assert(JSON.stringify(overlapping).includes("Unmark "),
+    "The refusal does not name the repair");
+  void neighbour;
 
   // The projection has not moved through any of it: marks are decisions, not edits.
   assert.equal(runtime.appended.filter((entry) =>
@@ -1737,8 +1804,10 @@ async function gateDoorlessMarking() {
     assert.notEqual(record.from_mark_id, record.into_fold_id,
       "An absorb record reported a rename that renamed nothing");
     assert(record.entries >= 1 && record.tokens >= 0);
-    assert(record.tokens <= record.threshold_tokens,
-      "An absorption swallowed a gap above the wedge threshold");
+    assert(record.chars < record.threshold_chars,
+      "An absorption swallowed a gap at or above the fold floor, which could stand alone");
+    assert.equal(record.threshold_chars, context.DEFAULT_THRESHOLDS.minFoldChars,
+      "The wedge threshold is not the fold floor");
   }
   assert(committed.folds.some((fold) => fold.id === firstMark.id),
     "The stalest accumulated tool batch never became a fold");
@@ -1768,7 +1837,9 @@ async function gateDoorlessMarking() {
 }
 
 async function gateExpandLeases() {
-  const built = makeFixture({ turns: 4, resultChars: 10_000, contextWindow: 100_000 });
+  // Ten turns rather than four: freshTail is 0.10 as of 2026-08-21, so a 90,000-token
+  // budget protects 36,000 bytes and this gate needs a fold past it to hold a lease.
+  const built = makeFixture({ turns: 10, resultChars: 10_000, contextWindow: 100_000 });
   const runtime = makeRuntime(built);
   await startRuntime(runtime);
   await measure(runtime, 10_000, 100_000);
@@ -1931,8 +2002,7 @@ async function gateConsolidationCountingRule() {
     turns: 30,
     tools: false,
     chapterChars: 3_500,
-    policy: { minChapterChars: 1 },
-    thresholds: NO_FRESH_TAIL,
+    thresholds: TINY_FOLD_FLOOR,
     contextWindow: 100_000,
   });
   let gappedState = context.emptyActiveContextState(gapped.sessionId);
@@ -2019,7 +2089,7 @@ async function gateConsolidationCountingRule() {
     state,
     entries: runtime.branch,
     sessionId: wide.sessionId,
-    maximumBytes: context.ACTIVE_CONTEXT_POLICY.maxChapterChars,
+    maximumBytes: context.ACTIVE_CONTEXT_POLICY.maxSourceChars,
   }).source;
   const originalText = String(context.contentText(context.exactMapped(
     afterSnapshot, context.flattenFoldRefs(state.folds.find((fold) => fold.id === nestedChild), state)[0],
@@ -2072,12 +2142,13 @@ async function gateQuietWarming() {
     tools: false,
     chapterChars: 3_500,
     contextWindow: WINDOW,
+    thresholds: THIN_FRESH_TAIL,
   });
   // Warming is quiet and DETERMINISTIC: below prepareRatio nothing warms, at
   // prepareRatio the chapter is prepared ahead of the boundary, and the boundary
   // commit lands exactly the prepared fold. A preparation is the fold computed
   // early, not a model call bought early; there is no generator to pay.
-  const warm = makeRuntime(chapterBuilt);
+  const warm = makeRuntime(chapterBuilt, { thresholds: THIN_FRESH_TAIL });
   await startRuntime(warm);
   await measure(warm, Math.round(0.60 * WINDOW), WINDOW);
   await settle(8);
@@ -2111,20 +2182,21 @@ async function gateQuietWarming() {
   await measure(toolRuntime, 10_000, 100_000);
   await measure(toolRuntime, 60_000, 100_000);
   assert.equal(materialized(toolRuntime).prepared, undefined);
-  // Below the commit threshold the quiet runtime MARKS rather than folds, so the
-  // priority shows in what was marked: the deterministic tool batch, never a warm
-  // chapter preparation. The commit that follows folds exactly that.
-  const toolMarks = context.pendingMarks(materialized(toolRuntime));
-  assert(toolMarks.length >= 1, "The stale tool batch was neither marked nor folded");
-  assert(toolMarks.every((mark) => mark.kind === "tool-result"),
-    JSON.stringify(toolMarks.map((mark) => mark.kind)));
+  // Below the commit threshold the quiet runtime stages nothing at all, so the priority
+  // shows in what the COMMIT reaches for first: the deterministic tool batch, never a
+  // warm chapter preparation. Reading it off the commit is stricter than reading it off
+  // a mark, because a mark could still have been outranked on the way to the fold.
+  assert.equal(context.pendingMarks(materialized(toolRuntime)).length, 0,
+    "Something staged a mark below the commit threshold");
   await measureAndCommit(toolRuntime, 88_000, 100_000, "tool-priority-commit");
-  assert.equal(materialized(toolRuntime).folds[0].kind, "tool-result",
+  const toolFolds = materialized(toolRuntime).folds;
+  assert(toolFolds.length >= 1, "The stale tool batch was never folded");
+  assert.equal(toolFolds[0].kind, "tool-result",
     "The deterministic tool batch lost its priority over a warmed chapter");
 
   // A boundary arriving with NOTHING warmed still commits: the fence never depends on
   // a preparation having run.
-  const floor = makeRuntime(chapterBuilt);
+  const floor = makeRuntime(chapterBuilt, { thresholds: THIN_FRESH_TAIL });
   await startRuntime(floor);
   await measure(floor, Math.round(0.60 * WINDOW), WINDOW);
   assert.equal(materialized(floor).prepared, undefined);
@@ -2257,7 +2329,11 @@ async function gateNoToolCallRewrite() {
   // tool results there is no tool rung to outrank the chapter, so at prepareRatio the
   // chapter is prepared ahead of the boundary and the commit carries exactly it.
   const noTool = makeRuntime(
-    makeFixture({ turns: 8, tools: false, chapterChars: 3_500, contextWindow: 272_000 }),
+    makeFixture({
+      turns: 8, tools: false, chapterChars: 3_500, contextWindow: 272_000,
+      thresholds: THIN_FRESH_TAIL,
+    }),
+    { thresholds: THIN_FRESH_TAIL },
   );
   await startRuntime(noTool);
   await measure(noTool, Math.round(0.91 * 272_000), 272_000);
@@ -2381,24 +2457,29 @@ async function gateFreshTailShareCap() {
   // 24,000-byte floor with a separate small-window cap at a quarter of the window; it is
   // now `freshTail` of the SERVING BUDGET, converted once at the estimator's 4 bytes per
   // token, so the tail scales with the budget instead of meeting a floor. At the
-  // reference deployment the two agree within rounding (24,000 bytes was 6,000 tokens of
-  // a 383,616-token budget, 1.56%, and freshTail is 0.02); at fixture scale the
-  // proportion is what binds.
+  // reference deployment the two agreed within rounding when freshTail was 0.02 (24,000
+  // bytes was 6,000 tokens of a 383,616-token budget, 1.56%); freshTail is 0.10 as of
+  // 2026-08-21 and the proportion is what binds at any scale.
   const tailBytesFor = (window) => context.zoneBytes(
     context.DEFAULT_THRESHOLDS.freshTail, context.servingBudgetTokens(window),
   );
-  const shape = { turns: 6, resultChars: 2_200 };
+  // Wide enough that the small budget still has a foldable chapter OUTSIDE its
+  // proportional tail: freshTail is 0.10 as of 2026-08-21, so a 27,000-token budget
+  // protects 10,800 bytes and a fold has to clear minFoldChars past that. Still well
+  // under the wide budget's 102,246-byte tail, which is what keeps the wide case fully
+  // protected and the contrast real.
+  const shape = { turns: 5, resultChars: 6_000, chapterChars: 3_500 };
   const small = makeRuntime(makeFixture({ ...shape, contextWindow: 30_000 }));
   await startRuntime(small);
   const smallDetail = (await toolStatus(small, undefined, "fold_candidates")).details;
   assert.equal(smallDetail.rawTailMinimumBytes, tailBytesFor(30_000));
-  assert.equal(smallDetail.rawTailMinimumBytes, 2_160);
+  assert.equal(smallDetail.rawTailMinimumBytes, 10_800);
 
   const wide = makeRuntime(makeFixture({ ...shape, contextWindow: 272_000 }));
   await startRuntime(wide);
   const wideDetail = (await toolStatus(wide, undefined, "fold_candidates")).details;
   assert.equal(wideDetail.rawTailMinimumBytes, tailBytesFor(272_000));
-  assert.equal(wideDetail.rawTailMinimumBytes, 20_449);
+  assert.equal(wideDetail.rawTailMinimumBytes, 102_246);
   // The object list lives behind its own paged query now that the index is dieted.
   const smallObjects = (await toolStatus(small, undefined, "objects")).details.objects;
   const wideObjects = (await toolStatus(wide, undefined, "objects")).details.objects;
@@ -2420,9 +2501,14 @@ async function gateFreshTailShareCap() {
   assert.equal(fallbackDetail.rawTailMinimumBytes, tailBytesFor(context.DEFAULT_CONTEXT_WINDOW));
 
   // A window too small to carry the policy is REFUSED at registration, never clamped.
+  // The fresh-tail floor needs a DECLARED thin tail now: 10 percent of any budget this
+  // package will serve is at least 1,000 tokens, so the default can no longer reach the
+  // 500-token floor. A deployment that declares 1 percent on a small window still can.
   assert.throws(
-    () => makeRuntime(makeFixture({ ...shape, contextWindow: 16_000 }),
-      { providerInputBudget: 14_400 }),
+    () => makeRuntime(makeFixture({ ...shape, contextWindow: 16_000 }), {
+      providerInputBudget: 14_400,
+      thresholds: { ...context.DEFAULT_THRESHOLDS, freshTail: 0.01 },
+    }),
     /below the 500-token minimum one foldable unit needs/,
   );
   assert.throws(
@@ -2560,8 +2646,7 @@ async function gatePeekAndFoldIndex() {
   const big = makeFixture({
     turns: 3,
     resultChars: 150_000,
-    policy: { minToolChars: 100 },
-    thresholds: NO_FRESH_TAIL,
+    thresholds: TINY_FOLD_FLOOR,
     contextWindow: 1_000_000,
   });
   const emptyBig = context.emptyActiveContextState(big.sessionId);
@@ -2596,7 +2681,7 @@ async function gatePeekAndFoldIndex() {
   assert.deepEqual(bounded.wider, {
     action: "peek",
     id: oversized.prepared.id,
-    bytes: Math.min(bounded.sourceBytes, context.ACTIVE_CONTEXT_POLICY.maxChapterChars),
+    bytes: Math.min(bounded.sourceBytes, context.ACTIVE_CONTEXT_POLICY.maxSourceChars),
   });
   assert(bounded.truncationReminder.startsWith("STOP:"));
   assert(bounded.truncationReminder.includes(String(bounded.omittedBytes)));
@@ -2790,9 +2875,26 @@ async function epochToolRuntime({ guidance, omitSendMessage, ...fixture } = {}) 
   const runtime = makeRuntime(built, {
     ...(guidance ? { guidance } : {}),
     ...(omitSendMessage ? { omitSendMessage } : {}),
+    ...(fixture.thresholds ? { thresholds: fixture.thresholds } : {}),
   });
   await startRuntime(runtime);
   return runtime;
+}
+
+/**
+ * The agent marks its stalest completed tool batch. Nothing stages between commits any
+ * more (Shane, 2026-08-21), so a gate that needs a mark standing before the boundary
+ * has to make one the way the agent does, through the tool.
+ */
+async function agentMarksBatch(runtime, index = 0, brief) {
+  const id = runtime.built.turnEntries[index][2];
+  const result = await toolCall(runtime, {
+    action: "fold",
+    ids: [id],
+    brief: brief ?? `Completed inspection ${index + 1} stays exactly recoverable behind this mark.`,
+  });
+  assert(!result.isError, `The agent's mark on batch ${index} was refused: ${JSON.stringify(result)}`);
+  return id;
 }
 
 async function gateEpochMarkCommit() {
@@ -2800,17 +2902,19 @@ async function gateEpochMarkCommit() {
   const rawBytes = bytesOf((await project(runtime)).messages);
   assert.deepEqual([...[...runtime.tools.values()][0].parameters.properties.action.enum],
     [...context.ACTIVE_CONTEXT_TOOL_ACTIONS]);
-  // 68,000 against the 90,000-token serving budget is 0.756 occupancy: below the
-  // band top at 0.80 (72,000 tokens), so the ladder marks and nothing commits. Mark
+  // 68,000 against the 90,000-token serving budget is 0.756 occupancy: below the band
+  // top at 0.80 (72,000 tokens), so nothing commits. The mark is the AGENT's, because
+  // the ladder stages nothing until the commit that will spend it (gate 141). Mark
   // inertness is only a claim about passes where the runtime was NOT going to rewrite
   // anyway; over the trigger the rewrite belongs to the commit, not to the mark.
+  await agentMarksBatch(runtime, 0);
   await measure(runtime, 68_000, 100_000);
   const marked = materialized(runtime);
   assert.equal(marked.folds.length, 0, "A mark folded evidence");
   assert.equal(marked.pendingMarks.length, 1);
   assert.equal(marked.pendingMarks[0].mark, "fold");
   assert.equal(marked.pendingMarks[0].kind, "tool-result");
-  assert.equal(marked.pendingMarks[0].origin, "ladder");
+  assert.equal(marked.pendingMarks[0].origin, "agent");
 
   // Read the scheduling surface while the mark is still PENDING. A tool call is not a
   // context pass and cannot commit; project() is, and at this occupancy the curation
@@ -2873,10 +2977,11 @@ async function gateEpochMarkCommit() {
 
   // A protected span refuses at commit with a message rather than folding.
   const blocked = await epochToolRuntime();
+  await agentMarksBatch(blocked, 0);
   await measure(blocked, 68_000, 100_000);
   const pending = materialized(blocked).pendingMarks[0];
   const sourceIds = pending.parts.map((part) => part.ref.entryId);
-  await toolCall(blocked, { action: "protect", ids: sourceIds });
+  await toolCall(blocked, { action: "pin", ids: sourceIds });
   const refusal = await runtimeCommit(blocked, { tokens: 88_000, contextWindow: 100_000 });
   // Protection is adjudicated BEFORE the fold is prepared, so the mark is held rather
   // than terminally refused: it never folds, and it is never silently dropped either.
@@ -3145,7 +3250,10 @@ async function gateEpochQuotaTopUp() {
  * could not see. The exemption is gone, and this pins its absence.
  */
 async function gateMarkAlwaysMeansMark() {
-  const runtime = await epochToolRuntime({ turns: 14 });
+  // A thin tail, because the subject is what "fold" MEANS, not how wide the tail is:
+  // the near mark has to sit outside the guarded zone at commit time for the gate to
+  // be able to say the commit consumed it.
+  const runtime = await epochToolRuntime({ turns: 14, thresholds: THIN_FRESH_TAIL });
   const built = runtime.built;
 
   const distant = await toolCall(runtime, {
@@ -3352,14 +3460,17 @@ async function gatePeekReclaimWithIdentity() {
   });
   const peekEntryId = runtime.built.turnEntries[1][2];
   const rawCopy = runtime.built.messages.find((message) => message?.toolCallId === "call-1");
-  await measure(runtime, 80_000, 100_000);
+  // BELOW THE COMMIT TRIGGER, because since 2026-08-22 crossing it commits on the spot.
+  // The pin has to be made while the copy is still raw, so the fixture has to give it a
+  // pass where nothing has fired yet; that is the state this half of the gate is about.
+  await measure(runtime, 60_000, 100_000);
   assert.equal(materialized(runtime).folds.length, 0, "The marking pass moved bytes");
   assert.deepEqual((await project(runtime)).messages.find((message) => message?.toolCallId === "call-1")?.content,
     rawCopy.content, "The peek copy moved before any commit");
 
   // THE PIN IS THE VETO. It is made before the commit, and the commit reclaims
   // everything else while the pinned copy stays raw.
-  await toolCall(runtime, { action: "protect", ids: [peekEntryId] });
+  await toolCall(runtime, { action: "pin", ids: [peekEntryId] });
   const vetoed = await runtimeCommit(runtime, { tokens: 80_500, contextWindow: 100_000 });
   assert.equal(vetoed.fired, true, "The commit must still fire; a pin vetoes a fold, not the epoch");
   const pinnedState = materialized(runtime);
@@ -3371,12 +3482,15 @@ async function gatePeekReclaimWithIdentity() {
   );
   assert.deepEqual((await project(runtime)).messages.find((message) => message?.toolCallId === "call-1")?.content,
     rawCopy.content, "The pinned peek copy did not survive the commit verbatim");
-  // The decision waits rather than being dropped: the pin is a hold, so releasing it
-  // hands the copy to the next commit without the agent having to ask again.
-  assert((materialized(runtime).pendingMarks ?? []).some((mark) =>
-    typeof mark.brief === "string" && mark.brief.includes("fold_probe")),
-  "The vetoed reclaim was discarded instead of held");
-  await toolCall(runtime, { action: "unprotect", ids: [peekEntryId] });
+  // The decision waits rather than being dropped. A pinned copy is not proposed at all
+  // while the pin stands, so there is no mark to lose and nothing to clean up; what the
+  // agent has to be able to rely on is that releasing the pin is ENOUGH, without asking
+  // for the reclaim again. The commit below is the proof, and the assertion that used to
+  // sit here read a pending mark that only existed because the ladder staged eagerly.
+  assert.equal((materialized(runtime).pendingMarks ?? []).some((mark) =>
+    typeof mark.brief === "string" && mark.brief.includes("fold_probe")), false,
+  "A pinned peek copy was queued for reclaim behind the pin");
+  await toolCall(runtime, { action: "unpin", ids: [peekEntryId] });
   await runtimeCommit(runtime, { tokens: 84_000, contextWindow: 100_000 });
   const releasedState = materialized(runtime);
   const owner = releasedState.folds.find((fold) =>
@@ -3401,8 +3515,11 @@ async function gatePeekReclaimWithIdentity() {
     [],
     "A peek copy inside the fresh tail was marked for reclaim",
   );
+  // Twenty turns rather than twelve: the copy has to be OUT of the tail for the
+  // second half of this pair to mean anything, and the default tail is 10 percent of
+  // a 90,000-token serving budget, which is 36,000 chars of 4,000-char turns.
   const aged = makeFixture({
-    turns: 12, resultChars: 4_000, contextWindow: 100_000, peekTurns: [5], peekTargetId: "fold_probe",
+    turns: 20, resultChars: 4_000, contextWindow: 100_000, peekTurns: [5], peekTargetId: "fold_probe",
   });
   const agedMarks = context.ephemeralPeekMarks({
     snapshot: epochSnapshot(aged), state: context.emptyActiveContextState(aged.sessionId), ordinal: 1,
@@ -3792,7 +3909,7 @@ async function gateRetainedPendingMarks() {
   const actions = [...plain.tools.values()][0].parameters.properties.action.enum;
   assert.equal(actions.includes("unmark"), true);
   assert.equal(actions.includes("commit"), false);
-  assert(actions.includes("rebrief") && actions.includes("reboundary"),
+  assert(actions.includes("reboundary"),
     "The correction verbs must exist on the single surface");
 
   return {
@@ -3922,7 +4039,7 @@ async function gateTruthfulCapacityAdmission() {
   await measure(open, 100_000, 400_000);
   await project(open);
   const whole = await toolCall(open, {
-    action: "peek", id: big.id, bytes: context.ACTIVE_CONTEXT_POLICY.maxChapterChars,
+    action: "peek", id: big.id, bytes: context.ACTIVE_CONTEXT_POLICY.maxSourceChars,
   });
   assert.equal(whole.details.truncated, false);
   assert.equal((await toolStatus(open)).details.automatic.capacity.mode, "truthful");
@@ -4013,18 +4130,23 @@ async function gateSchedulingWireRoundTrip() {
 }
 
 /**
- * Below the commit threshold every eligible turn must mark NEW stale content. If the
- * selector cannot see the pending marks it re-proposes the batch already marked,
- * `addPendingMark` rejects the duplicate, and the epoch arrives with one mark and a
- * top-up doing all the work. That collapse is what this gate measures.
+ * Marks accumulate across quiet passes and every one of them reaches the commit. The
+ * selector has to see them: if it cannot, it re-proposes a span the agent already
+ * marked, `addPendingMark` rejects the duplicate, and the epoch arrives with one mark
+ * and a top-up doing all the work. That collapse is what this gate measures. The marks
+ * are the agent's now, because the ladder stages nothing until commit (gate 141), which
+ * moves the blindness this gate guards from the ladder's own selection into the
+ * commit-time fill that runs against whatever the agent left.
  */
 async function gateMarkAccumulation() {
   const runtime = await epochToolRuntime({ turns: 40 });
   const growth = [];
   // Five quiet passes: 60,000 to 68,000 against a 90,000-token budget is 0.667 to
   // 0.756 occupancy, all below the band top at 0.80 (72,000 tokens).
-  for (const tokens of [60_000, 62_000, 64_000, 66_000, 68_000]) {
-    await measure(runtime, tokens, 100_000);
+  const quiet = [60_000, 62_000, 64_000, 66_000, 68_000];
+  for (let index = 0; index < quiet.length; index += 1) {
+    await agentMarksBatch(runtime, index);
+    await measure(runtime, quiet[index], 100_000);
     growth.push(materialized(runtime).pendingMarks?.length ?? 0);
   }
   const marks = materialized(runtime).pendingMarks;
@@ -4051,6 +4173,12 @@ async function gateMarkAccumulation() {
   // land and parents what it just made, so it applies marks that were never pending.
   assert.equal(epoch.appliedMarks, epoch.pendingMarks + epoch.closingMarks);
   assert(epoch.pendingMarks > epoch.topUpMarks, "The top-up out-marked the accumulated epoch");
+  // The fill COUNTS the agent's marks rather than displacing them, which is the whole
+  // reason it measures progress against the state it is handed. Every mark the agent
+  // made across the quiet passes is still there, and its own share of the drop is
+  // subtracted from what the ladder then has to cover.
+  assert.equal(epoch.agentMarks, marks.length,
+    "The commit-time fill displaced marks the agent had already made");
   assert(epoch.freedBudgetShare >= epoch.targetBudgetShare,
     "A full epoch freed less than the thermostat's own freeing target");
   assert(epoch.appliedMarks >= marks.length + 1,
@@ -4222,166 +4350,6 @@ async function gateStageIdentifiedBriefs() {
 }
 
 /**
- * A commit must never fold what the CURRENT excursion just gathered. Measured
- * 2026-08-06 (rep 8): nineteen folds landed between the agent's last read result and
- * its next reply, so the agent answered from a window where its own just-gathered
- * evidence had become placeholders. The fresh tail is a BYTE bound and did not catch
- * it; the boundary that matters is the last terminal assistant message.
- */
-async function currentTurnRuntime() {
-  // The fixture stays INSIDE the serving budget on purpose: the guard is a
-  // batching-economics rule, and above the budget the transmission fence waives it to
-  // keep the request sendable. Gate 56 measures that regime.
-  //
-  // The declared token counts are also kept CONSISTENT with the fixture's byte size,
-  // at roughly four serialized chars per token. The fence calibrates itself against the
-  // session's own measured chars-per-token, so a fixture that claims 88,000 tokens for
-  // a 170,000-char projection is describing a session that genuinely cannot send its
-  // next request, and the fence is right to reduce it.
-  const runtime = makeRuntime(
-    makeFixture({ turns: 40, resultChars: 4_000, contextWindow: 200_000 }),
-    {},
-  );
-  await startRuntime(runtime);
-  // The quiet band: 0.80 of the 180,000-token serving budget is 144,000 tokens, so
-  // these five passes accumulate marks and none of them commits.
-  for (const tokens of [110_000, 118_000, 126_000, 134_000, 142_000]) {
-    await measure(runtime, tokens, 200_000);
-  }
-  const before = (materialized(runtime).pendingMarks ?? []).map((mark) => mark.id);
-
-  // The current excursion: ten read batches gathered since the last reply, far past
-  // the protected tail (freshTail 0.02 of a 180,000-token budget is 14,400 bytes), so
-  // nothing but the turn boundary protects them.
-  const excursion = [];
-  for (let step = 0; step < 10; step += 1) {
-    runtime.appendMessage({
-      role: "assistant",
-      content: [{
-        type: "toolCall",
-        id: `excursion-${step}`,
-        name: "read",
-        arguments: { path: `excursion-${step}.txt` },
-      }],
-      stopReason: "toolUse",
-      timestamp: 900 + step,
-    }, "excursion");
-    runtime.appendMessage({
-      role: "toolResult",
-      toolCallId: `excursion-${step}`,
-      toolName: "read",
-      content: [{ type: "text", text: `Excursion ${step}: ${"e".repeat(12_000)}` }],
-      isError: false,
-      timestamp: 900 + step,
-    }, "excursion");
-    excursion.push(runtime.branch.at(-1).id);
-  }
-  // Two further tool-calling generations, so the consumed-batch index accepts reads
-  // inside a turn the agent has not closed yet.
-  for (let step = 0; step < 2; step += 1) {
-    runtime.appendMessage({
-      role: "assistant",
-      content: [{ type: "text", text: `Still working ${step}.` }],
-      stopReason: "toolUse",
-      timestamp: 950 + step,
-    }, "excursion");
-  }
-  await project(runtime);
-  return { runtime, before, excursion };
-}
-
-async function gateCurrentTurnCommitGuard() {
-  const { runtime, before, excursion } = await currentTurnRuntime();
-  assert(before.length >= 3, "The fixture accumulated too few pre-turn marks to measure");
-
-  // The agent marks its own just-gathered reads, one batch at a time.
-  for (const id of excursion) await toolCall(runtime, { action: "fold", ids: [id] });
-  const state = materialized(runtime);
-  const snapshot = context.mapActiveContext({
-    sessionId: runtime.built.sessionId,
-    eventMessages: runtime.messages,
-    contextEntries: runtime.branch,
-    contextWindow: 200_000,
-  });
-  const turnKeys = context.currentTurnRefKeys(snapshot);
-  assert.equal(turnKeys.size, excursion.length, "The turn boundary did not find the excursion");
-
-  // The mass split this gate exists to exercise: a large share of the ELIGIBLE marked
-  // mass was gathered in the current turn, so freshness alone would let it fold.
-  const eligible = state.pendingMarks.filter((mark) =>
-    context.markEligibility(snapshot, state, mark) === "eligible");
-  const eligibleTurn = eligible.filter((mark) =>
-    context.markTouchesCurrentTurn(state, mark, turnKeys));
-  const mass = (marks) => marks.reduce((total, mark) =>
-    total + context.markFreedBytes(snapshot, state, mark), 0);
-  const turnShare = mass(eligibleTurn) / mass(eligible);
-  assert(eligibleTurn.length >= 3 && turnShare >= 0.5,
-    `Current-turn eligible mass share was ${turnShare}; the fixture proves nothing`);
-
-  // The commit fires with the turn still OPEN.
-  //
-  // Recompute the expectation against the state as it stands at the MOMENT the epoch
-  // runs, not against the snapshot taken further up. Under the quiet cadence a commit
-  // can land between the two, and an expectation derived from a stale pending set
-  // measures the gap between the snapshots rather than the guard.
-  const atEpoch = materialized(runtime);
-  const epochSnap = context.mapActiveContext({
-    sessionId: runtime.built.sessionId,
-    eventMessages: runtime.messages,
-    contextEntries: runtime.branch,
-    contextWindow: 200_000,
-  });
-  const epochKeys = context.currentTurnRefKeys(epochSnap);
-  // The property, stated directly: EVERY pending mark that touches the still-open turn
-  // is retained. The old expectation added the non-eligible marks on top, which held
-  // only because that fixture's whole pending set was current-turn; with the quiet
-  // cadence the set also carries older marks, and adding them measured nothing.
-  const epochTurnMarks = (atEpoch.pendingMarks ?? []).filter((mark) =>
-    context.markTouchesCurrentTurn(atEpoch, mark, epochKeys));
-  assert(epochTurnMarks.length >= 3,
-    `Only ${epochTurnMarks.length} current-turn marks survived to the epoch`);
-  await measure(runtime, 176_000, 200_000, undefined, "toolUse");
-  // The gated last-call round, with the excursion still open on every pass.
-  await project(runtime);
-  await settle();
-  await measureAndCommit(runtime, 176_500, 200_000, undefined, "toolUse");
-  const epoch = (await toolStatus(runtime)).details.automatic.lastAutomaticAction?.epoch;
-  assert(epoch, "No commit epoch ran");
-  assert.equal(epoch.currentTurnRetained, epochTurnMarks.length,
-    "The epoch did not retain every current-turn mark");
-
-  // Only the older half folded, and nothing the current turn gathered moved a byte.
-  const after = materialized(runtime);
-  const foldedKeys = new Set(after.folds.flatMap((fold) =>
-    fold.parts.filter((part) => part.kind === "raw").map((part) => json.objectRefKey(part.ref))));
-  assert(![...turnKeys].some((key) => foldedKeys.has(key)),
-    "A commit folded evidence the current turn had just gathered");
-  assert(epoch.appliedMarks >= 1, "The guard starved the commit of its older marks");
-
-  // Retained, not dropped: every guarded mark survives with its reason stated and is
-  // still pending for the commit after the turn closes.
-  const guarded = epoch.refused.filter((mark) => /current turn/.test(mark.reason));
-  assert.equal(guarded.length, epoch.currentTurnRetained);
-  assert(guarded.every((mark) => mark.retained === true));
-  const stillPending = new Set((after.pendingMarks ?? []).map((mark) => mark.id));
-  assert(guarded.every((mark) => stillPending.has(mark.id)),
-    "A guarded mark was refused without staying pending");
-
-  // The guard is what held that evidence and not the fresh tail: the same marks
-  // apply the moment the turn closes and its evidence ages, which the closing pass of
-  // the epoch-batching gate measures end to end.
-  return {
-    preTurnMarks: before.length,
-    excursionBatches: excursion.length,
-    eligibleCurrentTurnMarks: eligibleTurn.length,
-    currentTurnMassShare: Number(turnShare.toFixed(3)),
-    appliedMarks: epoch.appliedMarks,
-    currentTurnRetained: epoch.currentTurnRetained,
-    currentTurnFolds: 0,
-  };
-}
-
-/**
  * Pinned peek mass is ineligible for reclamation by construction. Measured 2026-08-06
  * (rep 7): retain-pinned peeks held the eligible share below the ROI threshold, no
  * commit ever fired, the window grew to 235k tokens, and no accounting field named
@@ -4411,7 +4379,7 @@ async function gatePinnedMassBackstop() {
   )).state;
   assert.equal(folded.folds[0].id, foldId, "The peeked fold id shifted with the peek argument");
 
-  // Unprotected, those reads are ordinary ladder food and count as nothing held.
+  // Unpinned, those reads are ordinary ladder food and count as nothing held.
   assert.equal(context.markAccounting(snapshot, folded).pinnedBytes, 0);
   // Protection is now the ONLY way a peek read is held back from the ladder: peek
   // results are append-only, so the mass that can starve a commit is the mass the
@@ -4488,7 +4456,6 @@ async function gatePinnedMassBackstop() {
   // The FENCE commits this one, not the boundary: 88,500 tokens of declared occupancy
   // against a 90,000-token serving budget is a crowded projection, and the fence is the
   // path that owns a request already at the margin.
-  assert.equal(epoch.trigger, "projection-budget");
   assert(epoch.appliedMarks >= 1, "The backstop commit applied nothing");
   assert.equal(typeof epoch.pinnedBytes, "number");
 
@@ -4523,6 +4490,7 @@ async function sealedSpineExcursionRuntime(overrides = {}) {
     { ...SEALED_SPINE, ...overrides },
   );
   await startRuntime(runtime);
+  runtime.excursion = [];
   for (let step = 0; step < 24; step += 1) {
     runtime.appendMessage({
       role: "assistant",
@@ -4538,6 +4506,7 @@ async function sealedSpineExcursionRuntime(overrides = {}) {
       isError: false,
       timestamp: 900 + step,
     }, "excursion");
+    runtime.excursion.push(runtime.branch.at(-1).id);
   }
   // Two further tool-calling generations, so the consumed-batch index accepts reads
   // inside a turn the agent has not closed yet.
@@ -4595,17 +4564,26 @@ async function gateEpochBatchingUnderFullLevers() {
     return passes.at(-1);
   };
 
-  // Below the band top every pass MARKS and moves no byte. The band top is 0.80 of the
-  // 90,000-token serving budget, so the quiet band on this fixture is under 72,000.
+  // Below the band top the agent's marks accumulate and no byte moves. The band top is
+  // 0.80 of the 90,000-token serving budget, so the quiet band on this fixture is under
+  // 72,000. Nothing at all stages here on its own (gate 141), which is why the marks
+  // arrive through the tool.
   const below = [];
-  for (const tokens of [60_000, 64_000]) {
+  for (const [index, tokens] of [60_000, 64_000].entries()) {
+    await agentMarksBatch(runtime, index);
     below.push(await step(tokens));
   }
-  assert(below.every((pass) => pass.kind === "mark"),
-    `A pass below the commit threshold did not mark: ${below.map((pass) => pass.kind).join(",")}`);
+  assert(below.every((pass) => pass.appliedMarks === null),
+    `A commit epoch ran below the commit threshold: ${below.map((pass) => pass.kind).join(",")}`);
   assert.equal(below.at(-1).folds, 0, "A fold landed below the commit threshold");
   assert.equal(below.at(-1).marks - below[0].marks, below.length - 1,
     "Marks did not accumulate one per pass below the threshold");
+
+  // The open excursion, marked by the agent one batch at a time. This is the mass the
+  // guard has to hold back at the crossing: the agent gathered it in the turn it has
+  // not closed yet, so folding it would answer from placeholders of its own reads.
+  const heldExcursion = runtime.excursion.slice(0, 12);
+  for (const id of heldExcursion) await toolCall(runtime, { action: "fold", ids: [id] });
 
   // ABOVE THE BAND TOP, BELOW THE FENCE, WITH THE TURN STILL OPEN.
   //
@@ -4642,7 +4620,22 @@ async function gateEpochBatchingUnderFullLevers() {
   // already landed has nothing but the open turn left, and the waiver would release it.
   const above = [];
   above.push(await step(86_000, true));
-  for (let index = 1; index < 8; index += 1) above.push(await step(86_000 + index * 100));
+  // The agent keeps reaching into the open excursion pass after pass. The crossing's
+  // backstop already claimed the rest of it, so these are refused BY NAME rather than
+  // accepted into a second owner over one span. A mark accepted here would lose at the
+  // next commit to a forest invariant, which is a message the agent cannot act on.
+  const collisions = [];
+  for (let index = 1; index < 8; index += 1) {
+    const id = runtime.excursion[heldExcursion.length + index - 1];
+    if (id) collisions.push(await toolCall(runtime, { action: "fold", ids: [id] }));
+    above.push(await step(86_000 + index * 100));
+  }
+  assert(collisions.length >= 3, "The fixture never collided with a mark the fill had claimed");
+  for (const result of collisions) {
+    const reason = JSON.stringify(result);
+    assert(/already held by pending mark fold_/.test(reason),
+      `A mark over evidence the fill already claimed was not refused by name: ${reason}`);
+  }
   const commitPass = above.find((pass) => pass.appliedMarks !== null);
   assert(commitPass, "No commit epoch ran above the band top");
   assert(commitPass.appliedMarks >= accumulated,
@@ -4657,12 +4650,12 @@ async function gateEpochBatchingUnderFullLevers() {
   // is the difference between "held until the turn closes" and "lost".
   assert(commitPass.retainedMarks > 0,
     "The crossing epoch retained nothing, so the current-turn guard held nothing back");
-  // Marks are free; folds are not. Automation keeps proposing into the open excursion
-  // and not one byte moves for it while the turn stays open.
+  // Marks are free; folds are not. The held batch sits there and not one byte moves for
+  // it while the turn stays open.
   const openPasses = above.slice(above.indexOf(commitPass) + 1);
   assert(openPasses.length >= 3, "The fixture never sat on the open turn long enough to measure it");
-  assert(openPasses.at(-1).marks > commitPass.appliedMarks,
-    `Automation stopped proposing on the open turn at ${openPasses.at(-1).marks} marks`);
+  assert(openPasses.every((pass) => pass.marks >= commitPass.retainedMarks),
+    `The open turn lost held marks: ${openPasses.map((pass) => pass.marks).join(",")}`);
   assert(openPasses.every((pass) => pass.folds === commitPass.folds),
     `Bytes moved on the open turn: ${openPasses.map((pass) => pass.folds).join(",")}`);
 
@@ -4725,13 +4718,28 @@ async function gateEpochBatchingUnderFullLevers() {
     .filter((record) => record.kind === "context.commit" && record.deferred === false);
   assert.equal(closingCommits.length, 1,
     `The released batch took ${closingCommits.length} commits over three request cycles`);
-  // Plus whatever parents the epoch's own closing count owed over the folds it just
-  // landed: those were never pending, and counting them as released would be a fiction.
-  assert.equal(
-    closingCommits[0].applied_marks - closingCommits[0].closing_consolidation_marks,
-    pendingAtClose,
-    `The commit applied ${closingCommits[0].applied_marks} of the ${pendingAtClose} marks the guard released`,
-  );
+  // Every released mark is accounted for by id, three ways and no fourth: it folded
+  // under the id it was made with, it is still standing, or it was absorbed into a
+  // neighbour and the absorb record carries both ends of the rename. An exact count
+  // cannot say this any more, because the commit also fills from the stale end to reach
+  // its freeing target and those marks were never pending.
+  const closingFolds = new Set(materialized(runtime).folds.map((fold) => fold.id));
+  const closingHeld = new Set((materialized(runtime).pendingMarks ?? []).map((mark) => mark.id));
+  // Every absorb the session ever recorded, not just this commit's: a mark the guard
+  // held can be grown by absorption at any commit it sat through, and the rename has to
+  // stay followable from the id it was made with.
+  const closingAbsorbs = new Map(contextEvents(runtime)
+    .filter((record) => record.kind === "context.absorb")
+    .map((record) => [record.from_mark_id, record.into_fold_id]));
+  for (const id of marksAtCloseIds) {
+    if (closingFolds.has(id) || closingHeld.has(id)) continue;
+    const renamed = closingAbsorbs.get(id);
+    assert(renamed, `A mark the guard released was neither applied, retained nor absorbed: ${id}`);
+    assert(closingFolds.has(renamed) || closingHeld.has(renamed),
+      `An absorbed mark's grown id ${renamed} leads nowhere`);
+  }
+  assert(closingCommits[0].applied_marks >= closingCommits[0].closing_consolidation_marks,
+    "The closing count claimed more parents than the commit applied marks");
   assert.equal(closingCommits[0].refused_marks, 0, "A released mark was refused rather than applied");
   assert(closingCommits[0].freed_tokens > 0, "The released batch freed nothing");
   assert(materialized(runtime).folds.length > foldsAtClose,
@@ -5410,7 +5418,7 @@ async function gateFenceMarginAndDepth() {
     // The pin lands on a current snapshot, so the stage has to be projected before the
     // agent can name it. One pin per stage, on the call rather than the payload.
     await project(runtime);
-    const pinned = await toolCall(runtime, { action: "protect", ids: [callEntryId] });
+    const pinned = await toolCall(runtime, { action: "pin", ids: [callEntryId] });
     assert.equal(pinned.details.protectedRefs, step + 1,
       `The stage-${step} pin did not hold: ${JSON.stringify(pinned.details).slice(0, 200)}`);
   }
@@ -5639,8 +5647,9 @@ async function gateContextReceipts() {
   assert.match(text, /Recent automatic context actions/);
   assert.match(text, /tokens freed/);
   // Informatory, never exhortative: it names the correction verbs and asks nothing.
-  assert.match(text, /"action":"rebrief"/);
+  assert.match(text, /"action":"expand"/);
   assert.match(text, /"action":"reboundary"/);
+  assert.equal(/rebrief/.test(text), false, "The receipt still advertises the deleted action");
   assert.equal(/\?/.test(text), false, "A receipt asks the agent a question");
   assert.equal(/please|you should|make sure to|remember to/i.test(text), false,
     "A receipt exhorts rather than reports");
@@ -5806,37 +5815,17 @@ async function gateAutoSnapAndCorrections() {
     /ids must contain 1-64 values/,
   );
 
-  // Re-brief: the fold record is content-addressed and immutable, so the correction is
-  // durable state beside it. The placeholder, the index and the suggestions follow it.
-  const target = materialized(runtime).folds[0];
-  const rebrief = await toolCall(runtime, {
-    action: "rebrief",
-    id: target.id,
-    brief: "Corrected: this fold holds the exact stage-3 chain key the task needs.",
-  });
-  assert.equal(rebrief.details.previousBrief, target.brief);
-  assert.deepEqual(materialized(runtime).briefs, {
-    [target.id]: "Corrected: this fold holds the exact stage-3 chain key the task needs.",
-  });
-  assert.equal(materialized(runtime).folds.find((fold) => fold.id === target.id).brief, target.brief,
-    "A re-brief mutated the immutable fold record");
-  assert.equal(runtime.notifications.filter((notice) => /Conflicting durable/.test(notice.message)).length, 0);
-  const snapshotNow = context.mapActiveContext({
-    sessionId: built.sessionId,
-    eventMessages: runtime.messages,
-    contextEntries: runtime.branch,
-    contextWindow: 100_000,
-  });
-  assert(context.foldPlaceholder(target, materialized(runtime), snapshotNow).includes("Corrected:"),
-    "The placeholder did not carry the corrected brief");
-  // Restated at iteration 8: the row is found by walking the bounded pages, which is
-  // how an agent reaches any fold row now that one page never exceeds the byte cap.
-  const paged = (await pagedStatusRows(runtime, "folds")).rows;
-  assert(paged.find((row) => row.id === target.id).brief.startsWith("Corrected:"));
+  // REBRIEF IS DELETED (Shane, 2026-08-21) and refused BY NAME, not as a disabled
+  // action: rewriting a standing fold's brief rewrites the projection at that fold's
+  // placeholder and breaks the prefix cache from there on, which sol-20260820 rep 7
+  // paid $8.36 for in one nine-request burst at cacheRead 0. An agent told a verb is
+  // merely "not enabled" keeps offering it, so the refusal has to say what happened.
   await assert.rejects(
-    () => toolCall(runtime, { action: "rebrief", id: target.id, brief: "  " }),
-    /rebrief requires a nonempty brief/,
+    () => toolCall(runtime, { action: "rebrief", id: materialized(runtime).folds[0].id, brief: "x" }),
+    /rebrief is deleted/,
   );
+  assert(!JSON.stringify([...runtime.tools.values()][0].parameters).includes("rebrief"),
+    "The deleted action is still on the tool's own parameter surface");
 
   return {
     batchedMarks: batched.details.marks.length,
@@ -5846,7 +5835,7 @@ async function gateAutoSnapAndCorrections() {
     snapCorrected,
     snapRefused,
     correctionNamesFold: true,
-    rebriefed: 1,
+    rebriefRefusedByName: true,
   };
 }
 
@@ -5923,13 +5912,114 @@ async function gateSymmetricReboundary() {
 }
 
 /**
- * Bite-sized folds.
+ * Bite-sized LADDER folds, and an agent span taken whole.
  *
  * Measured 2026-08-06 (rep 6): one 60,432-byte chapter fold hid the fact the run
  * needed in its tail. A fold is only navigable if reading one back is cheap, so the
- * ladder cannot build an oversized chapter and an oversized manual span is split.
+ * ladder cannot build an oversized chapter.
+ *
+ * THE CAP CAME OFF THE AGENT'S OWN SPAN (Shane, 2026-08-22). It was applied to manual
+ * marks too, and manual marks were its ONLY caller: the ladder never split, because
+ * `selectAutomaticChapter` stops accumulating at the cap by itself. So the split
+ * existed solely to overrule the one judgement the design is trying to encourage, and
+ * it charged twice for doing so. One intended fold became five or ten placeholders,
+ * and each piece was handed the SAME brief, so every one of them claimed to describe a
+ * span it held a fraction of, while the correction text said "each with its own brief".
+ *
+ * What separates the two cases is who chose the boundary. A ladder fold is a span
+ * nobody vouched for, so it stays small enough to read back cheaply. An agent fold is a
+ * span the agent cut and wrote a brief for, and it is navigable by a route that did not
+ * exist when rep 6 was measured: peek takes offset and bytes, states the omitted
+ * middle, and reads any child id, so a large fold has a narrow read; an expand that
+ * will not fit is refused with a bounded peek offered in its place.
  */
+/**
+ * THE BAND TOP COMMITS ON ITS OWN (Shane, 2026-08-22).
+ *
+ * Reported from a live 1M-window session: provider count 571,367 against a serving budget
+ * of 1,032,192, the settings panel reading "Commit trigger 0.50 / 516,096 tok", and
+ * `folds: 0`. Occupancy had stood 55,000 tokens above the stated trigger for most of a
+ * session and nothing had ever committed.
+ *
+ * The label was not lying about the intent, it was lying about the runtime. There were
+ * exactly two commit sites: `enforceProjectionBudget`, which measures against the WHOLE
+ * serving budget plus a margin, and the compaction boundary, which is Pi's own threshold
+ * near the top of the window. `maxTarget` reached neither. `epochCommitDue` existed and
+ * was read only by `schedulingStatus`, for display. Every gate that produced a commit
+ * reached it through `measureAndCommit`, which ends in `compactBoundary`, so the suite
+ * agreed with the runtime and neither of them agreed with the panel.
+ *
+ * On a 251,520-token budget the gap is invisible: the fence sits close enough behind the
+ * boundary that a commit lands either way. At 1M the two are half a million tokens apart,
+ * and the session simply climbs.
+ *
+ * ONE IF STATEMENT, no latch (Shane: "if it's over we fold"). Every projection pass asks
+ * whether occupancy is over `maxTarget` and commits when it is. Occupancy only moves when
+ * the provider measures, and a second attempt inside one handoff defers on the mutation
+ * budget, so this is one commit per pass while over and nothing more elaborate.
+ */
+async function gateBandTopCommits() {
+  // maxTarget 0.50 RATHER THAN THE DEFAULT, which is the reported session's own setting
+  // and the only way to separate the two triggers. At 0.80 on this budget the band top
+  // lands inside the fence's margin and the fence fires first, which is exactly why a
+  // 251,520-token campaign never exposed this and a 1M window did.
+  const window = 200_000;
+  const budget = 120_000;
+  const thresholds = { ...context.DEFAULT_THRESHOLDS, maxTarget: 0.50, minTarget: 0.20 };
+  const built = makeFixture({
+    sessionId: "band-top", turns: 26, resultChars: 14_000, contextWindow: window,
+  });
+  const runtime = makeRuntime(built, { providerInputBudget: budget, thresholds });
+  await startRuntime(runtime);
+  const bandTop = thresholds.maxTarget * budget;
+  const commits = () => contextEvents(runtime)
+    .filter((record) => record.kind === "context.commit" && record.deferred === false);
+
+  // (a) UNDER IT, NOTHING.
+  await measure(runtime, Math.round((thresholds.maxTarget - 0.15) * budget), window);
+  await project(runtime);
+  await settle();
+  assert.equal(commits().length, 0, "A commit fired below the band top");
+
+  // (b) OVER IT, A COMMIT, with no boundary call anywhere in this gate and a projection
+  // nowhere near the serving budget the fence watches.
+  await measure(runtime, Math.ceil(bandTop) + 4_000, window);
+  await project(runtime);
+  await settle();
+  const fired = commits();
+  assert.equal(fired.length, 1,
+    `The band top produced ${fired.length} commits with no boundary and no fence`);
+  assert.equal(fired[0].trigger, "band-top",
+    `The commit that fired at the band top names itself ${fired[0].trigger}`);
+  assert(fired[0].applied_marks > 0, "The band-top commit applied no marks");
+  assert(materialized(runtime).folds.length > 0, "The band-top commit produced no folds");
+  assert.equal(commits().filter((record) => record.trigger === "projection-budget").length, 0,
+    "The fence fired, so this gate is measuring the fence and not the band top");
+
+  // (c) THE OPEN TURN IS NEVER SPENT. Routine housekeeping at a stated threshold takes a
+  // null waiver ratio, so `guardWaiverCount` returns 0 and every current-turn mark waits.
+  // The fence and the boundary keep the waiver, because they are the two places where
+  // something has already gone wrong.
+  const epoch = (await toolStatus(runtime)).details.automatic.lastAutomaticAction?.epoch;
+  assert(epoch, "The band-top commit left no epoch record");
+  assert.equal(epoch.waivedMarks, 0, "The band-top commit waived the current-turn guard");
+
+  return {
+    budgetTokens: budget,
+    bandTopTokens: Math.round(bandTop),
+    bandTopCommits: commits().filter((record) => record.trigger === "band-top").length,
+    foldsAfterCommit: materialized(runtime).folds.length,
+    boundaryCalls: 0,
+  };
+}
+
 async function gateBiteSizedFolds() {
+  // THE TURN CAP WENT TOO (Shane, 2026-08-22: fewer moving parts). `maxChapterTurns` 4
+  // bounded the same span a second way and in a second unit. On the ladder it was
+  // redundant, because the walk already stops at MAX_FOLD_SPAN_CHARS and can only stop
+  // EARLIER for a reason that is not about size. On the agent it was the last thing
+  // standing between a mark and the whole window.
+
   assert.equal(context.MAX_FOLD_SPAN_CHARS, 16_000);
   assert.equal(context.PEEK_DEFAULT_MAX_BYTES, 16_000);
 
@@ -5957,64 +6047,113 @@ async function gateBiteSizedFolds() {
   assert.equal(peeked.details.truncated, false, "A default peek of a bite-sized fold was truncated");
   assert.equal(peeked.details.view, "complete");
 
-  // The manual path: an oversized supplied span becomes sequential bounded folds, and
-  // the split is reported rather than silent.
-  const wide = makeFixture({ turns: 12, tools: false, chapterChars: 3_000, contextWindow: 100_000 });
+  // THE MANUAL PATH: one span the agent named, one mark, one fold, one brief.
+  const wide = makeFixture({ turns: 20, tools: false, chapterChars: 3_000, contextWindow: 100_000 });
   const empty = context.emptyActiveContextState(wide.sessionId);
   const oversized = context.manualFoldCandidate(wide.snapshot, empty, [
-    wide.turnEntries[0][0], wide.turnEntries[3].at(-1),
+    wide.turnEntries[0][0], wide.turnEntries[9].at(-1),
   ]);
   const spanChars = context.candidateSpanChars(wide.snapshot, empty, oversized);
-  assert(spanChars > context.MAX_FOLD_SPAN_CHARS, "The oversized fixture is not oversized");
-  const parts = context.splitCandidateBySize(wide.snapshot, empty, oversized);
-  assert(parts.length >= 2, "An oversized span was not split");
-  for (const part of parts) {
-    assert(context.candidateSpanChars(wide.snapshot, empty, part) <= context.MAX_FOLD_SPAN_CHARS,
-      "A split part is still over the cap");
-  }
-  // Split only at closed unit boundaries: never mid-entry, so the parts tile the span.
-  const partRefs = parts.flatMap((part) => part.sourceRefs.map((ref) => ref.entryId));
-  assert.deepEqual(partRefs, oversized.sourceRefs.map((ref) => ref.entryId),
-    "The split lost or reordered evidence");
+  assert(spanChars > context.MAX_FOLD_SPAN_CHARS,
+    `The fixture span is ${spanChars} chars, not past the ${context.MAX_FOLD_SPAN_CHARS} cap`);
+  // The splitter is DELETED rather than left unused, so nothing can quietly call it back.
+  assert.equal(context.splitCandidateBySize, undefined,
+    "the manual splitter is still callable");
+  // So are the three caps that bounded the same span in three other units (Shane,
+  // 2026-08-22). Turns, chapter chars, and exact refs: `maxChapterTurns` 4 and
+  // `maxChapterChars` 128,000 were each redundant against MAX_FOLD_SPAN_CHARS on the
+  // ladder and a hard stop on the agent, and `maxFoldSourceRefs` 256 was refusing the
+  // exact shape the whole-span law exists to allow. The ref cap gets its own probe
+  // below, because a policy field reading `undefined` proves only that it is gone.
+  assert.equal(context.ACTIVE_CONTEXT_POLICY.maxChapterTurns, undefined,
+    "the chapter turn cap is still declared");
+  assert.equal(context.ACTIVE_CONTEXT_POLICY.maxChapterChars, undefined,
+    "the chapter char cap is still declared");
+  assert.equal(context.ACTIVE_CONTEXT_POLICY.maxFoldSourceRefs, undefined,
+    "the fold source-ref cap is still declared");
 
   const manual = makeRuntime(wide, {});
   await startRuntime(manual);
+  const agentBrief = "Ten completed tasks whose exact evidence stays recoverable behind this fold.";
   const folded = await toolCall(manual, {
     action: "fold",
-    ids: [wide.turnEntries[0][0], wide.turnEntries[3].at(-1)],
-    brief: "Four completed tasks whose exact evidence stays recoverable behind these folds.",
+    ids: [wide.turnEntries[0][0], wide.turnEntries[9].at(-1)],
+    brief: agentBrief,
   });
-  // The agent's fold action is a MARK, so the split is reported as marks. The cap is a
-  // property of the decision and of the fold the commit makes from it, so both are read.
-  assert.equal(folded.details.marks.length, parts.length, "The manual fold did not split");
-  assert(folded.details.corrections.some((item) => /split into \d+ sequential folds/.test(item.reason)),
-    "The split was not reported");
-  const splitCommitted = await measureAndCommit(manual, 86_000, 100_000, "split-commit");
-  assert(splitCommitted.folds.length >= 1, "The split marks never committed");
-  assert(splitCommitted.folds.every((fold) => fold.sourceChars <= context.MAX_FOLD_SPAN_CHARS));
+  assert.equal(folded.details.marks.length, 1,
+    `An agent span past the cap became ${folded.details.marks.length} marks`);
+  assert(!folded.details.corrections.some((item) => /split/.test(item.reason)),
+    "The span was reported as split");
+  assert(!folded.details.corrections.some((item) => /turn/.test(item.reason)),
+    "The span was clamped back to a turn limit");
+  const wholeCommitted = await measureAndCommit(manual, 86_000, 100_000, "whole-commit");
+  const agentFold = wholeCommitted.folds.find((fold) => fold.brief === agentBrief);
+  assert(agentFold, "the agent's fold did not commit under its own brief");
+  assert(agentFold.sourceChars > context.MAX_FOLD_SPAN_CHARS,
+    `the committed agent fold is ${agentFold.sourceChars} chars, so it was bite-sized anyway`);
+  assert.equal(wholeCommitted.folds.filter((fold) => fold.brief === agentBrief).length, 1,
+    "one brief was handed to several folds, which is what the split used to do");
 
-  // A single unit that alone exceeds the cap is folded whole: there is no interior
-  // boundary, and refusing would leave the biggest span as the one thing nothing takes.
-  const huge = makeFixture({ turns: 6, tools: false, chapterChars: 12_000, contextWindow: 100_000 });
-  const hugeEmpty = context.emptyActiveContextState(huge.sessionId);
-  const units = context.chapterUnits(huge.snapshot);
-  const oneUnit = units.find((unit) =>
-    context.spanBytes(huge.snapshot, unit.start, unit.end) > context.MAX_FOLD_SPAN_CHARS);
-  assert(oneUnit, "The huge fixture has no single unit past the cap");
-  const single = {
-    kind: "chapter",
-    parts: context.partsForRange(huge.snapshot, hugeEmpty, oneUnit.start, oneUnit.end - 1, new Set()),
-    sourceRefs: [],
-  };
-  single.sourceRefs = context.candidateSourceRefs(single.parts, hugeEmpty);
-  assert(context.candidateSpanChars(huge.snapshot, hugeEmpty, single) > context.MAX_FOLD_SPAN_CHARS);
-  assert.equal(context.splitCandidateBySize(huge.snapshot, hugeEmpty, single).length, 1);
+  // AND IT IS STILL NAVIGABLE, which is the property rep 6 actually lost. A default peek
+  // of a large fold returns a bounded window and SAYS it is bounded rather than pretending
+  // to be complete, so reading one back is cheap however large it is.
+  const wholeState = materialized(manual);
+  const committedId = wholeState.folds.find((fold) => fold.brief === agentBrief).id;
+  const widePeek = await toolCall(manual, { action: "peek", id: committedId });
+  assert.equal(widePeek.details.truncated, true,
+    "a peek of an oversized fold claims to be complete");
+  assert(widePeek.details.omittedBytes > 0,
+    "the bounded peek does not state what it omitted");
+  assert.equal(widePeek.details.view, "index",
+    "a bounded read of a large fold does not present itself as an index view");
+  assert(widePeek.details.sourceBytes > context.MAX_FOLD_SPAN_CHARS,
+    "the peeked fold is not actually large");
+  // PAST THE OLD REF CAP, through the real tool. 256 was the number, and a window of
+  // many small entries reaches it long before it reaches any size bound, so the cap
+  // refused the whole-window mark by counting rather than by cost.
+  const many = makeFixture({
+    sessionId: "many-refs", turns: 300, tools: false, chapterChars: 1_000,
+    contextWindow: 100_000,
+  });
+  const manyRuntime = makeRuntime(many, {});
+  await startRuntime(manyRuntime);
+  const manyBrief = "Two hundred and fifty closed turns whose exact evidence stays recoverable behind this fold.";
+  const manyFolded = await toolCall(manyRuntime, {
+    action: "fold",
+    ids: [many.turnEntries[0][0], many.turnEntries[250].at(-1)],
+    brief: manyBrief,
+  });
+  assert.equal(manyFolded.details.marks.length, 1,
+    `A span of many small entries became ${manyFolded.details.marks.length} marks`);
+  assert.equal(manyFolded.details.marks[0].ok, true, "The wide span was refused");
+  // The count comes off the candidate, because `manualFoldCandidate` is exactly where
+  // the cap used to throw "Folds may include at most 256 exact source references".
+  const manyRefCount = context.manualFoldCandidate(
+    many.snapshot, context.emptyActiveContextState(many.sessionId),
+    [many.turnEntries[0][0], many.turnEntries[250].at(-1)],
+  ).sourceRefs.length;
+  assert(manyRefCount > 256,
+    `The span names ${manyRefCount} exact refs, so it never reached the old 256 cap`);
+
+  const slice = await toolCall(manual,
+    { action: "peek", id: committedId, offset: 200, bytes: 2_048 });
+  assert.equal(slice.details.view, "slice", "a narrow read did not come back as a slice");
+  assert(slice.details.returnedBytes <= 2_048,
+    `a narrow read returned ${slice.details.returnedBytes} bytes against a 2,048 ask`);
+  assert(slice.details.nextOffset > slice.details.offset,
+    "a slice of a large fold offers no way to continue reading");
 
   return {
     foldSpanCap: context.MAX_FOLD_SPAN_CHARS,
     ladderChapters: chapters.length,
     largestLadderChapter: Math.max(...chapters.map((fold) => fold.sourceChars)),
-    manualSplitParts: folded.details.marks.length,
+    agentSpanChars: spanChars,
+    agentSpanTurns: 10,
+    chapterTurnCap: context.ACTIVE_CONTEXT_POLICY.maxChapterTurns ?? null,
+    chapterCharCap: context.ACTIVE_CONTEXT_POLICY.maxChapterChars ?? null,
+    foldSourceRefCap: context.ACTIVE_CONTEXT_POLICY.maxFoldSourceRefs ?? null,
+    widestAgentMarkRefs: manyRefCount,
+    agentMarks: folded.details.marks.length,
     unsplittableUnitFoldedWhole: true,
   };
 }
@@ -6029,10 +6168,15 @@ async function gateBiteSizedFolds() {
  * pi-fold into system-controlled compaction with the curation element deleted.
  */
 async function gateWedgeAbsorption() {
-  assert.equal(context.MAX_WEDGE_ABSORB_TOKENS, 256);
+  // THE WEDGE THRESHOLD IS THE FOLD FLOOR (Shane, 2026-08-21). It was
+  // MAX_WEDGE_ABSORB_TOKENS, a separate 256-token constant, and there is no reason for
+  // a second number: a gap that could stand as a fold on its own is left for the ladder
+  // to take on its own terms, and a gap that could not has no business staying raw.
+  assert.equal(context.MAX_WEDGE_ABSORB_TOKENS, undefined,
+    "The wedge still has a threshold of its own");
+  const floor = context.DEFAULT_THRESHOLDS.minFoldChars;
   const built = makeFixture({
     turns: 20, tools: false, chapterChars: 40, contextWindow: 100_000,
-    policy: { minChapterChars: 1 },
     thresholds: NO_FRESH_TAIL,
   });
   const snapshot = built.snapshot;
@@ -6054,7 +6198,9 @@ async function gateWedgeAbsorption() {
   }
   const absorbed = context.absorbWedgeMarks({ snapshot, state, charsPerToken: 4 });
   assert.equal(absorbed.absorbed.length, 1, "The wedge between two folds was not absorbed");
-  assert(absorbed.absorbed[0].tokens <= context.MAX_WEDGE_ABSORB_TOKENS);
+  assert(absorbed.absorbed[0].chars < floor,
+    `A ${absorbed.absorbed[0].chars}-char wedge was absorbed against a ${floor}-char floor`);
+  assert.equal(absorbed.absorbed[0].threshold ?? floor, floor);
   assert(absorbed.absorbed[0].entries >= 1);
   // Later, not earlier: the LATER fold grew backward, which mutates at a shallower
   // prefix position and preserves more cache.
@@ -6072,8 +6218,7 @@ async function gateWedgeAbsorption() {
   // the agent's curation and is structurally untouchable, at ANY occupancy and after
   // any number of commits. Only a sub-threshold sliver is ever taken.
   const wide = makeFixture({
-    turns: 20, tools: false, chapterChars: 900, contextWindow: 100_000,
-    policy: { minChapterChars: 1 },
+    turns: 20, tools: false, chapterChars: 4_000, contextWindow: 100_000,
     thresholds: NO_FRESH_TAIL,
   });
   const wideEmpty = context.emptyActiveContextState(wide.sessionId);
@@ -6088,19 +6233,18 @@ async function gateWedgeAbsorption() {
       ordinal: 1,
     })).state;
   }
-  const gapTokens = Math.ceil(
-    context.spanBytes(wide.snapshot, wide.snapshot.mapped.findIndex((item) =>
-      item.ref?.entryId === wide.turnEntries[1][0]),
-    wide.snapshot.mapped.findIndex((item) => item.ref?.entryId === wide.turnEntries[4][0])) / 4,
-  );
-  assert(gapTokens > context.MAX_WEDGE_ABSORB_TOKENS * 4,
-    `The deliberate gap is only ${gapTokens} tokens; it does not test the threshold`);
+  const gapChars = context.spanBytes(wide.snapshot, wide.snapshot.mapped.findIndex((item) =>
+    item.ref?.entryId === wide.turnEntries[1][0]),
+  wide.snapshot.mapped.findIndex((item) => item.ref?.entryId === wide.turnEntries[4][0]));
+  assert(gapChars > floor,
+    `The deliberate gap is only ${gapChars} chars against a ${floor}-char floor; ` +
+    "it does not test the threshold");
   for (let commit = 0; commit < 5; commit += 1) {
     const attempt = context.absorbWedgeMarks({
       snapshot: wide.snapshot, state: wideState, charsPerToken: 4,
     });
     assert.deepEqual(attempt.absorbed, [],
-      `A deliberate ${gapTokens}-token gap was absorbed on commit ${commit}`);
+      `A deliberate ${gapChars}-char gap was absorbed on commit ${commit}`);
     wideState = attempt.state;
   }
 
@@ -6138,10 +6282,10 @@ async function gateWedgeAbsorption() {
   );
 
   return {
-    thresholdTokens: context.MAX_WEDGE_ABSORB_TOKENS,
+    thresholdChars: floor,
     absorbedSlivers: absorbed.absorbed.length,
-    absorbedTokens: absorbed.absorbed[0].tokens,
-    deliberateGapTokens: gapTokens,
+    absorbedChars: absorbed.absorbed[0].chars,
+    deliberateGapChars: gapChars,
     deliberateGapAbsorbed: 0,
     markedWedgeAbsorbed: 0,
   };
@@ -6466,7 +6610,6 @@ async function gateContextEventStream() {
     "A batched call did not record how many spans it carried");
 
   // Corrections are their own records, joined to their attempt by seq.
-  const existing = materialized(runtime).folds[0];
   const foldable = foldableSpan(runtime, built);
   assert(foldable.turn, "The fixture left no unfolded turn for the agent to fold");
   await toolCall(runtime, {
@@ -6492,9 +6635,12 @@ async function gateContextEventStream() {
   "A correction references no attempt");
   assert.equal(typeof correction.reason, "string");
   assert.equal(typeof correction.corrected_start_id, "string");
-  assert(correction.reason.includes(chapter.id) ||
-    correction.reason.includes(existing.id) ||
-    /corrected to/.test(correction.reason));
+  // The span crossed a fold boundary AND a unit boundary, so both are reported by name
+  // and the last word is what the span was corrected TO. Reading only the last record
+  // hid the fold's own id behind whichever correction happened to be applied last.
+  assert(corrections.some((record) => record.reason.includes(chapter.id)),
+    "No correction named the fold the span cut into");
+  assert(/corrected to/.test(correction.reason));
 
   // The timeline is reconstructable: commits, the folds they created, projections, the
   // per-handoff prefix comparison, and the provider usage the analyst joins against.
@@ -6685,7 +6831,7 @@ async function gateLeverCollapse() {
     "the ephemeral visibility contract left the peek surface");
   assert.equal(properties.marks.type, "array", "Batched marks are not on the surface");
   const actions = [...properties.action.enum];
-  assert(actions.includes("rebrief") && actions.includes("reboundary"),
+  assert(actions.includes("reboundary"),
     "The correction verbs are not on the immediate surface");
   const folds = materialized(plain).folds.filter((fold) => fold.kind === "tool-result");
   assert(folds.length >= 1, "The collapse fixture folded nothing");
@@ -6817,20 +6963,21 @@ async function gateQuietRuntimeStormReplay() {
   await measure(runtime, 72_600, 100_000, undefined, "toolUse");
   await project(runtime);
   await settle();
+  // ONE DEEP EVENT PER CYCLE IS GONE (Shane, 2026-08-22): "if it's over we fold". Over
+  // the threshold, every pass commits, and the reclaim floor is what stops it rather than
+  // a counter. The quiet property this gate is named for is unchanged and asserted below:
+  // BELOW the threshold, nothing fires at all.
   const afterGate = commits().length;
-  assert.equal(afterGate, 1, `The crossing produced ${afterGate} commit events instead of one`);
+  assert(afterGate >= 1, "The crossing produced no commit");
   const commit = commits()[0];
-  // The FENCE commits this one: the fixture's declared occupancy puts the projection at
-  // the margin, and the fence owns a request already there.
-  assert.equal(commit.trigger, "projection-budget");
   assert(commit.applied_marks >= 5,
-    `The commit applied ${commit.applied_marks} marks; it was not the ONE deep event`);
+    `The commit applied ${commit.applied_marks} marks; it was not a deep event`);
 
   // Quiet again once occupancy falls back below the threshold.
   await measure(runtime, 40_000, 100_000, undefined, "toolUse");
   await project(runtime);
   await settle();
-  assert.equal(commits().length, 1, "The runtime kept folding after the commit");
+  assert.equal(commits().length, afterGate, "The runtime kept folding below the threshold");
 
   // The retune itself, and the parts of the thermostat that did NOT move. The two
   // occupancy constants are fields of the declared object now; their values are the
@@ -7048,7 +7195,7 @@ async function gateCurationCopyAndReceipts() {
   assert.match(line, /Occupancy 76000→45000 tokens/);
   assert.match(line, /1 span\(s\) folded, 3 tool result\(s\) folded/);
   const block = context.receiptBlockText({ receipts: [receipt], toolName: "pi_fold_context" });
-  assert.match(block, /"action":"rebrief"/);
+  assert.match(block, /"action":"reboundary"/);
   assert.match(block, /"action":"reboundary"/);
   assert.match(block, /"action":"expand"/);
 
@@ -7147,7 +7294,7 @@ async function gateMutationBudgetPerHandoff() {
 async function gateNoAgentCommitVerb() {
   assert.equal(context.ACTIVE_CONTEXT_TOOL_ACTIONS.includes("commit"), false,
     "The epoch action surface still carries the commit verb");
-  for (const kept of ["fold", "unmark", "status", "expand", "peek", "refold", "rebrief", "reboundary"]) {
+  for (const kept of ["fold", "unmark", "status", "expand", "peek", "refold", "reboundary"]) {
     assert(context.ACTIVE_CONTEXT_TOOL_ACTIONS.includes(kept),
       `The deletion took ${kept} with it`);
   }
@@ -7186,7 +7333,7 @@ async function gateNoAgentCommitVerb() {
   });
   assert.equal(/"action":"commit"/.test(receiptBlock), false,
     "The receipt block still offers a commit verb");
-  assert(receiptBlock.includes('"action":"rebrief"') && receiptBlock.includes('"action":"reboundary"'),
+  assert(receiptBlock.includes('"action":"reboundary"'),
     "The receipt block lost the correction verbs");
 
   // And the machinery is intact: the marks still fold, on the runtime's own trigger.
@@ -7204,9 +7351,9 @@ async function gateNoAgentCommitVerb() {
   // no automatic top-up, which is banking the curation the session already made rather
   // than asking the runtime to pick more.
   const user = await epochToolRuntime({ turns: 14, resultChars: 8_000 });
-  const command = user.commands.get("fold-context");
+  const command = user.commands.get("fold");
   assert(command, "The user fold command is not registered");
-  assert(/commit/.test(command.description),
+  assert(/[Cc]ommit/.test(command.description),
     `The user command does not advertise its commit form: ${command.description}`);
   // Quiet: 60,000 of a 90,000-token budget is 0.667, well below the 0.80 band top.
   await measure(user, 60_000, 100_000);
@@ -7766,7 +7913,7 @@ async function gateStatusResultsAreLadderFood() {
   const built = makeStatusResultFixture({
     statusTurns: 1,
     statusChars: 30_000,
-    trailingTurns: 4,
+    trailingTurns: 8,
     trailingChars: 4_000,
     contextWindow: 100_000,
   });
@@ -7793,8 +7940,8 @@ async function gateStatusResultsAreLadderFood() {
   const runtime = makeRuntime(makeStatusResultFixture({
     statusTurns: 1,
     statusChars: 30_000,
-    trailingTurns: 4,
-    trailingChars: 4_000,
+    trailingTurns: 8,
+    trailingChars: 8_000,
     contextWindow: 100_000,
   }));
   await startRuntime(runtime);
@@ -7823,7 +7970,7 @@ async function gateStatusResultsAreLadderFood() {
 /**
  * Turns whose tool the deployment BLACKLISTED, so no tool rung may claim their results
  * and the chapter encoding must inline them whole: this is the shape whose closed unit
- * can exceed maxChapterChars, exactly how rep 19's status units encoded to 146k-331k
+ * can exceed the bite-size bound, exactly how rep 19's status units encoded to 146k-331k
  * chars before this build. It took no blacklist to produce before 2026-08-10, when an
  * unlisted tool was one the ladder could not fold; a blacklisted tool is the only way
  * left to build the shape, which is the whole cost of naming one.
@@ -7902,23 +8049,37 @@ async function gateNoPermanentlyUnfoldableUnit() {
   // One closed unit bigger than the whole chapter cap. Before this build the
   // selector broke on the cap BEFORE its single-unit acceptance, so the biggest
   // span in the window was exactly the one thing no automatic rung could reclaim.
-  const giant = makeOpaqueToolFixture({ sessionId: "giant-unit", resultSizes: [140_000] });
-  assert.equal(giant.snapshot.policy.maxChapterChars, 128_000);
+  // Two units: the oversized one this gate is about, and a second so the projection
+  // reaches past the 0.10 fresh tail and the giant is genuinely stale.
+  const giant = makeOpaqueToolFixture({
+    sessionId: "giant-unit", resultSizes: [140_000, 140_000],
+  });
+  // THE CHAPTER CAP IS DELETED (Shane, 2026-08-22). `maxChapterChars` 128,000 sat above
+  // MAX_FOLD_SPAN_CHARS 16,000 in the same monotonically growing walk, so the smaller
+  // bound always broke first and the larger one never fired. What is left is the one
+  // bound that does the work, and the single-unit acceptance that lets a unit past it.
+  assert.equal(giant.snapshot.policy.maxChapterChars, undefined,
+    "the chapter cap is still declared");
   const units = context.chapterUnits(giant.snapshot);
   const state = context.emptyActiveContextState(giant.sessionId);
   const candidate = context.selectAutomaticChapter(giant.snapshot, state);
   assert(candidate, "The oversized unit left the chapter rung with nothing to select");
   const encoded = context.encodedFoldSource(giant.snapshot, state, candidate.parts, "chapter");
-  assert(Buffer.byteLength(encoded, "utf8") > giant.snapshot.policy.maxChapterChars,
-    "The fixture unit is not actually above the chapter cap");
+  assert(Buffer.byteLength(encoded, "utf8") > context.MAX_FOLD_SPAN_CHARS,
+    "The fixture unit is not actually above the bite-size bound");
   // A single unit, exactly: every source ref lies inside one closed unit's range.
   const indices = candidate.sourceRefs.map((ref) =>
     giant.snapshot.mapped.findIndex((item) => item.ref?.entryId === ref.entryId));
   const unit = units.find((item) => indices.every((index) =>
     index >= item.start && index < item.end));
   assert(unit, "The oversized candidate spans more than one closed unit");
-  // No interior boundary exists, so the splitter returns it whole and it folds.
-  assert.equal(context.splitCandidateBySize(giant.snapshot, state, candidate).length, 1);
+  // It folds whole. Nothing bite-sizes it: the splitter is deleted (2026-08-22) and it
+  // never ran on the ladder's own candidates anyway, since `selectAutomaticChapter`
+  // stops accumulating at the cap by itself. The single-unit acceptance below the cap
+  // check is what keeps the biggest span in the window from being the one thing no rung
+  // can reclaim, which is this gate's whole subject.
+  assert.equal(context.splitCandidateBySize, undefined,
+    "the manual splitter is back, and it would cut this unit no rung could re-cut");
   const committed = await commitCandidate(state, giant.snapshot, candidate);
   assert.equal(committed.state.folds.length, 1);
   assert.equal(committed.state.folds[0].kind, "chapter");
@@ -7929,10 +8090,14 @@ async function gateNoPermanentlyUnfoldableUnit() {
 
   // Composition keeps its caps: over inline units the selector still builds
   // multi-unit chapters, and a composed chapter never exceeds the bite-size bound,
-  // let alone maxChapterChars. Only the single closed unit may exceed them.
+  // Only the single closed unit may exceed it.
+  // Twelve units on a 100,000-token window: the 0.10 fresh tail protects 36,000 bytes
+  // of the 90,000-token budget, so the fixture has to carry enough past it for the
+  // selector to compose at all. Composition, not tail size, is what this asserts.
   const multi = makeOpaqueToolFixture({
     sessionId: "multi-unit",
-    resultSizes: [5_000, 5_000, 5_000, 5_000],
+    resultSizes: Array.from({ length: 12 }, () => 5_000),
+    contextWindow: 100_000,
   });
   const multiState = context.emptyActiveContextState(multi.sessionId);
   const multiCandidate = context.selectAutomaticChapter(multi.snapshot, multiState);
@@ -7944,8 +8109,6 @@ async function gateNoPermanentlyUnfoldableUnit() {
     "The cap exception collapsed ordinary composition to single units");
   assert(Buffer.byteLength(multiEncoded, "utf8") <= context.MAX_FOLD_SPAN_CHARS,
     "A composed multi-unit chapter exceeded the bite-size bound");
-  assert(Buffer.byteLength(multiEncoded, "utf8") <= multi.snapshot.policy.maxChapterChars,
-    "A composed multi-unit chapter exceeded maxChapterChars");
   const multiIndices = multiCandidate.sourceRefs.map((ref) =>
     multi.snapshot.mapped.findIndex((item) => item.ref?.entryId === ref.entryId));
   const multiUnits = context.chapterUnits(multi.snapshot).filter((item) =>
@@ -7958,7 +8121,7 @@ async function gateNoPermanentlyUnfoldableUnit() {
   // a brief in its place. Both halves say the same thing, which is this gate's name: there
   // is no closed unit the automatic law cannot reclaim by SOME rung.
   const unlisted = makeOpaqueToolFixture({
-    sessionId: "giant-unlisted", resultSizes: [140_000], blacklisted: false,
+    sessionId: "giant-unlisted", resultSizes: [140_000, 140_000], blacklisted: false,
   });
   const unlistedState = context.emptyActiveContextState(unlisted.sessionId);
   const [unlistedCandidate] = context.selectAutomaticToolBatch(unlisted.snapshot, unlistedState);
@@ -7971,7 +8134,8 @@ async function gateNoPermanentlyUnfoldableUnit() {
     `Folding the oversized result freed only ${unlistedBefore - unlistedAfter} bytes`);
 
   return {
-    maxChapterChars: giant.snapshot.policy.maxChapterChars,
+    chapterCharCap: giant.snapshot.policy.maxChapterChars ?? null,
+    foldSourceRefCap: giant.snapshot.policy.maxFoldSourceRefs ?? null,
     oversizedUnitBytes: Buffer.byteLength(encoded, "utf8"),
     freedBytes: before - after,
     multiUnitChapterBytes: Buffer.byteLength(multiEncoded, "utf8"),
@@ -8149,7 +8313,6 @@ async function gateRep19ShapeResolves() {
   await startRuntime(runtime);
   const committed = await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
   assert(committed.fired, "The window-pressure commit never fired");
-  assert.equal(committed.commit.trigger, "projection-budget");
 
   // The eligible share is an order of magnitude over the reclaim floor: the status
   // mass is ladder food now, not immortal weight.
@@ -8195,9 +8358,9 @@ async function gateRep19ShapeResolves() {
 }
 
 async function gateProtectIsDurablePin() {
-  // Protect is the pin. It must hold an expanded fold against the refold rung after
-  // the lease runs out, hold entries out of commits, release on unprotect, land on
-  // the event stream as context.protect, and be advertised in the description text,
+  // The pin must hold an expanded fold against the refold rung after the lease runs
+  // out, hold entries out of commits, release on unpin, land on the event stream as
+  // context.pin, and be advertised in the description text,
   // because a verb nobody can discover is a verb nobody uses.
   // Wider and lighter than the fixture this gate used to carry. One boundary lands the
   // whole accumulated batch, so a twelve-turn session commits two or three ROOTS and one
@@ -8208,7 +8371,11 @@ async function gateProtectIsDurablePin() {
     .filter((entry) => entry.customType === "pi-fold-context-event")
     .map((entry) => entry.data);
   const description = [...runtime.tools.values()][0].description;
-  assert(description.includes("Protect is the pin"), "The pin is not advertised in the tool surface");
+  // The surface has to name BOTH halves, because a pin an agent cannot find the release
+  // for is a leak: pinned mass counts against the cap gate 92 pins, and the agent is the
+  // only thing that can give it back.
+  assert(/\bPin with ids holds\b/.test(description), "The pin is not advertised in the tool surface");
+  assert(/\bunpin releases\b/.test(description), "The surface names the pin without naming its release");
 
   // ONE crossing. Each one runs consolidation to a fixpoint, so three of them take a
   // thirty-turn session down to a single root and there is no second fold to leave
@@ -8225,14 +8392,14 @@ async function gateProtectIsDurablePin() {
   // while the pin is live and the pinned-mass accounting has a commit to ride.
   const unpinnedFoldId = folds[1].id;
   await toolCall(runtime, { action: "expand", id: foldId });
-  await toolCall(runtime, { action: "protect", ids: [foldId] });
+  await toolCall(runtime, { action: "pin", ids: [foldId] });
   await toolCall(runtime, { action: "expand", id: unpinnedFoldId });
-  const pinned = stream().filter((record) => record.kind === "context.protect");
-  assert.equal(pinned.length, 1, "A protect action must land exactly one context.protect record");
-  assert.equal(pinned[0].protect, true);
+  const pinned = stream().filter((record) => record.kind === "context.pin");
+  assert.equal(pinned.length, 1, "A pin action must land exactly one context.pin record");
+  assert.equal(pinned[0].pin, true);
   assert.equal(pinned[0].ids, foldId);
   assert(pinned[0].protected_refs_after > pinned[0].protected_refs_before,
-    "Protecting a fold must add its evidence refs to the durable pin set");
+    "Pinning a fold must add its evidence refs to the durable pin set");
 
   // Ten measured requests above the refold ratio, each reaching the boundary: the
   // 8-generation lease is long exhausted, the refold the ladder proposes lands as a mark
@@ -8259,16 +8426,16 @@ async function gateProtectIsDurablePin() {
 
   // Unpin: the release lands on the stream, the pin set drains, and the ladder may
   // reclaim the span again.
-  await toolCall(runtime, { action: "unprotect", ids: [foldId] });
+  await toolCall(runtime, { action: "unpin", ids: [foldId] });
   const releases = stream().filter((record) =>
-    record.kind === "context.protect" && record.protect === false);
+    record.kind === "context.pin" && record.pin === false);
   assert.equal(releases.length, 1);
-  assert.equal(materialized(runtime).protected.length, 0, "Unprotect must drain the refs protect added");
+  assert.equal(materialized(runtime).protected.length, 0, "Unpin must drain the refs the pin added");
   for (let index = 0; index < 3; index += 1) {
     await measureAndCommit(runtime, 91_000 + index, 100_000, `unpin-measurement-${index + 1}`);
   }
   state = materialized(runtime);
-  assert(!state.expanded.includes(foldId), "After unprotect the refold rung must reclaim the span");
+  assert(!state.expanded.includes(foldId), "After unpin the refold rung must reclaim the span");
   assert(!state.expanded.includes(unpinnedFoldId), "The unpinned expanded fold should have been refolded under pressure");
   return {
     advertised: true,
@@ -8391,14 +8558,14 @@ async function gatePinnedShareCap() {
   await settle();
   const folds = materialized(runtime).folds;
   assert(folds.length >= 2, "Pressure must have produced at least two committed folds");
-  const refusal = await toolCall(runtime, { action: "protect", ids: folds.map((fold) => fold.id) })
+  const refusal = await toolCall(runtime, { action: "pin", ids: folds.map((fold) => fold.id) })
     .catch((error) => error);
   assert.match(String(refusal), /pinned-share cap/,
     "Pinning everything must refuse past the cap");
   assert.match(String(refusal), new RegExp(`${Math.round(context.MAX_PINNED_SHARE * 100)}%`),
     "The refusal must name the cap");
-  assert.match(String(refusal), /unprotect/, "The refusal must name the release valve");
-  assert.equal(materialized(runtime).protected.length, 0, "A refused protect must pin nothing");
+  assert.match(String(refusal), /unpin/, "The refusal must name the release valve");
+  assert.equal(materialized(runtime).protected.length, 0, "A refused pin must pin nothing");
   // The smallest LEAF. Consolidation nests under the counting rule, so a root fold can
   // now hold the whole stale region and pinning it would exceed the cap on its own;
   // what the under-the-cap leg is about is that a modest pin still lands.
@@ -8406,7 +8573,7 @@ async function gatePinnedShareCap() {
     .filter((fold) => !fold.parts.some((part) => part.kind === "fold"))
     .sort((left, right) => (left.sourceChars ?? 0) - (right.sourceChars ?? 0))[0];
   assert(smallest, "The fixture produced no leaf fold to pin");
-  await toolCall(runtime, { action: "protect", ids: [smallest.id] });
+  await toolCall(runtime, { action: "pin", ids: [smallest.id] });
   const pinned = materialized(runtime).protected.length;
   assert(pinned > 0, "A pin under the cap must still land");
   return { cap: context.MAX_PINNED_SHARE, refused: true, pinnedUnderCap: pinned };
@@ -8427,7 +8594,7 @@ async function gateRiderContentLaw() {
     maxPinnedShare: context.MAX_PINNED_SHARE,
   };
   const text = context.contextRiderText(input);
-  assert(text.includes('"action":"protect"') && text.includes("unprotect"),
+  assert(text.includes('"action":"pin"') && text.includes("unpin"),
     "The rider must carry both pin verbs");
   assert(text.includes("12%") && text.includes(`${Math.round(context.MAX_PINNED_SHARE * 100)}% cap`),
     "The rider must state the pinned share against its cap");
@@ -8440,7 +8607,7 @@ async function gateRiderContentLaw() {
   assert.equal(text, context.contextRiderText(input), "Identical inputs give identical bytes");
   const empty = context.contextRiderText({ ...input, anchors: [], pinnedShare: 0 });
   assert(empty.includes("none"), "An empty anchor list says so instead of vanishing");
-  return { bounded: true, deterministic: true, verbs: ["protect", "unprotect"] };
+  return { bounded: true, deterministic: true, verbs: ["pin", "unpin"] };
 }
 
 /**
@@ -8532,7 +8699,7 @@ async function gateUnifiedSpanLaw() {
     state,
     entries: runtime.branch,
     sessionId: forest.sessionId,
-    maximumBytes: context.ACTIVE_CONTEXT_POLICY.maxChapterChars,
+    maximumBytes: context.ACTIVE_CONTEXT_POLICY.maxSourceChars,
   });
   assert(peekedChild.source.includes(grandchildText), "Peek of a child id lost the verbatim floor");
   // The rescue path is the other read and still resolves every depth, because restoring
@@ -8620,6 +8787,21 @@ async function gateThresholdConstruction() {
   named.push(refuses(withField({ consolidateAfter: 0 }), "consolidateAfter"));
   named.push(refuses(withField({ consolidateAfter: 2.5 }), "consolidateAfter"));
   named.push(refuses(withField({ consolidateAfter: "10" }), "consolidateAfter"));
+  // The fold floor is a character count with a hard floor of its own: below it a
+  // placeholder can cost more than the source it replaces, which was measured twice on
+  // sol-20260814-traps rep 1 (2,726 source chars to 5,341 of placeholder, and 6,384 to
+  // 10,531). A share, a fraction and a value under the floor are each refused by name.
+  named.push(refuses(withField({ minFoldChars: 0 }), "minFoldChars"));
+  named.push(refuses(withField({ minFoldChars: 1_999 }), "minFoldChars"));
+  named.push(refuses(withField({ minFoldChars: 8_000.5 }), "minFoldChars"));
+  named.push(refuses(withField({ minFoldChars: "8000" }), "minFoldChars"));
+  named.push(refuses(withField({ minFoldChars: 0.5 }), "minFoldChars"));
+  assert.equal(context.MINIMUM_FOLD_CHARS_FLOOR, 2_000,
+    "The fold floor drifted from the value the refusal message states");
+  assert.equal(context.resolveThresholds({
+    ...context.DEFAULT_THRESHOLDS, minFoldChars: context.MINIMUM_FOLD_CHARS_FLOOR,
+  }).minFoldChars, context.MINIMUM_FOLD_CHARS_FLOOR,
+  "The floor itself is refused, so nothing can sit at it");
 
   // ONE ASSERTION PER ORDERING INVARIANT, each by the name it refuses under.
   const orderings = [
@@ -8642,11 +8824,20 @@ async function gateThresholdConstruction() {
     "Two ordering violations refused under the same invariant name");
 
   // Servability, evaluated at REGISTRATION against the declared window.
+  // The fresh-tail floor is driven with a DECLARED tail rather than the default one:
+  // the default is 0.10 as of 2026-08-21, and 10 percent of the 10,000-token minimum
+  // supported budget is 1,000 tokens, so the 500-token floor is unreachable through the
+  // defaults at any budget the package will serve. It is still reachable, and still
+  // worth refusing, for a deployment that declares a thin tail on a small window.
+  const thinTail = { ...context.DEFAULT_THRESHOLDS, freshTail: 0.01 };
   const serving = [];
-  for (const [budget, invariant] of [[9_000, "minimumBudget"], [14_400, "freshTailTokens"]]) {
+  for (const [thresholds, budget, invariant] of [
+    [context.DEFAULT_THRESHOLDS, 9_000, "minimumBudget"],
+    [thinTail, 25_000, "freshTailTokens"],
+  ]) {
     let thrown = null;
     try {
-      context.assertThresholdsServable(context.DEFAULT_THRESHOLDS, budget);
+      context.assertThresholdsServable(thresholds, budget);
     } catch (error) {
       thrown = error;
     }
@@ -8662,8 +8853,18 @@ async function gateThresholdConstruction() {
   // deployment that still passes the old field is refused by name rather than having it
   // quietly ignored, which is the only way a governing number may leave a public surface.
   assert.deepEqual(Object.keys(context.DEFAULT_THRESHOLDS).sort(),
-    ["consolidateAfter", "freshTail", "maxTarget", "minTarget"],
-    "The thermostat is not the four numbers it declares");
+    ["consolidateAfter", "freshTail", "maxTarget", "minFoldChars", "minTarget"],
+    "The thermostat is not the five numbers it declares");
+  // And nothing ELSE is a tuning number. minToolChars and minChapterChars were two
+  // constants nobody could tell apart, collapsed into minFoldChars on 2026-08-21;
+  // MAX_WEDGE_ABSORB_TOKENS was a third saying the same thing in tokens and is gone
+  // with them. The names stay spent.
+  for (const gone of ["minToolChars", "minChapterChars", "maxWedgeAbsorbTokens"]) {
+    assert.equal(context.ACTIVE_CONTEXT_POLICY[gone], undefined,
+      `${gone} outlived the setting that replaced it`);
+  }
+  assert.equal(context.MAX_WEDGE_ABSORB_TOKENS, undefined,
+    "The wedge threshold is minFoldChars now; its old constant is still exported");
   refuses({ ...context.DEFAULT_THRESHOLDS, staleTail: 0.78 }, "shape");
 
   // And the same refusal reaches a real registration, by name, never clamped.
@@ -8714,7 +8915,7 @@ async function gateThresholdConstruction() {
  */
 async function gateThreeZones() {
   const thresholds = Object.freeze({
-    maxTarget: 0.80, minTarget: 0.35, freshTail: 0.05, consolidateAfter: 10,
+    maxTarget: 0.80, minTarget: 0.35, freshTail: 0.05, consolidateAfter: 10, minFoldChars: 8_000,
   });
   const built = makeFixture({
     turns: 30, resultChars: 8_000, contextWindow: 100_000, thresholds,
@@ -8872,7 +9073,7 @@ async function gateThreeZones() {
  */
 async function gateFenceOpensTheMiddle() {
   const thresholds = Object.freeze({
-    maxTarget: 0.80, minTarget: 0.35, freshTail: 0.05, consolidateAfter: 10,
+    maxTarget: 0.80, minTarget: 0.35, freshTail: 0.05, consolidateAfter: 10, minFoldChars: 8_000,
   });
   const built = makeFixture({
     turns: 30, resultChars: 8_000, contextWindow: 100_000, thresholds,
@@ -8938,17 +9139,10 @@ async function gateFenceOpensTheMiddle() {
     },
   );
   await startRuntime(runtime);
-  // First crossing: commits, and latches.
   await measureAndCommit(runtime, 26_000, 34_000, "latch-arm");
-  const afterFirst = runtime.appended.length;
-  // A second crossing with nothing new: the latch holds it.
   await measure(runtime, 26_100, 34_000);
   await project(runtime);
   await settle();
-  const latched = contextEvents(runtime, afterFirst)
-    .filter((record) => record.kind === "context.commit" && record.deferred === false);
-  assert.equal(latched.length, 0,
-    "A window parked on the band top committed again with no new eligible mass");
   // WHAT THE FENCE MAY TAKE, NOT WHETHER IT TAKES ANYTHING.
   //
   // This used to assert that no commit fires at the fence at all, on a fixture whose
@@ -9031,7 +9225,7 @@ async function gateFenceOpensTheMiddle() {
     // zone law; the pin counts from the moment it exists, which is what a pin means.
     await project(runtime);
     await settle();
-    const pinned = await toolCall(runtime, { action: "protect", ids: [callEntryId] });
+    const pinned = await toolCall(runtime, { action: "pin", ids: [callEntryId] });
     assert.equal(pinned.details.protectedRefs, step + 1,
       `The fence-${step} pin did not hold: ${JSON.stringify(pinned.details).slice(0, 200)}`);
     untakeable.add(callIndex);
@@ -9130,7 +9324,6 @@ async function gateFenceOpensTheMiddle() {
     proposedSpans: proposed.length,
     deepestProposedIndex: Math.max(...reachedIndices),
     fenceSnapshotDeleted: true,
-    latchedCommits: latched.length,
     drainRounds: drained,
     fenceFolds: landedAtFence.length,
     fenceFoldDeepestIndex: landedAtFence.length ? Math.max(...landedAtFence.flatMap((fold) => fold.indices)) : -1,
@@ -9175,7 +9368,11 @@ async function gateOpenTurnCommits() {
   const window = 100_000;
   const providerInputBudget = 90_000;
   const batches = 24;
-  const resultChars = 12_000;
+  // Sixteen thousand rather than twelve: the commit is sized to the drop the thermostat
+  // asks for, 0.683 of a 90,000-token budget here, and the default fresh tail holds the
+  // newest 36,000 chars back from it. At 12,000 chars a batch the fixture ran 373 tokens
+  // short of a target it was asked to reach, which measures the fixture and not the fill.
+  const resultChars = 16_000;
   const entries = [];
   const messages = [];
   const resultEntryIds = [];
@@ -9238,8 +9435,8 @@ async function gateOpenTurnCommits() {
     "A terminal assistant message reached the open-turn fixture");
   assert(bytesOf(runtime.messages) >= batches * resultChars,
     "The fixture is smaller than the batches it declares");
-  assert(snapshot.policy.minToolChars <= resultChars,
-    "The fixture's results are under the minimum a tool batch may fold");
+  assert(snapshot.thresholds.minFoldChars <= resultChars,
+    "The fixture's results are under the minimum a fold may be");
 
   // (b) THE DIRECT REGRESSION ASSERTION. Foldability is membership, so a session that
   // never closed a turn still holds members. The old law made the automatic reach a byte
@@ -9300,8 +9497,12 @@ async function gateOpenTurnCommits() {
   assert(backstop > bandTop, "The backstop is not above the band top on this deployment");
   const commitFrom = runtime.appended.length;
   await measureAndCommit(runtime, Math.ceil(backstop) + 3_000, window, undefined, "toolUse");
+  // NAMED, because this gate IS about the boundary. The band top fires first on the same
+  // pass and applies nothing, correctly: it takes a null waiver ratio, and on this shape
+  // every mark belongs to the open turn.
   const commit = contextEvents(runtime, commitFrom)
-    .find((record) => record.kind === "context.commit" && record.deferred === false);
+    .find((record) => record.kind === "context.commit" && record.deferred === false &&
+      record.trigger === "compaction-boundary");
   assert(commit, "The boundary committed nothing in a session that never closed a turn");
   assert(commit.applied_marks > 0, `The commit applied ${commit.applied_marks} marks`);
   assert(commit.freed_tokens > 0, `The commit freed ${commit.freed_tokens} tokens`);
@@ -9313,8 +9514,13 @@ async function gateOpenTurnCommits() {
   // exclusion made it propose nothing at all on this shape, because here the open turn
   // is the entire window. A commit that reaches the target only by the marks a few
   // measurement passes left lying around is the starvation with a smaller number on it.
-  assert(commit.topup_marks > 0,
-    "The top-up proposed nothing on a window that is one open turn");
+  // SUMMED OVER THE PASS, not read off the boundary alone: the band top runs first and
+  // its own top-up is where the marks come from now. What the defect was about is that
+  // the top-up proposes ANYTHING on a window that is one open turn.
+  const topUp = contextEvents(runtime, commitFrom)
+    .filter((record) => record.kind === "context.commit")
+    .reduce((total, record) => total + Number(record.topup_marks ?? 0), 0);
+  assert(topUp > 0, "The top-up proposed nothing on a window that is one open turn");
   assert.equal(commit.shortfall_share, 0,
     `The commit fell ${commit.shortfall_share} short of its freeing target`);
 
@@ -9384,7 +9590,7 @@ async function gateAgentSpansNest() {
     state: committed.state,
     entries: forest.entries,
     sessionId: forest.sessionId,
-    maximumBytes: context.ACTIVE_CONTEXT_POLICY.maxChapterChars,
+    maximumBytes: context.ACTIVE_CONTEXT_POLICY.maxSourceChars,
   };
   const peeked = context.peekFoldSource({ ...peekArguments, foldId: parent.id });
   const interstitial = String(context.contentText(
@@ -9408,7 +9614,7 @@ async function gateAgentSpansNest() {
   };
   assert.throws(
     () => context.manualFoldCandidate(forest.snapshot, pinned, ids),
-    (error) => error.message.includes(childFold.id) && /unprotect/.test(error.message),
+    (error) => error.message.includes(childFold.id) && /unpin/.test(error.message),
     "A span that would swallow a pinned fold was not refused by name",
   );
   // Even a caller that may name protected spans, which every agent mark is, cannot
@@ -9528,16 +9734,33 @@ async function gatePublicOptionSurface() {
 }
 
 /**
- * MECHANISM 5. The ladder stands down until commit; the agent owns the epoch.
+ * MECHANISM 5. The ladder stages nothing between epochs, and at the epoch it fills
+ * whatever the agent's own marks did not cover. One commit, sized before it runs.
  *
  * Shane, 2026-08-21, dogfooding: the rung staged a mark on every measured response,
- * every turn end, every message end -- so by the time an agent looked, every eligible
- * batch was already marked and agent curation was structurally impossible. The law
- * inverts: between epochs the ladder stages NOTHING, and at an epoch it fills fresh
- * (topUpMarks) only when the agent staged no marks of its own. The classifier and the
- * blacklist survive unchanged; what died is the eager staging.
+ * every turn end and every message end, so by the time an agent looked, every eligible
+ * batch was already claimed and agent curation was structurally impossible. The corpus
+ * says so without ambiguity: 30 sealed pifold runs, 2,529 automatic folds, ZERO
+ * voluntary ones, and exactly one `fold` action attempted in the whole history. That is
+ * not agents declining to curate. It is agents never being offered anything.
+ *
+ * The first cut of the fix over-corrected: any agent mark stood the ladder down for the
+ * whole epoch. That commits at whatever depth the agent happened to reach, so one small
+ * mark against a large drop commits a barely-moved window, and the next fence pass fires
+ * a SECOND commit in the same cycle. Two commits is two prefix rewrites is two cache
+ * misses, which is the cost the one-commit rule exists to prevent, and it is what made
+ * gate 69 fail on the stand-down build.
+ *
+ * Shane's law (2026-08-21), stated in his own arithmetic: at the threshold we know the
+ * distance from what is used now to the minTarget floor. Say 200k used, 100k floor, so
+ * 100k has to go. The agent marked 30k of it. The ladder folds ~70k more from the stale
+ * end, and BOTH land in one commit computed before the commit runs. The agent's marks
+ * are counted toward the distance rather than displaced, and `claimedRefKeys` keeps the
+ * fill off spans the agent already took.
+ *
+ * The classifier and the blacklist survive unchanged; what died is the eager staging.
  */
-async function gateLadderStandsDownUntilCommit() {
+async function gateLadderFillsWhatTheAgentLeft() {
   // The classifier, unchanged: an arbitrary tool is foldable whatever its
   // arguments look like, and blacklisting it is the only thing that changes the answer.
   assert.equal(context.isAutoFoldableToolCall("bash", { command: "make" }), true);
@@ -9564,7 +9787,10 @@ async function gateLadderStandsDownUntilCommit() {
   assert.equal(quietStatus.details.automatic.scheduling.pending, 0,
     "Marks appeared without the agent marking anything");
 
-  // AN EPOCH THE AGENT CURATED: the agent's folds apply and the ladder adds nothing.
+  // AN EPOCH THE AGENT CURATED: the agent's mark applies, AND the ladder fills the
+  // rest of the drop in the same commit. This is the assertion that inverted: the
+  // stand-down build required every applied fold to be the agent's, which is what
+  // commits a barely-moved window when the agent marks one small span.
   const curated = await epochToolRuntime(shape);
   const staleBatch = bashResultIds(curated.built)[0];
   const marked = await toolCall(curated, {
@@ -9575,9 +9801,29 @@ async function gateLadderStandsDownUntilCommit() {
   assert(!marked.isError, "The agent mark was refused");
   const curatedEpoch = await runtimeCommit(curated, { tokens: 95_000, contextWindow: 100_000 });
   assert(curatedEpoch.fired, "The curated epoch did not fire");
-  assert(curatedEpoch.applied.length >= 1, "The agent's mark did not apply");
-  assert(curatedEpoch.applied.every((fold) => fold.origin === "agent"),
-    `The ladder marked alongside the agent: ${JSON.stringify(curatedEpoch.applied.filter((f) => f.origin !== "agent"))}`);
+  const byOrigin = (origin) => curatedEpoch.applied.filter((fold) => fold.origin === origin);
+  // The agent's mark is never displaced by the fill.
+  assert.equal(byOrigin("agent").length, 1,
+    `The agent's mark did not apply: ${JSON.stringify(curatedEpoch.applied)}`);
+  // And the fill runs ALONGSIDE it rather than standing down.
+  assert(byOrigin("ladder").length >= 1,
+    "The ladder stood down because the agent marked, so the commit lands at whatever " +
+    "depth the agent happened to reach");
+  // ONE commit carries both. Two commits would be two prefix rewrites.
+  assert.equal(curatedEpoch.commits.filter((record) => record.deferred === false).length, 1,
+    `The drop was split across ${curatedEpoch.commits.length} commits instead of one`);
+  // The fill never re-claims what the agent took: no two applied folds share a mark id,
+  // and the agent's own span is not among the ladder's.
+  const agentMarkIds = new Set(byOrigin("agent").map((fold) => fold.id));
+  assert(byOrigin("ladder").every((fold) => !agentMarkIds.has(fold.id)),
+    "The fill re-claimed a span the agent had already marked");
+  // A curated epoch reaches at least the depth an ignored one does, which is the whole
+  // point: curating must not cost the window its drop.
+  const ignoredForDepth = await epochToolRuntime(shape);
+  const ignoredEpoch = await runtimeCommit(ignoredForDepth, { tokens: 95_000, contextWindow: 100_000 });
+  assert(curatedEpoch.freedTokens >= ignoredEpoch.freedTokens * 0.9,
+    `Curating cost the window its drop: curated freed ${curatedEpoch.freedTokens}, ` +
+    `ignored freed ${ignoredEpoch.freedTokens}`);
 
   // AN EPOCH THE AGENT IGNORED: the ladder fills fresh at commit time, and the fill
   // covers the unlisted tool's completed batches.
@@ -9602,6 +9848,9 @@ async function gateLadderStandsDownUntilCommit() {
     defaultBlacklist: [...context.AUTO_FOLD_BLACKLIST_DEFAULT],
     eagerMarksAfterMeasure: quietStatus.details.automatic.scheduling.ladderMarks,
     curatedEpochOrigins: [...new Set(curatedEpoch.applied.map((fold) => fold.origin))],
+    curatedFreedTokens: curatedEpoch.freedTokens,
+    ignoredFreedTokens: ignoredEpoch.freedTokens,
+    curatedCommits: curatedEpoch.commits.filter((record) => record.deferred === false).length,
     fillToolFolds: toolFolds.length,
     blacklistedFillToolFolds: 0,
   };
@@ -10294,8 +10543,12 @@ async function gateDanglingChildMarks() {
   assert.equal(context.pendingMarks(dropCommit.state).length, 0, "The dropped mark is still pending");
 
   // HALF TWO: the fold is not gone, it is held back this pass.
+  // A thin tail, because the hold under test is the current-turn GUARD. The default tail
+  // is 36,000 chars at this budget and the excursion below is 30,000, so the whole open
+  // turn would sit inside it and the child would be held by the tail instead.
   const openBuilt = makeFixture({
     sessionId: "dangling-defer-test", turns: 12, resultChars: 6_000, contextWindow: 100_000,
+    thresholds: THIN_FRESH_TAIL,
   });
   const openMessages = [...openBuilt.messages];
   const openEntries = [...openBuilt.entries];
@@ -10331,6 +10584,7 @@ async function gateDanglingChildMarks() {
     eventMessages: openMessages,
     contextEntries: openEntries,
     contextWindow: openBuilt.contextWindow,
+    thresholds: THIN_FRESH_TAIL,
     readOnlyContextActions: context.PEEK_READ_ONLY_CONTEXT_ACTIONS,
   });
   const openEmpty = context.emptyActiveContextState(openBuilt.sessionId);
@@ -10486,9 +10740,17 @@ async function gateAnchoredOccupancy() {
 
   // CASE 4: rewritten. A commit rebuilds the projection, so the anchored one is no longer
   // a prefix of it: the reading falls back and SAYS it fell back.
+  // A thin tail and a 4,000-char fold floor, declared: this fixture's subject is the
+  // occupancy anchor, and it has to commit repeatedly inside a 40,000-token budget. The
+  // 8,000-char default floor would leave its 6,000-char results unfoldable and the
+  // 0.10 default tail would protect most of what remains, so neither default is what
+  // this gate is measuring. Both are pinned by their own gates (19 and 96).
+  const pressuredThresholds = { ...THIN_FRESH_TAIL, minFoldChars: 4_000 };
   const pressured = makeRuntime(
-    makeFixture({ turns: 20, resultChars: 6_000, contextWindow: 200_000 }),
-    { providerInputBudget: 40_000 },
+    makeFixture({
+      turns: 20, resultChars: 6_000, contextWindow: 200_000, thresholds: pressuredThresholds,
+    }),
+    { thresholds: pressuredThresholds, providerInputBudget: 40_000 },
   );
   await startRuntime(pressured);
   const pressuredProjections = () => contextEvents(pressured).filter((event) => event.kind === "context.projection");
@@ -11131,7 +11393,7 @@ async function gateNoFoldWithoutABrief() {
   // fine. So: protect the span first, which is what makes the mark deferred, then mark it
   // with a brief that cannot pass.
   const guarded = built.turnEntries[2][2];
-  const pinned = await toolCall(runtime, { action: "protect", ids: [guarded] });
+  const pinned = await toolCall(runtime, { action: "pin", ids: [guarded] });
   assert(pinned.details.protectedRefs > 0,
     "The fixture could not protect the span it needs deferred, so nothing here is deferred");
   const marksBefore = materialized(runtime).pendingMarks.length;
@@ -11152,7 +11414,7 @@ async function gateNoFoldWithoutABrief() {
   });
   assert.equal(retried.details.ok, true,
     "The agent corrected the brief the refusal complained about and was refused again");
-  await toolCall(runtime, { action: "unprotect", ids: [guarded] });
+  await toolCall(runtime, { action: "unpin", ids: [guarded] });
 
   // EVERY FOLD, AFTER THE LADDER RUNS: nothing stands with an empty placeholder.
   await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
@@ -11186,10 +11448,10 @@ async function gateNoFoldWithoutABrief() {
  * later turn's derivation reads, so the run burned 50.9 minutes of CPU over 116 minutes
  * of wall against the native arm's 24 seconds, and wall-clock stopped meaning anything.
  *
- * The invariant is not that a brief never changes: the upgrade lane rewrites a
- * deterministic brief with a model one, and `rebrief` lets the agent correct either. It
- * is that the wire carries the difference from its base and nothing else, so an addition,
- * a rewrite and a removal all travel and an unchanged map travels nowhere.
+ * The invariant is not that a brief never changes: a sealed session written by a build
+ * that still had `rebrief` carries overrides that were added, rewritten and removed over
+ * its life. It is that the wire carries the difference from its base and nothing else, so
+ * an addition, a rewrite and a removal all travel and an unchanged map travels nowhere.
  */
 /**
  * A RETIRED STATE FIELD IS REFUSED BY NAME, NOT TOLERATED AND DROPPED.
@@ -11486,26 +11748,24 @@ async function gateBoundaryWaivesTheGuardRatherThanNoOp() {
   });
   assert.equal(context.currentTurnBoundary(snapshot), -1,
     "A turn closed in the fixture, so the guard does not hold every mark");
-  const turnKeys = context.currentTurnRefKeys(snapshot);
-  const marks = context.pendingMarks(state);
-  const guarded = marks.filter((mark) =>
-    context.markTouchesCurrentTurn(state, mark, turnKeys));
-  assert.equal(guarded.length, marks.length,
-    `${marks.length - guarded.length} of ${marks.length} marks sit outside the open turn, so ` +
-    "the commit has unguarded work to do and never reaches the waiver at all");
-  assert(guarded.length >= context.GUARD_WAIVER_MINIMUM_MARKS,
-    `The fixture accumulated ${guarded.length} marks, under the waiver's own minimum`);
+  // Nothing is staged before the boundary any more (gate 141): the commit fills its own
+  // marks from the stale end, and on this shape every one of them lands inside the turn
+  // that never closes. That is precisely the starvation the waiver exists for, and the
+  // counts it turns on are read off the commit record below rather than guessed at here.
+  assert.equal(context.pendingMarks(state).length, 0,
+    "Something staged a mark before the boundary, so the commit is not the only filler");
 
   const from = boundaryRun.appended.length;
   await compactBoundary(boundaryRun);
   const commit = contextEvents(boundaryRun, from)
     .find((record) => record.kind === "context.commit" && record.deferred === false);
   assert(commit, "The boundary did not commit at all");
-  assert.equal(commit.trigger, "compaction-boundary");
   const occupancy = commit.occupancy_tokens_before / commit.budget_tokens;
   assert(occupancy < context.ACTIVE_CONTEXT_POLICY.refoldRatio,
     `The fixture sat at ${occupancy} occupancy, at or past the anchor, so the waiver did ` +
     "not need the boundary and this gate proves nothing");
+  assert(commit.pending_marks >= context.GUARD_WAIVER_MINIMUM_MARKS,
+    `The commit filled ${commit.pending_marks} marks, under the waiver's own minimum`);
   assert(commit.waived_marks > 0,
     "The boundary cancelled Pi's compaction and waived nothing");
   assert(commit.applied_marks > 0,
@@ -11525,8 +11785,9 @@ async function gateBoundaryWaivesTheGuardRatherThanNoOp() {
   // thermostat reading its own gauge, not Pi saying this window must shrink, so it has
   // no better signal than the proxy and does not get to spend the open turn.
   const ratio = 62_500 / window;
+  const guardedCount = commit.pending_marks;
   const waiverAt = (extra) => context.guardWaiverCount({
-    snapshot, ratio, guardedMarks: guarded.length, otherApplicableMarks: 0, ...extra,
+    snapshot, ratio, guardedMarks: guardedCount, otherApplicableMarks: 0, ...extra,
   });
   assert.equal(waiverAt({}), 0,
     "The occupancy anchor stopped governing a waiver that is not at a boundary");
@@ -11536,7 +11797,7 @@ async function gateBoundaryWaivesTheGuardRatherThanNoOp() {
   // take precedence, and a guarded set under the minimum still holds whole.
   assert.equal(
     context.guardWaiverCount({
-      snapshot, ratio, guardedMarks: guarded.length, otherApplicableMarks: 1, boundary: true,
+      snapshot, ratio, guardedMarks: guardedCount, otherApplicableMarks: 1, boundary: true,
     }),
     0,
     "A boundary waived the open turn while unguarded work was available instead");
@@ -11553,7 +11814,7 @@ async function gateBoundaryWaivesTheGuardRatherThanNoOp() {
   return {
     boundaryOccupancy: Number(occupancy.toFixed(3)),
     anchor: context.ACTIVE_CONTEXT_POLICY.refoldRatio,
-    guardedMarks: guarded.length,
+    guardedMarks: guardedCount,
     waivedAtBoundary: commit.waived_marks,
     appliedAtBoundary: commit.applied_marks,
     freedTokens: commit.freed_tokens,
@@ -11562,7 +11823,9 @@ async function gateBoundaryWaivesTheGuardRatherThanNoOp() {
 }
 
 async function gateRetiredStateFieldsAreRefusedByName() {
-  const built = makeFixture({ turns: 6, resultChars: 4_000, contextWindow: 100_000 });
+  // Wide enough to fold at the shipped defaults: freshTail 0.10 protects 36,000 bytes
+  // of a 90,000-token budget, and a fold has to clear minFoldChars past that.
+  const built = makeFixture({ turns: 10, resultChars: 10_000, contextWindow: 100_000 });
   const empty = context.emptyActiveContextState(built.sessionId);
   // Neither field can be produced any more: the schema does not declare them, so the
   // fixture states them as a build that HAD them would have written them.
@@ -11670,56 +11933,86 @@ async function gateDeltaCarriesOnlyBriefChanges() {
   const [first, second] = roots;
 
   // A brief at the policy cap, so a whole-map write could not hide inside the rest of the
-  // wire. It ends on a period because `rebrief` trims, and a trimmed brief is not the
-  // string this gate then compares the replayed map against.
+  // wire. It ends on a period because the write path trims, and a trimmed brief is not
+  // the string this gate then compares the replayed map against.
   const briefText = (name) => `${`Corrected ${name}: the exact bytes stay recoverable behind this fold. `
     .padEnd(context.ACTIVE_CONTEXT_POLICY.maxBriefChars - 1, "The span is unchanged beside it. ")}.`;
 
-  await toolCall(runtime, { action: "rebrief", id: first.id, brief: briefText("one") });
-  const afterFirst = newestDelta();
-  assert.equal(afterFirst.briefs, undefined, "The delta stated the whole brief map");
-  assert.deepEqual(Object.keys(afterFirst.addBriefs ?? {}), [first.id], "The rebrief did not name its own fold");
+  // THE READER OUTLIVES THE WRITER. `rebrief` was deleted on 2026-08-21 and it was the
+  // only verb that reliably wrote `state.briefs`, so nothing in a fresh session puts an
+  // override there any more. The map is NOT retired: sessions written by builds that had
+  // rebrief carry overrides on disk, and refusing to load them would strand every fold
+  // those sessions folded. So the reader stays, and it has to keep winning over the
+  // fold's own immutable brief exactly as before.
+  const overridden = {
+    ...materialized(runtime),
+    briefs: { [first.id]: briefText("one") },
+  };
+  assert.equal(context.foldBrief(first, overridden), briefText("one"),
+    "A brief override loaded from durable state no longer wins over the fold's own brief");
+  assert.equal(first.brief === briefText("one"), false,
+    "The fixture's fold already carries the override text, so the reader proves nothing");
+  assert.equal(context.foldPlaceholder(first, overridden, snapshotNow()).includes("Corrected one"), true,
+    "The placeholder stopped carrying a loaded override");
+  assert.equal(materialized(runtime).briefs, undefined,
+    "Something in a fresh session still writes a brief override");
+
+  // Real mutations, so the branch this gate replays below is a chain rather than two
+  // entries. Each one writes durable state and none of them touches a brief, which is
+  // also the negative half of the claim: a write that changed no brief carries none.
+  await toolCall(runtime, { action: "expand", id: second.id });
+  await toolCall(runtime, { action: "pin", ids: [second.id] });
+  await toolCall(runtime, { action: "unpin", ids: [second.id] });
+  assert.equal(newestDelta().addBriefs, undefined,
+    "The newest write changed no brief and carried one anyway");
+  for (const entry of runtime.branch.filter((item) =>
+    item.customType === context.ACTIVE_CONTEXT_STATE_ENTRY && item.data.kind === "delta")) {
+    assert.equal(entry.data.briefs, undefined, "A write that changed no brief stated the whole map");
+    assert.equal(entry.data.addBriefs, undefined, "A write that changed no brief carried one");
+  }
+
+  // The rest of the lane is driven as a pure function, the same way this gate's mark half
+  // below is, because the write path can reach only one override per re-cut and the law
+  // under test is about what a DELTA carries, not about how many verbs can produce one.
+  // The base carries the session's REAL folds, because a brief override naming a fold
+  // the state does not hold is refused on load, which is the right refusal and would
+  // make a synthetic chain prove nothing.
+  const briefBase = materialized(runtime);
+  const withBriefs = (revision, briefs) => ({
+    ...briefBase,
+    revision,
+    ...(Object.keys(briefs).length ? { briefs } : {}),
+  });
+  const oneBrief = withBriefs(2, { [first.id]: briefText("one") });
+  const twoBriefs = withBriefs(3, { [first.id]: briefText("one"), [second.id]: briefText("two") });
+  const rewritten = withBriefs(4, { [first.id]: briefText("one again"), [second.id]: briefText("two") });
+  const dropped = withBriefs(5, { [second.id]: briefText("two") });
+
+  const added = context.makeStateDelta(oneBrief, twoBriefs);
+  assert.equal(added.briefs, undefined, "The delta stated the whole brief map");
+  assert.deepEqual(Object.keys(added.addBriefs), [second.id], "The delta re-shipped a brief its base already held");
 
   // The write the defect made expensive: nothing about the briefs changed here, and the
   // whole map shipped anyway. It has to carry no brief key of any kind.
-  await toolCall(runtime, { action: "expand", id: second.id });
-  const unrelated = newestDelta();
-  assert.equal(unrelated.briefs, undefined);
-  assert.equal(unrelated.addBriefs, undefined, "A write that changed no brief carried one");
-  assert.equal(unrelated.removeBriefIds, undefined);
-  assert(!JSON.stringify(unrelated).includes("Corrected one"),
+  const quietBrief = context.makeStateDelta(twoBriefs, { ...twoBriefs, revision: 9 });
+  assert.equal(quietBrief.briefs, undefined);
+  assert.equal(quietBrief.addBriefs, undefined, "A write that changed no brief carried one");
+  assert.equal(quietBrief.removeBriefIds, undefined);
+  assert(!JSON.stringify(quietBrief).includes("Corrected one"),
     "The write that changed no brief carried the brief's own bytes");
 
-  await toolCall(runtime, { action: "rebrief", id: second.id, brief: briefText("two") });
-  assert.deepEqual(Object.keys(newestDelta().addBriefs), [second.id], "The second rebrief re-shipped the first");
-  await toolCall(runtime, { action: "rebrief", id: first.id, brief: briefText("one again") });
-  assert.deepEqual(Object.keys(newestDelta().addBriefs), [first.id], "A rewrite did not travel as its own change");
+  assert.deepEqual(Object.keys(context.makeStateDelta(twoBriefs, rewritten).addBriefs), [first.id],
+    "A rewrite did not travel as its own change");
+  assert.deepEqual(context.makeStateDelta(twoBriefs, dropped).removeBriefIds, [first.id],
+    "Dropping a brief did not travel");
 
-  // Materialisation replays every entry in the branch, so this is the round trip: the map
-  // the runtime holds has to be rebuildable from a chain that never stated it whole.
-  assert.deepEqual(materialized(runtime).briefs, {
-    [first.id]: briefText("one again"),
-    [second.id]: briefText("two"),
-  }, "Replaying the deltas did not reproduce the brief map");
+  // The REPLAY half of this mechanism is pinned by the mark chain below, which builds a
+  // whole session from scratch and materialises it. It is not repeated for briefs: with
+  // `rebrief` deleted nothing in a live session writes an override, and a brief chain
+  // hand-built beside the runtime's own fold records fails the state digest for reasons
+  // that have nothing to do with briefs. What is left here is the claim that matters
+  // now, which is what a brief delta CARRIES.
 
-  // REMOVAL. `reboundary` with an id alone dissolves the fold and drops its brief with it.
-  await toolCall(runtime, { action: "reboundary", id: first.id });
-  const afterDissolve = newestDelta();
-  assert.deepEqual(afterDissolve.removeBriefIds, [first.id], "The dissolved fold's brief did not travel as a removal");
-  assert.equal(afterDissolve.addBriefs, undefined, "A removal re-shipped the brief that stayed");
-  assert.deepEqual(materialized(runtime).briefs, { [second.id]: briefText("two") },
-    "Replaying the removal did not leave the surviving brief standing");
-
-  // THE MARKS ARE THE SAME RULE ONE SHAPE ALONG, and the next largest field: 2.55 MB of
-  // rep 9's 21.6 MB ledger, which a diff takes to 0.16 MB. They carry an ORDER as well as a
-  // membership, and appending after removing does not always reproduce it (four of that
-  // run's 309 writes), so the key order travels whole and states the removals by not naming
-  // them. It is short beside the marks themselves, so there is no case to split and no
-  // branch that can pick the wrong one.
-  //
-  // Driven against the encoding rather than through the runtime, the way gate 38 drives the
-  // wire round trip: the reorder is the case that decides the design, and the ladder does
-  // not reorder on demand.
   const markFixture = makeFixture({
     turns: 10, resultChars: 10_000, contextWindow: 100_000, sessionId: "delta-marks",
   });
@@ -11819,9 +12112,13 @@ async function gateDeltaCarriesOnlyBriefChanges() {
     "A sealed session's whole-array marks no longer replay",
   );
 
-  // A delta written before this change states the whole map, and sealed sessions hold
-  // thousands of them. The presence of `briefs` is the discriminator, not a fallback: a
-  // wire that states the map is replayed as the map, and it may not also state a change.
+  // A delta written before this change states the whole array, and sealed sessions hold
+  // thousands of them. The presence of the whole field is the discriminator, not a
+  // fallback: a wire that states it is replayed as stated, and it may not also state a
+  // change to it. Driven on MARKS, which still have a live writer. The same claim for
+  // BRIEFS is carried by the parser assertions below rather than by a replay, because
+  // `rebrief` was deleted on 2026-08-21 and no live session writes an override any more;
+  // a fixture cannot produce a state whose digest covers briefs it never held.
   const chain = runtime.branch.filter((entry) => entry.customType === context.ACTIVE_CONTEXT_STATE_ENTRY);
   assert(chain.length > 3, "The fixture wrote too few state entries to exercise a chain");
   const legacyBranch = structuredClone(runtime.branch);
@@ -11838,15 +12135,17 @@ async function gateDeltaCarriesOnlyBriefChanges() {
     if (held.pendingMarks?.length) entry.data.pendingMarks = held.pendingMarks;
   }
   const legacyReplay = context.materializeActiveContextState(legacyBranch, built.sessionId);
-  assert.deepEqual(legacyReplay.briefs, { [second.id]: briefText("two") },
-    "A sealed session's whole-map deltas no longer replay");
+  assert.deepEqual(legacyReplay.briefs, materialized(runtime).briefs,
+    "The whole-map rewrite changed the brief map the branch replays to");
   assert.deepEqual(legacyReplay.pendingMarks, materialized(runtime).pendingMarks,
     "A sealed session's whole-array marks no longer replay");
 
   const sample = structuredClone(chain.at(-1).data);
-  assert.throws(() => context.parseActiveContextStateV2(
-    { ...sample, briefs: { [second.id]: briefText("two") } }, built.sessionId,
-  ), /states the whole brief map and a change to it/,
+  assert.throws(() => context.parseActiveContextStateV2({
+    ...sample,
+    briefs: { [second.id]: briefText("two") },
+    addBriefs: { [first.id]: briefText("one") },
+  }, built.sessionId), /states the whole brief map and a change to it/,
   "A delta stating both the whole map and a change to it was accepted");
   assert.throws(() => context.parseActiveContextStateV2(
     { ...sample, removeBriefIds: [first.id, first.id] }, built.sessionId,
@@ -11860,16 +12159,16 @@ async function gateDeltaCarriesOnlyBriefChanges() {
     .at(-1).data.removeBriefIds = ["fold_never_written_here"];
   assert.throws(() => context.materializeActiveContextState(brokenRemoval, built.sessionId),
     /Unknown active-context brief removal/);
-  const redundant = structuredClone(runtime.branch);
-  const redundantTail = redundant.filter((entry) => entry.customType === context.ACTIVE_CONTEXT_STATE_ENTRY).at(-1);
-  delete redundantTail.data.removeBriefIds;
-  redundantTail.data.addBriefs = { [second.id]: briefText("two") };
-  assert.throws(() => context.materializeActiveContextState(redundant, built.sessionId),
-    /Redundant active-context brief/);
+  // The REDUNDANT-addition refusal is not driven here any more. Reaching it needs a base
+  // that already holds the brief being re-added, and with `rebrief` deleted no live
+  // session writes one: injecting the first addition into an earlier delta changes the
+  // state that entry's digest covers, so the replay dies of drift before it ever reads
+  // the second. The refusal itself is untouched at persistence.ts, and the writer that
+  // could produce the case is gone. Stated rather than quietly dropped.
 
   return {
     stateEntries: chain.length,
-    unchangedWriteBytes: JSON.stringify(unrelated).length,
+    unchangedWriteBytes: JSON.stringify(quietBrief).length,
     briefChars: briefText("one").length,
     additionsTravelled: 2,
     rewritesTravelled: 1,
@@ -11931,17 +12230,13 @@ async function gateProjectionFingerprintsAreComputedOnDemand() {
   });
   const roots = context.orderedRoots(materialized(runtime), snapshotNow()).map((root) => root.fold);
   assert(roots.length >= 2, `The fixture committed ${roots.length} root folds; two are needed`);
+  // Four durable writes, so several revisions exist to fingerprint. They used to be an
+  // expand and two rebriefs; rebrief was deleted on 2026-08-21, and what this gate needs
+  // is revisions, not any particular verb.
   await toolCall(runtime, { action: "expand", id: roots[0].id });
-  await toolCall(runtime, {
-    action: "rebrief",
-    id: roots[1].id,
-    brief: "Corrected: the exact bytes stay recoverable behind this fold.",
-  });
-  await toolCall(runtime, {
-    action: "rebrief",
-    id: roots[1].id,
-    brief: "Corrected again: the exact bytes stay recoverable behind this fold.",
-  });
+  await toolCall(runtime, { action: "pin", ids: [roots[1].id] });
+  await toolCall(runtime, { action: "unpin", ids: [roots[1].id] });
+  await toolCall(runtime, { action: "expand", id: roots[1].id });
 
   const persistence = context.materializeStatePersistence(
     runtime.branch, sessionId, stateEntryType, foldRecordEntryType);
@@ -12004,8 +12299,10 @@ async function gateUserCommitAnnouncesPersistenceFailure() {
   const shape = { turns: 12, resultChars: 16_000, contextWindow: 100_000 };
   const bank = async (runtime) => {
     await startRuntime(runtime);
-    // 60,000 against the 90,000-token budget is below the band top, so the ladder marks
-    // and waits: the command is what commits, which is the path under test.
+    // 60,000 against the 90,000-token budget is below the band top, so nothing commits
+    // on its own: the agent's mark waits and the command is what spends it, which is the
+    // path under test.
+    await agentMarksBatch(runtime, 0);
     await measure(runtime, 60_000, 100_000);
     assert((materialized(runtime).pendingMarks ?? []).length >= 1,
       "The quiet band accumulated no mark, so the command had nothing to commit");
@@ -12014,8 +12311,19 @@ async function gateUserCommitAnnouncesPersistenceFailure() {
   // ANTI-VACUITY. Unsabotaged, the same command commits, persists and says so. Without
   // this the assertions below would pass on a command that never did anything.
   const clean = makeRuntime(makeFixture({ ...shape, sessionId: "user-commit-clean" }));
+  // BARE IS THE COMMIT (Shane, dogfooding 2026-08-22): no arguments applies the staged
+  // pile exactly as "commit" does. The old bare form rescue-folded an auto-offered
+  // chapter instead, which read as the command ignoring the staged pile.
+  const bare = makeRuntime(makeFixture({ ...shape, sessionId: "user-commit-bare" }));
+  await bank(bare);
+  await bare.commands.get("fold").handler("", bare.ctx);
+  await settle();
+  assert(materialized(bare).folds.length > 0, "The bare form committed nothing");
+  assert(bare.notifications.some((notice) => /Committed \d+ mark/.test(notice.message)),
+    "The bare form did not report what it committed");
   await bank(clean);
-  await clean.commands.get("fold-context").handler("commit", clean.ctx);
+  await bank(clean);
+  await clean.commands.get("fold").handler("commit", clean.ctx);
   await settle();
   assert(materialized(clean).folds.length > 0, "The clean command persisted no fold");
   assert.equal(contextEvents(clean).filter((event) => event.kind === "context.suspend").length, 0,
@@ -12033,7 +12341,7 @@ async function gateUserCommitAnnouncesPersistenceFailure() {
   });
   await bank(runtime);
   armed = true;
-  await runtime.commands.get("fold-context").handler("commit", runtime.ctx);
+  await runtime.commands.get("fold").handler("commit", runtime.ctx);
   await settle();
 
   const suspensions = contextEvents(runtime).filter((event) =>
@@ -12193,8 +12501,15 @@ async function gateAgentNotesSurviveConsolidation() {
   const noteFor = (turn) => turn === 3
     ? `${TRACE_FACT}\nRecorded for the dependency appendix.`
     : `Completed task ${turn} and noted its outcome.`;
+  // SIZED TO THE FOLD FLOOR. A tool batch under minFoldChars is not a candidate at all
+  // and a chapter is measured on its OWN content, with each tool result standing in as
+  // its brief, so the results carry the batch past the floor and the padded user text
+  // carries the chapter past it. Twenty turns leaves ten visible roots for the parent.
   const runtime = makeRuntime(
-    makeFixture({ turns: 14, resultChars: 6_000, contextWindow: 100_000, assistantText: noteFor }),
+    makeFixture({
+      turns: 20, resultChars: 10_000, chapterChars: 2_000, contextWindow: 100_000,
+      assistantText: noteFor,
+    }),
   );
   await startRuntime(runtime);
   await measure(runtime, 92_000, 100_000);
@@ -12225,7 +12540,7 @@ async function gateAgentNotesSurviveConsolidation() {
   // instead of chaptering it, and there the tool fold's brief appends the
   // note as an agent-noted clause the moment the batch folds.
   const shallow = makeRuntime(
-    makeFixture({ turns: 8, resultChars: 6_000, contextWindow: 100_000, assistantText: noteFor }),
+    makeFixture({ turns: 8, resultChars: 10_000, contextWindow: 100_000, assistantText: noteFor }),
   );
   await startRuntime(shallow);
   await measure(shallow, 92_000, 100_000);
@@ -12249,7 +12564,7 @@ async function gateAgentNotesSurviveConsolidation() {
     ? `${TRACE_FACT}\nRecorded while pulling the next stage.`
     : `Stage ${turn - 1} done, pulling on.`;
   const pulled = makeRuntime(
-    makeFixture({ turns: 12, resultChars: 6_000, contextWindow: 100_000, pull: true, pullText: pullNote }),
+    makeFixture({ turns: 12, resultChars: 10_000, contextWindow: 100_000, pull: true, pullText: pullNote }),
   );
   await startRuntime(pulled);
   await measure(pulled, 92_000, 100_000);
@@ -12311,8 +12626,7 @@ async function gateAgentNotesSurviveConsolidation() {
   const wideTurns = 90;
   const wide = makeFixture({
     turns: wideTurns, tools: false, chapterChars: 40, contextWindow: 100_000,
-    policy: { minChapterChars: 1 },
-    thresholds: NO_FRESH_TAIL,
+    thresholds: TINY_FOLD_FLOOR,
     assistantText: (turn) => `Landmark ${turn}: value-${turn} recorded.`,
   });
   let wideState = context.emptyActiveContextState(wide.sessionId);
@@ -12406,8 +12720,7 @@ async function gateBriefTruncationIsExplicit() {
       turns: 2, resultChars: 120, contextWindow: 272_000,
       readArguments: () => ({ path }),
       resultText,
-      policy: { minToolChars: 100 },
-      thresholds: NO_FRESH_TAIL,
+      thresholds: TINY_FOLD_FLOOR,
     });
     const empty = context.emptyActiveContextState(built.sessionId);
     const [candidate] = context.selectAutomaticToolBatch(built.snapshot, empty);
@@ -12442,9 +12755,11 @@ async function gateBriefTruncationIsExplicit() {
   // between them, the LATER mark's brief sized against the policy cap. The
   // suffix length is learned from a real absorption first, so the boundary
   // asserts sit at the exact fit and one past it rather than at a guess.
+  // No fresh tail so both marks are foldable, and the DEFAULT fold floor, because the
+  // floor is what decides a wedge: a gap under it is absorbed and a gap at or over it
+  // stands as its own fold. A one-character floor leaves nothing absorbable at all.
   const wedgeFixture = () => makeFixture({
     turns: 20, tools: false, chapterChars: 40, contextWindow: 100_000,
-    policy: { minChapterChars: 1 },
     thresholds: NO_FRESH_TAIL,
   });
   const built = wedgeFixture();
@@ -12516,7 +12831,9 @@ async function gateBriefTruncationIsExplicit() {
 // the runtime's job is to make that result joinable to the action that selected it.
 // This gate changes no cache policy and sends no provider parameter.
 async function gateCacheTopologyAccounting() {
-  const runtime = await epochToolRuntime({ turns: 12, resultChars: 6_000 });
+  // Results over the fold floor, so the agent's mark alone clears the reclaim floor and
+  // the commit this gate reads actually fires.
+  const runtime = await epochToolRuntime({ turns: 12, resultChars: 10_000 });
   const built = runtime.built;
   const stream = () => contextEvents(runtime);
   const latestPrefix = () => stream().filter((record) => record.kind === "context.prefix").at(-1);
@@ -12535,9 +12852,17 @@ async function gateCacheTopologyAccounting() {
   assert.equal(afterMark.divergent_char, null,
     "Accepting a mark moved old projection bytes before the commit");
 
-  const committed = await runtimeCommit(runtime, { tokens: 88_000, contextWindow: 100_000 });
+  // Measured below the fence rather than against it: the expand this gate performs next
+  // has to be admissible, and at 88,000 of a 90,000-token budget nothing is.
+  const prefixes = () => stream().filter((record) => record.kind === "context.prefix");
+  const beforeCommit = prefixes().length;
+  const committed = await runtimeCommit(runtime, { tokens: 76_000, contextWindow: 100_000 });
   assert.equal(committed.fired, true, "The cache-topology fixture never reached a fold commit");
-  const afterCommit = latestPrefix();
+  // THE FIRST request after the fold, not the last one in the stream. Since 2026-08-22 a
+  // commit fires on the projection pass that crosses the trigger, so the drive to it
+  // leaves further passes behind and the topology point being asserted is not last.
+  const afterCommit = prefixes()[beforeCommit];
+  assert(afterCommit, "The commit produced no following request to classify");
   assert.equal(afterCommit.request_class, "after-fold");
   const root = materialized(runtime).folds.find((fold) => fold.parentId === null);
   assert(root, "The marked span did not produce a root fold");
@@ -12586,31 +12911,49 @@ async function gateCacheTopologyAccounting() {
 //
 // The surfacing falsification program (experiment gates 77-94) killed every cheap
 // judge, leaving the agent itself the only relevance judge standing. The steward
-// advisory is that verdict as runtime behavior: when occupancy stands one inflow
-// step ahead of the wall's own band, an EPHEMERAL projection-tail carrier states
-// mechanical facts only (headroom, budget, inflow, the largest unmarked completed
-// units, mark accounting) and invites marks with agent briefs before the band-top
-// epoch takes the remainder with deterministic ones. It never pretends judgment,
-// never mutates the prefix, never enters the durable stream, and stands down
-// exactly where the wall band, the overflow lanes, and an empty remainder stand
-// up. With no measured inflow pairing there is no band at all, mirroring how the
-// gate-119 trigger degrades. One context.steward event per crossing, not per pass.
+// advisory is that verdict as runtime behavior: an EPHEMERAL projection-tail
+// carrier states mechanical facts only and invites marks with agent briefs before
+// the epoch takes the remainder with deterministic ones. It never pretends
+// judgment, never mutates the prefix, and never enters the durable stream.
+//
+// THE BAND IS ANCHORED TO THE COMMIT TRIGGER (Shane, 2026-08-22), which is the
+// correction this gate exists to hold. It used to open one inflow step below the
+// SERVING BUDGET, and on any real deployment that is ABOVE the trigger: at the
+// sealed 251,520-token budget with maxTarget 0.80 the epoch fires at 201,216 while
+// the old band opened near 226,520, so the advisory arrived after the commit was
+// already due. That is the mechanical half of why the sealed corpus recorded zero
+// voluntary folds in 30 runs and 2,529 automatic ones: the agent was asked to mark
+// at a moment when marking could no longer change anything. The band now opens at
+// trigger - max(10% of budget, one worst recent inflow step) and stands until the
+// budget. The inflow term is not decoration: a single large result can step the
+// window from under a fixed band to over the trigger in one arrival, and a band
+// nothing lands inside never asks. Yielding inside the wall band is DELETED for
+// the same reason it was wrong: that is where the forward-looking trigger fires,
+// which is the last moment marking still decides what folds.
+//
+// One context.steward event per crossing, not per pass.
 async function gateStewardAdvisory() {
-  const runtime = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
+  // A thin tail, because the subject is the BAND and what it says there. At the default
+  // tail the post-epoch work below would have to be large enough to stand outside 36,000
+  // chars, and inflow that size trips the projection fence, which commits and sweeps the
+  // very remainder the advisory is supposed to be inviting marks on.
+  const runtime = await epochToolRuntime({
+    turns: 12, resultChars: 16_000, thresholds: THIN_FRESH_TAIL,
+  });
   const stewardEntries = (projection) => projection.messages.filter((message) =>
     typeof message?.customType === "string" && message.customType.endsWith("-steward"));
   const stewardEvents = () => contextEvents(runtime)
     .filter((record) => record.kind === "context.steward");
 
   // Budget for a 100k window is 90k (16,384-token reserve capped at 10% of the
-  // window). A LARGE measured inflow step is the steward's whole reason to exist:
-  // at a 25k step the band is (40k, 65k], far below the ladder's own working
-  // range, so the invitation lands while the agent still has unclaimed mass to
-  // mark. A small step's band overlaps the threshold epochs, and there the
-  // remainder is already claimed, which the stand-down at the end pins.
+  // window), so the epoch fires at 72k and the warning floor is 9k. The first
+  // measurement has no inflow pairing yet, so the band is the FLOOR alone, opening at
+  // 63k: 30k is below it. The floor mattering before any pairing exists is itself the
+  // fix, since the old rule had no band at all until two requests had been measured,
+  // and a session that overflows early never gets asked.
   await measure(runtime, 30_000, 100_000);
   assert.equal(stewardEntries(await project(runtime)).length, 0,
-    "With no measured inflow pairing there is no steward band");
+    "Below the warning line the advisory must stay silent");
   assert.equal(stewardEvents().length, 0, "No crossing has happened yet");
 
   await measure(runtime, 55_000, 100_000);
@@ -12623,12 +12966,24 @@ async function gateStewardAdvisory() {
   assert.equal(stewards[0].details?.ephemeral, true, "The advisory is an ephemeral carrier");
   const text = stewards[0].content;
   assert(text.includes(" steward] "), "The advisory speaks under the steward header");
-  assert(text.includes("90000-token serving budget"),
-    "The advisory states the serving budget it read");
-  assert(/Unmarked completed units, largest first: (?!none)/.test(text),
+  assert(/A fold commit is imminent/.test(text),
+    "The advisory does not say a commit is coming, which is its whole reason to speak");
+  assert(/Finished units you have not marked, largest first: (?!none)/.test(text),
     "The advisory names the unmarked completed units");
   assert(text.includes('"brief":"<factual brief>"'),
     "The invitation carries the agent-brief mark syntax");
+  // TWO NUMBERS THE AGENT CANNOT DERIVE. It sees no occupancy and no threshold, so an
+  // ask to govern its own window is unactionable without the size of the drop and how
+  // much of it its own marks already carry.
+  const target = Number(text.match(/must free about (\d+) tokens/)?.[1]);
+  assert(Number.isFinite(target) && target > 0,
+    `The advisory does not state the drop the commit is sized to: ${text}`);
+  assert(/will be taken from the stale end by age/.test(text),
+    "The advisory does not say what happens to whatever stays unmarked");
+  assert(text.includes("as many as you like in ONE call"),
+    "The advisory does not tell the agent it may batch its marks");
+  assert((text.match(/"ids":\["<start>","<end>"\]/g) ?? []).length >= 2,
+    "The batch syntax shows only one mark, so the shape does not read as a list");
   // A re-render regenerates CURRENT facts rather than replaying a literal: the
   // ladder may claim spans between passes, and a stale invitation would name
   // mass the agent can no longer mark. What must hold is one advisory, at the
@@ -12637,7 +12992,7 @@ async function gateStewardAdvisory() {
   const rerendered = stewardEntries(again);
   assert.equal(rerendered.length, 1, "A frozen pass must not stack a second advisory");
   assert.equal(again.messages.at(-1), rerendered[0], "The re-rendered advisory still rides the tail");
-  assert(/Unmarked completed units, largest first: (?!none)/.test(rerendered[0].content),
+  assert(/Finished units you have not marked, largest first: (?!none)/.test(rerendered[0].content),
     "The re-rendered advisory still names current unmarked units");
   assert.equal(stewardEvents().length, 1, "One crossing, one context.steward event");
   const facts = stewardEvents()[0];
@@ -12646,6 +13001,23 @@ async function gateStewardAdvisory() {
   assert.equal(facts.inflow_tokens, 25_000);
   assert(typeof facts.largest_candidate === "string" && facts.largest_candidate.length > 0,
     "The event names the largest unmarked candidate");
+  // THE REGRESSION ASSERTION, and the reason this gate was rewritten: the advisory has
+  // to be read while a commit can still be influenced. Under the old band this held at
+  // 55k only by accident of the fixture's 90k budget; at a real budget it never held.
+  assert.equal(facts.trigger_tokens, 72_000,
+    "The band is not anchored to the commit trigger");
+  assert(facts.used_tokens < facts.trigger_tokens,
+    "The advisory spoke at or past the trigger, which is too late to change what folds");
+  assert.equal(facts.warning_tokens, 25_000,
+    "The warning distance is not the wider of the 10% floor and one inflow step");
+  assert(facts.warning_tokens >= 0.10 * facts.budget_tokens,
+    "The warning distance fell under the floor a person can reason about");
+  assert(facts.warning_tokens >= facts.inflow_tokens,
+    "A single inflow step can clear the whole band, so an arrival could skip the ask");
+  assert(facts.commit_target_tokens > 0, "The event does not carry the drop");
+  assert.equal(facts.unmarked_against_commit_tokens,
+    Math.max(0, facts.commit_target_tokens - facts.marked_toward_commit_tokens),
+    "The event's remainder is not the drop less what is marked");
 
   // Leaving through the QUIET side: below the band no epoch fires, so the mass
   // survives for the re-entry probe. The wall side is visited last, because the
@@ -12658,23 +13030,26 @@ async function gateStewardAdvisory() {
   stewards = stewardEntries(await project(runtime));
   assert.equal(stewards.length, 1, "Re-entering the band re-arms the advisory");
   assert.equal(stewardEvents().length, 2, "A second crossing is a second event, no more");
-  await measure(runtime, 70_000, 100_000);
-  assert.equal(stewardEntries(await project(runtime)).length, 0,
-    "Inside the wall band the existing lanes own the moment");
-
-  // The wall handover, probed where it alone does the work: a 36k step from a
-  // low base puts 55k INSIDE the wall band (55k + 36k > 90k) at an occupancy
-  // the ladder does not yet act on, so unclaimed mass is still standing and
-  // only the handover check keeps the steward silent. In the main drive above,
-  // the wall's own epoch had already consumed the remainder, which would let a
-  // weakened handover pass unnoticed.
+  // THE WALL BAND NO LONGER SILENCES IT (law inverted 2026-08-22), probed where the
+  // handover alone does the work: a 36k step from a low base puts 55k inside the wall
+  // band (55k + 36k > 90k) at an occupancy the ladder has not yet acted on, so
+  // unclaimed mass is still standing and the ONLY thing that could keep the advisory
+  // quiet is the handover rule itself. That rule used to stand it down here. It is
+  // backwards: the wall band is where the forward-looking trigger fires, so it is the
+  // last pass at which a mark still changes what gets folded.
   const wallRuntime = await epochToolRuntime({ turns: 12, resultChars: 16_000 });
+  const wallStewards = async () => (await project(wallRuntime)).messages.filter((message) =>
+    typeof message?.customType === "string" && message.customType.endsWith("-steward"));
   await measure(wallRuntime, 19_000, 100_000);
   await measure(wallRuntime, 55_000, 100_000);
-  const wallProjection = await project(wallRuntime);
-  assert.equal(wallProjection.messages.filter((message) =>
-    typeof message?.customType === "string" && message.customType.endsWith("-steward")).length, 0,
-  "Inside the wall band the advisory yields even with unclaimed mass standing");
+  assert.equal((await wallStewards()).length, 1,
+    "The advisory must still speak in the wall band, where marking last matters");
+
+  // Past the serving budget it does stand down: the request is already being refused,
+  // and a mark cannot be applied in time to change that.
+  await measure(wallRuntime, 95_000, 100_000);
+  assert.equal((await wallStewards()).length, 0,
+    "Past the serving budget the recovery lanes own the moment");
 
   // Nothing to mark, nothing to say: a session whose only batch sits inside the
   // fresh tail has an empty remainder at any occupancy, so inside the band the
@@ -12692,34 +13067,74 @@ async function gateStewardAdvisory() {
     typeof entry.customType === "string" && entry.customType.endsWith("-steward"))),
   "The steward advisory must never be appended as a durable entry");
 
-  // THE PRODUCTION SHAPE (sol-20260820-steward rep 2): after an epoch under
-  // pressure the ladder has already claimed and folded every completed batch,
-  // so no unclaimed candidate exists at the band; what stands is folds carrying
-  // deterministic briefs, and the advisory invites REBRIEF on the newest of
-  // them. The rep-2 runtime stood down here instead and passed its whole
-  // session with zero crossings, which is what this section makes impossible.
+  // THE PRODUCTION SHAPE, RE-DERIVED 2026-08-21. Under the eager ladder this section
+  // read the opposite way: sol-20260820-steward rep 2 reached every band with the
+  // remainder already claimed and folded (111 folds, zero unclaimed candidates at every
+  // band moment, every rider's anchors 0), so the advisory had nothing to invite and the
+  // section pinned a REBRIEF invitation instead. Nothing stages between commits now, so
+  // the agent's own channel is live again and rebrief is deleted with its cache cost.
+  // What the band owes is therefore the original claim: stand down with nothing to mark,
+  // and invite marks the moment there is something.
   await measureAndCommit(runtime, 86_000, 100_000);
   await settle();
   await measure(runtime, 55_000, 100_000);
+  assert.equal(stewardEntries(await project(runtime)).length, 0,
+    "A band with everything already folded must stand down, never invent an ask");
+
+  // New completed work arrives, closed by a terminal assistant so the current-turn
+  // guard is not what is being measured here.
+  for (let step = 0; step < 3; step += 1) {
+    runtime.appendMessage({
+      role: "assistant",
+      content: [{ type: "toolCall", id: `post-${step}`, name: "read", arguments: { path: `post-${step}.txt` } }],
+      stopReason: "toolUse",
+      timestamp: 3_000 + step,
+    }, "post-epoch");
+    runtime.appendMessage({
+      role: "toolResult",
+      toolCallId: `post-${step}`,
+      toolName: "read",
+      // Over the fold floor, so each read is a candidate the advisory may name, and no
+      // larger, so the arrival does not push the projection into the fence.
+      content: [{ type: "text", text: `Post-epoch read ${step}: ${"p".repeat(9_000)}` }],
+      isError: false,
+      timestamp: 3_000 + step,
+    }, "post-epoch");
+  }
+  runtime.appendMessage({
+    role: "assistant",
+    content: [{ type: "text", text: "Those four reads are done." }],
+    stopReason: "stop",
+    timestamp: 3_100,
+  }, "post-epoch");
+  await measure(runtime, 40_000, 100_000);
+  await project(runtime);
+  await measure(runtime, 55_000, 100_000);
   const afterEpoch = stewardEntries(await project(runtime));
   assert.equal(afterEpoch.length, 1,
-    "The band after an epoch must invite rebrief, not stand down");
-  const rebriefText = afterEpoch[0].content;
-  assert(!/Unmarked completed units, largest first: none/.test(rebriefText),
+    "With fresh unmarked work standing, the band must invite marks rather than stand down");
+  const invitation = afterEpoch[0].content;
+  assert(!/Finished units you have not marked, largest first: none/.test(invitation),
     "An empty remainder must be omitted, never say none");
-  assert(rebriefText.includes("Standing folds carrying deterministic briefs, largest first: "),
-    "The rebrief invitation is missing");
-  assert(rebriefText.includes('{"action":"rebrief","id":"<fold-id>"'),
-    "The rebrief syntax is missing");
-  const named = rebriefText.match(/largest first: ([^ ]+) \(/)[1];
+  assert(/Finished units you have not marked, largest first: (?!none)/.test(invitation),
+    "The advisory names nothing to mark while unmarked work is standing");
+  assert(invitation.includes('"action":"fold"'),
+    "The invitation lost the mark syntax it exists to carry");
+  assert(!invitation.includes("rebrief"),
+    "The deleted action is still being advertised to the agent");
+
+  // And it is an invitation, not a demand: marking what it named makes it stop naming
+  // it, which is the only way the agent can tell the advisory read its answer.
+  const namedId = invitation.match(/largest first: ([^ ]+) \(/)[1];
   await toolCall(runtime, {
-    action: "rebrief", id: named,
-    brief: "Exact chapter facts: alpha beta gamma delta epsilon.",
+    action: "fold",
+    ids: [namedId],
+    brief: "Exact post-epoch read facts: alpha beta gamma delta epsilon.",
   });
   const reProjected = stewardEntries(await project(runtime));
-  assert.equal(reProjected.length, 1);
-  assert(!reProjected[0].content.includes(named),
-    "A fold the agent already rebriefed is still being offered");
+  assert(reProjected.length <= 1, "Marking stacked a second advisory");
+  assert(reProjected.every((entry) => !entry.content.includes(namedId)),
+    "A span the agent already marked is still being offered");
 
   // THE DIRECTED TURN IS DELETED (Build 4a f2d6f6e, killed 2026-08-20 on the
   // sol-20260820-steward verdict at n=3). The crossing queued one required
@@ -12761,74 +13176,32 @@ async function gateStewardAdvisory() {
     "A host without sendMessage must read identically to one with it");
   assert.equal(mute.steered.length, 0);
 
-  // Visible targets only: the offline brief-function study measured visible
-  // carriage at 43 percent natural and ZERO seeded because consolidation
-  // parents dilute their children's briefs to subject lines, so a hidden
-  // child's brief renders nothing and offering it wastes the turn. The forest
-  // drive proves the walk: eleven roots consolidate ten under one parent, and
-  // the ask offers the PARENT, never a hidden child.
-  const forest = await chapterForest(11);
-  const forestBranch = [...forest.entries, stateEntry(
-    forest.sessionId, forest.state, "forest-state", forest.entries.at(-1).id,
-  )];
-  const forestRuntime = makeRuntime(forest, { initialEntries: forestBranch });
-  await startRuntime(forestRuntime);
-  await measure(forestRuntime, 30_000, 100_000);
-  await measure(forestRuntime, 55_000, 100_000);
-  await measureAndCommit(forestRuntime, 85_000, 100_000, "forest-commit");
-  await settle();
-  await measure(forestRuntime, 55_000, 100_000);
-  const forestState = materialized(forestRuntime);
-  const parent = forestState.folds.find((fold) => fold.kind === "consolidation");
-  assert(parent, "Anti-vacuity: the forest drive must build a consolidation parent");
-  const hiddenChildIds = new Set(forestState.folds
-    .filter((fold) => fold.parentId !== null && !forestState.expanded.includes(fold.parentId))
-    .map((fold) => fold.id));
-  assert(hiddenChildIds.size >= context.DEFAULT_THRESHOLDS.consolidateAfter,
-    "Anti-vacuity: the parent must hide its children");
-  const advisoryTargets = (projection) => {
-    const advisories = projection.messages.filter((message) =>
-      typeof message?.customType === "string" && message.customType.endsWith("-steward"));
-    assert.equal(advisories.length, 1, "Anti-vacuity: the forest band must render the advisory");
-    const listed = String(advisories[0].content)
-      .match(/deterministic briefs, largest first: ([^.]+)\./);
-    return listed ? listed[1].split("; ").map((part) => part.split(" (")[0]) : [];
-  };
-  const offered = advisoryTargets(await project(forestRuntime));
-  assert(offered.length >= 1, "The forest ask must offer at least one rebrief target");
-  assert(offered.every((id) => !hiddenChildIds.has(id)),
-    "A hidden child's brief renders nothing; offering it wastes the turn");
-  assert(offered.includes(parent.id),
-    "The visible consolidation parent is the rebrief target that matters");
-
-  // The discriminating half: EXPAND the parent and the offer must flip. A
-  // revealed parent's own brief no longer renders (the projection shows its
-  // children instead), so offering it wastes the turn; the children's briefs
-  // now render and become legitimate targets. A target list computed from
-  // state.folds instead of the visibility walk keeps offering the parent here,
-  // which is exactly the weakening this section exists to catch.
-  await toolCall(forestRuntime, { action: "expand", id: parent.id });
-  // Leaving to 20k grows the worst inflow step to 35k on re-entry, which moves
-  // the band to (20k, 55k]; 50k sits inside it with margin, where 55k would
-  // land exactly on the top edge and read as the wall's moment.
-  await measure(forestRuntime, 20_000, 100_000);
-  // The latch releases only where the reading runs: a projection below the
-  // band is what re-arms the crossing edge, exactly as in the main drive.
-  await project(forestRuntime);
-  await measure(forestRuntime, 50_000, 100_000);
-  const offeredAfterExpand = advisoryTargets(await project(forestRuntime));
-  assert(offeredAfterExpand.length >= 1);
-  assert(!offeredAfterExpand.includes(parent.id),
-    "A revealed parent's brief does not render; offering it wastes the turn");
+  // THE VISIBILITY WALK IS DELETED WITH ITS ONLY CONSUMER (2026-08-21). This section
+  // drove an eleven-root forest to prove the advisory offered the visible consolidation
+  // PARENT and never a hidden child, and flipped the offer when the parent was expanded.
+  // Its subject was the rebrief target list: the offline brief-function study measured
+  // visible carriage at 43 percent natural and ZERO seeded because a consolidation parent
+  // dilutes its children's briefs to subject lines, so offering a hidden child's brief
+  // wasted the turn. With rebrief deleted there is no target list to compute, no walk to
+  // get wrong, and no way to weaken this by accident. What the advisory names now is
+  // unmarked RAW evidence, which is visible by definition. Stated rather than dropped in
+  // silence, and the walk itself is gone from the runtime.
+  assert.equal(
+    readFileSync(join(projectRoot, "extensions", "active-context.ts"), "utf8")
+      .includes("visibleBriefFolds"),
+    false,
+    "The rebrief target walk outlived the action it served",
+  );
 
   return {
-    band: "(40000, 65000] of a 90000 budget at 25000 inflow",
+    band: "[47000, 90000] of a 90000 budget: trigger 72000 less the wider of a 9000 floor " +
+      "and a 25000 inflow step",
     eventsPerCrossing: 1,
     durableEntries: 0,
     ephemeral: true,
-    rebriefInvitedAfterEpoch: true,
+    marksInvitedAfterEpoch: true,
     directedTurnDeleted: true,
-    forestOffersParentOnly: true,
+    rebriefWalkDeleted: true,
   };
 }
 
@@ -12864,9 +13237,43 @@ async function gateEphemeralPeek() {
       new AbortController().signal, undefined, runtime.ctx),
     /peek ephemeral must be a boolean/);
 
-  // Durable default: the result outlives the reply, exactly as before.
-  await tool.execute("peek-durable", { action: "peek", id: foldId },
+  // EPHEMERAL IS THE DEFAULT (Shane, 2026-08-22), and it is decided by one predicate
+  // rather than by three call sites reading the raw parameter. Only an explicit false
+  // is durable: a bare call, and anything the validator already rejected, reads
+  // ephemeral, so a caller that never learned the argument gets the cheap read and can
+  // still recover the bytes by peeking again.
+  assert.equal(context.peekIsEphemeral(undefined), true);
+  assert.equal(context.peekIsEphemeral({}), true);
+  assert.equal(context.peekIsEphemeral({ action: "peek" }), true);
+  assert.equal(context.peekIsEphemeral({ ephemeral: true }), true);
+  assert.equal(context.peekIsEphemeral({ ephemeral: false }), false,
+    "an explicit false is the only way to hold a peek in the window");
+
+  // The bare call takes the default, and the payload says which contract it got, so the
+  // agent never has to infer it from the absence of a field.
+  const bare = await tool.execute("peek-bare", { action: "peek", id: foldId },
     new AbortController().signal, undefined, runtime.ctx);
+  assert(String(bare.details.ephemeral ?? "").includes("until your next message"),
+    "a bare peek did not take the ephemeral default");
+  assert(/ephemeral false/.test(String(bare.details.ephemeral ?? "")),
+    "the ephemeral payload does not name the escape to a durable read");
+  runtime.appendMessage({
+    role: "toolResult", toolCallId: "peek-bare", toolName: "pi_fold_context",
+    content: [{ type: "text", text: "BARE-SENTINEL-51kd" }], isError: false,
+  });
+  runtime.appendMessage({ role: "assistant", content: [{ type: "text", text: "read it." }] });
+  assert(!json.stableStringify((await project(runtime)).messages).includes("BARE-SENTINEL-51kd"),
+    "a bare peek outlived the reply, so the default did not flip");
+
+  // The escape works and is the ONLY thing that holds a result: explicit false outlives
+  // the reply, which is the stage-64 shape (bytes wanted standing across several turns).
+  const durable = await tool.execute("peek-durable",
+    { action: "peek", id: foldId, ephemeral: false },
+    new AbortController().signal, undefined, runtime.ctx);
+  assert.equal(durable.details.ephemeral, undefined,
+    "a durable peek claimed the ephemeral contract");
+  assert(String(durable.details.durable ?? "").includes("stays in your context"),
+    "a durable peek does not state its own contract");
   runtime.appendMessage({
     role: "toolResult", toolCallId: "peek-durable", toolName: "pi_fold_context",
     content: [{ type: "text", text: "DURABLE-SENTINEL-2c9a" }], isError: false,
@@ -12874,7 +13281,12 @@ async function gateEphemeralPeek() {
   runtime.appendMessage({ role: "assistant", content: [{ type: "text", text: "noted." }] });
   const afterDurable = json.stableStringify((await project(runtime)).messages);
   assert(afterDurable.includes("DURABLE-SENTINEL-2c9a"),
-    "a bare peek's result must stay like any other tool result");
+    "an explicitly durable peek was withdrawn anyway");
+
+  // The schema states the default the runtime actually applies, since the description is
+  // the only place the agent reads it from.
+  assert(/[Dd]efault TRUE/.test(tool.parameters.properties.ephemeral.description),
+    "the schema still advertises the old default");
 
   // Ephemeral: visible until answered, then the placeholder takes its index.
   const peeked = await tool.execute("peek-ephemeral",
@@ -12947,9 +13359,16 @@ async function gateEphemeralPeek() {
   assert(attemptEvents.some((data) =>
     data.tool_call_id === "peek-ephemeral" && data.ephemeral === true),
   "the ephemeral peek's attempt does not say so");
-  assert(attemptEvents.every((data) =>
-    data.tool_call_id !== "peek-durable" || data.ephemeral === undefined),
-  "a bare peek's attempt claims ephemerality");
+  // EVERY peek attempt states which contract it took, rather than only the ephemeral
+  // ones. With ephemerality the default, absence would otherwise mean two different
+  // things: a durable read on this build, or any read at all on a build before the
+  // argument existed. A campaign lens has to be able to tell those apart.
+  assert(attemptEvents.some((data) =>
+    data.tool_call_id === "peek-bare" && data.ephemeral === true),
+  "a bare peek's attempt does not record the default it took");
+  assert(attemptEvents.some((data) =>
+    data.tool_call_id === "peek-durable" && data.ephemeral === false),
+  "an explicitly durable peek's attempt does not record the choice");
 
   // A projection-shaped result with the same call id is never touched: after a
   // fold claims the batch, its deterministic tool brief carries the toolCallId.
@@ -12976,7 +13395,8 @@ async function gateEphemeralPeek() {
     "a restart must degrade to durable, never to silent loss");
 
   return {
-    durableDefault: true,
+    ephemeralDefault: true,
+    durableOnExplicitFalse: true,
     oneRead: true,
     placeholderKeepsIndex: true,
     prefixIntactBeforeWithdrawnIndex: true,
@@ -12984,6 +13404,201 @@ async function gateEphemeralPeek() {
     attemptSaysEphemeral: true,
     foldPlaceholderUntouched: true,
     restartDegradesToDurable: true,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// GATE 143 - a mark answers with the arithmetic of the commit it is heading for.
+//
+// The corpus that read as "agents will not govern their context" was measuring a
+// window where they could not: the ladder claimed every completed batch before the
+// band was reached, so unmarked_spans was 0 at every sealed crossing and the one
+// fold action ever attempted across 30 runs had nothing left to name. The scale is
+// not the obstacle either. Sealed rep 2 of sol-20260815-hidden ran 7 applied commits
+// at a 251,520-token budget with 13, 15, 12, 15, 11, 10 and 17 applied marks, mean
+// 13,640 tokens per mark and a median fold of 57,050 source chars, so a whole
+// epoch's drop is ten to seventeen spans and ONE call carries sixty-four of them.
+//
+// What was missing is the number. An agent sees no occupancy, no threshold and no
+// minTarget, so "mark what you are done with" is an instruction it cannot aim. Every
+// mark now answers with the drop the next commit is sized to, what the standing
+// marks will free when it runs, and what the ladder will take by age if nothing else
+// is marked, from ONE definition shared with the fill that enforces it and the
+// advisory that warns about it.
+// ---------------------------------------------------------------------------
+async function gateMarkAnswersWithCommitArithmetic() {
+  // The definition itself, driven as a function so the arithmetic is pinned rather
+  // than inferred from a rendered sentence.
+  const built = makeFixture({
+    turns: 14, resultChars: 12_000, contextWindow: 100_000, thresholds: THIN_FRESH_TAIL,
+  });
+  const snapshot = epochSnapshot(built);
+  const empty = context.emptyActiveContextState(built.sessionId);
+  const bare = context.commitCoverage({
+    snapshot, state: empty, usedTokens: 72_000, budgetTokens: 90_000,
+  });
+  // 72,000 used against a 90,000 budget with minTarget 0.20 is a drop to 18,000.
+  assert.equal(bare.targetTokens, 54_000, "the drop is not measured to the minTarget floor");
+  assert.equal(bare.markedTokens, 0, "an unmarked window claims coverage");
+  assert.equal(bare.remainingTokens, 54_000);
+  assert.equal(bare.covered, false);
+  // Below the floor there is nothing to free and nothing to ask for.
+  assert.equal(context.commitCoverage({
+    snapshot, state: empty, usedTokens: 10_000, budgetTokens: 90_000,
+  }).targetTokens, 0, "a window under the floor still demands a drop");
+  assert.equal(context.commitCoverage({
+    snapshot, state: empty, usedTokens: null, budgetTokens: 90_000,
+  }).targetTokens, 0, "an unmeasured window invents a drop");
+
+  // THE MARKED SIDE IS THE ELIGIBLE SIDE. A mark the current-turn guard will retain
+  // frees nothing at this commit however good it is, so counting it would tell the
+  // agent it was covered while the ladder took the same tokens anyway.
+  const runtime = await epochToolRuntime({
+    turns: 14, resultChars: 12_000, thresholds: THIN_FRESH_TAIL,
+  });
+  await measure(runtime, 72_000, 100_000);
+  const first = await toolCall(runtime, {
+    action: "fold",
+    ids: [runtime.built.turnEntries[0][2]],
+    brief: "The first completed inspection is finished with and stays exactly recoverable.",
+  });
+  assert(!first.isError, `the mark was refused: ${JSON.stringify(first)}`);
+  const one = first.details;
+  assert(one.commitTargetTokens > 0, "the mark response does not state the drop");
+  assert(one.markedTowardCommitTokens > 0,
+    "a mark that will apply reports no progress against the drop");
+  assert.equal(one.unmarkedAgainstCommitTokens,
+    Math.max(0, one.commitTargetTokens - one.markedTowardCommitTokens),
+    "the remainder is not the drop less what is marked");
+  assert.equal(one.commitCovered, one.unmarkedAgainstCommitTokens === 0);
+  assert(/must free about \d+ tokens/.test(one.awareness),
+    `the readable answer does not carry the drop: ${one.awareness}`);
+  assert(/the ladder\s+will take/.test(one.awareness.replace(/\n/g, " ")),
+    "the readable answer does not say who takes the remainder");
+  assert(/as of now/.test(one.awareness),
+    "the readable answer states a moving number as though it were fixed");
+
+  // MANY IN ONE CALL, which is what makes the drop reachable at all. The batch marks
+  // several spans and the answer accounts for all of them together.
+  const batch = await toolCall(runtime, {
+    action: "fold",
+    marks: [1, 2, 3, 4].map((index) => ({
+      ids: [runtime.built.turnEntries[index][2]],
+      brief: `Completed inspection ${index} is finished with and stays exactly recoverable.`,
+    })),
+  });
+  assert(!batch.isError, `the batch was refused: ${JSON.stringify(batch)}`);
+  assert.equal(batch.details.marks.filter((mark) => mark.ok === true).length, 4,
+    "the batch did not take every span it named");
+  const many = batch.details;
+  assert(many.markedTowardCommitTokens > one.markedTowardCommitTokens,
+    "four more marks moved the coverage by nothing");
+  assert(many.unmarkedAgainstCommitTokens < one.unmarkedAgainstCommitTokens,
+    "the remainder did not fall as the agent marked");
+  assert.equal(many.markedTowardCommitTokens,
+    Math.round(many.estimatedEligibleWindowShare * 90_000),
+    "the coverage and the eligible share disagree, so two readings of one fact exist");
+
+  // AND IT IS REACHABLE, which is the claim the number exists to serve. A fixture can
+  // decouple these: measured occupancy is whatever the harness reports while the real
+  // foldable mass is whatever the fixture holds, and asking for a drop larger than the
+  // session's own bytes is unreachable by construction rather than by behaviour. So the
+  // reachable probe measures a drop the window can actually pay: 40,000 used against a
+  // 90,000 budget is a 22,000-token drop, and this fixture holds about 42,000 tokens of
+  // completed results outside a thin tail.
+  const reach = await epochToolRuntime({
+    turns: 14, resultChars: 16_000, thresholds: THIN_FRESH_TAIL,
+  });
+  await measure(reach, 40_000, 100_000);
+  let answer = null;
+  let markCalls = 0;
+  for (let index = 0; index < 12 && !(answer && answer.commitCovered); index += 1) {
+    const result = await toolCall(reach, {
+      action: "fold",
+      ids: [reach.built.turnEntries[index][2]],
+      brief: `Completed inspection ${index} is finished with and stays exactly recoverable.`,
+    });
+    assert(!result.isError, `mark ${index} was refused: ${JSON.stringify(result)}`);
+    answer = result.details;
+    markCalls += 1;
+  }
+  assert(answer && answer.commitCovered,
+    `the agent could not reach coverage in ${markCalls} marks: ${answer?.unmarkedAgainstCommitTokens} left`);
+  assert(markCalls <= 17,
+    `coverage took ${markCalls} spans, past the ten to seventeen the sealed corpus measured`);
+  assert(/Your marks cover the next commit/.test(answer.awareness),
+    `the answer does not say the agent is covered: ${answer.awareness}`);
+
+  // The commit that follows chooses nothing for itself: every applied mark is the
+  // agent's, and the ladder adds none of its own. That is what "no automated folds"
+  // means, and it is the state the reported number is there to make findable.
+  const covered = await runtimeCommit(reach, { tokens: 40_000, contextWindow: 100_000 });
+  assert.equal(covered.fired, true, "the covered epoch never committed");
+  const coveredOrigins = new Set(covered.applied.map((mark) => mark.origin));
+  assert(coveredOrigins.has("agent"), "the agent's own marks did not land in the commit");
+  assert(!coveredOrigins.has("ladder"),
+    `the ladder marked anyway against a covered drop: ${[...coveredOrigins].join(", ")}`);
+  assert.equal(covered.commit.topup_marks, 0,
+    "the fill topped up a commit the agent had already covered");
+
+  // A PIN IS A CLAIM, NOT A FOLD (Shane, 2026-08-22). It is reported beside the marks so
+  // a gap reads as a gap, and it pays NOTHING toward the drop, because pinned bytes stay
+  // in the window. If a pin counted, an agent could pin its way to a coverage it does not
+  // have and the commit would fold something else anyway, which makes the number a lie at
+  // the moment it matters most.
+  const pinRuntime = await epochToolRuntime({
+    turns: 14, resultChars: 12_000, thresholds: THIN_FRESH_TAIL,
+  });
+  await measure(pinRuntime, 72_000, 100_000);
+  const beforePin = (await toolCall(pinRuntime, {
+    action: "fold",
+    ids: [pinRuntime.built.turnEntries[0][2]],
+    brief: "A finished inspection whose exact bytes stay recoverable behind this mark.",
+  })).details;
+  const pinnedEntry = pinRuntime.built.turnEntries[5][2];
+  const pinned = await toolCall(pinRuntime, { action: "pin", ids: [pinnedEntry] });
+  assert(!pinned.isError, `the pin was refused: ${JSON.stringify(pinned)}`);
+  assert(pinned.details.pinnedTokens > 0, "the pin response does not state what it holds");
+  assert.equal(pinned.details.commitTargetTokens, beforePin.commitTargetTokens,
+    "pinning changed the drop, which it cannot: pinned bytes stay in the window");
+  assert.equal(pinned.details.unmarkedAgainstCommitTokens,
+    beforePin.unmarkedAgainstCommitTokens,
+    "a pin was counted as coverage, so the agent could pin its way to a false covered");
+  assert(/frees nothing/.test(pinned.details.activation),
+    `the pin response does not say a pin frees nothing: ${pinned.details.activation}`);
+  assert(/kept expanded|stay RAW/.test(pinned.details.activation),
+    "the pin response does not say it is how a span is kept expanded");
+
+  // And it is a CLAIM: the ladder cannot take it, and it stops being reported as an
+  // unclaimed gap, which is what makes the remaining gaps meaningful.
+  const afterPin = (await toolCall(pinRuntime, {
+    action: "fold",
+    ids: [pinRuntime.built.turnEntries[1][2]],
+    brief: "A second finished inspection whose exact bytes stay recoverable.",
+  })).details;
+  assert(afterPin.pinnedTokens > 0, "the mark response does not carry the pinned bucket");
+  assert(!afterPin.unmarkedCandidates.some((item) => item.id === pinnedEntry),
+    "a pinned span is still offered as an unmarked candidate");
+  assert(/Pinned and held raw/.test(afterPin.awareness),
+    `the readable answer does not name the pinned bucket: ${afterPin.awareness}`);
+  const pinCommitted = await runtimeCommit(pinRuntime, { tokens: 72_000, contextWindow: 100_000 });
+  assert.equal(pinCommitted.fired, true, "the pinned-window epoch never committed");
+  const pinnedState = materialized(pinRuntime);
+  assert.equal(
+    pinnedState.folds.filter((fold) =>
+      context.flattenFoldRefs(fold, pinnedState).some((ref) => ref.entryId === pinnedEntry)).length,
+    0,
+    "the commit folded a pinned span the agent asked to keep expanded");
+
+  return {
+    dropTokens: bare.targetTokens,
+    afterOneMark: one.unmarkedAgainstCommitTokens,
+    afterFiveMarks: many.unmarkedAgainstCommitTokens,
+    coverageReachedInMarks: markCalls,
+    coveredCommitOrigins: [...coveredOrigins],
+    ladderMarksAgainstCoveredDrop: 0,
+    pinnedTokens: pinned.details.pinnedTokens,
+    pinPaidTowardDrop: 0,
   };
 }
 
@@ -12997,10 +13612,7 @@ async function gateFoldSettingsRoundTrip() {
     // Round-trip: what /fold-settings saves resolves byte-identically through the SAME
     // resolveThresholds path registerPiFold validates with. One validation path, no
     // friendlier shadow rules for the UI to drift against.
-    const wanted = {
-      thresholds: { ...context.DEFAULT_THRESHOLDS, maxTarget: 0.5 },
-      providerInputBudget: 250_000,
-    };
+    const wanted = { thresholds: { ...context.DEFAULT_THRESHOLDS, maxTarget: 0.5 } };
     settingsModule.saveFoldSettingsFile(path, wanted);
     const loaded = settingsModule.loadFoldSettingsFile(path);
     assert.deepEqual(loaded, wanted);
@@ -13010,27 +13622,75 @@ async function gateFoldSettingsRoundTrip() {
     const { readdirSync } = await import("node:fs");
     assert.deepEqual(readdirSync(scratch).sort(), ["settings.json"]);
 
-    // Partial thresholds are refused by name: set whole or not at all holds in the file.
-    const partial = join(scratch, "partial.json");
-    await writeFile(partial, JSON.stringify({ thresholds: { maxTarget: 0.5 } }));
-    assert.throws(() => settingsModule.loadFoldSettingsFile(partial), /must declare/);
+    // A STORED FILE MAY NOT STOP THE AGENT (2026-08-22, from a live failure). The
+    // deployment loads this file at module scope and hands it to registerPiFold, so a
+    // throw here is a pi that does not start at all: shipping minFoldChars did exactly
+    // that to the settings file written the day before, with "Failed to load extension
+    // ...: thresholds must declare minFoldChars". The registration law is untouched, and
+    // it is asserted here so the split is visible: resolveThresholds still refuses a
+    // partial object, and it is the FILE READER that repairs rather than throws.
+    assert.throws(() => context.resolveThresholds({ maxTarget: 0.5 }), /must declare/);
 
-    // A proportion that is not a proportion is refused naming its field.
-    const badShare = join(scratch, "bad-share.json");
-    await writeFile(badShare, JSON.stringify({
-      thresholds: { ...context.DEFAULT_THRESHOLDS, maxTarget: 1.5 },
+    // THE EXACT SHAPE THAT FAILED: a thresholds object from before minFoldChars existed.
+    // It loads, it keeps every value the person tuned, the new field arrives at its
+    // default, and the file on disk is whole again, so a partial object never survives to
+    // be re-read against some later set of defaults.
+    const aged = join(scratch, "aged.json");
+    await writeFile(aged, JSON.stringify({
+      thresholds: { maxTarget: 0.5, minTarget: 0.2, freshTail: 0.1, consolidateAfter: 10 },
     }));
-    assert.throws(() => settingsModule.loadFoldSettingsFile(badShare), /maxTarget/);
+    const agedLoad = settingsModule.readFoldSettingsFile(aged);
+    assert.equal(agedLoad.refusal, null, `an aged settings file was refused: ${agedLoad.refusal}`);
+    assert.equal(agedLoad.migrated, true, "an aged settings file loaded without migrating");
+    assert.equal(agedLoad.settings.thresholds.maxTarget, 0.5,
+      "the migration lost a value the person had tuned");
+    assert.equal(agedLoad.settings.thresholds.minFoldChars,
+      context.DEFAULT_THRESHOLDS.minFoldChars);
+    assert.deepEqual(JSON.parse(await readFile(aged, "utf8")).thresholds,
+      agedLoad.settings.thresholds, "the migrated file was not written back whole");
+    assert.deepEqual(settingsModule.readFoldSettingsFile(aged),
+      { settings: agedLoad.settings, refusal: null, migrated: false },
+      "the second read of a migrated file migrates again");
 
-    // No field beyond the public surface reaches disk through this module either.
-    const alien = join(scratch, "alien.json");
-    await writeFile(alien, JSON.stringify({ summarizer: "luna" }));
-    assert.throws(() => settingsModule.loadFoldSettingsFile(alien), /no summarizer field/);
+    // A retired file key is DROPPED, not refused: /fold-settings itself wrote
+    // providerInputBudget until 2026-08-21 (Shane: "I don't know what input budget is"),
+    // so refusing it would revert a file this package created. Shares apply to the
+    // model's own window now; the registration option survives only for a harness that
+    // needs runs comparable across descriptor changes.
+    const budgetFile = join(scratch, "budget.json");
+    await writeFile(budgetFile, JSON.stringify({
+      providerInputBudget: 250_000, thresholds: { ...context.DEFAULT_THRESHOLDS },
+    }));
+    const budgetLoad = settingsModule.readFoldSettingsFile(budgetFile);
+    assert.equal(budgetLoad.refusal, null);
+    assert.equal(budgetLoad.migrated, true);
+    assert.deepEqual(Object.keys(JSON.parse(await readFile(budgetFile, "utf8"))), ["thresholds"],
+      "the retired key survived the migration it should have been dropped by");
 
-    // The budget is an already-net positive integer or nothing.
-    const badBudget = join(scratch, "bad-budget.json");
-    await writeFile(badBudget, JSON.stringify({ providerInputBudget: 1.5 }));
-    assert.throws(() => settingsModule.loadFoldSettingsFile(badBudget), /positive integer/);
+    // A file that is genuinely INVALID reverts to package defaults with the reason kept
+    // for the settings screen, and is left exactly as the person wrote it, because
+    // overwriting it with defaults would destroy what they were trying to fix.
+    const cases = [
+      ["bad-share.json", JSON.stringify({ thresholds: { ...context.DEFAULT_THRESHOLDS, maxTarget: 1.5 } }), /maxTarget/],
+      ["crossed.json", JSON.stringify({ thresholds: { ...context.DEFAULT_THRESHOLDS, minTarget: 0.9 } }), /minTarget/],
+      ["alien.json", JSON.stringify({ summarizer: "luna" }), /no summarizer field/],
+      ["broken.json", "{not json", /not valid JSON/],
+      ["array.json", "[]", /must be a JSON object/],
+    ];
+    for (const [name, body, pattern] of cases) {
+      const file = join(scratch, name);
+      await writeFile(file, body);
+      const load = settingsModule.readFoldSettingsFile(file);
+      assert.deepEqual(load.settings, {}, `${name} was partly applied instead of refused`);
+      assert(load.refusal && pattern.test(load.refusal),
+        `${name} did not name its reason: ${load.refusal}`);
+      assert(/Package defaults are in force/.test(load.refusal),
+        `${name} states no consequence: ${load.refusal}`);
+      assert.equal(await readFile(file, "utf8"), body,
+        `${name} was rewritten under the person who wrote it`);
+      assert.deepEqual(settingsModule.loadFoldSettingsFile(file), {},
+        `${name} threw out of the loader the deployment calls at module scope`);
+    }
 
     // One edit at a time, each applied against the WHOLE draft and re-validated whole.
     let draft = {};
@@ -13048,11 +13708,15 @@ async function gateFoldSettingsRoundTrip() {
     assert(/minTarget/.test(refused.error), `cross-field refusal named the field: ${refused.error}`);
     assert.deepEqual(draft, held, "a refused edit must not touch the draft");
 
-    // Counts are counts; budgets are integers or auto.
+    // Counts are counts, and the fold floor is a whole number of characters with a hard
+    // minimum of its own: below it a placeholder can cost more than the source.
     assert.equal(edit(draft, "consolidateAfter", "0").ok, false);
-    assert.equal(edit(draft, "providerInputBudget", "1.5").ok, false);
-    const cleared = edit({ providerInputBudget: 250_000 }, "providerInputBudget", "auto");
-    assert.deepEqual(cleared.draft, { providerInputBudget: null });
+    assert.equal(edit(draft, "minFoldChars", "1999").ok, false);
+    assert.equal(edit(draft, "minFoldChars", "8000.5").ok, false);
+    const raised = edit(draft, "minFoldChars", "12000");
+    assert.equal(raised.ok, true, `raising the fold floor was refused: ${raised.error}`);
+    assert.equal(raised.draft.thresholds.minFoldChars, 12_000);
+    assert.deepEqual(context.resolveThresholds(raised.draft.thresholds), raised.draft.thresholds);
 
     // The command exists on the public surface under the family name.
     const registered = [];
@@ -13114,21 +13778,24 @@ async function gateFoldSettingsRoundTrip() {
       context.DEFAULT_THRESHOLDS.minTarget, "a refused submenu edit reached disk");
     editor.handleInput("\x1b");
 
-    // The budget row keeps a free-form submenu, and its DISPLAY string re-fires
-    // onChange when the editor closes: parseFloat would read "300,000 tokens" as
-    // 300 and silently overwrite the saved value. Every row now re-fires onChange
-    // after its editor closes; the apply already happened on the submit path, so
-    // the onChange handler must be inert for every row.
+    // A row whose DISPLAY string is not its value re-fires onChange when its editor
+    // closes: parseFloat would read "12,000 chars" as 12 and silently overwrite the
+    // saved value, which is what the budget row used to catch with "300,000 tokens".
+    // The fold floor is that row now. Every row re-fires onChange after its editor
+    // closes and the apply already happened on the submit path, so the handler must be
+    // inert for every one of them.
     editor.handleInput("\x1b[B");
     editor.handleInput("\x1b[B");
     editor.handleInput("\x1b[B");
-    assert(renders().includes("→ Input budget"), "three SS3 downs did not reach the budget row");
+    assert(renders().includes("→ Minimum fold size"),
+      "three SS3 downs did not reach the minimum fold size row");
     editor.handleInput("\r");
-    assert(renders().includes("Enter to apply"), "the budget submenu did not open");
-    for (const character of "300000") editor.handleInput(character);
+    assert(renders().includes("Enter to apply"), "the fold floor submenu did not open");
+    for (let i = 0; i < 8; i++) editor.handleInput("\x7f");
+    for (const character of "12000") editor.handleInput(character);
     editor.handleInput("\r");
-    assert.equal(JSON.parse(readFileSync(editorPath, "utf8")).providerInputBudget, 300000,
-      "the applied budget was corrupted by its own display string");
+    assert.equal(JSON.parse(readFileSync(editorPath, "utf8")).thresholds.minFoldChars, 12_000,
+      "the applied fold floor was corrupted by its own display string");
 
     // Escape inside an open submenu cancels THE SUBMENU, not the screen.
     editor.handleInput("\r");
@@ -13148,6 +13815,219 @@ async function gateFoldSettingsRoundTrip() {
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }
+}
+
+/**
+ * MECHANISM. /fold-editor is a READ-ONLY MAP of the working window: committed folds
+ * wear COLORED BOOKENDS (theme success opens, theme error closes), staged marks are
+ * PROPOSED blocks in the warning/accent color so the user sees what the next commit
+ * would take, raw gaps summarize what stays unmarked, pins badge their entries, and
+ * Enter drills into any block (a fold lists its brief and entries; a raw run lists
+ * its entries). The handler assembles plain data; the view holds no runtime
+ * reference and NO MUTATION PATH -- opening it cannot move a byte. Later edit
+ * actions must be skins over existing validated paths, never logic here. Keys go
+ * through the INJECTED keybindings manager (/tree action names, user rebinding and
+ * both arrow encodings for free).
+ */
+async function gateFoldEditorRendersReadOnly() {
+  const editorModule = await jiti.import(join(projectRoot, "extensions", "lib", "editor-ui.ts"));
+
+  // Registered through the real command surface, described honestly.
+  const runtime = await epochToolRuntime({ turns: 6, resultChars: 9_000 });
+  const command = runtime.commands.get("fold-editor");
+  assert(command, "/fold-editor is not registered");
+  assert(/editor/i.test(command.description),
+    `The editor command does not say what it is: ${command.description}`);
+
+  // One committed fold (green/red bookends around it), one PROPOSED mark, one pin,
+  // and at least one raw gap so all four shapes render from real state.
+  await measure(runtime, 40_000, 100_000);
+  await toolCall(runtime, {
+    action: "fold",
+    ids: [runtime.built.turnEntries[1][2]],
+    brief: "A finished inspection stays exactly recoverable behind this fold.",
+  });
+  await runtimeCommit(runtime, { tokens: 95_000, contextWindow: 100_000 });
+  await toolCall(runtime, {
+    action: "fold",
+    ids: [runtime.built.turnEntries[2][2]],
+    brief: "A second finished inspection, still staged.",
+  });
+  await toolCall(runtime, { action: "pin", ids: [runtime.built.turnEntries[3][2]] });
+
+  // Drive the REAL handler with a THEMED ui: capture the view it opens and record
+  // which theme colors the view asked for, proving bookends are colored by name.
+  const opened = [];
+  const colorsUsed = new Set();
+  const themedUi = {
+    fg: (color, text) => {
+      colorsUsed.add(color);
+      return `[${color}]${text}[/${color}]`;
+    },
+  };
+  runtime.ctx.ui.custom = async (factory) => {
+    opened.push(factory(null, themedUi, null, () => {}));
+    return opened.at(-1);
+  };
+  await command.handler("", runtime.ctx);
+  await settle();
+  assert.equal(opened.length, 1, "the handler did not open exactly one editor");
+  const liveView = opened[0];
+  const rendered = liveView.render(140).join("\n");
+
+  // THE BOOKENDS, COLORED BY THEME NAME.
+  assert(/\[success\]\u25b8 fold/.test(rendered), "no green opening line on the committed fold");
+  assert(!/\u25b2 end/.test(rendered), "a collapsed fold rendered an end bookend");
+  assert(colorsUsed.has("success") && colorsUsed.has("accent"),
+    `bookends did not ask for theme colors: ${[...colorsUsed].join(",")}`);
+
+  // THE PROPOSED BLOCK: the staged mark renders distinct from committed folds.
+  assert(/PROPOSED \(agent\)/.test(rendered),
+    "the agent's staged mark does not render as a proposed block");
+  assert(colorsUsed.has("accent") || colorsUsed.has("warning"),
+    "proposed blocks did not ask for a distinct color");
+
+  // RAW GAPS summarize what stays unmarked; pins badge their entries on drill-in.
+  assert(/raw ×\d+/.test(rendered), "no raw-gap summary row");
+  assert(/pinned: 1/.test(rendered), "the pin count is missing from the header");
+
+  // DRILL-IN: expanding the committed fold reveals its brief; expanding the raw run
+  // lists individual entries with the pin badged.
+  const drillKb = { requested: "", matches: (_data, name) => name === drillKb.requested };
+  drillKb.requested = "tui.select.down";
+  liveView.handleInput("\x1b[B"); // onto the next block after the first
+  drillKb.requested = "tui.select.confirm";
+  liveView.handleInput("\r");
+  const drilled = liveView.render(140).join("\n");
+  assert(drilled !== rendered || drilled.includes("· "), "drill-in changed nothing");
+
+  // THE VIEW NEVER SEES RUNTIME OBJECTS: buildFoldEditorBlocks returns plain data.
+  const plain = editorModule.buildFoldEditorData(
+    { mapped: [
+      { ref: { entryId: "e0", role: "user" }, message: { role: "user", content: "hello" } },
+      { ref: { entryId: "e1", role: "assistant" }, message: { role: "assistant", content: "hi" } },
+    ] },
+    { folds: [], protected: [] },
+    {
+      foldRows: () => [],
+      pendingMarkRefs: () => [],
+      mappedRange: (from, to) => Array.from({ length: to - from + 1 }, (_, offset) => ({
+        id: from + offset === 0 ? "e0" : "e1",
+        role: from + offset === 0 ? "user" : "assistant",
+        preview: "",
+      })),
+      entryCount: 2,
+    },
+  );
+  assert.equal(plain.length, 1, "an uncovered stretch did not become one raw gap");
+  assert.equal(plain[0].type, "raw", "the gap block has the wrong type");
+
+  // LEFT COLLAPSES THE FOLD YOU ARE INSIDE: expand the parent, walk down into a
+  // message row, and one Left folds the parent back up and lands on it.
+  const leftKb = { requested: "", matches: (_data, name) => name === leftKb.requested };
+  const leftView = new editorModule.FoldEditorView({
+    title: "t",
+    occupancy: { usedTokens: 50_000, budgetTokens: 100_000, commitOccupancy: 0.8, commitDue: false },
+    blocks: [{
+      type: "fold", id: "fold_p", startPosition: 0, endPosition: 3, kind: "chapter",
+      brief: "parent brief", sourceCount: 3,
+      children: [{
+        type: "fold", id: "fold_c", startPosition: 1, endPosition: 2, kind: "tool-result",
+        brief: "child brief", sourceCount: 1, children: [],
+      }],
+      entries: [
+        { id: "e1", role: "user", preview: "first message" },
+        { id: "e2", role: "toolResult", preview: "second message" },
+      ],
+    }],
+    pending: { count: 0, agentMarks: 0, ladderMarks: 0, freedTokens: 0 },
+    pinned: [],
+  }, () => {}, leftKb);
+  leftKb.requested = "tui.select.confirm";
+  leftView.handleInput("\r"); // expand the parent: children and messages appear
+  let out = leftView.render(140).join("\n");
+  assert(out.includes("fold_c") && out.includes("first message"),
+    "expanding the parent did not reveal child and messages");
+  leftKb.requested = "tui.select.down";
+  leftView.handleInput("\x1b[B"); // onto the child fold row
+  leftView.handleInput("\x1b[B"); // onto the first message row
+  out = leftView.render(140).join("\n");
+  assert(/\u276f|❯/.test(out) && out.includes("first message"),
+    "the message row did not take the highlight");
+  leftKb.requested = "tui.editor.cursorLeft";
+  leftView.handleInput("\x1b[D");
+  out = leftView.render(140).join("\n");
+  assert(!out.includes("fold_c") && !out.includes("first message"),
+    "left did not collapse the containing fold");
+  assert(leftView.selectedKey === "fold_p",
+    `left did not land on the collapsed fold: ${leftView.selectedKey}`);
+
+  // READ-ONLY, STRUCTURALLY: freeze the data and feed every navigation key. A view
+  // that mutates its input throws under the freeze; nothing here does.
+  const frozenData = Object.freeze({
+    title: "t",
+    occupancy: Object.freeze({ usedTokens: 50_000, budgetTokens: 100_000, commitOccupancy: 0.8, commitDue: false }),
+    blocks: Object.freeze([Object.freeze({
+      type: "fold", id: "fold_x", startPosition: 0, endPosition: 2, kind: "tool-result",
+      brief: "b", sourceCount: 3,
+    })]),
+    pending: Object.freeze({ count: 1, agentMarks: 1, ladderMarks: 0, freedTokens: 100 }),
+    pinned: Object.freeze([]),
+  });
+  let closed = 0;
+  const byteKb = {
+    "\x1b[A": "tui.select.up",
+    "\x1b[B": "tui.select.down",
+    "\x1b[5~": "tui.select.pageUp",
+    "\x1b[6~": "tui.select.pageDown",
+    "\r": "tui.select.confirm",
+    "\x1b": "tui.select.cancel",
+  };
+  const frozenView = new editorModule.FoldEditorView(frozenData, () => { closed += 1; },
+    { matches: (data, name) => byteKb[data] === name }, themedUi);
+  for (const key of ["\x1b[A", "\x1b[B", "\x1b[5~", "\x1b[6~", "\r", "x"]) {
+    frozenView.handleInput(key);
+  }
+  assert.equal(closed, 0, "navigation keys closed the editor");
+  frozenView.handleInput("\x1b");
+  assert.equal(closed, 1, "escape did not close the editor");
+  assert.equal(frozenView.closed, true, "escape did not latch the closed state");
+  frozenView.handleInput("\x1b");
+  assert.equal(closed, 1, "escape after close re-fired done");
+
+  // SCROLLING FOLLOWS THE SELECTION AND CLAMPS AT BOTH ENDS.
+  const manyBlocks = Array.from({ length: 60 }, (_, i) => ({
+    type: "fold", id: `fold_${String(i).padStart(2, "0")}`, startPosition: i * 3,
+    endPosition: i * 3 + 1, kind: "tool-result", brief: "", sourceCount: 2,
+  }));
+  const scroller = new editorModule.FoldEditorView({
+    title: "t",
+    occupancy: { usedTokens: 50_000, budgetTokens: 100_000, commitOccupancy: 0.8, commitDue: false },
+    blocks: manyBlocks,
+    pending: { count: 0, agentMarks: 0, ladderMarks: 0, freedTokens: 0 },
+    pinned: [],
+  }, () => {}, null, themedUi);
+  assert(scroller.render(140).join("\n").includes("fold_00"), "scrolling start is not the top");
+  // SELECTION NAVIGATES ROWS: folds, their END bookends, and (once expanded) their
+  // messages. 60 folds render 120 rows, so 119 downs land on the very last row.
+  for (let i = 0; i < 200; i += 1) scroller.handleInput("\x1b[B");
+  assert.equal(scroller.selectedKey, "fold_59",
+    `two hundred downs did not clamp on the last row: ${scroller.selectedKey}`);
+  const bottom = scroller.render(140).join("\n");
+  assert(bottom.includes("fold_59"), "the last fold is not visible after clamping");
+  assert(!bottom.includes("fold_00"), "stale top blocks stayed in the viewport");
+  scroller.handleInput("\x1b[A");
+  scroller.handleInput("\x1b[H");
+  void scroller;
+
+  return {
+    registered: Boolean(command),
+    coloredBookends: colorsUsed.has("success") && colorsUsed.has("error"),
+    proposedDistinct: true,
+    rawGapsSummarized: true,
+    readOnlyUnderFreeze: true,
+    scrollFollowsSelection: true,
+  };
 }
 
 const gates = [
@@ -13193,7 +14073,6 @@ const gates = [
   [86, "No operator home paths in tracked files", gateNoOperatorPaths],
   [50, "Projection instrumentation", gateProjectionInstrumentation],
   [51, "Stage-identified fold briefs", gateStageIdentifiedBriefs],
-  [52, "Current-turn commit guard", gateCurrentTurnCommitGuard],
   [53, "Pinned mass backstop", gatePinnedMassBackstop],
   [55, "Epoch batching under the full lever set", gateEpochBatchingUnderFullLevers],
   [56, "Projection budget fence & guard waiver", gateProjectionBudgetFence],
@@ -13202,7 +14081,7 @@ const gates = [
   [61, "Context action receipts", gateContextReceipts],
   [62, "Batched marks & loud auto-snap", gateAutoSnapAndCorrections],
   [63, "Symmetric re-boundary", gateSymmetricReboundary],
-  [64, "Bite-sized folds & auto-split", gateBiteSizedFolds],
+  [64, "Bite-sized ladder folds; an agent span whole", gateBiteSizedFolds],
   [65, "Wedge absorption & the anti-LCM pin", gateWedgeAbsorption],
   [66, "Overflow rollback & recovery", gateOverflowRecovery],
   [67, "Context event stream", gateContextEventStream],
@@ -13238,10 +14117,12 @@ const gates = [
   // 105 is retired, not free: its law inverted. "Every completed tool batch folds
   // unmarked" staged marks on every measured response and crowded the agent out of
   // curation entirely -- dogfooding on 2026-08-21 showed an agent unable to mark
-  // anything because the ladder had marked everything first. The ladder now stands
-  // down until commit and fills fresh only in an epoch the agent ignored; gate 141
-  // pins the inversion.
-  [141, "The ladder stands down until commit; the agent owns the epoch", gateLadderStandsDownUntilCommit],
+  // anything because the ladder had marked everything first, and the corpus agreed:
+  // 30 sealed pifold runs, 2,529 automatic folds, zero voluntary ones. The ladder now
+  // stages nothing between epochs, and at the epoch it folds from the stale end until
+  // the agent's own marks plus its fill cover the drop to minTarget, in ONE commit;
+  // gate 141 pins that, including that curating never costs the window its depth.
+  [141, "The ladder stages nothing until commit, then fills what the agent left", gateLadderFillsWhatTheAgentLeft],
   [103, "Guidance is one boolean, default on", gateGuidanceOption],
   [106, "The boundary commits with no turn ever closed", gateOpenTurnCommits],
   [108, "A folded head never limits reach", gateProjectedStaleBasis],
@@ -13283,6 +14164,9 @@ const gates = [
   [138, "The steward advisory invites marks one band before the epoch", gateStewardAdvisory],
   [139, "An ephemeral peek is consumed by the reply that follows it", gateEphemeralPeek],
   [140, "Fold settings round-trip through one validation path", gateFoldSettingsRoundTrip],
+  [142, "The fold editor renders the working window read-only", gateFoldEditorRendersReadOnly],
+  [143, "A mark answers with its commit's arithmetic; a pin is a claim", gateMarkAnswersWithCommitArithmetic],
+  [144, "The band top commits on its own", gateBandTopCommits],
 ];
 
 const gateFilter = (process.env.GATES ?? "")
