@@ -559,6 +559,21 @@ async function measureAndCommit(
   return materialized(runtime);
 }
 
+// The last terminal assistant stop, read inline where a fixture has to prove its shape:
+// the runtime keeps no turn-scoped reading any more (the current-turn guard and its
+// waiver were deleted 2026-08-23), so the suite computes the old boundary itself where
+// a gate documents what that reading would have held.
+function terminalStopIn(messages) {
+  return messages.some((message) => message?.role === "assistant" &&
+    (message.stopReason === "stop" || message.stopReason === "length"));
+}
+
+function toolResultRefKeys(snapshot) {
+  return new Set(snapshot.mapped
+    .filter((item) => item.ref && item.message?.role === "toolResult")
+    .map((item) => json.objectRefKey(item.ref)));
+}
+
 function contextEvents(runtime, from = 0) {
   return runtime.appended
     .slice(from)
@@ -3035,7 +3050,11 @@ async function gateEpochQuotaTopUp() {
     Math.max(0, (epoch.occupancyTokensBefore - context.DEFAULT_THRESHOLDS.minTarget * 90_000) / 90_000),
     1e-12, "freeing target");
   const committed = materialized(runtime);
-  assert.equal(committed.pendingMarks, undefined);
+  // What the depth cut retained survives as PENDING, not as a leak: the count in the
+  // durable state is exactly what the receipt says was retained (2026-08-23; before the
+  // cut existed this asserted the commit consumed every mark).
+  assert.equal((committed.pendingMarks ?? []).length, epoch.retainedMarks,
+    "The durable pending set disagrees with the receipt's retained count");
   // Every applied mark became a fold. The count is a floor rather than an equality: a
   // rung riding the same paid rewrite may add one more, which costs no extra
   // invalidation and is the reason inline rungs are allowed there at all.
@@ -4244,7 +4263,7 @@ async function sealedSpineExcursionRuntime(overrides = {}) {
 
 
 /**
- * The transmission fence, and the guard waiver that serves it.
+ * The transmission fence, and the stalest-first cut order that serves it.
  *
  * Measured 2026-08-06 (rep 11): the hard fence gates on `measurements.latestRatio`,
  * which describes the request the provider already ANSWERED. The last measurement read
@@ -4253,43 +4272,29 @@ async function sealedSpineExcursionRuntime(overrides = {}) {
  * tokens, 1.2x the window. The provider rejected it twice and the worker died at stage
  * 39 of 64. Nothing in that run ever measured the request about to be SENT.
  *
- * The run also proved the guard boundary can never advance: all 58 assistant messages
- * carried stopReason "toolUse" and not one was terminal, so `currentTurnBoundary` sat
- * at -1 the whole session and every mark was guarded forever. The only marks that ever
- * landed came from the agent's own two explicit commits.
+ * The run also proved a turn boundary can never advance on this shape: all 58 assistant
+ * messages carried stopReason "toolUse" and not one was terminal. That reading killed
+ * the current-turn guard on 2026-08-23; what this gate keeps from the guard era is the
+ * ORDERING law its waiver carried, now owned by the depth cut.
  */
 async function gateProjectionBudgetFence() {
-  // The waiver arithmetic first, in isolation.
-  const built = makeFixture({ turns: 8, resultChars: 4_000, contextWindow: 100_000 });
-  const snapshot = epochSnapshot(built);
-  const waiver = (ratio, guardedMarks, otherApplicableMarks = 0) =>
-    context.guardWaiverCount({ snapshot, ratio, guardedMarks, otherApplicableMarks });
-  assert.equal(waiver(0.5, 8), 0, "The guard was waived below the pressure backstop");
-  assert.equal(waiver(0.86, 8, 3), 0, "The guard was waived while the commit had other work");
-  assert.equal(waiver(0.86, 8), 6, "The starved waiver did not keep the newest reads protected");
-  assert.equal(waiver(0.86, 3), 0, "A sub-batch waiver bought a rewrite for almost nothing");
-  assert.equal(waiver(0.99, 3), 3, "The hard fence did not waive every guarded mark");
-  assert.equal(waiver(0.99, 1), 1, "The hard fence honoured the batch floor it must ignore");
-  assert.equal(waiver(null, 8), 0, "An unmeasured ratio waived the guard");
-
-  // AND THE RELEASE ORDER IS REAL STALENESS, NOT THE MARK-ID ACCIDENT.
+  // THE CUT ORDER IS REAL STALENESS, NOT THE MARK-ID ACCIDENT.
   //
-  // Added 2026-08-10. Every mark one epoch proposes carries the same `ordinal`: it is the
+  // Added 2026-08-10 for the guard waiver, kept 2026-08-23 for the depth cut that
+  // replaced it. Every mark one epoch proposes carries the same `ordinal`: it is the
   // transcript position at MARK time, so it records when the DECISION was made and
-  // nothing about the age of what the decision covers. Ordering the release by it
-  // therefore fell through to comparing mark ids, which are content hashes, and a digest
-  // decided which evidence the guard surrendered first. What the waiver protects is the
-  // newest reads an in-flight excursion is about to use, and that is a property of the
-  // SPAN, so the order is the earliest window index each span covers, oldest first.
+  // nothing about the age of what the decision covers. Ordering the cut by it falls
+  // through to comparing mark ids, which are content hashes, and a digest would decide
+  // which evidence the commit spends first. What the bound protects is the newest reads
+  // an in-flight excursion is about to use, and that is a property of the SPAN, so the
+  // order is the earliest window index each span covers, oldest first.
   //
-  // The fixture is a session that never closes a turn, so the guard holds every mark and
-  // the waiver is the only thing that can release one. Its mark ids and its span order
-  // disagree, and that disagreement is asserted BEFORE the outcome: without it the check
-  // would pass under either ordering.
+  // The fixture's mark ids and its span order disagree, and that disagreement is
+  // asserted BEFORE the outcome: without it the check would pass under either ordering.
   const orderSession = "waiver-order-test";
   const orderBatches = 8;
-  // The newest batches sit in the fresh byte tail, where no candidate forms at all, so
-  // the marks are the six oldest and the waiver's protection is measured among those.
+  // Six of the eight batches are marked, oldest first, so the cut has both marks to
+  // spend and marks to hold and the boundary between them is what the order decides.
   const orderMarked = 6;
   const orderEntries = [];
   const orderMessages = [];
@@ -4329,11 +4334,9 @@ async function gateProjectionBudgetFence() {
     contextEntries: orderEntries,
     contextWindow: 100_000,
   });
-  assert.equal(context.currentTurnBoundary(orderSnapshot), -1,
-    "A turn closed in the waiver-order fixture, so the guard does not hold every mark");
-  assert.equal(context.currentTurnRefKeys(orderSnapshot).size, orderBatches,
-    "The guard does not hold every batch, so the release order is not being measured");
-  assert(orderBatches > orderMarked, "The fixture marked into the fresh tail");
+  assert(!terminalStopIn(orderMessages),
+    "A turn closed in the cut-order fixture; the never-closing shape is the one under test");
+  assert(orderBatches > orderMarked, "The fixture marked every batch it holds");
   let orderState = context.emptyActiveContextState(orderSession);
   for (const resultId of orderResultIds.slice(0, orderMarked)) {
     const candidate = context.manualFoldCandidate(
@@ -4357,30 +4360,29 @@ async function gateProjectionBudgetFence() {
     .map((mark) => mark.id);
   const byMarkId = [...orderMarks].sort((left, right) => left.id.localeCompare(right.id))
     .map((mark) => mark.id);
-  // The bounded count and its arming threshold are the ones asserted above, reached
-  // through the same arithmetic: only the ORDER is new.
-  const orderWaiver = context.guardWaiverCount({
-    snapshot: orderSnapshot, ratio: 0.86, guardedMarks: orderMarks.length, otherApplicableMarks: 0,
-  });
-  assert.equal(orderWaiver, orderMarked - context.GUARD_WAIVER_PROTECTED_MARKS,
-    `The bounded release moved: ${orderWaiver} of ${orderMarked} guarded marks`);
+  // The bound is sized off the marks' own freed bytes so the cut stops after exactly
+  // four of the six, and only the ORDER decides which four.
+  const orderCut = 4;
+  const spanOrdered = bySpan.map((id) => orderMarks.find((mark) => mark.id === id));
+  const cutTarget = spanOrdered.slice(0, orderCut).reduce((total, mark) =>
+    total + context.markFreedBytes(orderSnapshot, orderState, mark), 0);
+  assert(cutTarget > 0, "The cut target is empty, so the bound cannot bind");
   // The fixture is only worth running while the two orders genuinely disagree, and this
-  // is the disagreement that matters: by mark id the release reaches the NEWEST span in
-  // the set, which is the one evidence the guard exists to hold back.
-  assert(byMarkId.slice(0, orderWaiver).includes(bySpan.at(-1)),
-    "Mark-id order no longer releases the newest span, so this fixture cannot tell the orders apart");
+  // is the disagreement that matters: by mark id the cut reaches the NEWEST span in the
+  // set, which is the one evidence the bound exists to hold back.
+  assert(byMarkId.slice(0, orderCut).includes(bySpan.at(-1)),
+    "Mark-id order no longer spends the newest span, so this fixture cannot tell the orders apart");
   const released = await context.commitPendingMarks({
     snapshot: orderSnapshot,
     state: orderState,
     generation: 1,
-    guardCurrentTurn: true,
-    guardWaiver: orderWaiver,
+    applyTargetBytes: cutTarget,
   });
-  assert.deepEqual(released.waived.map((mark) => mark.id), bySpan.slice(0, orderWaiver),
-    "The waiver released marks in an order span staleness does not explain");
+  assert.deepEqual(released.applied.map((mark) => mark.id), bySpan.slice(0, orderCut),
+    "The cut spent marks in an order span staleness does not explain");
   assert.deepEqual(context.pendingMarks(released.state).map((mark) => mark.id).sort(),
-    [...bySpan.slice(orderWaiver)].sort(),
-    "The guard held back something other than the newest material");
+    [...bySpan.slice(orderCut)].sort(),
+    "The bound held back something other than the newest material");
 
   // A session whose PROJECTION is far past the serving budget while the last measured
   // ratio is calm: exactly the rep11 shape, where the excursion outgrew the window
@@ -4422,11 +4424,10 @@ async function gateProjectionBudgetFence() {
     contextEntries: runtime.branch,
     contextWindow: 34_000,
   });
-  const boundary = context.currentTurnBoundary(openSnapshot);
-  assert(boundary < runtime.messages.length - 24,
-    "The turn boundary advanced into the excursion, so the starving guard is not being measured");
-  assert(context.currentTurnRefKeys(openSnapshot).size >= 12,
-    "The guard does not hold the excursion, so there is nothing for the waiver to release");
+  assert(!terminalStopIn(runtime.messages.slice(-24)),
+    "A terminal stop closed the excursion, so the rep11 shape is not being measured");
+  assert(toolResultRefKeys(openSnapshot).size >= 12,
+    "The excursion's reads are not mapped, so there is nothing for the fence to spend");
 
   // A calm measured ratio, well under the hard fence: the lagging fence sees nothing.
   await measure(runtime, 24_000, 34_000, undefined, "toolUse");
@@ -4461,7 +4462,7 @@ async function gateProjectionBudgetFence() {
   const epoch = (await toolStatus(runtime)).details.automatic.lastAutomaticAction?.epoch;
   assert(epoch, "The over-budget path never opened a commit epoch");
   assert(epoch.appliedMarks >= 1, "The fence-level commit applied nothing");
-  assert.equal(epoch.retainedMarks, 0, "The fence left marks guarded while the request would not fit");
+  assert.equal(epoch.retainedMarks, 0, "The fence left marks retained while the request would not fit");
 
   // THE STARVED SESSION: THE FOLD PATH REACHES, AND THE ROLLBACK STILL CARRIES IT.
   //
@@ -4519,7 +4520,7 @@ async function gateProjectionBudgetFence() {
     contextEntries: guardedOnly.branch,
     contextWindow: 34_000,
   });
-  assert(context.currentTurnBoundary(guardedSnapshot) < guardedSnapshot.messages.length - 28,
+  assert(!terminalStopIn(guardedOnly.messages.slice(-28)),
     "A turn closed inside the excursion, so the starving case is not being measured");
   const guardedMembers = context.automaticToolBatches(
     guardedSnapshot, context.emptyActiveContextState(guardedOnly.built.sessionId));
@@ -4528,8 +4529,8 @@ async function gateProjectionBudgetFence() {
   assert(!guardedMembers.some((batch) =>
     batch.indices.includes(guardedSnapshot.messages.length - 1)),
   "The newest result is a member, so the fresh tail bounds nothing");
-  assert(context.currentTurnRefKeys(guardedSnapshot).size >= 12,
-    "The guard does not hold the excursion, so the starving case is not being measured");
+  assert(toolResultRefKeys(guardedSnapshot).size >= 12,
+    "The excursion's reads are not mapped, so the starving case is not being measured");
   // The new truth, positively: the fold path found legal material inside the open
   // excursion and folded it. What it could not do is fold enough.
   const starvedFolds = materialized(guardedOnly).folds.length;
@@ -4593,13 +4594,10 @@ async function gateProjectionBudgetFence() {
     "An aborted pass handed back the raw branch instead of the projection");
 
   return {
-    waiverBelowBackstop: 0,
-    waiverWhenStarved: waiver(0.86, 8),
-    waiverAtFence: waiver(0.99, 3),
-    orderGuardedMarks: orderMarked,
-    orderWaiver,
+    orderMarkedMarks: orderMarked,
+    orderCut,
     orderIdOrderDiffersFromSpanOrder: true,
-    orderReleasedStalestFirst: true,
+    orderCutStalestFirst: true,
     budgetTokens,
     projectedTokensBefore: reduction.estimatedTokensBefore,
     projectedTokensAfter: reduction.estimatedTokensAfter,
@@ -4846,10 +4844,8 @@ async function gateFenceMarginAndDepth() {
   // "where the zone law admits nothing at any occupancy". That was the regression
   // talking: the automatic reach was a byte prefix clamped to the fresh boundary, so an
   // unclosed session had zero width and starved. Automation reaches an open excursion
-  // now, and the guard adjudicates it at the commit. Closing every turn still matters
-  // here for a simpler reason: it keeps the
-  // guard out of the picture entirely, so what the climb measures is the estimator and
-  // the margin rather than the guard-and-waiver case gate 56 owns.
+  // now, with no turn-scoped hold left anywhere (the guard is deleted, 2026-08-23), so
+  // what the climb measures is the estimator and the margin alone.
   // EIGHT STEPS, NOT TWELVE. The loop used to break the moment the fence recorded a
   // reduction, which on the old fixture happened around the fourth pass; with the starved
   // case deleted above nothing breaks it early and twelve passes cost this gate a fifth
@@ -5103,8 +5099,8 @@ async function gateFenceMarginAndDepth() {
   // itself, rather than through the machinery that used to produce it.
   assert(epochs.every((epoch) => epoch.appliedMarks >= 1),
     "A commit epoch ran without applying a mark");
-  assert(epochs.every((epoch) => epoch.guardWaived !== true),
-    "A commit below the fence waived the current-turn guard");
+  assert(epochs.every((epoch) => epoch.guardWaived === undefined),
+    "A commit receipt still carries guard-waiver vocabulary; the guard and its waiver are deleted");
   // The property the rep13 ratchet violated, measured at like phases of the rhythm:
   // across a run where every cycle added a 24,000-char stage of inflow, the window
   // just after the LAST commit has grown by less than ONE such stage since just after
@@ -5365,13 +5361,16 @@ async function gateBandTopCommits() {
   assert.equal(commits().filter((record) => record.trigger === "projection-budget").length, 0,
     "The fence fired, so this gate is measuring the fence and not the band top");
 
-  // (c) THE OPEN TURN IS NEVER SPENT. Routine housekeeping at a stated threshold takes a
-  // null waiver ratio, so `guardWaiverCount` returns 0 and every current-turn mark waits.
-  // The fence and the boundary keep the waiver, because they are the two places where
-  // something has already gone wrong.
+  // (c) THE CUT STOPS AT THE AIM. Routine housekeeping at a stated threshold takes a
+  // null ratio, which arms the depth bound; the fence and the boundary carry a ratio
+  // and no bound, because something has already gone wrong there. The guard-waiver
+  // vocabulary the receipt used to carry is gone with the guard (2026-08-23).
   const epoch = (await toolStatus(runtime)).details.automatic.lastAutomaticAction?.epoch;
   assert(epoch, "The band-top commit left no epoch record");
-  assert.equal(epoch.waivedMarks, 0, "The band-top commit waived the current-turn guard");
+  assert.equal(epoch.waivedMarks, undefined,
+    "The receipt still carries guard-waiver vocabulary; the guard and its waiver are deleted");
+  assert.equal(epoch.guardWaived, undefined,
+    "The receipt still carries guard-waiver vocabulary; the guard and its waiver are deleted");
 
   return {
     budgetTokens: budget,
@@ -7845,21 +7844,24 @@ async function gateThresholdConstruction() {
  *
  * Automatic foldability is MEMBERSHIP, not position (Shane 2026-08-10). A span is
  * automatically foldable when it is a completed tool batch the deployment did not
- * blacklist, or older material a chapter or a consolidation can compose over. Four
- * things and only four things hold it back, and this gate names each of them:
+ * blacklist, or older material a chapter or a consolidation can compose over. Two
+ * things and only two things hold it back, and this gate names each of them:
  *
  *   pinned          the agent protected it, anywhere in the window;
- *   fresh tail      the guaranteed-raw newest bytes, marked or not;
- *   blacklisted     the deployment named the tool, so no batch forms over it;
- *   guarded         the open turn's own evidence, adjudicated once at the commit,
- *                   where it has a high-occupancy waiver.
+ *   blacklisted     the deployment named the tool, so no batch forms over it.
  *
- * There is no fifth thing, and in particular there is no MIDDLE. The positional stale
+ * The list was four. The fresh tail went first (nothing decided on it; stale-first
+ * ordering already leaves recent material last), and the current-turn guard went on
+ * 2026-08-23 when the first live session showed its "turn" covering the whole window
+ * (Shane: "It should be at the most granular level, which is events"). What replaced
+ * them is not a hold but structure: an incomplete event is never proposable, and the
+ * depth bound stops the routine commit at the aim, stalest first, so the newest events
+ * stay raw for exactly as long as there is room for them.
+ *
+ * There is no third thing, and in particular there is no MIDDLE. The positional stale
  * prefix that used to be the automatic law's whole reach is deleted: it starved rep 2 by
  * collapsing to zero width and rep 3 by charging a folded head its raw bytes, and both
- * times the set-based protections above went on working exactly as written. What sits
- * between the fresh tail and the oldest material is whatever the ladder has not needed
- * yet plus whatever the agent pinned.
+ * times the set-based protections above went on working exactly as written.
  */
 async function gateThreeZones() {
   const thresholds = Object.freeze({
@@ -7969,13 +7971,10 @@ async function gateThreeZones() {
     }
   }
 
-  // GUARDED IS THE FOURTH, and it is adjudicated at the COMMIT rather than here: the open
-  // turn's evidence stays proposable, because a session that never closes a turn would
-  // otherwise have nothing to offer, and the commit refuses it unless the high-occupancy
-  // waiver releases it. Gate 52 pins the guard and gate 106 pins the waiver end to end;
-  // this fixture closes every turn, so it has no open turn to speak for.
-  assert.equal(context.currentTurnRefKeys(snapshot).size, 0,
-    "The fixture left a turn open, so the guard belongs in this gate after all");
+  // GUARDED IS NO LONGER A HOLD (2026-08-23): the open turn's evidence stays proposable
+  // and the commit spends it stalest-first under the depth bound. Gate 09 drives the
+  // never-closing session end to end; this fixture closes every turn, so what it proves
+  // is that the two holds above are the only refusals selection ever issues.
 
   return {
     freshBoundary: snapshot.freshBoundary,
@@ -8224,28 +8223,28 @@ async function gateFenceOpensTheMiddle() {
 /**
  * THE BAND TOP COMMITS IN A SESSION THAT NEVER CLOSES A TURN.
  *
- * Measured 2026-08-10 (luna-20260810 pifold rep 2, sealed run 3705e0d4). One user
- * message and 24 assistant messages, every one of them stopReason "toolUse", so
- * `completeTurns` was empty for the whole session and `currentTurnBoundary` sat at -1.
- * The last call fired at 0.804 occupancy announcing 19 unmarked stale spans worth
- * 274,173 tokens, and no commit of any kind ever fired. The window climbed to 375,830
- * estimated tokens and the provider rejected it twice.
+ * The shape was first measured 2026-08-10 (luna-20260810 pifold rep 2, sealed run
+ * 3705e0d4): one user message and 24 assistant messages, every one stopReason "toolUse",
+ * so no turn ever closes. Back then two selector defects starved it; those are long
+ * fixed and the membership half of this gate still pins them: a completed tool batch is
+ * a member whether or not its turn ever closed.
  *
- * Two independent defects each emptied the automatic selector on that shape, and either
- * alone was enough to starve it. The automatic reach was a position, and it was pinned
- * to the last CLOSED turn, which on this shape does not exist: every rung read an empty
- * region. And the commit pass handed `currentTurnRefKeys` to the top-up as an exclusion,
- * which on this shape is the entire window, so nothing was ever proposed and the guard
- * waiver written for exactly this starvation never had a guarded mark to count.
+ * The commit half was REWRITTEN 2026-08-23, from the first live session of the redesign
+ * (sol-20260823-live pifold rep 1). The current-turn guard held every mark the frontier
+ * staged, because "current turn" was everything since the last terminal assistant stop
+ * and this shape never has one: four band-top commits applied 0 of 15/16/17/18 marks,
+ * occupancy rode 208,234 to 240,948 of a 251,520 budget (0.958), and the projection
+ * fence swept all 18 marks at once to a 7,908-token landing against a 100,608 aim. The
+ * guard and its waiver are DELETED (Shane: "you're using turns as the boundaries, which
+ * should not be the case. It should be at the most granular level, which is events").
+ * What protects the working set now is event-level and structural: an incomplete batch
+ * is never proposable, the depth bound stops the routine commit at the aim, and the
+ * stalest-first cut order leaves the newest events raw.
  *
- * The reach is not a position any more, so the first defect has no expression left to
- * come back in: what the selectors read is membership, and a completed tool batch is a
- * member whether or not its turn ever closed. What this gate holds unchanged is the
- * second half, which is the half that still has a moving part: the open turn is excluded
- * at the COMMIT, where the waiver can release it, and never at the proposal, where it
- * cannot. Counterfactual on the sealed state at ordinal 45: either fix alone yields 0
- * marks, both together yield 13 marks, 11 applied under a guard waiver of 11, about
- * 167,321 tokens freed.
+ * So this gate now asserts the exact opposite of what its commit half asserted before,
+ * on the same fixture: the BAND TOP ITSELF applies, stops at the aim, and retains the
+ * newest material as pending rather than as guarded. It fails on the pre-fix runtime,
+ * where the same drive applies zero marks.
  */
 async function gateOpenTurnCommits() {
   // THE FIXTURE IS THE SHAPE. One user message, then nothing but tool-calling assistants
@@ -8255,10 +8254,6 @@ async function gateOpenTurnCommits() {
   const window = 100_000;
   const providerInputBudget = 90_000;
   const batches = 24;
-  // Sixteen thousand rather than twelve: the commit is sized to the drop the thermostat
-  // asks for, 0.683 of a 90,000-token budget here, and the default fresh tail holds the
-  // newest 36,000 chars back from it. At 12,000 chars a batch the fixture ran 373 tokens
-  // short of a target it was asked to reach, which measures the fixture and not the fill.
   const resultChars = 16_000;
   const entries = [];
   const messages = [];
@@ -8318,40 +8313,80 @@ async function gateOpenTurnCommits() {
     netBudget: true,
   });
   assert.equal(snapshot.completeTurns.length, 0, "A turn closed in the open-turn fixture");
-  assert.equal(context.currentTurnBoundary(snapshot), -1,
+  assert(!terminalStopIn(runtime.messages),
     "A terminal assistant message reached the open-turn fixture");
   assert(bytesOf(runtime.messages) >= batches * resultChars,
     "The fixture is smaller than the batches it declares");
   assert(snapshot.thresholds.minFoldChars <= resultChars,
     "The fixture's results are under the minimum a fold may be");
 
-  // (b) THE DIRECT REGRESSION ASSERTION. Foldability is membership, so a session that
-  // never closed a turn still holds members. The old law made the automatic reach a byte
-  // prefix clamped to the fresh boundary, which is 0 here, so every rung saw nothing.
+  // (b) MEMBERSHIP, NOT POSITION. Foldability is membership, so a session that never
+  // closed a turn still holds members. The old law made the automatic reach a byte
+  // prefix clamped to the last closed turn, which is absent here, so every rung saw
+  // nothing; the 2026-08-10 fix is still pinned by these two assertions.
   assert.equal(snapshot.freshBoundary, 0,
-    "The fresh boundary is not zero, so the clamp is not being measured");
+    "The fresh boundary is not zero, so the never-closing shape is not being measured");
   const members = context.automaticToolBatches(snapshot, context.emptyActiveContextState(sessionId));
   assert(members.length > 0,
     "No completed batch is a member in a session that never closed a turn: the clamp is back");
-  const newestIndex = snapshot.messages.length - 1;
-  assert(!members.some((batch) => batch.indices.includes(newestIndex)),
-    "The newest batch is a member, so the fresh tail bounds nothing");
 
-  // (c) CLIMB WITH ZERO AGENT MARKS. Every measurement stops on toolUse, so the turn
+  // (c) AND THE OLD GUARD WOULD HAVE HELD ALL OF IT, recorded so the deletion stays a
+  // decision: every member's refs sit past the last terminal stop, which is the whole
+  // window here. Excluding that set at proposal time leaves the selector nothing, which
+  // is why no exclusion at any granularity wider than the event can serve this shape.
+  const turnScoped = toolResultRefKeys(snapshot);
+  assert.equal(turnScoped.size, batches,
+    "The turn-scoped reading does not cover the whole window, so the shape is not being measured");
+  assert.equal(context.selectAutomaticSpan(snapshot, context.emptyActiveContextState(sessionId), turnScoped), null,
+    "A turn-scoped exclusion left something proposable, so this fixture no longer " +
+      "demonstrates why the old guard starved it");
+
+  // (d) CLIMB WITH ZERO AGENT MARKS. Every measurement stops on toolUse, so the turn
   // stays open through the whole climb and the agent never marks anything itself.
   const bandTop = context.DEFAULT_THRESHOLDS.maxTarget * providerInputBudget;
   await measure(runtime, 60_000, window, undefined, "toolUse");
   await project(runtime);
   await settle();
+  const commitFrom = runtime.appended.length;
   await measure(runtime, Math.ceil(bandTop) + 2_000, window, undefined, "toolUse");
   await project(runtime);
   await settle();
 
-  // (d) THE CONSISTENCY INVARIANT, checked at the state the boundary will find.
-  //
-  // Unmarked stale mass the selector cannot propose is a window that will starve no
-  // matter how often the boundary fires. In rep 2 that was 19 spans and 274,173 tokens,
-  // which is the contradiction this asserts away.
+  // (e) THE BAND TOP APPLIES. This is the assertion the live run failed: the pre-fix
+  // runtime emitted this same record with applied_marks 0 and every mark retained.
+  const commit = contextEvents(runtime, commitFrom)
+    .find((record) => record.kind === "context.commit" && record.deferred === false &&
+      record.trigger === "band-top");
+  assert(commit, "The band top did not commit in a session that never closed a turn");
+  assert(commit.applied_marks > 0, `The band-top commit applied ${commit.applied_marks} marks`);
+  assert(commit.freed_tokens > 0, `The band-top commit freed ${commit.freed_tokens} tokens`);
+  assert.equal(commit.shortfall_share, 0,
+    `The commit fell ${commit.shortfall_share} short of its freeing target`);
+
+  // (f) AND STOPS AT THE AIM. The depth bound retains what the target does not need,
+  // stalest first, so the newest events survive raw as PENDING marks rather than as
+  // guarded ones: still briefable, still editable, folded only when a later commit
+  // needs the depth.
+  assert(commit.deferred_marks > 0,
+    "The commit applied everything staged, so the depth bound is not binding and the " +
+      "landing is the fence sweep the live run recorded");
+  const committedState = materialized(runtime, sessionId);
+  const foldedKeys = new Set(committedState.folds.flatMap((fold) =>
+    fold.parts.flatMap((part) => (part.kind === "raw" ? [part.ref.entryId] : []))));
+  assert(foldedKeys.size > 0, "Nothing was folded, so the depth cut proves nothing");
+  assert(foldedKeys.has(resultEntryIds[0]),
+    "The oldest batch survived raw, so the cut is not taking stalest first");
+  assert(!foldedKeys.has(resultEntryIds.at(-1)),
+    "The commit folded the newest batch, so the depth cut is not what protects the working set");
+  const projection = await project(runtime);
+  const projected = json.stableStringify(projection.messages);
+  assert(projected.includes(`Open ${batches - 1}: `),
+    "The newest batch did not survive raw in the projection");
+  assert(!projected.includes(`Open 0: ${"o".repeat(resultChars)}`),
+    "The oldest batch survived raw, so the commit moved nothing the stale end offered");
+
+  // (g) THE CONSISTENCY INVARIANT, held from the 2026-08-10 fix: unmarked stale mass the
+  // selector cannot propose is a window that will starve no matter what fires.
   const exposureSnapshot = context.mapActiveContext({
     sessionId,
     eventMessages: runtime.messages,
@@ -8361,113 +8396,23 @@ async function gateOpenTurnCommits() {
   });
   const exposureState = materialized(runtime, sessionId);
   const remainder = context.unmarkedRemainder(exposureSnapshot, exposureState, 4);
-  // AS AN IMPLICATION, BOTH WAYS. The old reading demanded unmarked mass be standing; under
-  // the frontier it usually is not, because everything the selector can propose has already
-  // been cut, and demanding a backlog would be demanding that the frontier fail. The
-  // contradiction rep 2 died of is untouched and is what is asserted: mass the remainder
-  // NAMES that the selector cannot propose. Checked in both directions, because the other
-  // way round is the same contradiction read from the other side, a selector offering spans
-  // the remainder does not count, and a fixture that only ever sees one of them proves half.
   if (remainder.spans > 0) {
     assert(context.selectAutomaticSpan(exposureSnapshot, exposureState) !== null,
       `${remainder.spans} unmarked stale spans stand that the selector cannot propose`);
   }
-  // THE REVERSE DIRECTION IS NOT ASSERTED, and that is a statement about the code rather
-  // than a gap in the fixture. `unmarkedRemainder` enumerates `automaticToolBatches`, which
-  // is TOOL BATCHES ONLY, while `selectAutomaticSpan` also proposes chapters. So a window
-  // holding nothing but unfolded prose reads a remainder of zero and offers the selector a
-  // span, and this fixture is exactly that window. Asserting the two agree would fail on
-  // the real runtime today. It is worth writing down rather than leaving to be rediscovered:
-  // the remainder is what the AGENT is told is left, so on a chapter-heavy session it
-  // under-reports, and it is the same tool-only reading that made the fold frontier's first
-  // cut never fire on a chapter-only session at all.
-  // AND THE SHAPE OF THE DEFECT, pinned so it cannot come back by another route. The
-  // open turn is the WHOLE window here, so excluding it at proposal time leaves the
-  // selector nothing; that is why the guard is adjudicated at the commit, where it has a
-  // waiver, and never at the proposal, where it does not.
-  const guarded = context.currentTurnRefKeys(exposureSnapshot);
-  assert.equal(guarded.size, batches,
-    "The guard does not hold the whole window, so the starving shape is not being measured");
-  assert.equal(context.selectAutomaticSpan(exposureSnapshot, exposureState, guarded), null,
-    "Excluding the open turn at proposal time left something proposable, so this fixture " +
-      "no longer demonstrates why the exclusion had to move to the commit");
-
-  // THE COMMIT, AT THE BOUNDARY, ON A SESSION THAT NEVER CLOSES A TURN. Every mark on
-  // this shape belongs to the open turn, so applying any of them needs the guard waiver,
-  // and the waiver only releases a STARVED commit once occupancy has reached
-  // `refoldRatio` of the serving budget. Below that the boundary marks and holds, which
-  // is the deferral the guard is for.
-  const backstop = context.ACTIVE_CONTEXT_POLICY.refoldRatio * providerInputBudget;
-  assert(backstop > bandTop, "The backstop is not above the band top on this deployment");
-  const commitFrom = runtime.appended.length;
-  await measureAndCommit(runtime, Math.ceil(backstop) + 3_000, window, undefined, "toolUse");
-  // NAMED, because this gate IS about the boundary. The band top fires first on the same
-  // pass and applies nothing, correctly: it takes a null waiver ratio, and on this shape
-  // every mark belongs to the open turn.
-  const commit = contextEvents(runtime, commitFrom)
-    .find((record) => record.kind === "context.commit" && record.deferred === false &&
-      record.trigger === "compaction-boundary");
-  assert(commit, "The boundary committed nothing in a session that never closed a turn");
-  assert(commit.applied_marks > 0, `The commit applied ${commit.applied_marks} marks`);
-  assert(commit.freed_tokens > 0, `The commit freed ${commit.freed_tokens} tokens`);
-  assert(commit.waived_marks > 0,
-    "The guard was not waived, so the commit did not apply the open turn's own evidence");
-  // AND THE COMMIT IS AS DEEP AS THE THERMOSTAT ASKED. This is the second defect's own
-  // assertion: the top-up is what carries a commit from whatever the per-pass ladder
-  // happened to mark down to the target line, and handing it the open turn as an
-  // exclusion made it propose nothing at all on this shape, because here the open turn
-  // is the entire window. A commit that reaches the target only by the marks a few
-  // measurement passes left lying around is the starvation with a smaller number on it.
-  // SUMMED OVER THE PASS, and counting the FRONTIER beside the top-up. The defect was that
-  // NOTHING was proposable on a window that is one open turn, because the reach was clamped
-  // to the last closed turn and there is none. Whether the proposal comes from the commit's
-  // own fill or from the frontier that cut ahead of it is not what the defect was about;
-  // that something is proposable at all is. Reading `topup_marks` alone would now fail for
-  // the opposite reason to the defect, that the frontier got there first.
-  const commitRecords = contextEvents(runtime, commitFrom)
-    .filter((record) => record.kind === "context.commit");
-  const topUp = commitRecords.reduce((total, record) => total + Number(record.topup_marks ?? 0), 0);
-  // Frontier cuts counted over the WHOLE session, not from the boundary: the frontier runs
-  // on every projection pass, so by the time the boundary is reached it has already made
-  // the proposals the commit then spends. Windowing them to the boundary would count zero
-  // and read as the defect.
-  const proposed = topUp + contextEvents(runtime)
-    .filter((record) => record.kind === "context.frontier")
-    .reduce((total, record) => total + Number(record.cut ?? 0), 0);
-  assert(proposed > 0, "Nothing proposed a span on a window that is one open turn");
-  assert.equal(commit.shortfall_share, 0,
-    `The commit fell ${commit.shortfall_share} short of its freeing target`);
-
-  // AND THE PROTECTIONS SURVIVE THE FIX. The newest batch is inside the fresh tail, and
-  // the fresh tail is a byte tail in `protectedIndices`, not a consequence of the clamp.
-  const committedState = materialized(runtime, sessionId);
-  const foldedKeys = new Set(committedState.folds.flatMap((fold) =>
-    fold.parts.flatMap((part) => (part.kind === "raw" ? [part.ref.entryId] : []))));
-  const newest = resultEntryIds.at(-1);
-  assert(foldedKeys.size > 0, "Nothing was folded, so the fresh tail proves nothing");
-  assert(!foldedKeys.has(newest), "The commit folded the newest batch out of the fresh tail");
-  const projection = await project(runtime);
-  const projected = json.stableStringify(projection.messages);
-  assert(projected.includes(`Open ${batches - 1}: `),
-    "The newest batch did not survive raw in the projection");
-  assert(!projected.includes(`Open 0: ${"o".repeat(resultChars)}`),
-    "The oldest batch survived raw, so the commit moved nothing the stale zone offered");
 
   return {
     completeTurns: snapshot.completeTurns.length,
-    currentTurnBoundary: context.currentTurnBoundary(snapshot),
     freshBoundary: snapshot.freshBoundary,
     memberBatches: members.length,
     messages: snapshot.messages.length,
-    unmarkedStaleSpans: remainder.spans,
-    guardedRefKeys: guarded.size,
-    proposableWithoutTheExclusion: true,
-    proposableWithTheExclusion: false,
+    turnScopedRefKeys: turnScoped.size,
+    proposableUnderTurnScopedExclusion: false,
     appliedMarks: commit.applied_marks,
-    topUpMarks: commit.topup_marks,
-    waivedMarks: commit.waived_marks,
+    retainedByDepthBound: commit.deferred_marks,
     shortfallShare: commit.shortfall_share,
     freedTokens: commit.freed_tokens,
+    unmarkedStaleSpans: remainder.spans,
     newestBatchFolded: false,
   };
 }
@@ -9406,13 +9351,12 @@ async function gateDanglingChildMarks() {
     "A mark naming a fold nothing will mint is not reported terminal");
   assert.equal(context.markSpanStart(snapshot, dissolved, parent), snapshot.mapped.length,
     "An unreadable span does not sort past the newest entry");
-  assert.equal(context.markTouchesCurrentTurn(dissolved, parent, new Set(["dangling-probe"])), false);
   assert(context.claimedRefKeys(dissolved).size >= 2,
     "The claimed keys lost the raw parts the dangling mark still names");
   assert.equal(context.markFreedBytes(snapshot, dissolved, parent), 0);
 
   const dropCommit = await context.commitPendingMarks({
-    snapshot, state: dissolved, generation: 2, retainIneligible: true, guardCurrentTurn: true,
+    snapshot, state: dissolved, generation: 2, retainIneligible: true,
   });
   assert.equal(dropCommit.applied.length, 0, "A mark naming a dissolved fold folded anyway");
   assert.equal(dropCommit.refused.length, 1);
@@ -9423,9 +9367,11 @@ async function gateDanglingChildMarks() {
   assert.equal(context.pendingMarks(dropCommit.state).length, 0, "The dropped mark is still pending");
 
   // HALF TWO: the fold is not gone, it is held back this pass.
-  // A thin tail, because the hold under test is the current-turn GUARD. The default tail
-  // is 36,000 chars at this budget and the excursion below is 30,000, so the whole open
-  // turn would sit inside it and the child would be held by the tail instead.
+  // The hold under test was the current-turn guard until its 2026-08-23 deletion; a pin
+  // is the hold that remains reachable here, and it produces the same deferral shape: a
+  // child over protected evidence stays pending, and a parent naming it defers rather
+  // than dropping. (The depth bound cannot make this shape: an unresolved parent sorts
+  // past every resolvable mark, so a cut that spares the child spares the parent too.)
   const openBuilt = makeFixture({
     sessionId: "dangling-defer-test", turns: 12, resultChars: 6_000, contextWindow: 100_000,
     thresholds: context.DEFAULT_THRESHOLDS,
@@ -9468,34 +9414,37 @@ async function gateDanglingChildMarks() {
     readOnlyContextActions: context.PEEK_READ_ONLY_CONTEXT_ACTIONS,
   });
   const openEmpty = context.emptyActiveContextState(openBuilt.sessionId);
-  const turnKeys = context.currentTurnRefKeys(openSnapshot);
-  assert.equal(turnKeys.size, 5, "The excursion did not leave five reads inside an open turn");
-  const heldIndex = openSnapshot.mapped.findIndex((item) =>
-    item.ref && turnKeys.has(json.objectRefKey(item.ref)));
-  assert(heldIndex >= 2, "The open turn starts too early in the window to carry a parent span");
+  // The child is the excursion's first read, exactly where the guard-era fixture put
+  // it; pinning its evidence below is what holds it back this pass.
+  const heldIndex = openBuilt.messages.length + 1;
+  assert.equal(openSnapshot.mapped[heldIndex]?.message?.role, "toolResult",
+    "The excursion's first read is not where the fixture expects it");
+  assert(heldIndex >= 2, "The window is too small to carry a parent span past the child");
   const heldChild = childMarkAt(openSnapshot, openEmpty, heldIndex);
   const heldParent = parentMarkAt(openSnapshot, heldIndex, heldChild);
   let openState = context.addPendingMark(openEmpty, heldChild).state;
   openState = context.addPendingMark(openState, heldParent).state;
-  // The guard, and only the guard, is what holds the child: with the turn closed the
-  // same child applies, so the deferral below is not measuring some other hold.
+  // The pin, and only the pin, is what holds the child: unpinned, the same child
+  // applies, so the deferral below is not measuring some other hold.
   const closedTurn = await context.commitPendingMarks({
     snapshot: openSnapshot, state: context.addPendingMark(openEmpty, heldChild).state,
     generation: 1, retainIneligible: true,
   });
   assert.deepEqual(closedTurn.applied.map((mark) => mark.id), [heldChild.id],
-    "The child is held by something other than the turn guard, so this half measures the wrong hold");
-  assert.equal(context.markTouchesCurrentTurn(openState, heldChild, turnKeys), true,
-    "The excursion's own read is outside the open turn, so nothing guards the child");
-  assert.equal(context.markTouchesCurrentTurn(openState, heldParent, turnKeys), false,
-    "The parent's readable parts sit inside the open turn, so the guard would hold it too");
+    "The child is held by something other than the pin, so this half measures the wrong hold");
   assert.throws(() => context.candidateSourceRefs(heldParent.parts, openState),
     /Missing candidate child/,
     "The parent already resolves, so the deferral below is not being measured");
 
+  const pinnedState = {
+    ...openState,
+    protected: [structuredClone(openSnapshot.mapped[heldIndex].ref)],
+  };
+  assert.equal(context.markEligibility(openSnapshot, pinnedState, heldChild), "protected",
+    "The pin does not hold the child, so the deferral below is not being measured");
   const deferCommit = await context.commitPendingMarks({
-    snapshot: openSnapshot, state: openState, generation: 1,
-    retainIneligible: true, guardCurrentTurn: true,
+    snapshot: openSnapshot, state: pinnedState, generation: 1,
+    retainIneligible: true,
   });
   assert.equal(deferCommit.applied.length, 0, "The guarded child folded anyway");
   const parentReceipt = deferCommit.refused.find((item) => item.id === heldParent.id);
@@ -9513,7 +9462,7 @@ async function gateDanglingChildMarks() {
   // The contrast: the same parent, with nothing standing to mint its child, is dropped.
   const aloneCommit = await context.commitPendingMarks({
     snapshot: openSnapshot, state: context.addPendingMark(openEmpty, heldParent).state,
-    generation: 1, retainIneligible: true, guardCurrentTurn: true,
+    generation: 1, retainIneligible: true,
   });
   assert.equal(aloneCommit.refused.length, 1);
   assert.equal(aloneCommit.refused[0].retained, false,
@@ -9525,7 +9474,7 @@ async function gateDanglingChildMarks() {
     accountingAnswersAfterDissolve: true,
     statusEligibilityAfterDissolve: status.marks[0].eligibility,
     droppedRetained: dropCommit.refused[0].retained,
-    openTurnReads: turnKeys.size,
+    pinnedChildIndex: heldIndex,
     deferredParentRetained: parentReceipt.retained,
     deferredStillPending: stillPending.length,
     sameParentDroppedAlone: aloneCommit.refused[0].retained,
@@ -10360,20 +10309,16 @@ async function gateNoFoldWithoutABrief() {
 /**
  * A BOUNDARY THAT CANCELS PI'S COMPACTION MUST NOT THEN APPLY NOTHING.
  *
- * The current-turn guard retains marks that touch the still-open turn, and its waiver
- * asked for occupancy at or past `refoldRatio` before releasing them. That anchor was a
- * proxy for "this session is in enough trouble to spend the open turn's own evidence",
- * and at a compaction boundary Pi has already answered the question the proxy was asking.
- *
  * Measured on the sol-20260813 smoke, which is why this gate exists: the boundary fired,
  * cancelled the native compaction, retained all seven of its marks at 0.20 occupancy and
  * freed nothing, so the runtime told Pi not to compact and then handed back a
- * byte-identical projection. The full run reaches the anchor 12,576 tokens past its own
- * trigger and self-corrects there; a session whose budget it never approaches does not.
- *
- * What must NOT change is the rest of the waiver, so this drives the same fixture at the
- * same occupancy through the projection fence, where the boundary is not the trigger, and
- * requires the guard to hold.
+ * byte-identical projection. In the guard era the repair was a boundary-only waiver;
+ * since the guard's 2026-08-23 deletion nothing retains an eligible mark at a boundary
+ * in the first place, and what this gate pins is the outcome the waiver existed to buy:
+ * a boundary at LOW occupancy, on a session that never closes a turn, commits real mass
+ * rather than handing Pi's own threshold back the projection that just crossed it.
+ * The boundary carries a ratio, so its commit takes everything eligible with no depth
+ * bound; the depth bound is the band top's, and gate 09 pins that half.
  */
 /**
  * WHAT THE SESSION SPENDS DERIVING ITSELF, ON THE RECORD AND SUMMABLE.
@@ -10563,10 +10508,10 @@ async function gateCanonicalizationIsMemoizedPerMessageObject() {
   };
 }
 
-async function gateBoundaryWaivesTheGuardRatherThanNoOp() {
-  // THE FIXTURE IS THE SHAPE, the same one gate 106 uses: one user message and nothing
-  // after it but tool-calling assistants and their results, so no turn ever closes, the
-  // guard holds every mark, and there is no unguarded mark for the waiver to prefer.
+async function gateBoundaryCommitsRatherThanNoOp() {
+  // THE FIXTURE IS THE SHAPE, the same one gate 09 uses: one user message and nothing
+  // after it but tool-calling assistants and their results, so no turn ever closes and
+  // occupancy sits far under every emergency threshold when the boundary fires.
   const sessionId = "boundary-waiver-test";
   const window = 100_000;
   const providerInputBudget = 90_000;
@@ -10618,8 +10563,8 @@ async function gateBoundaryWaivesTheGuardRatherThanNoOp() {
     };
   };
 
-  // Well under refoldRatio, which is 0.85 of the 90,000-token serving budget: the
-  // occupancy anchor alone refuses the waiver at every one of these.
+  // Well under refoldRatio, which is 0.85 of the 90,000-token serving budget, and under
+  // the band top: nothing but the boundary itself explains the commit below.
   const climb = [55_000, 57_000, 59_000, 61_000, 62_000, 62_500];
   const boundaryRun = makeRuntime(build(), { providerInputBudget });
   await startRuntime(boundaryRun);
@@ -10636,18 +10581,15 @@ async function gateBoundaryWaivesTheGuardRatherThanNoOp() {
     contextWindow: providerInputBudget,
     netBudget: true,
   });
-  assert.equal(context.currentTurnBoundary(snapshot), -1,
-    "A turn closed in the fixture, so the guard does not hold every mark");
+  assert(!terminalStopIn(boundaryRun.messages),
+    "A turn closed in the fixture, so the never-closing shape is not being measured");
   // The frontier cuts before the boundary (gate 141), and on this shape every one of
-  // those cuts lands inside the turn that never closes, so the guard holds every one of
-  // them and the boundary arrives with nothing applicable. That is precisely the
-  // starvation the waiver exists for, and the counts it turns on are read off the commit
-  // record below rather than guessed at here. What this pins is that the guard, not the
-  // absence of marks, is what leaves the boundary empty.
-  const guardedBefore = context.pendingMarks(state);
-  const turnKeys = context.currentTurnRefKeys(snapshot);
-  assert(guardedBefore.every((mark) => context.markTouchesCurrentTurn(state, mark, turnKeys)),
-    "A mark outside the open turn was left for the boundary, so the waiver is not what frees it");
+  // those cuts lands inside the turn that never closes: under the deleted guard the
+  // boundary arrived with nothing applicable, which is the no-op this gate was born
+  // from. The marks standing here are what the boundary spends.
+  const pendingBefore = context.pendingMarks(state);
+  assert(pendingBefore.length > 0,
+    "Nothing is pending at the boundary, so the commit below proves nothing");
 
   const from = boundaryRun.appended.length;
   await compactBoundary(boundaryRun);
@@ -10658,61 +10600,25 @@ async function gateBoundaryWaivesTheGuardRatherThanNoOp() {
   assert(occupancy < context.ACTIVE_CONTEXT_POLICY.refoldRatio,
     `The fixture sat at ${occupancy} occupancy, at or past the anchor, so the waiver did ` +
     "not need the boundary and this gate proves nothing");
-  assert(commit.pending_marks >= context.GUARD_WAIVER_MINIMUM_MARKS,
-    `The commit filled ${commit.pending_marks} marks, under the waiver's own minimum`);
-  assert(commit.waived_marks > 0,
-    "The boundary cancelled Pi's compaction and waived nothing");
   assert(commit.applied_marks > 0,
     "The boundary cancelled Pi's compaction and applied nothing, which hands Pi's own " +
     "threshold a projection byte-identical to the one that just crossed it");
   assert(commit.freed_tokens > 0, "The boundary commit freed nothing");
-  // THE NEWEST MATERIAL STILL STAYS RAW. The waiver releases the oldest and holds back
-  // GUARD_WAIVER_PROTECTED_MARKS, so a boundary is not a licence to fold the open turn
-  // down to nothing.
-  assert.equal(commit.waived_marks,
-    commit.pending_marks - context.GUARD_WAIVER_PROTECTED_MARKS,
-    `The boundary waived ${commit.waived_marks} of ${commit.pending_marks} marks, which is ` +
-    "not the bounded release the waiver has always performed");
-
-  // AND THE ANCHOR STILL GOVERNS EVERY OTHER PATH. The same state at the same occupancy
-  // keeps the guard when the trigger is not a boundary: the projection fence is our own
-  // thermostat reading its own gauge, not Pi saying this window must shrink, so it has
-  // no better signal than the proxy and does not get to spend the open turn.
-  const ratio = 62_500 / window;
-  const guardedCount = commit.pending_marks;
-  const waiverAt = (extra) => context.guardWaiverCount({
-    snapshot, ratio, guardedMarks: guardedCount, otherApplicableMarks: 0, ...extra,
-  });
-  assert.equal(waiverAt({}), 0,
-    "The occupancy anchor stopped governing a waiver that is not at a boundary");
-  assert(waiverAt({ boundary: true }) > 0,
-    "The boundary flag did not release the same guard the anchor refused");
-  // The boundary is not a bypass of the rest of the rule. Other applicable marks still
-  // take precedence, and a guarded set under the minimum still holds whole.
-  assert.equal(
-    context.guardWaiverCount({
-      snapshot, ratio, guardedMarks: guardedCount, otherApplicableMarks: 1, boundary: true,
-    }),
-    0,
-    "A boundary waived the open turn while unguarded work was available instead");
-  assert.equal(
-    context.guardWaiverCount({
-      snapshot,
-      ratio,
-      guardedMarks: context.GUARD_WAIVER_MINIMUM_MARKS - 1,
-      otherApplicableMarks: 0,
-      boundary: true,
-    }),
-    0,
-    "A boundary waived a guarded set under the waiver's own minimum");
+  // AND IT TAKES EVERYTHING ELIGIBLE. The boundary carries a ratio, so the depth bound
+  // does not arm: Pi has already said this window must shrink, and a bound that left
+  // depth on the table would hand the decision back half-answered. The receipt carries
+  // no guard-waiver vocabulary any more, and that absence is pinned.
+  assert.equal(commit.deferred_marks, 0,
+    `The boundary retained ${commit.deferred_marks} marks while Pi asked the window to shrink`);
+  assert.equal(commit.waived_marks, undefined,
+    "The commit record still carries guard-waiver vocabulary; the guard and its waiver are deleted");
   return {
     boundaryOccupancy: Number(occupancy.toFixed(3)),
     anchor: context.ACTIVE_CONTEXT_POLICY.refoldRatio,
-    guardedMarks: guardedCount,
-    waivedAtBoundary: commit.waived_marks,
+    pendingAtBoundary: pendingBefore.length,
     appliedAtBoundary: commit.applied_marks,
+    deferredAtBoundary: commit.deferred_marks,
     freedTokens: commit.freed_tokens,
-    anchorStillGovernsTheFence: true,
   };
 }
 
@@ -13796,7 +13702,7 @@ const gates = [
   // compaction boundary now, and a boundary Pi fires has nothing to announce in
   // advance. Their numbers stay spent for the same reason 124's does.
   [127, "A delta carries only what changed", gateDeltaCarriesOnlyBriefChanges],
-  [130, "A boundary waives the guard rather than no-op", gateBoundaryWaivesTheGuardRatherThanNoOp],
+  [130, "A boundary commits rather than no-op", gateBoundaryCommitsRatherThanNoOp],
   [128, "The user's commit announces a persistence failure", gateUserCommitAnnouncesPersistenceFailure],
 
   [136, "A brief's cut is stated, never silent", gateBriefTruncationIsExplicit],

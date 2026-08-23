@@ -499,22 +499,3 @@ export function mapActiveContext(input: {
   };
   return snapshot;
 }
-
-export function currentTurnBoundary(snapshot: Pick<ActiveContextSnapshot, "messages">): number {
-  let boundary = -1;
-  for (let index = 0; index < snapshot.messages.length; index += 1) {
-    if (terminalAssistant(snapshot.messages[index])) boundary = index;
-  }
-  return boundary;
-}
-
-export function currentTurnRefKeys(snapshot: ActiveContextSnapshot): Set<string> {
-  const boundary = currentTurnBoundary(snapshot);
-  const keys = new Set<string>();
-  for (const item of snapshot.mapped) {
-    if (item.index <= boundary || !item.ref) continue;
-    if (messageRole(item.message) !== "toolResult") continue;
-    keys.add(objectRefKey(item.ref));
-  }
-  return keys;
-}

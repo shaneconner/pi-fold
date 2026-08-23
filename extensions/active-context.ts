@@ -152,10 +152,8 @@ import {
   markEligibility,
   markFreedBytes,
   unmarkedRemainder,
-  guardWaiverCount,
   markClaimingRef,
   markOrdinal,
-  markTouchesCurrentTurn,
   pendingMarks,
   refoldMarks,
   schedulingStatus,
@@ -189,7 +187,6 @@ import type {
 import { buildActiveContextCommands, buildActiveContextTool } from "./lib/tool-surface.ts";
 import { buildFoldEditorData, FoldEditorView } from "./lib/editor-ui.ts";
 import {
-  currentTurnRefKeys,
   mapActiveContext,
 } from "./lib/transcript.ts";
 import {
@@ -1698,11 +1695,11 @@ export function registerActiveContext(pi: any, options: {
     ladder.bandTopMeasurement = measurements.lastProviderMeasurement;
     let action: Record<string, unknown> | null = null;
     try {
-      // NULL WAIVER RATIO, deliberately. The band top is routine housekeeping at a stated
-      // threshold, not an emergency, and `guardWaiverCount` returns 0 for a null ratio. It
-      // therefore never spends the OPEN turn's own evidence: every current-turn mark is
-      // retained and waits. The fence and the compaction boundary keep the waiver, because
-      // they are the two places where something has already gone wrong.
+      // NULL RATIO, deliberately. The band top is routine housekeeping at a stated
+      // threshold, not an emergency, and a null ratio is what arms the depth bound: the
+      // commit takes stalest-first and stops at the aim, so the newest events stay raw
+      // for as long as there is room for them. The fence and the compaction boundary
+      // carry a ratio and no bound, because something has already gone wrong there.
       action = await attemptAutomaticCommit(snapshot, ctx, "band-top", null);
     } catch (error) {
       suspendAutomatic(error, "band-top", ctx);
@@ -1727,9 +1724,10 @@ export function registerActiveContext(pi: any, options: {
       attempts += 1;
       // THE EMERGENCY IS THE REQUEST THAT WILL NOT FIT, and only that. A projection at
       // the margin is ordinary work: the fence commits it because it is the pass holding
-      // the request, but it is not a recovery, it does not waive the current-turn guard,
-      // and it does not buy an exemption from the reclaim floor. Waiving at the margin
-      // spends the open turn's own evidence on headroom the boundary was about to buy.
+      // the request, but it is not a recovery and it does not buy an exemption from the
+      // reclaim floor. What separates it from the band top is depth alone: the fence
+      // carries a ratio, so its commit takes everything eligible rather than stopping at
+      // the aim.
       const emergency = measured.over || rejected;
       if (emergency) curation.recoveryAttempts += 1;
       let action: Record<string, unknown> | null = null;
@@ -2157,7 +2155,6 @@ export function registerActiveContext(pi: any, options: {
       const addition = addPendingMark(state, mark);
       if (addition.added) { state = addition.state; consolidationAdded += 1; }
     }
-    const guarded = currentTurnRefKeys(snapshot);
     const capacity = servingCapacity(snapshot.contextWindow);
     const usedTokens = capacity.usedTokens;
     const budgetTokens = capacity.budgetTokens;
@@ -2198,12 +2195,12 @@ export function registerActiveContext(pi: any, options: {
     //
     // The fill measures progress over EVERY mark it makes, not just the ones this commit
     // will apply. Measuring the eligible share alone is what a starved commit needs and it
-    // is wrong here: a mark the current-turn guard will retain moves the eligible share by
-    // nothing, so the loop kept marking and walked a whole 24-batch open excursion chasing
-    // a target it could not reach that way. Counting everything bounds the fill at the drop
-    // it was asked for, and the guard holds back what belongs to the open turn for the next
-    // commit. The backstop still reads the eligible share, because starvation is the one
-    // state where the difference is the point.
+    // is wrong here: a mark over protected evidence moves the eligible share by nothing,
+    // so the loop kept marking and walked a whole 24-batch excursion chasing a target it
+    // could not reach that way (the retainer was the current-turn guard then; pins and
+    // protected evidence retain the same way now). Counting everything bounds the fill at
+    // the drop it was asked for. The backstop still reads the eligible share, because
+    // starvation is the one state where the difference is the point.
     const fill = (targetShare: number, eligibleOnly: boolean): void => {
       for (const mark of topUpMarks({ snapshot, state, ordinal, eligibleOnly, targetShare })) {
         const addition = addPendingMark(state, mark);
@@ -2228,7 +2225,6 @@ export function registerActiveContext(pi: any, options: {
       snapshot,
       state,
       charsPerToken: projectionCharsPerToken(),
-      excludeRefKeys: guarded,
     });
     state = wedges.state;
     const accounting = markAccounting(snapshot, state);
@@ -2271,60 +2267,67 @@ export function registerActiveContext(pi: any, options: {
       return null;
     }
     const bytesBefore = bytes(projectActiveContext(snapshot, state));
-    const guardWaiver = guardWaiverCount({
-      snapshot,
-      ratio: waiverRatio,
-      boundary: trigger === "compaction-boundary",
-      guardedMarks: pendingMarks(state).filter((mark) =>
-        markTouchesCurrentTurn(state, mark, guarded)).length,
-      otherApplicableMarks: pendingMarks(state).filter((mark) =>
-        !markTouchesCurrentTurn(state, mark, guarded) &&
-        markEligibility(snapshot, state, mark) === "eligible").length,
-    });
     // THE COMMIT CUTS ONLY AS DEEP AS THE BUDGET ASKS (Shane, 2026-08-23). The frontier
     // stages as material arrives, so by now the pending set is most of the window; without
     // this bound the first commit would fold all of it. `freeingTarget` is a share of the
     // budget and the bound is bytes, so it is converted once, here, through the same ratio
     // the projection weighs itself with.
     //
-    // It binds on the ROUTINE path only, which is the same line the guard waiver is drawn
-    // on: a null waiver ratio is the band top, ordinary housekeeping at a stated
-    // threshold, and that is where "only as deep as it needs" belongs. The fence and the
-    // compaction boundary carry a ratio because something has already gone wrong there,
-    // and a lane holding a request that will not fit is not the place to leave depth on
-    // the table. The backstop is exempt for the same reason: it fires only when the commit
-    // is already starving.
+    // It binds on the ROUTINE path only: a null ratio is the band top, ordinary
+    // housekeeping at a stated threshold, and that is where "only as deep as it needs"
+    // belongs. The fence and the compaction boundary carry a ratio because something has
+    // already gone wrong there, and a lane holding a request that will not fit is not the
+    // place to leave depth on the table. The backstop is exempt for the same reason: it
+    // fires only when the commit is already starving.
+    //
+    // This bound is also what protects the working set since the current-turn guard was
+    // deleted (Shane, 2026-08-23, from the first live session): the cut takes stalest
+    // first and stops at the aim, so the newest events stay raw exactly as long as there
+    // is room for them, in every session shape including one that never closes a turn.
     let result = await commitPendingMarks({
       snapshot,
       state,
       generation: lifecycle.generation,
       retainIneligible: true,
-      guardCurrentTurn: true,
-      guardWaiver,
       ...(backstopFired || waiverRatio !== null ? {} : {
         applyTargetBytes: Math.ceil(freeingTarget * budgetTokens * projectionCharsPerToken()),
       }),
     });
     for (;;) {
+      // THE CLOSING PASS COMMITS ONLY WHAT IT SEATS (2026-08-23). It rides the same paid
+      // rewrite to give a group its parent, and it runs UNBOUNDED because a parent's whole
+      // span must land together. Handing it the full pending set therefore leaked the depth
+      // cut: the marks the bound had just retained were still pending, the closing commit
+      // carried no bound, and the first band-top commit after the guard deletion folded all
+      // 24 of them to the floor (gate 09's fixture, applied 26 of 24 with deferred 0). The
+      // marks the cut held back are set aside before the closing commit and restored after,
+      // so the only thing an unbounded closing pass can spend is the parents it just made.
       let closing = result.state;
+      const heldBack = pendingMarks(closing);
+      let seeded = withPendingMarks(closing, []);
+      let seededAdded = 0;
       for (const mark of consolidationMarks({ snapshot, state: closing, ordinal })) {
         const addition = addPendingMark(closing, mark);
-        if (addition.added) { closing = addition.state; closingAdded += 1; }
+        if (!addition.added) continue;
+        closing = addition.state;
+        const carried = addPendingMark(seeded, mark);
+        if (carried.added) { seeded = carried.state; closingAdded += 1; seededAdded += 1; }
       }
-      if (closing === result.state) break;
+      if (!seededAdded) break;
       const closed = await commitPendingMarks({
         snapshot,
-        state: closing,
+        state: seeded,
         generation: lifecycle.generation,
         retainIneligible: true,
-        guardCurrentTurn: true,
       });
       if (!closed.applied.length) break;
       result = {
         ...closed,
+        state: withPendingMarks(closed.state, [...pendingMarks(closed.state), ...heldBack]),
         applied: [...result.applied, ...closed.applied],
         refused: [...result.refused.filter((mark) => !mark.retained), ...closed.refused],
-        waived: [...result.waived, ...closed.waived],
+        retained: [...result.retained.filter((mark) =>
+          !closed.applied.some((appliedMark) => appliedMark.id === mark.id)), ...closed.retained],
       };
     }
     persistence.state = result.state;
@@ -2352,7 +2355,6 @@ export function registerActiveContext(pi: any, options: {
       applied_marks: result.applied.length,
       refused_marks: result.refused.filter((mark) => !mark.retained).length,
       deferred_marks: result.retained.length,
-      waived_marks: result.waived.length,
       pending_marks: accounting.pending,
       agent_marks: accounting.agentMarks,
       ladder_marks: accounting.ladderMarks,
@@ -2427,8 +2429,6 @@ export function registerActiveContext(pi: any, options: {
       occupancyTokensBefore: usedTokens,
       depthFloorShare: commitDepthFloorShare(snapshot),
       reclaimFloorShare: COMMIT_RECLAIM_FLOOR_SHARE,
-      guardWaived: result.waived.length > 0,
-      waivedMarks: result.waived.length,
       appliedMarks: result.applied.length,
       refusedMarks: result.refused.filter((mark) => !mark.retained).length,
       deferredMarks: result.retained.length,
@@ -2437,8 +2437,6 @@ export function registerActiveContext(pi: any, options: {
       protectedStaleBytes: pinHeld.bytes,
       protectedStaleRefs: pinHeld.refs,
       retainedMarks: result.retained.length,
-      currentTurnRetained: result.retained.filter((mark) =>
-        markTouchesCurrentTurn(state, mark, guarded)).length,
       eligibleMarks: accounting.eligibleMarks,
       estimatedRewriteTokens: accounting.rewriteTokens,
       estimatedFreedTokens: accounting.freedTokens,

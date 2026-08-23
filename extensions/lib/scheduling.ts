@@ -34,7 +34,6 @@ import {
   parsePendingMarks,
   pendingMarkKey,
 } from "./persistence.ts";
-import { currentTurnRefKeys } from "./transcript.ts";
 import {
   ESTIMATED_BYTES_PER_TOKEN,
   ESTIMATED_PLACEHOLDER_OVERHEAD_BYTES,
@@ -187,15 +186,6 @@ export function markFreedBytes(
   return Math.max(0, bytes(source) - placeholder);
 }
 
-export function markTouchesCurrentTurn(
-  state: ActiveContextState,
-  mark: PendingMark,
-  currentTurn: ReadonlySet<string>,
-): boolean {
-  if (!currentTurn.size) return false;
-  return markSpanRefs(state, mark).refs.some((ref) => currentTurn.has(objectRefKey(ref)));
-}
-
 export function markSpanStart(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
@@ -210,46 +200,6 @@ export function markSpanStart(
     return item ? [item.index] : [];
   });
   return indices.length ? Math.min(...indices) : snapshot.mapped.length;
-}
-
-export const GUARD_WAIVER_PROTECTED_MARKS = 2;
-
-export const GUARD_WAIVER_MINIMUM_MARKS = 4;
-
-export function guardWaiverCount(input: {
-  snapshot: ActiveContextSnapshot;
-  ratio: number | null;
-  guardedMarks: number;
-  otherApplicableMarks: number;
-  /**
-   * THE BOUNDARY IS ITS OWN SIGNAL, and a better one than the occupancy anchor.
-   *
-   * The anchor exists to answer "is this session in enough trouble to spend the open
-   * turn's own evidence": a proxy, because nothing else was asking. At a compaction
-   * boundary Pi has already answered it. Cancelling the compaction and then applying
-   * nothing hands Pi's own threshold a byte-identical projection, which is worse than
-   * letting it compact, because compaction would at least have shed something.
-   *
-   * Measured on the sol-20260813 smoke: the boundary fired, cancelled the compaction and
-   * retained all seven marks at 0.20 occupancy, freeing nothing. The full run reaches the
-   * anchor 12,576 tokens past its own trigger, so it self-corrects there and this is
-   * about what happens in between; a smoke, or any session whose budget it never
-   * approaches, never corrects at all.
-   *
-   * Everything else about the waiver is unchanged, and deliberately: the newest marks
-   * still stay raw, a small guarded set still holds whole, and other applicable work
-   * still takes precedence over spending the open turn.
-   */
-  boundary?: boolean;
-}): number {
-  const { snapshot, ratio, guardedMarks, otherApplicableMarks, boundary } = input;
-  if (guardedMarks <= 0 || typeof ratio !== "number" || !Number.isFinite(ratio)) return 0;
-  if (ratio >= hardFenceRatio(snapshot)) return guardedMarks;
-  const occupancy = budgetOccupancy(snapshot, ratio);
-  if (occupancy === null || otherApplicableMarks > 0) return 0;
-  if (occupancy < snapshot.policy.refoldRatio && !boundary) return 0;
-  if (guardedMarks < GUARD_WAIVER_MINIMUM_MARKS) return 0;
-  return Math.max(1, guardedMarks - GUARD_WAIVER_PROTECTED_MARKS);
 }
 
 export type MarkEligibility = "eligible" | "protected" | "unfulfillable";
@@ -612,8 +562,8 @@ export function frontierMarks(input: {
 /**
  * The pending mark that already holds a piece of this evidence, if any.
  *
- * The commit fills from the stale end and the current-turn guard can retain what it
- * marked, so a ladder mark occasionally outlives the commit that made it. An agent
+ * The commit fills from the stale end and the depth bound retains what it does not
+ * reach, so a ladder mark routinely outlives the commit that staged it. An agent
  * marking the same evidence afterwards would stand a second owner over one span and
  * lose at apply time with a forest invariant for a message. Refusing at the tool says
  * so while the agent can still act on it.
@@ -702,9 +652,9 @@ export interface CommitCoverage {
  * mark response that tells the agent where it stands. An agent asked to govern its own
  * context cannot do it against a number nobody tells it.
  *
- * The marked side is the ELIGIBLE share, not every standing mark, because a mark the
- * current-turn guard will retain frees nothing at this commit however good it is. That
- * makes `remainingTokens` the honest answer to "what will fold without me".
+ * The marked side is the ELIGIBLE share, not every standing mark, because a mark over
+ * protected evidence frees nothing at this commit however good it is. That makes
+ * `remainingTokens` the honest answer to "what will fold without me".
  *
  * `targetShare` moves as the window grows: it is measured from occupancy NOW, and two
  * large results landing after the reading raise it again. Callers that render it say so.
@@ -758,13 +708,11 @@ export function topUpMarks(input: {
   state: ActiveContextState;
   ordinal: number;
   targetShare: number;
-  excludeRefKeys?: ReadonlySet<string>;
   eligibleOnly?: boolean;
 }): PendingFoldMark[] {
   const { snapshot } = input;
   const target = input.targetShare;
   const claimed = claimedRefKeys(input.state);
-  for (const key of input.excludeRefKeys ?? []) claimed.add(key);
   const marks: PendingFoldMark[] = [];
   let state = input.state;
   const progress = (value: ActiveContextState): number => {
@@ -962,7 +910,6 @@ export interface CommitEpochResult {
   applied: AppliedMark[];
   refused: RefusedMark[];
   retained: PendingMark[];
-  waived: PendingMark[];
 }
 
 export async function commitPendingMarks(input: {
@@ -971,8 +918,6 @@ export async function commitPendingMarks(input: {
   generation: number;
   now?: () => number;
   retainIneligible?: boolean;
-  guardCurrentTurn?: boolean;
-  guardWaiver?: number;
   /**
    * How many bytes this commit needs to free. Marks past it are RETAINED, not applied.
    *
@@ -989,45 +934,24 @@ export async function commitPendingMarks(input: {
    */
   applyTargetBytes?: number;
 }): Promise<CommitEpochResult> {
+  // THE CURRENT-TURN GUARD IS DELETED (Shane, 2026-08-23: "you're using turns as the
+  // boundaries, which should not be the case. It should be at the most granular level,
+  // which is events"). The guard retained every mark touching a toolResult newer than
+  // the last terminal assistant stop, and a terminal stop is a TURN artifact: the first
+  // live session (sol-20260823-live rep 1) ran its whole workload as one turn, every
+  // assistant response stopping "toolUse", so the guard's "current turn" was the entire
+  // window, four band-top commits applied nothing, and the projection fence swept 18
+  // marks at 0.958 occupancy down to a 0.031 landing against a 0.40 aim. The waiver
+  // machinery existed only to bail the guard out at the fence and the boundary, so it
+  // is deleted with it. What protects the working set now is structural and event-level:
+  // an incomplete batch is never proposable, the depth bound stops the routine commit at
+  // the aim, and the stalest-first cut order leaves the newest events raw.
   const marks = pendingMarks(input.state);
   const retained: PendingMark[] = [];
-  const waived: PendingMark[] = [];
-  const guardReasons = new Map<string, string>();
   const held = new Set(input.state.folds.map((fold) => fold.id));
   const deferred: PendingMark[] = [];
   const awaitingMintedChild = (mark: PendingMark): boolean =>
     markSpanRefs(input.state, mark).unresolved?.pending === true;
-  const currentTurn = input.guardCurrentTurn
-    ? currentTurnRefKeys(input.snapshot)
-    : new Set<string>();
-  if (input.guardCurrentTurn) {
-    const applicable: PendingMark[] = [];
-    const guarded: PendingMark[] = [];
-    for (const mark of marks) {
-      if (markTouchesCurrentTurn(input.state, mark, currentTurn)) guarded.push(mark);
-      else applicable.push(mark);
-    }
-    const guardedStart = new Map(guarded.map((mark) =>
-      [pendingMarkKey(mark), markSpanStart(input.snapshot, input.state, mark)] as const));
-    guarded.sort((left, right) =>
-      guardedStart.get(pendingMarkKey(left))! - guardedStart.get(pendingMarkKey(right))! ||
-      left.id.localeCompare(right.id));
-    const waiverCount = Math.max(0, Math.min(guarded.length, Math.trunc(input.guardWaiver ?? 0)));
-    for (const [index, mark] of guarded.entries()) {
-      if (index < waiverCount) {
-        waived.push(mark);
-        applicable.push(mark);
-        continue;
-      }
-      retained.push(mark);
-      guardReasons.set(
-        pendingMarkKey(mark),
-        "evidence was gathered in the current turn; the mark stays pending until the turn closes",
-      );
-    }
-    marks.length = 0;
-    marks.push(...applicable);
-  }
   if (input.retainIneligible) {
     const applicable: PendingMark[] = [];
     for (const mark of marks) {
@@ -1044,8 +968,7 @@ export async function commitPendingMarks(input: {
     mark: mark.mark,
     id: mark.id,
     origin: mark.origin,
-    reason: guardReasons.get(pendingMarkKey(mark)) ??
-      "span is still fresh or protected; the mark stays pending until it is eligible",
+    reason: "span is still fresh or protected; the mark stays pending until it is eligible",
     retained: true,
   }));
   const minting = new Map(marks.flatMap((mark) =>
@@ -1178,7 +1101,7 @@ export async function commitPendingMarks(input: {
     state = withPendingMarks(state, [...pendingMarks(state), ...deferred]);
     retained.push(...deferred);
   }
-  return { state, applied, refused, retained, waived };
+  return { state, applied, refused, retained };
 }
 
 export function schedulingStatus(input: {

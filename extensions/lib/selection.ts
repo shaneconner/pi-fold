@@ -40,7 +40,6 @@ import type {
 } from "./policy.ts";
 import {
   chapterSegments,
-  currentTurnBoundary,
   scanTurnToolBatches,
   structurallyClosedChapterUnits,
   terminalAssistant,
@@ -939,11 +938,6 @@ export function snapSpanIds(
         note(`span ended inside ${root.fold.id}; corrected to its ` +
           `${absorb ? "end" : "near"} boundary`);
       }
-    }
-    const boundary = currentTurnBoundary(snapshot);
-    if (boundary >= 0 && end > boundary) {
-      end = boundary;
-      note("span reached into the turn still in flight; corrected back to the last closed turn");
     }
     const startUnit = units.find((unit) => start >= unit.start && start < unit.end);
     if (startUnit && startUnit.start !== start) {

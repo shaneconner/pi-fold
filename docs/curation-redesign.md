@@ -293,3 +293,42 @@ Landings sit above the aim, so the observed floor lands near 100k rather than at
 The cost is the 2026-08-14 cadence argument running backwards, about a fifth more epochs for
 the same session shape, bought deliberately: the floor is what holds 100k of raw recent
 context across the whole cycle.
+
+## The guard falls to the first live session (2026-08-23)
+
+The redesign's first live run (sol-20260823-live, pifold rep 1, sandboxed, budget
+251,520) caught what every suite fixture missed because fixtures close turns. The
+workload is one user message and then tool calls all the way down; every assistant
+response stops with toolUse, so the last terminal stop never advances and the
+current-turn guard read the ENTIRE session as the open turn. Four band-top commits fired
+at 208,234 / 225,906 / 236,742 / 241,394 tokens and each applied zero of its 15 to 18
+marks. Occupancy rode to 240,948, 0.958 of budget, and the projection fence, which
+waives the guard and carries no depth bound because it is an emergency, swept all 18
+marks to a 7,908-token landing against the 100,608 aim. The sawtooth then repeated:
+climb to the fence, sweep to near zero, five cycles observed. The old runtime survived
+this shape only through last-call, which the redesign had deleted without replacing the
+one duty it performed here.
+
+Shane's ruling: "you're using turns as the boundaries, which should not be the case. It
+should be at the most granular level, which is events." The current-turn guard and its
+waiver machinery are deleted outright rather than re-scoped: markTouchesCurrentTurn,
+currentTurnRefKeys, currentTurnBoundary, guardWaiverCount and both waiver constants are
+gone, the manual-span clamp that snapped a user's span back to the last closed turn is
+gone with them, and the class law's holds are now pinned and blacklisted alone. What
+protects the working set is structural and event-level: an incomplete batch is never
+proposable, the depth bound stops the routine commit at the aim, and the stalest-first
+cut order leaves the newest events raw.
+
+Deleting the guard exposed one real leak the guard had been masking: the closing
+consolidation pass reruns the commit unbounded to seat parents on the same paid rewrite,
+and the marks the depth cut had just retained were still pending, so the first unguarded
+band-top commit folded all 24 fixture marks to the floor. The closing pass now commits
+only the parents it seats, with the held-back marks set aside and restored.
+
+Gate 09's open-turn claim now asserts the exact opposite of its guard-era text on the
+same fixture: the band top itself applies (14 of 24, one a consolidation parent), stops
+at the aim with shortfall zero, retains 11 by depth, keeps the newest batch raw and folds
+the oldest. It fails on the pre-fix runtime with the live run's exact symptom, applied 0.
+Gate 130 became "A boundary commits rather than no-op", gate 56's waiver-order fixture
+became the depth-cut-order fixture with the same anti-digest concern, and gate 32's
+held-parent deferral runs on a pin, the hold that remains.
