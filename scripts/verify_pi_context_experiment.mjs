@@ -5291,6 +5291,17 @@ try {
     sha256Text(readFileSync(
       join(PROJECT, "scripts", "lib", "pi_context_soak_attestation.mjs"), "utf8")),
   "the result does not bind the helper that defines its source and self hashes");
+  // THE RUNTIME TREE THAT RECONSTRUCTED IT. One equality, and it stays one.
+  //
+  // It nearly became a branch on 2026-08-23: the curation redesign deleted the rider and
+  // its wire parsing with it, every state sol-20260815-hidden sealed carries a rider key,
+  // and the re-extraction the runtime change owed came back with 102 rows of
+  // state-unreadable. The fix was not to soften this line, it was to make the corpus
+  // readable: the rider is read, spent on the state digest through
+  // `legacyRiderStateSha256`, and dropped, and the carriage lens follows the runtime's own
+  // collapse from `toolRefsProtected` onto `refsProtected`. The re-extraction that
+  // followed is byte-identical to the published body, hashes aside, which is what this
+  // equality exists to require.
   assert.equal(releaseResult.sourceHashes.runtimeTreeSha256,
     directoryTreeSha256(join(PROJECT, "extensions")),
   "the result does not bind the runtime tree that reconstructed its fold state and projection");

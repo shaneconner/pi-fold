@@ -89,9 +89,12 @@ export function projectionCarriers({ runtime, state, snapshot }) {
   const roots = state.folds.filter((fold) => fold.parentId === null);
   const walk = (fold) => {
     const refs = runtime.flattenFoldRefs(fold, state);
-    const revealed = expanded.has(fold.id) || (fold.kind === "tool-result"
-      ? runtime.toolRefsProtected(refs, state, snapshot)
-      : runtime.refsProtected(refs, state, snapshot));
+    // ONE PREDICATE, because the runtime has one. `toolRefsProtected` was the fresh-tail
+    // aware variant for tool-result folds, and the 2026-08-23 curation redesign deleted
+    // fresh-tail protection and collapsed every call site onto `refsProtected`. The lens
+    // composes the runtime's own predicate so it cannot drift from what built the
+    // request, so the collapse belongs here too.
+    const revealed = expanded.has(fold.id) || runtime.refsProtected(refs, state, snapshot);
     if (!revealed) {
       visibleBriefIds.add(fold.id);
       return;
