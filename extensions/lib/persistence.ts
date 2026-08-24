@@ -32,6 +32,7 @@ import type {
   AdvisoryMilestone,
   BriefOverride,
   BriefProvenance,
+  ToolClip,
   FoldKind,
   FoldPart,
   FoldRecordEntry,
@@ -324,6 +325,7 @@ export function parseActiveContextState(
   const hasPendingMarks = recordLike && Object.prototype.hasOwnProperty.call(value, "pendingMarks");
   const hasPinnedPeeks = recordLike && Object.prototype.hasOwnProperty.call(value, "pinnedPeeks");
   const hasBriefs = recordLike && Object.prototype.hasOwnProperty.call(value, "briefs");
+  const hasClips = recordLike && Object.prototype.hasOwnProperty.call(value, "clips");
   // Read and dropped, never stored: see legacyRiderStateSha256. A v1 state has no digest
   // to reproduce, so here the tolerance is the whole of it.
   const hasLegacyRider = recordLike && Object.prototype.hasOwnProperty.call(value, "rider");
@@ -336,6 +338,7 @@ export function parseActiveContextState(
     ...(hasPendingMarks ? ["pendingMarks"] : []),
     ...(hasPinnedPeeks ? ["pinnedPeeks"] : []),
     ...(hasBriefs ? ["briefs"] : []),
+    ...(hasClips ? ["clips"] : []),
     ...(hasLegacyRider ? ["rider"] : []),
   ];
   if (!exactRecord(value, [...ACTIVE_STATE_KEYS, ...extraKeys])) throw new Error("Invalid active-context state keys");
@@ -367,6 +370,7 @@ export function parseActiveContextState(
     throw new Error("Invalid active-context pending marks");
   }
   const briefs = hasBriefs ? parseBriefOverrides(ownValue(value, "briefs"), ids) : {};
+  const clips = hasClips ? parseToolClips(ownValue(value, "clips")) : [];
   const source = clone(value) as unknown as ActiveContextState;
   return {
     version: 1,
@@ -381,11 +385,29 @@ export function parseActiveContextState(
     leases,
     ...(marks.length ? { pendingMarks: marks } : {}),
     ...(Object.keys(briefs).length ? { briefs } : {}),
+    ...(clips.length ? { clips } : {}),
     ...(hasAdvisory
       ? { advisory: clone(source.advisory!) }
       : defaultAdvisory ? { advisory: { highWater: 0, delivered: {} } } : {}),
     ...(hasPrepared ? { prepared: clone(source.prepared!) } : {}),
   };
+}
+
+function parseToolClips(value: unknown): ToolClip[] {
+  const entries = denseOwnArrayValues(value);
+  if (!entries) throw new Error("Invalid active-context clips");
+  const clips = entries.map((entry) => {
+    if (!exactRecord(entry, ["callId", "entryId"]) ||
+        typeof ownValue(entry, "callId") !== "string" || !ownValue(entry, "callId") ||
+        typeof ownValue(entry, "entryId") !== "string" || !ownValue(entry, "entryId")) {
+      throw new Error("Invalid active-context clip entry");
+    }
+    return { callId: String(ownValue(entry, "callId")), entryId: String(ownValue(entry, "entryId")) };
+  });
+  if (new Set(clips.map((clip) => clip.callId)).size !== clips.length) {
+    throw new Error("Invalid active-context clips: duplicate call id");
+  }
+  return clips;
 }
 
 export function clearPrepared(state: ActiveContextState): ActiveContextState {
@@ -481,6 +503,7 @@ export function sameStateProjection(left: ActiveContextState, right: ActiveConte
     if (normalizedState.leases && Object.keys(normalizedState.leases).length === 0) delete normalizedState.leases;
     if (normalizedState.pendingMarks && normalizedState.pendingMarks.length === 0) delete normalizedState.pendingMarks;
     if (normalizedState.briefs && !Object.keys(normalizedState.briefs).length) delete normalizedState.briefs;
+    if (normalizedState.clips && normalizedState.clips.length === 0) delete normalizedState.clips;
     return normalizedState;
   };
   return stableStringify(normalized(left)) === stableStringify(normalized(right));
@@ -587,6 +610,8 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     Object.prototype.hasOwnProperty.call(value, "addBriefs"));
   const hasRemoveBriefIds = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "removeBriefIds"));
+  const hasWireClips = Boolean(value && typeof value === "object" &&
+    Object.prototype.hasOwnProperty.call(value, "clips"));
   const hasLegacyRider = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "rider"));
   refuseRetiredStateFields(value);
@@ -601,6 +626,7 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     ...(hasBriefs ? ["briefs"] : []),
     ...(hasAddBriefs ? ["addBriefs"] : []),
     ...(hasRemoveBriefIds ? ["removeBriefIds"] : []),
+    ...(hasWireClips ? ["clips"] : []),
     // Carried no further than the digest check in `materializeStatePersistence`, which is
     // the only thing on a load that the rider's absence can change.
     ...(hasLegacyRider ? ["rider"] : []),
@@ -620,6 +646,7 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     ownValue(value, "advisory"), ownValue(value, "tokensSinceToolFold"), ownValue(value, "leases"),
     ownValue(value, "pendingMarks"), ownValue(value, "briefs"),
   );
+  if (hasWireClips) parseToolClips(ownValue(value, "clips"));
   if (checkpoint) {
     const refs = denseOwnArrayValues(ownValue(value, "foldRefs"));
     if (!refs || refs.length > MAX_ACTIVE_FOLD_RECORDS) throw new Error("Invalid active-context checkpoint refs");
@@ -713,7 +740,7 @@ export function stateFromFoldRefs(
   wire: Pick<
     ActiveContextCheckpointV2,
     "sessionId" | "revision" | "expanded" | "protected" | "prepared" | "advisory" |
-      "tokensSinceToolFold" | "leases" | "pendingMarks" | "briefs"
+      "tokensSinceToolFold" | "leases" | "pendingMarks" | "briefs" | "clips"
   >,
   refs: FoldRecordRef[],
   records: Map<string, FoldRecordEntry>,
@@ -735,6 +762,7 @@ export function stateFromFoldRefs(
     leases: clone(wire.leases ?? {}),
     ...(wire.pendingMarks?.length ? { pendingMarks: clone(wire.pendingMarks) } : {}),
     ...(wire.briefs && Object.keys(wire.briefs).length ? { briefs: clone(wire.briefs) } : {}),
+    ...(wire.clips?.length ? { clips: clone(wire.clips) } : {}),
     ...(wire.advisory === undefined ? {} : { advisory: clone(wire.advisory) }),
     ...(wire.prepared === null || wire.prepared === undefined ? {} : { prepared: clone(wire.prepared) }),
   };
@@ -990,6 +1018,7 @@ export function makeStateCheckpoint(state: ActiveContextState): ActiveContextChe
     leases: clone(state.leases),
     ...(state.pendingMarks?.length ? { pendingMarks: clone(state.pendingMarks) } : {}),
     ...(state.briefs && Object.keys(state.briefs).length ? { briefs: clone(state.briefs) } : {}),
+    ...(state.clips?.length ? { clips: clone(state.clips) } : {}),
     ...(state.advisory ? { advisory: clone(state.advisory) } : {}),
     stateSha256: semanticStateSha256(state),
   }, state.sessionId) as ActiveContextCheckpointV2;
@@ -1062,6 +1091,7 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
     ...(addPendingMarks.length ? { addPendingMarks: clone(addPendingMarks) } : {}),
     ...(Object.keys(addBriefs).length ? { addBriefs } : {}),
     ...(removeBriefIds.length ? { removeBriefIds } : {}),
+    ...(next.clips?.length ? { clips: clone(next.clips) } : {}),
     ...(next.advisory ? { advisory: clone(next.advisory) } : {}),
     stateSha256: semanticStateSha256(next),
   }, next.sessionId) as ActiveContextDeltaV2;

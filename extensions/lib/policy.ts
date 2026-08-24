@@ -334,6 +334,15 @@ export const ACTIVE_CONTEXT_POLICY = Object.freeze({
   // clamps its `bytes` to it. Was two numbers until 2026-08-22, when the peek ceiling
   // was `maxChapterChars` 128,000 and that constant also claimed to cap a chapter.
   maxSourceChars: 200_000,
+  // THE TOOL-CALL DIET (2026-08-24): at COMMIT TIME ONLY, a stale tool result inside
+  // the configured toolFoldThreshold share of the projected window is clipped IN VIEW
+  // to an identified head, the full bytes staying peek-recoverable behind its entry id.
+  // The head keeps the leading paragraph up to its cap (gate 134's rule); results at or
+  // under the floor stay whole, because clipping a small result buys almost nothing and
+  // adds a peek indirection. Constants, not options, for v1: the share point is the one
+  // public knob.
+  toolClipHeadChars: 500,
+  toolClipFloorChars: 2_000,
   maxBriefChars: 2_000,
   // The agent's share of maxBriefChars when a supplied brief augments the deterministic
   // head (sol-20260823-live rep 7: supplied briefs REPLACED the fact-carrying head and
@@ -345,6 +354,7 @@ export const ACTIVE_CONTEXT_POLICY = Object.freeze({
 });
 
 export type FoldKind = "tool-result" | "chapter" | "consolidation";
+export type ToolClip = { callId: string; entryId: string };
 export type FoldPart = { kind: "raw"; ref: EvidenceRef } | { kind: "fold"; foldId: string };
 export type BriefProvenance =
   | { kind: "supplied" }
@@ -401,6 +411,7 @@ export interface ActiveContextState {
   pendingMarks?: PendingMark[];
   pinnedPeeks?: never;
   briefs?: Record<string, BriefOverride>;
+  clips?: ToolClip[];
   prepared?: PreparedFold;
   advisory?: {
     highWater: number;

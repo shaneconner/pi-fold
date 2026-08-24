@@ -6,6 +6,7 @@ import {
   stableStringify,
 } from "./json.ts";
 import {
+  contentText,
   bytes,
   clone,
   emptyActiveContextState,
@@ -143,6 +144,7 @@ import {
   commitCoverage,
   windowClaims,
   commitPendingMarks,
+  toolClipAdditions,
   consolidationMarks,
   ephemeralPeekMarks,
   epochCommitDue,
@@ -253,6 +255,11 @@ export function registerActiveContext(pi: any, options: {
   blacklistAutoFoldTools?: ReadonlySet<string>;
   providerInputBudget?: number;
   thresholds?: ActiveContextThresholds;
+  /** THE TOOL-CALL DIET's share point (2026-08-24): tool results in the oldest
+   *  toolFoldThreshold share of the projected window are clipped IN VIEW at each
+   *  commit, identified head kept, full bytes peek-recoverable behind the entry id
+   *  the marker names. Off when absent. */
+  toolFoldThreshold?: number;
   /** INTERNAL SEAM ONLY (the experiment's deterministic condition): false suppresses
    *  the post-fold notice, so no carrier ever invites a brief and every fold goes out
    *  with the runtime's own words. registerPiFold refuses the name, because a
@@ -268,6 +275,14 @@ export function registerActiveContext(pi: any, options: {
   const entryTypePrefix = options.entryTypePrefix ?? DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX;
   const blacklistAutoFoldTools = options.blacklistAutoFoldTools ?? AUTO_FOLD_BLACKLIST_DEFAULT;
   const postFoldNotice = options.postFoldNotice ?? true;
+  const toolFoldThreshold = options.toolFoldThreshold;
+  if (toolFoldThreshold !== undefined &&
+      (typeof toolFoldThreshold !== "number" || !Number.isFinite(toolFoldThreshold) ||
+       toolFoldThreshold <= 0 || toolFoldThreshold >= 1)) {
+    throw new Error("toolFoldThreshold must be a share strictly between 0 and 1: it names " +
+      "the oldest fraction of the projected window whose tool results are clipped in view " +
+      "at each commit");
+  }
   for (const removed of ["foldScheduling", "foldPeekResults", "toolActions"]) {
     if (Object.hasOwn(options, removed)) {
       throw new Error(`${removed} is no longer an option: epoch scheduling, peek foldability ` +
@@ -2343,6 +2358,24 @@ export function registerActiveContext(pi: any, options: {
           !closed.applied.some((appliedMark) => appliedMark.id === mark.id)), ...closed.retained],
       };
     }
+    // THE TOOL-CALL DIET RIDES THE SAME TRANSACTION (2026-08-24): clips are selected
+    // against the post-fold state and land in the same revision the commit minted, so
+    // the one paid rewrite carries both and no non-commit pass ever moves a byte. The
+    // full bytes stay in the transcript behind each clip's entry id.
+    let clippedResults = 0;
+    if (toolFoldThreshold !== undefined) {
+      const clipAdditions = toolClipAdditions({
+        snapshot,
+        state: result.state,
+        threshold: toolFoldThreshold,
+        blacklist: blacklistAutoFoldTools,
+      });
+      if (clipAdditions.length) {
+        clippedResults = clipAdditions.length;
+        result = { ...result, state: { ...result.state,
+          clips: [...(result.state.clips ?? []), ...clipAdditions] } };
+      }
+    }
     persistence.state = result.state;
     const bytesAfter = bytes(projectActiveContext(snapshot, persistence.state));
     const freedBytes = Math.max(0, bytesBefore - bytesAfter);
@@ -2377,6 +2410,7 @@ export function registerActiveContext(pi: any, options: {
       consolidation_marks: consolidationAdded,
       closing_consolidation_marks: closingAdded,
       absorbed_wedges: wedges.absorbed.length,
+      clipped_results: clippedResults,
       freed_bytes: freedBytes,
       freed_tokens: estimatedTokens(freedBytes),
       rewrite_tokens: accounting.rewriteTokens,
@@ -3647,7 +3681,41 @@ export function registerActiveContext(pi: any, options: {
         "bytes",
       );
       const target = persistence.state.folds.find((item) => item.id === id);
-      if (!target) throw new Error(`Unknown active-context fold ${id}`);
+      // A CLIPPED RESULT ANSWERS TO ITS ENTRY ID (2026-08-24, the tool-call diet): the
+      // clip marker names the entry, and the full bytes are in the transcript rather
+      // than behind a fold, so the read serves them from the mapped message directly,
+      // through the same admission fence and the same slice bounds as a fold peek.
+      if (!target) {
+        const clip = (persistence.state.clips ?? []).find((item) =>
+          item.entryId === id || item.callId === id);
+        if (clip) {
+          const mapped = snapshot.mapped.find((item) => item.ref?.entryId === clip.entryId);
+          if (!mapped) throw new Error(`Clipped result ${id} is no longer on this branch`);
+          const full = contentText(snapshot.messages[mapped.index]);
+          admit({
+            action: "peek",
+            ctx,
+            foldId: clip.entryId,
+            requestedBytes: Math.max(0, Math.min(sliceBytes, full.length - offset)),
+            children: [],
+          });
+          const slice = full.slice(offset, offset + sliceBytes);
+          return toolPayload({
+            id: clip.entryId,
+            source: slice,
+            truncated: offset + slice.length < full.length,
+            sourceChars: full.length,
+            offset,
+            ...(peekIsEphemeral(params) ? {
+              ephemeral: "this result rides your context exactly until your next message; " +
+                "extract what your current task needs into that reply, which takes over its " +
+                "place. Peeking again is lossless and cheap; pass ephemeral false when you " +
+                "need these bytes standing for several turns",
+            } : { durable: "this result stays in your context like any other tool result" }),
+          });
+        }
+        throw new Error(`Unknown active-context fold ${id}`);
+      }
       admit({
         action: "peek",
         ctx,

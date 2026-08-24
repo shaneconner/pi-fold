@@ -3,6 +3,7 @@ import type { EvidenceRef } from "../json.ts";
 import {
   bytes,
   clone,
+  contentText,
   messageRole,
 } from "./canonical.ts";
 import {
@@ -10,6 +11,7 @@ import {
   pinnedPeekMass,
   preparedMatchesCandidate,
   prepareFold,
+  projectActiveContext,
   renderFold,
   renderFoldParts,
   selectAutomaticChapter,
@@ -17,6 +19,7 @@ import {
   setFoldProjectionState,
 } from "./folding.ts";
 import type { AutomaticRungSelection } from "./folding.ts";
+import { staleSpanMatureEnd } from "./transcript.ts";
 import {
   foldInterval,
   budgetOccupancy,
@@ -41,6 +44,7 @@ import {
   MAX_UNMARKED_CANDIDATES,
 } from "./policy.ts";
 import type {
+  ToolClip,
   ActiveContextSnapshot,
   ActiveContextState,
   FoldCandidate,
@@ -1130,4 +1134,58 @@ export function schedulingStatus(input: {
       ...(mark.mark === "fold" ? { kind: mark.kind, brief: mark.brief } : {}),
     })),
   };
+}
+
+// THE TOOL-CALL DIET SELECTS AT COMMIT TIME ONLY (2026-08-24, Shane's ToolFoldThreshold).
+// The zone is the oldest `threshold` share of the projected window measured in bytes,
+// because "the tool calls prior to the X point" is a statement about what the provider
+// is being made to re-read, and the projection is exactly that. Eligibility mirrors the
+// fold lanes' own laws one view over: the result must be MATURE (past
+// staleSpanMatureEnd, the batch lane's consumption proof), unprotected (a pinned ref is
+// a durable hold), not blacklisted (a tool whose results must stay raw stays raw in
+// view too), bigger than the floor (small calls are cheap; the win is the multi-KB
+// result), not a rendering the projection already substituted, and not already clipped.
+// The additions are VIEW state: encodedFoldSource reads raw parts, so a later fold of a
+// clipped span still encodes the full bytes and losslessness is untouched.
+export function toolClipAdditions(input: {
+  snapshot: ActiveContextSnapshot;
+  state: ActiveContextState;
+  threshold: number;
+  blacklist: ReadonlySet<string>;
+}): ToolClip[] {
+  const { snapshot, state, threshold, blacklist } = input;
+  const projected = projectActiveContext(snapshot, state);
+  const perMessage = projected.map((message) => bytes([message]));
+  const total = perMessage.reduce((sum, size) => sum + size, 0);
+  const zoneEnd = threshold * total;
+  const matureEnd = staleSpanMatureEnd(snapshot.messages);
+  const snapshotIndexByCallId = new Map<string, number>();
+  for (let index = 0; index < snapshot.messages.length; index += 1) {
+    const message = snapshot.messages[index] as { role?: unknown; toolCallId?: unknown };
+    if (message?.role === "toolResult" && typeof message.toolCallId === "string") {
+      snapshotIndexByCallId.set(message.toolCallId, index);
+    }
+  }
+  const already = new Set((state.clips ?? []).map((clip) => clip.callId));
+  const additions: ToolClip[] = [];
+  let offset = 0;
+  for (let index = 0; index < projected.length; index += 1) {
+    const start = offset;
+    offset += perMessage[index];
+    if (start >= zoneEnd) break;
+    const message = projected[index] as {
+      role?: unknown; toolCallId?: unknown; toolName?: unknown; details?: unknown;
+    };
+    if (message?.role !== "toolResult" || typeof message.toolCallId !== "string") continue;
+    if (already.has(message.toolCallId)) continue;
+    if (message.details && typeof (message.details as { projection?: unknown }).projection === "string") continue;
+    if (typeof message.toolName === "string" && blacklist.has(message.toolName)) continue;
+    const snapshotIndex = snapshotIndexByCallId.get(message.toolCallId);
+    if (snapshotIndex === undefined || snapshotIndex >= matureEnd) continue;
+    const ref = snapshot.mapped.find((item) => item.index === snapshotIndex)?.ref;
+    if (!ref || refsProtected([ref], state, snapshot)) continue;
+    if (contentText(message).length <= snapshot.policy.toolClipFloorChars) continue;
+    additions.push({ callId: message.toolCallId, entryId: ref.entryId });
+  }
+  return additions;
 }

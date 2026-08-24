@@ -10,7 +10,7 @@ export {
 } from "./settings.ts";
 
 const PUBLIC_OPTIONS = Object.freeze([
-  "thresholds", "providerInputBudget", "blacklistAutoFoldTools",
+  "thresholds", "providerInputBudget", "blacklistAutoFoldTools", "toolFoldThreshold",
 ]);
 
 const GENERATOR_DELETED = "the model brief generator is deleted (2026-08-14): across 15 sealed " +

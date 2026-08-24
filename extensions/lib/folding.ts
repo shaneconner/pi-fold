@@ -10,6 +10,7 @@ import {
   stableStringify,
 } from "../json.ts";
 import {
+  contentText,
   boundedUtf8,
   bytes,
   clone,
@@ -71,6 +72,7 @@ import {
   chapterUnits,
   unpinnedStaleFolds,
   deterministicChapterCandidateBrief,
+  toolClipHead,
   deterministicConsolidationBrief,
   oneLine,
   NO_FOLD_KINDS,
@@ -896,8 +898,53 @@ export function projectActiveContext(
       index += 1;
     }
   }
+  applyToolClips(output, state, snapshot);
   assertProjectionPreservesToolLinkage(snapshot.messages, output);
   return output;
+}
+
+// THE TOOL-CALL DIET'S VIEW (2026-08-24). A clipped result renders in place as its
+// identified head with the cut stated and the recovery named, matched BY CALL ID and
+// identity-preserving on role, call id, tool name, error flag and timestamp, exactly
+// the ephemeral-peek withdrawal's shape one mechanism over. Clips are only ever ADDED
+// inside a commit transaction, and a commit already rewrites the projection, so a
+// non-commit pass with unchanged clips renders byte-identically and the frozen prefix
+// never moves. Every reader shares this pass because every reader shares
+// projectActiveContext: the live projection, the persistence readers and the
+// attribution lens all see the same clipped view, and the full bytes stay in the
+// transcript behind the entry id the marker names.
+function applyToolClips(
+  output: unknown[],
+  state: ActiveContextState,
+  snapshot: ActiveContextSnapshot,
+): void {
+  if (!state.clips?.length) return;
+  const byCallId = new Map(state.clips.map((clip) => [clip.callId, clip]));
+  for (let index = 0; index < output.length; index += 1) {
+    const message = output[index] as Record<string, unknown> | null;
+    if (!message || (message as { role?: unknown }).role !== "toolResult") continue;
+    const callId = (message as { toolCallId?: unknown }).toolCallId;
+    if (typeof callId !== "string") continue;
+    const clip = byCallId.get(callId);
+    if (!clip) continue;
+    const details = (message as { details?: unknown }).details;
+    if (details && typeof (details as { projection?: unknown }).projection === "string") continue;
+    const full = contentText(message);
+    if (full.length <= snapshot.policy.toolClipFloorChars) continue;
+    const head = toolClipHead(full, snapshot.policy.toolClipHeadChars);
+    const hidden = full.length - head.length;
+    if (hidden <= 0) continue;
+    output[index] = {
+      role: "toolResult",
+      toolCallId: callId,
+      toolName: (message as { toolName?: unknown }).toolName,
+      content: [{ type: "text", text: `${head}\n... [${hidden} more chars clipped; ` +
+        `{"action":"peek","id":"${clip.entryId}"} returns the full result]` }],
+      isError: (message as { isError?: unknown }).isError ?? false,
+      details: { projection: "tool-clip" },
+      timestamp: (message as { timestamp?: unknown }).timestamp,
+    };
+  }
 }
 
 export function foldStatusRow(fold: ActiveFold, state: ActiveContextState, snapshot: ActiveContextSnapshot): Record<string, unknown> {

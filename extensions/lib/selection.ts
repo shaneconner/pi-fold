@@ -1061,6 +1061,26 @@ export function manualFoldCandidate(
   return bounded({ kind: "chapter", parts, sourceRefs: refs });
 }
 
+// THE TOOL-CLIP VIEW HEAD (2026-08-24). A clipped result keeps its opening verbatim,
+// not collapsed: the view stays a readable result head in place, unlike a brief's
+// one-line quote. The paragraph rule is gate 134's: an opening block terminated by a
+// blank line is kept whole up to the cap; a result that is bulk from line one keeps its
+// first cap's worth. The caller states the cut, per gate 136: the marker rides beside
+// the count of what it hides, never silently.
+export function toolClipHead(text: string, cap: number): string {
+  const lines = String(text ?? "").split(/\r?\n/);
+  const kept: string[] = [];
+  for (const line of lines) {
+    if (line.trim()) kept.push(line);
+    else if (kept.length) break;
+  }
+  const paragraph = kept.join("\n");
+  const head = paragraph.length > 0 && paragraph.length <= cap
+    ? paragraph
+    : String(text ?? "").slice(0, cap);
+  return head;
+}
+
 export function oneLine(value: string, maximum: number): string {
   return boundedSubject(value.replace(/\s+/g, " ").trim(), maximum);
 }

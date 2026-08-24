@@ -8390,15 +8390,18 @@ async function gatePublicOptionSurface() {
   const register = (options) => makeRuntime(built, {
     ...options, packageRegistration: true, retiredOptions: options,
   }).tools;
-  // The whole surface, exercised together: three names, all accepted at once. It was four
-  // until `guidance` went with the agent's `fold` verb on 2026-08-23; the copy it switched
-  // taught the agent to choose spans, and the agent does not choose spans.
+  // The whole surface, exercised together: four names, all accepted at once. It was four
+  // until `guidance` went with the agent's `fold` verb on 2026-08-23 (the copy it switched
+  // taught the agent to choose spans, and the agent does not choose spans), and is four
+  // again since 2026-08-24: `toolFoldThreshold`, the tool-call diet's one public knob
+  // (gate 148 owns its behaviour; this gate owns its seat on the surface).
   const surface = makeRuntime(built, {
     packageRegistration: true,
     retiredOptions: {
       thresholds: context.DEFAULT_THRESHOLDS,
       providerInputBudget: 90_000,
       blacklistAutoFoldTools: new Set(["repo_stage"]),
+      toolFoldThreshold: 0.5,
     },
   });
   assert.deepEqual(Object.keys(surface.registration), ["projectionCandidates"]);
@@ -13918,6 +13921,295 @@ async function gateFrontierWaitsForTheBatch() {
   };
 }
 
+/**
+ * GATE 148: THE TOOL-CALL DIET (2026-08-24, Shane's ToolFoldThreshold).
+ *
+ * One new public option, `toolFoldThreshold` (a share strictly between 0 and 1, off when
+ * absent): at COMMIT TIME ONLY, tool results inside the oldest `toolFoldThreshold` share
+ * of the projected window are clipped IN VIEW to an identified head with the cut stated
+ * and the recovery named, the full bytes staying peek-recoverable behind the entry id
+ * the marker carries. Small results are cheap and stay whole (toolClipFloorChars); the
+ * win the option buys is the multi-kilobyte result the provider is being made to re-read.
+ *
+ * The laws, each driven below:
+ *   - SELECTION mirrors the fold lanes' own holds one view over: mature only (the batch
+ *     lane's consumption proof), unprotected, unblacklisted, over the floor, stalest
+ *     first inside the zone, never twice.
+ *   - The clip RIDES THE COMMIT's own transaction and revision: no non-commit pass ever
+ *     adds one, moves one, or renders differently twice (the cache law), and the clip
+ *     set travels the persistence wire with the state it landed in.
+ *   - The marker is BYTE-ACCOUNTED: head plus hidden count equals the source, the head
+ *     is toolClipHead's paragraph rule (gate 134's), and peek by the named entry id (or
+ *     the call id) returns the full result byte-identical.
+ *   - The clip is a LENS, never the record: a later fold of a clipped span encodes the
+ *     RAW bytes, so losslessness is untouched (gate 108's spirit one mechanism over).
+ *   - OFF means OFF: with the option absent the same drive commits the same folds with
+ *     zero clips, no marker, and durable state identical but for the clip set.
+ *   - The option is validated at registration by its own invariant name.
+ */
+const CLIP_GATE_THRESHOLDS = Object.freeze({
+  ...context.DEFAULT_THRESHOLDS, maxTarget: 0.50, minTarget: 0.20,
+});
+const CLIP_GATE_WINDOW = 200_000;
+const CLIP_GATE_BUDGET = 120_000;
+
+/** Each result opens with a short paragraph (the head the clip keeps) and ends with a
+ *  per-turn fact planted past the head cap, so "the clipped view lost it and the fold
+ *  kept it" is measurable without self-similar containment probes (gate 94's lesson). */
+function clipGateResultText(turn) {
+  return `Result ${turn}: stage payload opens here.\n\n${"r".repeat(13_000)} deep-fact-${turn}-end`;
+}
+
+/**
+ * The band-top drive gate 144 proved, reused verbatim: measured occupancy crosses
+ * maxTarget x budget, the commit fires with the DEPTH BOUND armed, the cut takes stalest
+ * first and stops at the aim, and the mature raw survivors are exactly the material the
+ * diet's zone then reads. This is the only commit shape on which clips can land at all:
+ * a deferred boundary returns before the clip pass, which is claim (c)'s atomicity from
+ * the other side.
+ */
+async function driveClippedCommit(options = {}) {
+  const built = makeFixture({
+    sessionId: "tool-clip", turns: 26, resultText: clipGateResultText,
+    contextWindow: CLIP_GATE_WINDOW,
+  });
+  const runtime = makeRuntime(built, {
+    providerInputBudget: CLIP_GATE_BUDGET, thresholds: CLIP_GATE_THRESHOLDS, ...options,
+  });
+  await startRuntime(runtime);
+  await measure(runtime, Math.ceil(CLIP_GATE_THRESHOLDS.maxTarget * CLIP_GATE_BUDGET) + 4_000,
+    CLIP_GATE_WINDOW);
+  await project(runtime);
+  await settle();
+  return { built, runtime };
+}
+
+function clipCommitsOf(runtime) {
+  return contextEvents(runtime)
+    .filter((record) => record.kind === "context.commit" && record.deferred === false);
+}
+
+function clipRawResult(runtime, callId) {
+  const raw = runtime.messages.find((message) =>
+    message?.role === "toolResult" && message.toolCallId === callId);
+  assert(raw, `No raw tool result carries call id ${callId}`);
+  return raw;
+}
+
+async function gateClipSelection() {
+  // An OPEN pull session, so the maturity floor has something to hold: the newest
+  // generations are still being consumed and their results must stay whole even when
+  // the zone reaches them. Turn 3's result sits under toolClipFloorChars; every other
+  // result is well over it.
+  const small = 1_400;
+  const resultText = (turn) => turn === 3
+    ? `Result 3: small probe. ${"s".repeat(small)}`
+    : clipGateResultText(turn);
+  const built = makeFixture({ pull: true, turns: 9, resultText, contextWindow: 272_000 });
+  const snapshot = built.snapshot;
+  const empty = context.emptyActiveContextState(built.sessionId);
+  assert(small < context.ACTIVE_CONTEXT_POLICY.toolClipFloorChars,
+    "The fixture's small result is not under the floor, so the exemption is untestable");
+  const clipsAt = (threshold, state = empty, blacklist = new Set()) =>
+    context.toolClipAdditions({ snapshot, state, threshold, blacklist });
+
+  const wide = clipsAt(0.95);
+  const wideCalls = wide.map((clip) => clip.callId);
+  assert(wide.length >= 2, `A 0.95 zone over eight oversized mature results clipped ${wide.length}`);
+  assert(wideCalls.includes("call-0"), "The stalest oversized result escaped the widest zone");
+
+  // THE FLOOR: a result at or under toolClipFloorChars stays whole. Clipping it buys
+  // almost nothing and adds a peek indirection.
+  assert(!wideCalls.includes("call-3"), "A result under the floor was clipped");
+
+  // THE MATURITY FLOOR: the same consumption proof the batch lane demands (gate 147).
+  // The pull session is open, so its newest generations are immature by construction.
+  const matureEnd = context.staleSpanMatureEnd(built.messages);
+  const indexOf = (callId) => built.messages.findIndex((message) =>
+    message?.role === "toolResult" && message.toolCallId === callId);
+  assert(indexOf("call-8") >= matureEnd,
+    "The fixture's newest batch is already mature, so the exemption is untestable here");
+  assert(!wideCalls.includes("call-8"), "An immature result was clipped");
+  for (const clip of wide) {
+    assert(indexOf(clip.callId) < matureEnd,
+      `Clip ${clip.callId} sits past the maturity floor`);
+  }
+
+  // THE ZONE IS A PREFIX IN PROJECTED BYTES: a narrower share selects a stalest-first
+  // subset of the wider one, never a different population.
+  const narrow = clipsAt(0.35);
+  assert(narrow.length >= 1 && narrow.length < wide.length,
+    `A 0.35 zone selected ${narrow.length} of the wide zone's ${wide.length}`);
+  assert.deepEqual(narrow.map((clip) => clip.callId), wideCalls.slice(0, narrow.length),
+    "The narrow zone is not a stalest-first prefix of the wide one");
+
+  // THE HOLDS: a blacklisted tool's results stay raw in view too; a pinned ref is a
+  // durable hold; an already-clipped call is never re-added.
+  assert.equal(clipsAt(0.95, empty, new Set(["read"])).length, 0,
+    "A blacklisted tool's result was clipped");
+  const pinnedRef = snapshot.mapped.find((item) => item.index === indexOf("call-0"))?.ref;
+  assert(pinnedRef, "The fixture's stalest result has no evidence ref to pin");
+  assert(!clipsAt(0.95, { ...empty, protected: [pinnedRef] })
+    .some((clip) => clip.callId === "call-0"), "A pinned result was clipped");
+  assert(!clipsAt(0.95, { ...empty, clips: [wide[0]] })
+    .some((clip) => clip.callId === wide[0].callId), "A clip was re-added over itself");
+
+  // THE WIRE: the clip set rides the state readers, and a corrupt list is refused by
+  // name rather than read loosely.
+  const seeded = JSON.parse(JSON.stringify({ ...empty, clips: wide }));
+  assert.deepEqual(context.parseActiveContextState(seeded, built.sessionId).clips, wide);
+  assert.throws(
+    () => context.parseActiveContextState({ ...seeded, clips: [...wide, wide[0]] }, built.sessionId),
+    /duplicate call id/);
+  assert.throws(
+    () => context.parseActiveContextState(
+      { ...seeded, clips: [{ callId: "call-0", entryId: "e", extra: 1 }] }, built.sessionId),
+    /Invalid active-context clip entry/);
+  return { wideClips: wide.length, narrowClips: narrow.length, matureEnd };
+}
+
+async function gateClipCommitRendersAndRecovers() {
+  const on = await driveClippedCommit({ retiredOptions: { toolFoldThreshold: 0.5 } });
+  const fired = clipCommitsOf(on.runtime);
+  assert.equal(fired.length, 1, `The band-top drive produced ${fired.length} commits`);
+  assert(fired[0].applied_marks > 0, "The commit applied no folds, so there is no depth cut to survive");
+  assert(fired[0].clipped_results >= 1,
+    "The depth cut left mature raw results in the zone and the commit clipped none of them");
+  const state = materialized(on.runtime);
+  assert.equal(state.clips?.length ?? 0, fired[0].clipped_results,
+    "The durable state and the commit record disagree on the clip count: the set did not survive the wire");
+
+  // THE RENDER, BYTE-ACCOUNTED: every clip substitutes in place, identity preserved,
+  // head + stated hidden count = the exact source, recovery named by entry id.
+  const snapshotOf = (o) => context.mapActiveContext({
+    sessionId: o.built.sessionId, eventMessages: o.runtime.messages,
+    contextEntries: o.runtime.branch, contextWindow: CLIP_GATE_WINDOW,
+  });
+  const projected = context.projectActiveContext(snapshotOf(on), state);
+  const clippedViews = projected.filter((message) =>
+    message?.details?.projection === "tool-clip");
+  assert.equal(clippedViews.length, state.clips.length,
+    "The projection renders a different clip count than the state carries");
+  const clip = state.clips[0];
+  const view = clippedViews.find((message) => message.toolCallId === clip.callId);
+  assert(view, `No clipped view carries call id ${clip.callId}`);
+  const raw = clipRawResult(on.runtime, clip.callId);
+  const full = context.contentText(raw);
+  assert(full.length > context.ACTIVE_CONTEXT_POLICY.toolClipFloorChars,
+    "The clipped result is under the floor, so the selection law is already broken");
+  const head = context.toolClipHead(full, context.ACTIVE_CONTEXT_POLICY.toolClipHeadChars);
+  assert.equal(view.content[0].text,
+    `${head}\n... [${full.length - head.length} more chars clipped; ` +
+    `{"action":"peek","id":"${clip.entryId}"} returns the full result]`);
+  assert.equal(view.toolName, raw.toolName);
+  assert.equal(view.timestamp, raw.timestamp);
+  const turn = full.match(/^Result (\d+):/)[1];
+  assert(!json.stableStringify(projected).includes(`deep-fact-${turn}-end`),
+    "The clipped view still carries the deep bytes it claims to hide");
+
+  // THE RECOVERY: peek by the entry id the marker names returns the full result
+  // byte-identical; the call id answers too, honouring the byte bound.
+  const peek = await toolCall(on.runtime,
+    { action: "peek", id: clip.entryId, bytes: context.ACTIVE_CONTEXT_POLICY.maxSourceChars });
+  assert.equal(peek.details.source, full, "The peek did not return the full result byte-identical");
+  assert.equal(peek.details.truncated, false);
+  assert.equal(peek.details.sourceChars, full.length);
+  const byCall = await toolCall(on.runtime, { action: "peek", id: clip.callId, bytes: 2_000 });
+  assert.equal(byCall.details.source, full.slice(0, 2_000));
+  assert.equal(byCall.details.truncated, true);
+
+  // THE CACHE LAW: a non-commit pass with unchanged clips adds nothing, moves nothing,
+  // and renders byte-identically, which is what keeps the frozen prefix frozen.
+  await project(on.runtime);
+  await settle();
+  await project(on.runtime);
+  await settle();
+  const after = materialized(on.runtime);
+  assert.equal(after.clips.length, state.clips.length, "A non-commit pass moved the clip set");
+  assert.equal(clipCommitsOf(on.runtime).length, 1, "A non-commit pass fired a commit");
+  assert.equal(
+    json.stableStringify(context.projectActiveContext(snapshotOf(on), after)),
+    json.stableStringify(projected),
+    "Two passes over unchanged clips rendered differently");
+
+  // OFF MEANS OFF: the same drive with no threshold commits the same folds with zero
+  // clips and no marker, and the durable state differs by the clip set alone.
+  const off = await driveClippedCommit();
+  const offFired = clipCommitsOf(off.runtime);
+  assert.equal(offFired.length, 1);
+  assert.equal(offFired[0].clipped_results, 0, "The diet ran with no threshold configured");
+  const offState = materialized(off.runtime);
+  assert.equal(offState.clips, undefined, "A no-threshold run persisted a clip set");
+  assert.equal(offFired[0].applied_marks, fired[0].applied_marks,
+    "The diet changed WHAT the commit folded rather than only how survivors render");
+  const strippedOn = { ...state };
+  delete strippedOn.clips;
+  // Identical but for the clip set and the wall clock: createdAt is the one field a
+  // fold mints from the clock, so it is normalized before the byte comparison rather
+  // than letting two otherwise-identical runs read as divergent.
+  const clockless = (value) => json.stableStringify({
+    ...value, folds: value.folds.map((fold) => ({ ...fold, createdAt: 0 })),
+  });
+  assert.equal(clockless(strippedOn), clockless(offState),
+    "With the clips set aside, the two runs' durable state should be identical");
+  assert(!json.stableStringify(context.projectActiveContext(snapshotOf(off), offState))
+    .includes("more chars clipped"), "The no-threshold projection carries a clip marker");
+  return { clippedResults: fired[0].clipped_results, appliedMarks: fired[0].applied_marks };
+}
+
+async function gateClipsNeverTouchTheFoldedBytes() {
+  const { runtime } = await driveClippedCommit({ retiredOptions: { toolFoldThreshold: 0.5 } });
+  const state = materialized(runtime);
+  assert(state.clips?.length, "The drive landed no clips, so there is nothing to fold over");
+  const clip = state.clips[0];
+  const full = context.contentText(clipRawResult(runtime, clip.callId));
+  const deep = `deep-fact-${full.match(/^Result (\d+):/)[1]}-end`;
+  // A commit is one per crossing, so the second cut takes its own measurement before
+  // the boundary fires; the boundary carries a ratio and no depth bound, so between the
+  // two the clipped span is folded rather than surviving another shallow cut.
+  await measure(runtime,
+    Math.ceil(CLIP_GATE_THRESHOLDS.maxTarget * CLIP_GATE_BUDGET) + 8_000, CLIP_GATE_WINDOW);
+  await project(runtime);
+  await settle();
+  await compactBoundary(runtime);
+  const after = materialized(runtime);
+  const owning = after.folds.find((fold) => (fold.parts ?? []).some((part) =>
+    part.kind === "raw" && part.ref?.entryId === clip.entryId));
+  assert(owning, "The boundary commit did not fold the clipped span");
+  const peek = await toolCall(runtime,
+    { action: "peek", id: owning.id, bytes: context.ACTIVE_CONTEXT_POLICY.maxSourceChars });
+  assert(peek.details.source.includes(deep),
+    "The fold lost the bytes the clip hid: the diet leaked from the view into the record");
+  assert(!peek.details.source.includes("more chars clipped"),
+    "The fold encoded the clipped VIEW rather than the raw bytes");
+  return { owningFold: owning.kind, foldedSourceChars: peek.details.sourceChars ?? null };
+}
+
+async function gateClipOptionIsValidated() {
+  const built = makeFixture({ turns: 2, resultChars: 2_000 });
+  const refused = [0, 1, -0.25, 1.5, "0.5", Number.NaN];
+  for (const value of refused) {
+    assert.throws(
+      () => makeRuntime(built, { retiredOptions: { toolFoldThreshold: value } }),
+      /toolFoldThreshold must be a share strictly between 0 and 1/,
+      `toolFoldThreshold ${String(value)} was accepted`);
+  }
+  // And the whole open interval is accepted, through the package surface gate 96 pins.
+  for (const value of [0.05, 0.5, 0.937]) {
+    makeRuntime(built, { retiredOptions: { toolFoldThreshold: value } });
+  }
+  return { refused: refused.length };
+}
+
+async function gateToolCallDiet() {
+  return {
+    clipSelection: await claim("gateClipSelection", gateClipSelection),
+    clipCommitRendersAndRecovers: await claim("gateClipCommitRendersAndRecovers", gateClipCommitRendersAndRecovers),
+    clipsNeverTouchTheFoldedBytes: await claim("gateClipsNeverTouchTheFoldedBytes", gateClipsNeverTouchTheFoldedBytes),
+    clipOptionIsValidated: await claim("gateClipOptionIsValidated", gateClipOptionIsValidated),
+  };
+}
+
 const gates = [
   [1, "Registration, parse and deployment branding", gateRegistrationAndBranding],
   [2, "The durable record: lattice, chain and rollback", gateDurableRecord],
@@ -14038,6 +14330,7 @@ const gates = [
   [140, "Fold settings round-trip through one validation path", gateFoldSettingsRoundTrip],
   [142, "The fold editor", gateFoldEditor],
   [147, "The frontier waits for the batch", gateFrontierWaitsForTheBatch],
+  [148, "The tool-call diet", gateToolCallDiet],
   // 143 is retired with the agent's `fold` verb (Shane 2026-08-23). Its subject was the
   // ANSWER a mark comes back with: the drop the next commit has to make, what the mark
   // covers of it, and what the ladder takes otherwise, all so an agent choosing spans could
