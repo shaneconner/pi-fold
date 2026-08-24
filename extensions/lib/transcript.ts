@@ -327,6 +327,35 @@ export function unsafeChapterIndices(messages: unknown[]): Set<number> {
  * than a curation preference. The fresh-tail byte walk that used to sit here is deleted:
  * nothing decided on it, and stale-first ordering already leaves recent material last.
  */
+/**
+ * THE STALE-SPAN MATURITY FLOOR (2026-08-24). The tool-batch lane proves consumption
+ * before it will index a result: two later generations in an open turn, one or the
+ * terminal assistant in a closed one (resultCallIndex). The chapter lane had no such
+ * proof, and on the pull-shaped workload the frontier cuts the moment a span crosses
+ * minFoldChars, which is always one turn before the same span's batch qualifies:
+ * sol-20260823-live rep 3 cut 219 chapters and ZERO tool folds over a transcript whose
+ * every span replays as a tool-result when aged, so every placeholder read "User: No
+ * user ask · Tools: 1×repo_stage · Assistant: No assistant text" and the agent
+ * re-peeked 76 folds 209 times to rebuild the index the brief should have carried. One
+ * floor, kind-agnostic, derived from the proof the batch lane already demands: a stale
+ * span may be cut only when it ends before the second-newest open generation, so by the
+ * time the chapter lane may touch material the tool lane has had its turn at it, and
+ * the tool-first preference in selectAutomaticSpan is reachable rather than starved.
+ * This is NOT gate 19/72's fresh-tail proportion returning: nothing here reads bytes or
+ * shares, and a closed session (terminal assistant) folds to its end exactly as before.
+ */
+export function staleSpanMatureEnd(messages: unknown[]): number {
+  if (messages.length && terminalAssistant(messages[messages.length - 1])) return messages.length;
+  const generations: number[] = [];
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (messageRole(message) === "assistant" && ownValue(message, "stopReason") === "toolUse") {
+      generations.push(index);
+    }
+  }
+  return generations.length < 2 ? 0 : generations[generations.length - 2];
+}
+
 export function freshBoundary(messages: unknown[], turns: CompleteTurn[]): number {
   if (!messages.length) return 0;
   let unfinishedUser = messages.length;

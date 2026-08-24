@@ -13629,6 +13629,98 @@ async function gateFoldEditor() {
   };
 }
 
+/**
+ * GATE 147: THE FRONTIER WAITS FOR THE BATCH (2026-08-24).
+ *
+ * The deep dive on sol-20260823-live found the tool-first preference in
+ * selectAutomaticSpan starved to ZERO in production: the frontier cuts the moment a span
+ * crosses minFoldChars, which on a pull-shaped session is always one turn before that
+ * span's tool batch passes the consumption proof in resultCallIndex (two later
+ * generations in an open turn). The chapter lane had no such proof, took the span, and
+ * claimed the refs, so the batch that qualified one turn later found its material owned.
+ * Rep 3 cut 219 chapters and zero tool folds over a transcript whose every span replays
+ * as a tool-result when aged; 188 placeholders were byte-identical "User: No user ask ·
+ * Tools: 1×repo_stage · Assistant: No assistant text", and the agent re-peeked 76 folds
+ * 209 times to rebuild the index the brief should have carried, at $40.71 and a watchdog
+ * death. The 2.x runtime cut 82 identified tool folds on the same geometry at $17.00.
+ *
+ * The floor: a stale span may be cut only when it ends before the second-newest open
+ * generation (staleSpanMatureEnd), the same proof the batch lane already demands, so by
+ * the time the chapter lane may touch material the tool lane has had its turn at it. A
+ * closed session (terminal assistant) folds to its end exactly as before. This is not
+ * gate 19/72's fresh-tail proportion returning: nothing reads bytes or shares.
+ *
+ * The gate drives the LIVE cadence: frontier passes as the transcript grows, pending
+ * marks carried forward. On the pre-floor runtime every one of these cuts comes out a
+ * chapter and the population assertion fails.
+ */
+async function gateFrontierWaitsForTheBatch() {
+  const built = makeFixture({ pull: true, turns: 14, resultChars: 30_000 });
+  const snapshotOver = (messages, entries) => context.mapActiveContext({
+    sessionId: built.sessionId,
+    eventMessages: messages,
+    contextEntries: entries,
+    contextWindow: 272_000,
+    readOnlyContextActions: context.PEEK_READ_ONLY_CONTEXT_ACTIONS,
+  });
+  let state = context.emptyActiveContextState(built.sessionId);
+  const cuts = [];
+  for (let n = 2; n <= built.messages.length; n += 1) {
+    if (built.messages[n - 1].role !== "toolResult") continue;
+    const head = built.messages.slice(0, n);
+    const snapshot = snapshotOver(head, built.entries.slice(0, n));
+    const matureEnd = context.staleSpanMatureEnd(head);
+    for (const mark of context.frontierMarks({ snapshot, state, ordinal: n })) {
+      for (const part of mark.parts) {
+        if (part.kind !== "raw") continue;
+        const item = context.exactMapped(snapshot, part.ref);
+        assert(item && item.index < matureEnd,
+          `a ${mark.kind} cut at pass ${n} reached index ${item?.index} past the maturity floor ${matureEnd}`);
+      }
+      const addition = context.addPendingMark(state, mark);
+      if (addition.added) state = addition.state;
+      cuts.push(mark);
+    }
+  }
+  const toolCuts = cuts.filter((mark) => mark.kind === "tool-result");
+  assert(cuts.length >= 8, `the incremental frontier cut only ${cuts.length} spans`);
+  // THE POPULATION. This is the line the pre-floor runtime fails: chapters, every one.
+  assert(toolCuts.length >= 8,
+    `only ${toolCuts.length} of ${cuts.length} incremental cuts were identified tool folds`);
+  for (const mark of toolCuts) {
+    assert(/file-\d+\.txt/.test(mark.brief) && mark.brief.includes('opens "'),
+      `a tool fold's deterministic brief lost the identified head: ${mark.brief.slice(0, 120)}`);
+  }
+  for (const mark of cuts) {
+    if (mark.kind !== "tool-result") assert.equal(mark.kind, "chapter");
+  }
+
+  // THE FLOOR RELEASES ON CLOSE: a terminal assistant makes the whole transcript mature,
+  // and the frontier reaches the remainder the open-session floor was holding.
+  const closing = {
+    role: "assistant",
+    content: [{ type: "text", text: "All stages complete." }],
+    stopReason: "stop",
+    timestamp: 100_000,
+  };
+  const closedMessages = [...built.messages, closing];
+  const closedEntries = [...built.entries, {
+    type: "message", id: `${built.sessionId}-closing`, parentId: built.entries.at(-1).id, message: closing,
+  }];
+  assert.equal(context.staleSpanMatureEnd(closedMessages), closedMessages.length,
+    "a closed session did not mature to its end");
+  const closedSnapshot = snapshotOver(closedMessages, closedEntries);
+  const more = context.frontierMarks({ snapshot: closedSnapshot, state, ordinal: 999 });
+  assert(more.length >= 1, "a closed session left the held tail uncuttable");
+
+  return {
+    incrementalCuts: cuts.length,
+    identifiedToolFolds: toolCuts.length,
+    chapterCuts: cuts.length - toolCuts.length,
+    closedTailCuts: more.length,
+  };
+}
+
 const gates = [
   [1, "Registration, parse and deployment branding", gateRegistrationAndBranding],
   [2, "The durable record: lattice, chain and rollback", gateDurableRecord],
@@ -13748,6 +13840,7 @@ const gates = [
   // session, so the agent was never invited at all. The number stays spent.
   [140, "Fold settings round-trip through one validation path", gateFoldSettingsRoundTrip],
   [142, "The fold editor", gateFoldEditor],
+  [147, "The frontier waits for the batch", gateFrontierWaitsForTheBatch],
   // 143 is retired with the agent's `fold` verb (Shane 2026-08-23). Its subject was the
   // ANSWER a mark comes back with: the drop the next commit has to make, what the mark
   // covers of it, and what the ladder takes otherwise, all so an agent choosing spans could

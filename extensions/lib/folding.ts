@@ -79,6 +79,7 @@ import {
   selectAutomaticRefold,
   selectAutomaticToolBatch,
 } from "./selection.ts";
+import { staleSpanMatureEnd } from "./transcript.ts";
 
 export function selectAutomaticChapter(
   snapshot: ActiveContextSnapshot,
@@ -87,11 +88,16 @@ export function selectAutomaticChapter(
 ): FoldCandidate | null {
   const units = chapterUnits(snapshot);
   const allowedChildren = NO_FOLD_KINDS;
+  // The maturity floor: a stale span may end only where the batch lane has already had
+  // its chance, so a chapter can never claim a tool batch one turn before it qualifies.
+  const matureEnd = staleSpanMatureEnd(snapshot.messages);
   for (let unitIndex = 0; unitIndex < units.length; unitIndex += 1) {
     const first = units[unitIndex];
+    if (first.end > matureEnd) break;
     let best: FoldCandidate | null = null;
     for (let endIndex = unitIndex; endIndex < units.length; endIndex += 1) {
       const unit = units[endIndex];
+      if (unit.end > matureEnd) break;
       if (endIndex > unitIndex && unit.start !== units[endIndex - 1].end) break;
       const coherentSegment = endIndex > unitIndex || first.end - first.start > 1;
       if (!coherentSegment) continue;
