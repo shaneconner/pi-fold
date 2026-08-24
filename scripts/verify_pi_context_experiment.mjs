@@ -10134,7 +10134,8 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     };
     const request = handlers.get("before_provider_request").at(-1);
     const messageEnd = handlers.get("message_end").at(-1);
-    return { runDir, state, ctx, request, messageEnd, compacts };
+    const sessionCompact = handlers.get("session_compact").at(-1);
+    return { runDir, state, ctx, request, messageEnd, compacts, sessionCompact };
   };
   const funded = { message: { role: "assistant", stopReason: "toolUse",
     usage: { input: 1_000, output: 50, cacheRead: 230_000, cacheWrite: 0, totalTokens: 236_000 } } };
@@ -10189,7 +10190,108 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   assert(readLines106(prior.runDir, "failure-latch.jsonl")
     .some((entry) => entry.phase === "harness-fence-compaction"),
   "a pre-existing compaction satisfied a proof it does not own");
+  // SERVICED AT THE CATCH: a completion the crossing has not seen IS the replacement
+  // that made the ctx stale, so the catch services the crossing on the extension's own
+  // completion count with no deferral and no model event (nativefence rep 9's deadlock:
+  // the deferral's resolver needed a fresh-ctx event, the worker's resume needed the
+  // resolution, and the run ended at 8 of 64 stages).
+  const witnessed = driveStaleFence();
+  witnessed.request({ payload: { tools: [] } }, witnessed.ctx);
+  witnessed.messageEnd(funded, witnessed.ctx);
+  witnessed.sessionCompact({ reason: "manual", compactionEntry: { id: "comp-w" } });
+  witnessed.state.stale = true;
+  witnessed.compacts[0].onError(new Error("Compaction cancelled"));
+  const witnessedKinds = readLines106(witnessed.runDir, "worker-events.jsonl").map((entry) => entry.kind);
+  assert(!witnessedKinds.includes("harness-fence-verification-deferred"),
+    "a witnessed completion still deferred the proof");
+  const witnessedCompacted = readLines106(witnessed.runDir, "worker-events.jsonl")
+    .filter((entry) => entry.kind === "harness-fence-compacted");
+  assert.equal(witnessedCompacted.length, 1, "the witnessed completion did not service the crossing");
+  assert.equal(witnessedCompacted[0].details.serviced_by, "verified-after-stale-ctx");
+  assert.equal(readLines106(witnessed.runDir, "failure-latch.jsonl").length, 0,
+    "a witnessed completion still latched");
+
+  // RESOLVED BY THE COMPLETION ITSELF: a deferral standing when session_compact fires is
+  // by construction older than that completion, so the completion resolves it without
+  // waiting for a model event the settling worker will never send.
+  const resolved = driveStaleFence();
+  resolved.request({ payload: { tools: [] } }, resolved.ctx);
+  resolved.messageEnd(funded, resolved.ctx);
+  resolved.state.stale = true;
+  resolved.compacts[0].onError(new Error("Compaction cancelled"));
+  const resolvedDeferred = readLines106(resolved.runDir, "worker-events.jsonl").map((entry) => entry.kind);
+  assert(resolvedDeferred.includes("harness-fence-verification-deferred"),
+    "the unwitnessed cancellation did not defer");
+  resolved.sessionCompact({ reason: "manual", compactionEntry: { id: "comp-r" } });
+  const resolvedCompacted = readLines106(resolved.runDir, "worker-events.jsonl")
+    .filter((entry) => entry.kind === "harness-fence-compacted");
+  assert.equal(resolvedCompacted.length, 1, "the completion did not resolve the standing deferral");
+  assert.equal(resolvedCompacted[0].details.serviced_by, "verified-after-stale-ctx");
+  assert.equal(readLines106(resolved.runDir, "failure-latch.jsonl").length, 0,
+    "a completion-resolved deferral still latched");
+
   checks.fenceProofSurvivesAStaleCtx = true;
+}
+
+// GATE 107: A CROSSING'S OUTCOME IS AWAITED, NOT ASSUMED (2026-08-24). The manual
+// compact() a below-trigger crossing fires is DETACHED from the operation the worker
+// awaits: its abort ends the turn, the prompt promise resolves, and a worker that reads
+// "no completed compaction, no resume" and walks to its terminal assertions CANCELS the
+// in-flight compaction with its own teardown. nativefence rep 9 of sol-20260823-live
+// recorded the race in four milliseconds (workerFinished 197781672, "Compaction
+// cancelled" deferred 197781676) and rep 8 died on the identical race with the stale-ctx
+// throw masking the cancellation; at the matched 0.937 share it never fires because Pi's
+// own threshold pass runs inside the operation-end sequence the worker already awaits,
+// which is why five crossings serviced in rep 4 and zero ever serviced below the
+// trigger. The worker now waits, bounded, while the event log holds more crossings than
+// completed compactions and nothing has latched; the timeout latches by name, carrying
+// the deferred compact error when one stands, before it throws the same name.
+{
+  const worker = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
+
+  // The owed predicate, driven as a function per gate 56's pattern.
+  const owedSource = worker.slice(
+    worker.indexOf("const FENCE_OUTCOME_BOUND_MS"),
+    worker.indexOf("const awaitFenceOutcome"),
+  );
+  assert(owedSource.length > 0, "the fence outcome machinery was not found where it is pinned");
+  const { bound, owed } = new Function("existsSync", "readFileSync",
+    `${owedSource}; return { bound: FENCE_OUTCOME_BOUND_MS, owed: fenceOutcomeOwed };`)(
+    () => false, () => "");
+  assert.equal(bound, 120_000, "the settlement bound moved from the 120s the build fixed");
+  assert.equal(owed(1, 0, 0), true, "an unserviced crossing does not hold the worker");
+  assert.equal(owed(1, 1, 0), false, "a serviced crossing still holds the worker");
+  assert.equal(owed(0, 0, 0), false, "a quiet turn is held with nothing owed");
+  assert.equal(owed(1, 0, 1), false,
+    "a latched failure still holds the worker instead of failing the run by its own name");
+  assert.equal(owed(3, 2, 0), true, "only the first crossing of several is awaited");
+
+  // The wiring: the wait follows EVERY quiescence read, is fenced to the nativefence
+  // arm, breaks for the watchdog, and the timeout latches by name before it throws.
+  const quiescenceReads = worker.split("terminalState = await waitForDurableTerminalQuiescence(manager, session);").length - 1;
+  const outcomeWaits = worker.split("await awaitFenceOutcome();").length - 1;
+  assert.equal(quiescenceReads, 3, "a quiescence read was added or removed; re-pin the waits");
+  assert.equal(outcomeWaits, quiescenceReads,
+    "a quiescence read is not followed by the fence outcome wait");
+  for (let from = 0, read = 0; read < quiescenceReads; read += 1) {
+    const at = worker.indexOf("waitForDurableTerminalQuiescence(manager, session);", from);
+    const wait = worker.indexOf("await awaitFenceOutcome();", at);
+    const nextRead = worker.indexOf("waitForDurableTerminalQuiescence(manager, session);", at + 1);
+    assert(wait > at && (nextRead < 0 || wait < nextRead),
+      "a quiescence read is not IMMEDIATELY covered by the wait that follows it");
+    from = at + 1;
+  }
+  assert(worker.includes('if (config.arm !== "nativefence") return;'),
+    "the wait is not fenced to the arm whose mechanism it serves");
+  assert(worker.includes("!deadlineFired) {"),
+    "the wait does not break for the watchdog");
+  const timeoutLatch = worker.indexOf('phase: "harness-fence-outcome-timeout"');
+  const timeoutThrow = worker.indexOf("throw new Error(`harness-fence-outcome-timeout");
+  assert(timeoutLatch >= 0 && timeoutThrow > timeoutLatch,
+    "the timeout does not latch by name before it throws");
+  assert(worker.includes("deferred compact error"),
+    "the timeout does not carry the deferred compact error it is explaining");
+  checks.fenceOutcomeAwaitedNotAssumed = true;
 }
 
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);

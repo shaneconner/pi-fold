@@ -284,6 +284,58 @@ let fenceCompactionsResumedPast = 0;
 const fenceCompactedSinceLastPrompt = () => config.arm === "nativefence" &&
   fenceCompactions() > fenceCompactionsResumedPast && latchedFailures() === 0;
 
+// A CROSSING'S OUTCOME IS AWAITED, NOT ASSUMED. The manual compact() a below-trigger
+// crossing fires is DETACHED from the operation the worker awaits: its abort ends the
+// turn, the prompt promise resolves, and the worker that then reads "no completed
+// compaction, no resume" and walks to its terminal assertions CANCELS the compaction
+// with its own teardown. nativefence rep 9 of sol-20260823-live recorded the whole
+// race in four milliseconds: workerFinished 197781672, "Compaction cancelled" deferred
+// 197781676. Rep 8 died on the identical race one build earlier, with the stale-ctx
+// throw masking the cancellation. At the matched 0.937 share the race never fires
+// because Pi's OWN threshold pass runs inside the operation-end sequence the worker is
+// already awaiting, which is why five crossings serviced cleanly in rep 4 and zero
+// have ever serviced below the trigger. So: while the event log holds more crossings
+// than completed compactions and nothing has latched, the worker WAITS, bounded, and
+// a timeout latches by name with the deferred error when one stands, because a fence
+// that cannot compact is a dead arm and must say so rather than time out quietly.
+const FENCE_OUTCOME_BOUND_MS = 120_000;
+const fenceEvents = (kind) => (existsSync(eventLogPath)
+  ? readFileSync(eventLogPath, "utf8").split("\n").filter((line) => line.trim().length > 0)
+    .filter((line) => {
+      try { return JSON.parse(line).kind === kind; } catch { return false; }
+    })
+  : []);
+const fenceCrossings = () => fenceEvents("harness-fence-crossing").length;
+const fenceOutcomeOwed = (crossings, compactions, latched) =>
+  crossings > compactions && latched === 0;
+const awaitFenceOutcome = async () => {
+  if (config.arm !== "nativefence") return;
+  const started = monotonicMs();
+  while (fenceOutcomeOwed(fenceCrossings(), fenceCompactions(), latchedFailures()) &&
+      !deadlineFired) {
+    if (monotonicMs() - started > FENCE_OUTCOME_BOUND_MS) {
+      const deferred = fenceEvents("harness-fence-verification-deferred").at(-1);
+      let deferredError = null;
+      try { deferredError = deferred ? JSON.parse(deferred).details?.error ?? null : null; } catch { /* detail only */ }
+      const detail = `crossing ${fenceCrossings()} produced no completed compaction and ` +
+        `no latch within ${FENCE_OUTCOME_BOUND_MS}ms` +
+        (deferredError ? `; deferred compact error: ${deferredError}` : "");
+      try {
+        const fd = openSync(failurePath, "a", 0o600);
+        try {
+          writeSync(fd, `${JSON.stringify({
+            version: 1, runId: config.runId, phase: "harness-fence-outcome-timeout", detail,
+            wallMs: Date.now(), monotonicMs: monotonicMs(),
+          })}\n`);
+          fsyncSync(fd);
+        } finally { closeSync(fd); }
+      } catch { /* The throw below carries the same name into the report. */ }
+      throw new Error(`harness-fence-outcome-timeout: ${detail}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+};
+
 // A RESUME BUYS ONE FULL TURN, and delivery is the only progress signal that cannot be
 // faked. sol-20260815-hidden native rep 1 lost stage 39's NEXT_KEY to a compaction,
 // reported it unrecoverable on every pass, and was re-prompted every nine seconds for
@@ -506,6 +558,7 @@ try {
     try {
       await session.prompt(prompt, { expandPromptTemplates: false });
       terminalState = await waitForDurableTerminalQuiescence(manager, session);
+      await awaitFenceOutcome();
       while (!closedBook && !deadlineFired && stagesDelivered() < plan.stageCount &&
         (modelEndedItsTurn(terminalState) || fenceCompactedSinceLastPrompt())) {
         // Which of the two conditions fired is recorded, because they measure different
@@ -537,6 +590,7 @@ try {
         await session.prompt(resumePrompt(delivered + 1, plan.stageCount),
           { expandPromptTemplates: false });
         terminalState = await waitForDurableTerminalQuiescence(manager, session);
+        await awaitFenceOutcome();
       }
       // THE WITHHELD END BLOCK (task #79 build 3): asked only after the whole
       // workload was delivered and the model ended its turn cleanly, so no
@@ -549,6 +603,7 @@ try {
         await session.prompt(config.endBlockPrompt,
           { expandPromptTemplates: false });
         terminalState = await waitForDurableTerminalQuiescence(manager, session);
+        await awaitFenceOutcome();
       }
     } catch (error) {
       const text = error instanceof Error ? `${error.message}` : String(error);

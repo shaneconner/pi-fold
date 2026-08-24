@@ -146,8 +146,15 @@ export function createPiContextExperimentExtension(config) {
     // compaction count recorded before compact() is asked, and pendingVerification
     // carries the crossing and the error until an event with a live ctx can read the
     // branch and decide.
-    compactionsAtCrossing: 0, pendingVerification: null,
+    compactionsAtCrossing: 0, completionsAtCrossing: 0, pendingVerification: null,
   };
+  // The completion witness the deferred proof can consult WITHOUT a ctx: session_compact
+  // fires only after a summary is appended and the transcript replaced, so a count taken
+  // at the crossing and compared in the stale-ctx catch decides service on the
+  // extension's own evidence rather than waiting for a model event a settling worker
+  // may never send (nativefence rep 9: the deferral's resolver needed a fresh-ctx event,
+  // the worker's resume needed the resolution, and the deadlock ended the run at 8/64).
+  let nativeCompactionCompletions = 0;
   const compactionDisposition = nativeCompactionDisposition(config.arm);
   // Resolves a deferred fence proof at the first event carrying a live ctx: the
   // crossing is serviced when a compaction entry arrived on the branch since the
@@ -300,6 +307,17 @@ export function createPiContextExperimentExtension(config) {
       // never reaches it. The session's own compaction entry is the second witness, checked
       // on the branch by the context handler below.
       pi.on("session_compact", (event) => {
+        nativeCompactionCompletions += 1;
+        // A completion arriving while a deferred fence proof stands is by construction
+        // newer than the crossing that deferred it, so it services the crossing without
+        // waiting for a model event.
+        if (fenceState.pendingVerification) {
+          const pending = fenceState.pendingVerification;
+          fenceState.pendingVerification = null;
+          appendEvent("harness-fence-compacted", {
+            crossing: pending.crossing, serviced_by: "verified-after-stale-ctx",
+          });
+        }
         appendEvent("native-compaction", {
           reason: event.reason ?? null,
           willRetry: event.willRetry === true,
@@ -821,6 +839,7 @@ export function createPiContextExperimentExtension(config) {
             fenceState.abandonPending = true;
             fenceState.compactionsAtCrossing = ctx.sessionManager.getBranch()
               .filter((entry) => entry?.type === "compaction").length;
+            fenceState.completionsAtCrossing = nativeCompactionCompletions;
             appendEvent("harness-fence-crossing", {
               crossing: fenceState.crossings,
               occupancy_tokens: tokens,
@@ -862,8 +881,16 @@ export function createPiContextExperimentExtension(config) {
                 try {
                   compacted = ctx.sessionManager.getBranch().at(-1)?.type === "compaction";
                 } catch {
-                  // The captured ctx went stale mid-compact (session replacement). The
-                  // proof moves to the next event's fresh ctx; nothing is decided here.
+                  // The captured ctx went stale mid-compact (session replacement). A
+                  // completion the crossing has not seen IS the replacement that made
+                  // the ctx stale, so it services the crossing here; otherwise the
+                  // proof moves to the next fresh ctx and nothing is decided yet.
+                  if (nativeCompactionCompletions > fenceState.completionsAtCrossing) {
+                    appendEvent("harness-fence-compacted", {
+                      crossing: fenceState.crossings, serviced_by: "verified-after-stale-ctx",
+                    });
+                    return;
+                  }
                   fenceState.pendingVerification = {
                     crossing: fenceState.crossings, message,
                   };
