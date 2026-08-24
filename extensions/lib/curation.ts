@@ -1,4 +1,5 @@
 import { boundReceiptText } from "./measurement.ts";
+import { oneLine } from "./selection.ts";
 import {
   contextBrand,
   CONTEXT_RECEIPT_BLOCK_BYTES,
@@ -22,7 +23,7 @@ import {
  * worth a turn's attention, and it is ephemeral, so it never accumulates.
  */
 export function foldNoticeText(input: {
-  unbriefed: ReadonlyArray<{ id: string; kind: string; tokens: number }>;
+  unbriefed: ReadonlyArray<{ id: string; kind: string; tokens: number; brief?: string }>;
   pending: number;
   toolName: string;
   brandNoun?: string;
@@ -49,8 +50,15 @@ export function foldNoticeText(input: {
   ].join("\n");
   // WHAT IT COULD NOT NAME, IT COUNTS (gate 136's law, and gate 115's shape one level
   // out): a list that stops early and says nothing reads as a complete list.
+  // EACH ROW IDENTIFIES ITS SPAN. The pending mark carries the deterministic brief the
+  // runtime cut it with, and a notice that withholds it makes the agent guess: the
+  // dogfooded 1M session answered "I need to brief three pending folds. What are they?
+  // Likely: ..." from memory, and a wrong guess writes an accurate-sounding brief onto
+  // the wrong fold. The head is the identification; the agent adds what it cannot know.
+  const NOTICE_ROW_CHARS = 160;
   const entries = input.unbriefed
-    .map((fold) => `${fold.id} (${fold.kind}, ~${fold.tokens} tokens)`);
+    .map((fold) => `${fold.id} (${fold.kind}, ~${fold.tokens} tokens)` +
+      (fold.brief ? `: ${oneLine(fold.brief, NOTICE_ROW_CHARS)}` : ""));
   const overflowText = (seated: number) =>
     `${input.toolName} {"action":"status"} lists the other ${input.unbriefed.length - seated}.`;
   let seated = entries.length;

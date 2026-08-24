@@ -271,7 +271,7 @@ export const CONTEXT_RECEIPT_BLOCK_BYTES = 900;
  * agent answers. 1,200 seats the instruction and roughly eight folds; past that the list
  * gives way and states how many it could not name.
  */
-export const FOLD_NOTICE_BYTES = 1_200;
+export const FOLD_NOTICE_BYTES = 2_400;
 export const CONTEXT_STATUS_RESPONSE_BYTES = 24_000;
 export const MAX_UNMARKED_CANDIDATES = 3;
 

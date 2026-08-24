@@ -12304,6 +12304,20 @@ async function gateFoldNoticeInvitesBriefs() {
   const named = new Set(text.match(/fold_[0-9a-f]{16,}/g) ?? []);
   const standing = new Set(cut.map((fold) => fold.id));
   for (const id of named) assert(standing.has(id), `The notice named ${id}, which is not a pending fold`);
+  // EACH ROW IDENTIFIES ITS SPAN (2026-08-24). The pending mark carries the
+  // deterministic brief the runtime cut it with, and a notice that withheld it made the
+  // dogfooded agent GUESS which spans its briefs were for ("I need to brief three
+  // pending folds. What are they? Likely: ..."), where a wrong guess writes an
+  // accurate-sounding brief onto the wrong fold. The head is the identification; a row
+  // longer than its bound states the cut.
+  for (const fold of cut) {
+    assert(typeof fold.brief === "string" && fold.brief.length > 0,
+      `Pending fold ${fold.id} carries no deterministic brief for its row to show`);
+    assert(text.includes(`${fold.id} (`) && text.includes(fold.brief.slice(0, 40)),
+      `The notice row for ${fold.id} does not carry its own head: ${fold.brief.slice(0, 60)}`);
+  }
+  assert(cut.some((fold) => fold.brief.length > 160) &&
+    /\.\.\./.test(text), "No bounded row stated its cut");
   assert(/"action":"brief"/.test(text), "The notice does not say how to answer it");
   assert(/costs your window nothing/.test(text),
     "The notice does not state the price of answering, which is the reason to answer");

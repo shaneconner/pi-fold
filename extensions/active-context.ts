@@ -1661,6 +1661,7 @@ export function registerActiveContext(pi: any, options: {
         id: mark.id,
         kind: mark.kind,
         tokens: estimatedTokens(markFreedBytes(snapshot, persistence.state!, mark)),
+        brief: typeof mark.brief === "string" ? mark.brief : undefined,
       })),
       pending: held.length,
       toolName,
