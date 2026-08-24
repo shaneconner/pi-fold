@@ -130,7 +130,7 @@ export function createPiContextExperimentExtension(config) {
   const fenceBudgetTokens = config.providerInputBudget ?? null;
   const fenceThresholdTokens = fenceBudgetTokens === null
     ? null
-    : Math.floor(matchedFenceShare(config.mode) * fenceBudgetTokens);
+    : Math.floor((config.fenceShare ?? matchedFenceShare(config.mode)) * fenceBudgetTokens);
   assertExperiment(!harnessFence || Number.isSafeInteger(fenceThresholdTokens),
     "The matched-fence arm requires a declared providerInputBudget to fence against");
   // `abandonPending` is the one provider request each crossing is allowed to strand. See
@@ -795,7 +795,7 @@ export function createPiContextExperimentExtension(config) {
               occupancy_tokens: tokens,
               threshold_tokens: fenceThresholdTokens,
               occupancy_share: tokens / fenceBudgetTokens,
-              share_rule: matchedFenceShare(config.mode),
+              share_rule: config.fenceShare ?? matchedFenceShare(config.mode),
               budget_tokens: fenceBudgetTokens,
             });
             ctx.compact({

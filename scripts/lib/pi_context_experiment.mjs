@@ -2387,6 +2387,13 @@ export const EXPERIMENT_RUN_CONFIG_OPTIONAL_KEYS = Object.freeze([
   // finding: 42-46 percent of pifold's uncached input is the post-commit prefix rewrite,
   // sized by minTarget, so the band is a measured lever rather than a taste dial.
   "thresholds",
+  // THE FENCE POINT (Shane 2026-08-24): an explicit share of the declared budget at
+  // which the nativefence arm fires Pi's own compact(), replacing the matched default
+  // (MATCHED_FENCE_SHARES) so the compact point is a measured lever. The two points
+  // already held are 0.937 ($16.62, exam 18/30) and no-fence-to-1M (~$40 with a 43
+  // percent premium-tier surcharge); intermediate shares price recall against
+  // summarization frequency.
+  "fenceShare",
 ]);
 
 export function validateExperimentRunConfig(value) {
@@ -2432,6 +2439,13 @@ export function validateExperimentRunConfig(value) {
     assertExperiment(value.sessionType !== EXPERIMENT_CLOSED_BOOK_LABEL &&
       armRuntimeConfiguration(value.arm).activeContextEnabled,
     "Run config thresholds condition belongs to the pifold arm alone");
+  }
+  if (value.fenceShare !== undefined) {
+    assertExperiment(typeof value.fenceShare === "number" &&
+      value.fenceShare > 0 && value.fenceShare < 1,
+    "Run config fence share must be a proportion strictly between 0 and 1");
+    assertExperiment(value.sessionType !== EXPERIMENT_CLOSED_BOOK_LABEL && value.arm === "nativefence",
+      "Run config fence share belongs to the nativefence arm alone");
   }
   assertExperiment(value.transport === undefined || EXPERIMENT_TRANSPORTS.includes(value.transport),
     "Run config transport is not a known Pi transport");

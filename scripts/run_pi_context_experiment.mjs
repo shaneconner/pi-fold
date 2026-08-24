@@ -386,6 +386,15 @@ async function run() {
     "--thresholds takes max,min with 0 < min < max < 1");
     thresholds = { maxTarget: parts[0], minTarget: parts[1], consolidateAfter: 10, minFoldChars: 8000 };
   }
+  // `--fence-share X` moves the nativefence compact point off its matched default.
+  const requestedFenceShare = argumentValue("--fence-share", null);
+  let fenceShare = null;
+  if (requestedFenceShare !== null) {
+    assertExperiment(arm === "nativefence", "--fence-share belongs to the nativefence arm alone");
+    fenceShare = Number.parseFloat(requestedFenceShare);
+    assertExperiment(Number.isFinite(fenceShare) && fenceShare > 0 && fenceShare < 1,
+      "--fence-share takes a proportion strictly between 0 and 1");
+  }
   const providerInputBudget = requestedBudget === "none"
     ? null
     : EXPERIMENT_PROVIDER_INPUT_BUDGETS[`${modelProvider}/${modelId}`] ?? null;
@@ -460,6 +469,7 @@ async function run() {
         ...(providerInputBudget === null ? {} : { providerInputBudget }),
         ...(requestedNotice === "off" ? { postFoldNotice: false } : {}),
         ...(thresholds === null ? {} : { thresholds }),
+        ...(fenceShare === null ? {} : { fenceShare }),
         // No brief generator: the deterministic brief carries the opening prose
         // now (package gate 134), and this run measures the no-generator condition
         // the reviews recommend making permanent. See EXPERIMENT_BRIEF_GENERATOR's

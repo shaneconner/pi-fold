@@ -919,6 +919,19 @@ assert.throws(() => validateExperimentRunConfig({
 }), /whole or not at all/, "an unknown thresholds field was accepted");
 checks.thresholdsBandConditionPinned = true;
 
+// THE FENCE POINT (Shane 2026-08-24): --fence-share moves the nativefence compact point
+// off its matched default; the config layer pins the arm rule and the proportion law.
+validateExperimentRunConfig({ ...runConfig, arm: "nativefence", fenceShare: 0.5 });
+assert.throws(() => validateExperimentRunConfig({ ...runConfig, arm: "pifold", fenceShare: 0.5 }),
+  /belongs to the nativefence arm alone/, "the pifold arm accepted a fence share");
+assert.throws(() => validateExperimentRunConfig({ ...runConfig, fenceShare: 0.5 }),
+  /belongs to the nativefence arm alone/, "the native arm accepted a fence share");
+assert.throws(() => validateExperimentRunConfig({ ...runConfig, arm: "nativefence", fenceShare: 1.2 }),
+  /strictly between 0 and 1/, "an out-of-range fence share was accepted");
+assert.throws(() => validateExperimentRunConfig({ ...runConfig, arm: "nativefence", fenceShare: "0.5" }),
+  /strictly between 0 and 1/, "a string fence share was accepted");
+checks.fenceShareConditionPinned = true;
+
 // ---------------------------------------------------------------------------
 // GATE 6 - reread-tax hashing determinism and repeat accounting
 // ---------------------------------------------------------------------------
