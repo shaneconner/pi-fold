@@ -386,6 +386,17 @@ async function run() {
     "--thresholds takes max,min with 0 < min < max < 1");
     thresholds = { maxTarget: parts[0], minTarget: parts[1], consolidateAfter: 10, minFoldChars: 8000 };
   }
+  // `--tool-fold-threshold x` runs the pifold arm on the tool-call diet: stale tool
+  // results inside the oldest x share of the projected window clip to their identified
+  // head at each commit, full bytes peek-recoverable (package gate 148).
+  const requestedToolFold = argumentValue("--tool-fold-threshold", null);
+  let toolFoldThreshold = null;
+  if (requestedToolFold !== null) {
+    assertExperiment(arm === "pifold", "--tool-fold-threshold belongs to the pifold arm alone");
+    toolFoldThreshold = Number.parseFloat(requestedToolFold);
+    assertExperiment(Number.isFinite(toolFoldThreshold) && toolFoldThreshold > 0 && toolFoldThreshold < 1,
+      "--tool-fold-threshold takes a share strictly between 0 and 1");
+  }
   // `--fence-share X` moves the nativefence compact point off its matched default.
   const requestedFenceShare = argumentValue("--fence-share", null);
   let fenceShare = null;
@@ -469,6 +480,7 @@ async function run() {
         ...(providerInputBudget === null ? {} : { providerInputBudget }),
         ...(requestedNotice === "off" ? { postFoldNotice: false } : {}),
         ...(thresholds === null ? {} : { thresholds }),
+        ...(toolFoldThreshold === null ? {} : { toolFoldThreshold }),
         ...(fenceShare === null ? {} : { fenceShare }),
         // No brief generator: the deterministic brief carries the opening prose
         // now (package gate 134), and this run measures the no-generator condition

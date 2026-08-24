@@ -919,6 +919,21 @@ assert.throws(() => validateExperimentRunConfig({
 }), /whole or not at all/, "an unknown thresholds field was accepted");
 checks.thresholdsBandConditionPinned = true;
 
+// THE TOOL-CALL DIET CONDITION (Shane 2026-08-24): toolFoldThreshold on the pifold arm
+// alone, a share strictly inside (0, 1), refused by name everywhere else. The runtime
+// revalidates the same invariant at registration (package gate 148); this layer pins
+// what a sealed config may claim to have run under.
+validateExperimentRunConfig({ ...runConfig, arm: "pifold", toolFoldThreshold: 0.5 });
+assert.throws(() => validateExperimentRunConfig({ ...runConfig, toolFoldThreshold: 0.5 }),
+  /belongs to the pifold arm alone/, "a native arm accepted a tool-fold-threshold condition");
+assert.throws(() => validateExperimentRunConfig({ ...runConfig, arm: "nativefence", toolFoldThreshold: 0.5 }),
+  /belongs to the pifold arm alone/, "the fence arm accepted a tool-fold-threshold condition");
+for (const outside of [0, 1, -0.25, 1.5, "0.5", Number.NaN]) {
+  assert.throws(() => validateExperimentRunConfig({ ...runConfig, arm: "pifold", toolFoldThreshold: outside }),
+    /share strictly between 0 and 1/, `toolFoldThreshold ${String(outside)} was accepted`);
+}
+checks.toolFoldThresholdConditionPinned = true;
+
 // THE FENCE POINT (Shane 2026-08-24): --fence-share moves the nativefence compact point
 // off its matched default; the config layer pins the arm rule and the proportion law.
 validateExperimentRunConfig({ ...runConfig, arm: "nativefence", fenceShare: 0.5 });

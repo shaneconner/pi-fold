@@ -2394,6 +2394,12 @@ export const EXPERIMENT_RUN_CONFIG_OPTIONAL_KEYS = Object.freeze([
   // percent premium-tier surcharge); intermediate shares price recall against
   // summarization frequency.
   "fenceShare",
+  // THE TOOL-CALL DIET (Shane 2026-08-24): the runtime's toolFoldThreshold share for
+  // the pifold arm, so a sealed run states in its own config that stale tool results
+  // inside the oldest share of the projected window were clipped to their identified
+  // heads at each commit, full bytes peek-recoverable (package gate 148). The runtime
+  // revalidates at registration; here the config layer pins the arm rule and the range.
+  "toolFoldThreshold",
 ]);
 
 export function validateExperimentRunConfig(value) {
@@ -2439,6 +2445,15 @@ export function validateExperimentRunConfig(value) {
     assertExperiment(value.sessionType !== EXPERIMENT_CLOSED_BOOK_LABEL &&
       armRuntimeConfiguration(value.arm).activeContextEnabled,
     "Run config thresholds condition belongs to the pifold arm alone");
+  }
+  if (value.toolFoldThreshold !== undefined) {
+    assertExperiment(typeof value.toolFoldThreshold === "number" &&
+      Number.isFinite(value.toolFoldThreshold) &&
+      value.toolFoldThreshold > 0 && value.toolFoldThreshold < 1,
+    "Run config toolFoldThreshold must be a share strictly between 0 and 1");
+    assertExperiment(value.sessionType !== EXPERIMENT_CLOSED_BOOK_LABEL &&
+      armRuntimeConfiguration(value.arm).activeContextEnabled,
+    "Run config toolFoldThreshold condition belongs to the pifold arm alone");
   }
   if (value.fenceShare !== undefined) {
     assertExperiment(typeof value.fenceShare === "number" &&

@@ -360,6 +360,9 @@ export function createPiContextExperimentExtension(config) {
             // The band condition: an explicit thresholds object, validated whole by the
             // runtime's own resolveThresholds at registration.
             ...(config.thresholds === undefined ? {} : { thresholds: config.thresholds }),
+            // The tool-call diet: the share point travels verbatim; the runtime's own
+            // registration validation refuses anything outside the open interval.
+            ...(config.toolFoldThreshold === undefined ? {} : { toolFoldThreshold: config.toolFoldThreshold }),
           });
         } finally {
           pi.registerTool = registerTool;
