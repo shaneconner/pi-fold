@@ -13294,12 +13294,94 @@ async function gateInstrumentation() {
  *   134: Opening prose survives deterministic folding
  *   135: Agent notes survive; omission is stated
  */
+/**
+ * A chapter brief identifies every call in its span (2026-08-24, Shane approved the
+ * shape). The count-style composition ("User: No user ask \u00b7 Tools: 3\u00d7bash \u00b7
+ * Assistant: No assistant text in this span") collapsed to one anonymous line on every
+ * residue span of the pull workload: rep 3 of sol-20260823-live committed 188
+ * byte-identical placeholders of that shape. The chapter now indexes itself: each call
+ * named with its arguments and its result's opening line, an errored result marked by
+ * name, the user's ask and every assistant note seated in span order, our own tool
+ * sanitized to "active-context service" so a brief never teaches tool syntax, and what
+ * the cap refuses counted rather than dropped. Fails on the count-style runtime at its
+ * first assertion.
+ */
+async function gateChapterBriefIdentifiesCalls() {
+  const refFor = (index, role) => ({
+    sessionId: "brief-fixture", entryId: `chapter-${index}`, role, sha256: `sha-${index}`,
+  });
+  const span = [
+    { role: "assistant", content: [
+      { type: "toolCall", id: "c1", name: "bash", arguments: { command: "nl -ba lib/easy.c | sed -n '10,40p'" } },
+    ], stopReason: "toolUse" },
+    { role: "toolResult", toolCallId: "c1", toolName: "bash", isError: false,
+      content: [{ type: "text", text: "10  struct Curl_easy *data;\n11  CURLcode result;" }] },
+    { role: "assistant", content: [
+      { type: "text", text: "trace-a-06: lib/curl_sasl.h" },
+      { type: "toolCall", id: "c2", name: "pi_fold_context", arguments: { action: "peek", id: "fold_deadbeef" } },
+    ], stopReason: "toolUse" },
+    { role: "toolResult", toolCallId: "c2", toolName: "pi_fold_context", isError: true,
+      content: [{ type: "text", text: "Unknown active-context fold fold_deadbeef" }] },
+  ];
+  const refs = span.map((message, index) => refFor(index, message.role));
+  const brief = context.deterministicChapterBrief(refs, span, "pi_fold_context");
+  assert(/bash\(\{"command":"nl -ba lib\/easy\.c/.test(brief),
+    `the call is not identified by its arguments: ${brief}`);
+  assert(brief.includes('\u2192 "10 struct Curl_easy *data;'),
+    `the result's opening line is missing: ${brief}`);
+  assert(brief.includes("Noted: trace-a-06: lib/curl_sasl.h"),
+    "the assistant note did not seat");
+  assert(brief.includes("[errored]"), "the errored result is not marked");
+  assert(!brief.toLowerCase().includes("pi_fold_context"),
+    "the brief teaches the fold tool's name");
+  assert(brief.includes("active-context service({"), "the sanitized call head is missing");
+  assert(!brief.includes("No assistant text in this span") && !brief.includes("No user ask"),
+    "the count-style vestige survived");
+
+  // THE CAP COUNTS WHAT IT REFUSES. Enough calls to overflow maxBriefChars: the tail
+  // names how many entries could not seat, and the total respects the one cap.
+  const wide = [];
+  for (let index = 0; index < 40; index += 1) {
+    wide.push({ role: "assistant", content: [
+      { type: "toolCall", id: `w${index}`, name: "bash",
+        arguments: { command: `nl -ba lib/file-${index}.c | sed -n '1,40p' # ${"x".repeat(40)}` } },
+    ], stopReason: "toolUse" });
+    wide.push({ role: "toolResult", toolCallId: `w${index}`, toolName: "bash", isError: false,
+      content: [{ type: "text", text: `line one of result ${index}: ${"y".repeat(120)}` }] });
+  }
+  const wideRefs = wide.map((message, index) => refFor(index + 100, message.role));
+  const wideBrief = context.deterministicChapterBrief(wideRefs, wide, "pi_fold_context");
+  assert(wideBrief.length <= context.ACTIVE_CONTEXT_POLICY.maxBriefChars,
+    `the composed brief broke the one cap: ${wideBrief.length}`);
+  assert(/\d+ more entries in this span$/.test(wideBrief),
+    "the refused entries are not counted");
+  const seated = Number(wideBrief.match(/(\d+) more entries in this span$/)[1]);
+  assert(seated > 0 && seated < 40, "the omitted count is not a genuine partition");
+
+  // A user ask still leads its span.
+  const asked = [
+    { role: "user", content: [{ type: "text", text: "Please audit the DNS cache paths." }] },
+    ...span,
+  ];
+  const askedRefs = asked.map((message, index) => refFor(index + 200, message.role));
+  const askedBrief = context.deterministicChapterBrief(askedRefs, asked, "pi_fold_context");
+  assert(askedBrief.startsWith("User asked: Please audit the DNS cache paths."),
+    `the user ask does not lead: ${askedBrief}`);
+
+  return {
+    residueBriefChars: brief.length,
+    overflowSeated: 40 - seated,
+    overflowOmitted: seated,
+  };
+}
+
 async function gateBriefContract() {
   return {
     stageIdentifiedBriefs: await claim("gateStageIdentifiedBriefs", gateStageIdentifiedBriefs),
     noFoldWithoutABrief: await claim("gateNoFoldWithoutABrief", gateNoFoldWithoutABrief),
     openingProseSurvivesDeterministicFolding: await claim("gateOpeningProseSurvivesDeterministicFolding", gateOpeningProseSurvivesDeterministicFolding),
     agentNotesSurviveConsolidation: await claim("gateAgentNotesSurviveConsolidation", gateAgentNotesSurviveConsolidation),
+    chapterBriefIdentifiesCalls: await claim("gateChapterBriefIdentifiesCalls", gateChapterBriefIdentifiesCalls),
   };
 }
 

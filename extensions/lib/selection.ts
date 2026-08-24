@@ -1073,44 +1073,58 @@ export function deterministicChapterBrief(
   if (refs.length !== messages.length || !refs.length) {
     throw new Error("Deterministic chapter brief requires aligned exact evidence");
   }
-  const firstUser = messages.find((message) => messageRole(message) === "user");
-  const toolCounts = new Map<string, number>();
+  // EVERY ENTRY IDENTIFIED IN SPAN ORDER (Shane 2026-08-24). The count-style brief
+  // ("User: ... \u00b7 Tools: 3\u00d7bash \u00b7 Assistant: No assistant text in this span")
+  // collapsed to the same anonymous line on every residue span of the pull workload:
+  // sol-20260823-live rep 3 committed 188 byte-identical placeholders of that shape and
+  // the agent re-peeked 76 folds 209 times to learn what each one held. The span's own
+  // calls are the index: each call named with its arguments and its result's opening
+  // line, an errored result marked, the user's ask and every assistant note seated in
+  // span order, and what the cap refuses COUNTED rather than dropped (the gate-135 law
+  // carried forward: a value recorded once in an assistant note between two batches must
+  // reach the brief). Cuts run through oneLine, so "..." always means the exact source
+  // continues.
+  const callNames = new Map<string, string>();
+  const pieces: string[] = [];
   for (const message of messages) {
-    if (messageRole(message) !== "assistant") continue;
-    for (const part of denseOwnArrayValues(ownValue(message, "content")) ?? []) {
-      if (ownValue(part, "type") !== "toolCall") continue;
-      const name = ownValue(part, "name");
-      if (typeof name === "string" && name) toolCounts.set(name, (toolCounts.get(name) ?? 0) + 1);
+    const role = messageRole(message);
+    if (role === "user") {
+      const ask = contentText(message);
+      if (ask.trim()) pieces.push(`User asked: ${oneLine(ask, 120)}`);
+    } else if (role === "assistant") {
+      for (const part of denseOwnArrayValues(ownValue(message, "content")) ?? []) {
+        if (ownValue(part, "type") !== "toolCall") continue;
+        const id = ownValue(part, "id");
+        const name = ownValue(part, "name");
+        if (typeof id !== "string" || !id || typeof name !== "string" || !name) continue;
+        let args = "{}";
+        try {
+          args = JSON.stringify(ownValue(part, "arguments") ?? {}) ?? "{}";
+        } catch {
+          args = "{unserializable}";
+        }
+        callNames.set(id, `${name}(${oneLine(args, 80)})`);
+      }
+      const note = assistantNoteText(message);
+      if (note) pieces.push(`Noted: ${boundedSubject(note, CHAPTER_NOTE_CHARS)}`);
+    } else if (role === "toolResult") {
+      const id = ownValue(message, "toolCallId");
+      const name = ownValue(message, "toolName");
+      const head = (typeof id === "string" ? callNames.get(id) : undefined) ??
+        (typeof name === "string" && name ? `${name}(...)` : "tool(...)");
+      const errored = ownValue(message, "isError") === true ? " [errored]" : "";
+      pieces.push(`${head}${errored} \u2192 "${oneLine(contentText(message), 90)}"`);
     }
   }
-  // EVERY assistant note in the span, not the first line of the first one
-  // (Shane 2026-08-14). A chapter is the first fold that hides its span, and a
-  // value the agent recorded once on a later turn died with the old single
-  // line: sol-20260814-traps rep 2 lost trace-a-02 and trace-d-05 to exactly
-  // that shape, an assistant message between two tool batches whose words
-  // reached zero briefs. Each note is the message's leading paragraph, capped
-  // per note, seated whole in span order until the brief's own bound refuses
-  // the next one, with the count of what did not seat stated rather than cut.
-  const notes = messages.flatMap((message) => {
-    if (messageRole(message) !== "assistant") return [];
-    const note = assistantNoteText(message);
-    return note ? [boundedSubject(note, CHAPTER_NOTE_CHARS)] : [];
-  });
-  const ask = oneLine(firstUser ? contentText(firstUser) : "No user ask in this span", 90);
-  const tools = oneLine([...toolCounts.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([name, count]) => `${count}×${name}`)
-    .join(" ") || "no tools", 500);
-  const separator = " | ";
+  const separator = " \u00b7 ";
   const compose = (kept: number): string => {
-    const omitted = notes.length - kept;
-    const shown = kept ? notes.slice(0, kept).join(separator)
-      : (notes.length ? "" : "No assistant text in this span");
-    const tail = omitted ? `${kept ? separator : ""}${omitted} more notes in this span` : "";
-    return `User: ${ask} · Tools: ${tools} · Assistant: ${shown}${tail}`;
+    const omitted = pieces.length - kept;
+    const shown = pieces.slice(0, kept).join(separator);
+    const tail = omitted ? `${kept ? separator : ""}${omitted} more entries in this span` : "";
+    return `${shown}${tail}`;
   };
-  let composed = compose(notes.length);
-  for (let kept = notes.length; kept > 0 && composed.length > ACTIVE_CONTEXT_POLICY.maxBriefChars; kept -= 1) {
+  let composed = compose(pieces.length);
+  for (let kept = pieces.length; kept > 0 && composed.length > ACTIVE_CONTEXT_POLICY.maxBriefChars; kept -= 1) {
     composed = compose(kept - 1);
   }
   const escapeName = (name: string) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
