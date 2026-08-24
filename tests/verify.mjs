@@ -276,11 +276,11 @@ async function commitCandidate(
   state,
   snapshot,
   candidate,
-  { brief, generation = 1, now = 1 } = {},
+  { brief, briefProvenance, generation = 1, now = 1 } = {},
 ) {
   assert(candidate, "Expected an eligible fold candidate");
   const prepared = await context.prepareFold({
-    candidate, snapshot, state, generation, brief, now: () => now,
+    candidate, snapshot, state, generation, brief, briefProvenance, now: () => now,
   });
   assert.equal(context.preparedFoldError({ prepared, snapshot, state, generation }), null);
   return {
@@ -1113,7 +1113,7 @@ async function gateFoldLattice() {
     candidate, snapshot, state: empty, generation: 1,
     brief: `Real facts about the span. ${"padding ".repeat(400)}`,
   }), (error) => {
-    assert(new RegExp(`limit is ${context.ACTIVE_CONTEXT_POLICY.maxBriefChars}`).test(error.message),
+    assert(new RegExp(`limit is ${context.ACTIVE_CONTEXT_POLICY.agentBriefReserve}`).test(error.message),
       `An over-long brief was refused with ${JSON.stringify(error.message)}`);
     assert(/Cut detail, not subjects/.test(error.message),
       "The over-long refusal does not say how to shorten it");
@@ -1880,6 +1880,7 @@ async function gateConsolidationCountingRule() {
       assert.equal(candidate.parts.filter((part) => part.kind === "fold").length, deepWidth);
       deepState = (await commitCandidate(deepState, deepSnapshot, candidate, {
         brief: context.deterministicConsolidationBrief(candidate, deepState),
+        briefProvenance: "deterministic",
       })).state;
     }
   }
@@ -1940,7 +1941,8 @@ async function gateConsolidationCountingRule() {
     snapshot: wide.snapshot,
     state: wide.state,
     generation: 1,
-    brief: `A factual but deliberately non-shrinking consolidation ${"x".repeat(1_100)}`,
+    brief: `A factual but deliberately non-shrinking consolidation ${"x".repeat(1_900)}`,
+    briefProvenance: "deterministic",
   }), /materially reduce/);
   return {
     consolidateAfter: width,
@@ -5405,18 +5407,21 @@ async function gateBiteSizedFolds() {
   assert(!folded.details.corrections.some((item) => /turn/.test(item.reason)),
     "The span was clamped back to a turn limit");
   const wholeCommitted = await measureAndCommit(manual, 86_000, 100_000, "whole-commit");
-  const agentFold = wholeCommitted.folds.find((fold) => fold.brief === agentBrief);
-  assert(agentFold, "the agent's fold did not commit under its own brief");
+  const agentFold = wholeCommitted.folds.find((fold) => fold.brief.endsWith(` · Agent: ${agentBrief}`));
+  assert(agentFold, "the agent's fold did not commit carrying its own words");
+  assert.equal(agentFold.provenance.kind, "augmented",
+    "an agent-briefed fold does not record augmented provenance");
   assert(agentFold.sourceChars > context.MAX_FOLD_SPAN_CHARS,
     `the committed agent fold is ${agentFold.sourceChars} chars, so it was bite-sized anyway`);
-  assert.equal(wholeCommitted.folds.filter((fold) => fold.brief === agentBrief).length, 1,
+  assert.equal(wholeCommitted.folds.filter((fold) => fold.brief.endsWith(` · Agent: ${agentBrief}`)).length, 1,
     "one brief was handed to several folds, which is what the split used to do");
 
   // AND IT IS STILL NAVIGABLE, which is the property rep 6 actually lost. A default peek
   // of a large fold returns a bounded window and SAYS it is bounded rather than pretending
   // to be complete, so reading one back is cheap however large it is.
   const wholeState = materialized(manual);
-  const committedId = wholeState.folds.find((fold) => fold.brief === agentBrief).id;
+  const committedId = wholeState.folds.find((fold) =>
+    fold.brief.endsWith(` · Agent: ${agentBrief}`)).id;
   const widePeek = await toolCall(manual, { action: "peek", id: committedId });
   assert.equal(widePeek.details.truncated, true,
     "a peek of an oversized fold claims to be complete");
@@ -7543,7 +7548,7 @@ async function gateUnifiedSpanLaw() {
     stateEntry(forest.sessionId, seedState, "nesting-state", forest.entries.at(-1).id),
   ] });
   await startRuntime(runtime);
-  await measureAndCommit(runtime, 88_000, 100_000, "nesting-commit");
+  await measureAndCommit(runtime, 86_000, 100_000, "nesting-commit");
   const state = materialized(runtime);
   const parent = state.folds.find((fold) => fold.kind === "consolidation" && fold.parentId === null);
   assert(parent, JSON.stringify(state.folds.map((fold) => [fold.id, fold.kind, fold.parentId])));
@@ -7568,11 +7573,22 @@ async function gateUnifiedSpanLaw() {
   const revealedText = json.stableStringify(revealed);
   const child = state.folds.find((fold) => fold.id === childIds[0]);
   assert(revealedText.includes(child.brief), "The revealed level is not the child's placeholder");
+  // THE LAW IS BYTE MASS, NOT CONTAINMENT, on this fixture: its message bodies are
+  // uniform padding, so any deep-offset probe also matches inside the bounded opening a
+  // head may legitimately quote (the ask at 120, a note at 160, a result opening at
+  // 90), and a containment check can only measure the quote. What expanding one level
+  // must NOT do is swallow the grandchildren's bytes: the revealed rendering stays
+  // placeholder-sized while the raw mass stays behind the children's own folds.
+  const grandchildBytes = childIds.reduce((total, id) => total +
+    context.flattenFoldRefs(state.folds.find((fold) => fold.id === id), state)
+      .reduce((sum, ref) => sum +
+        String(context.contentText(context.exactMapped(snapshot, ref).message)).length, 0), 0);
+  assert(grandchildBytes > 4 * revealedText.length,
+    "Expanding the parent leaked the grandchildren's byte mass: " +
+      `${revealedText.length} revealed against ${grandchildBytes} raw`);
   const grandchildText = String(context.contentText(
     context.exactMapped(snapshot, context.flattenFoldRefs(child, state)[0]).message,
-  )).slice(0, 64);
-  assert.equal(revealedText.includes(grandchildText), false,
-    "Expanding the parent leaked the grandchild's exact bytes");
+  )).slice(220, 284);
 
   // Peek is the OTHER half of the contract, and it serves the same ONE level: the fold's
   // own stored span. A parent's span is its child placeholders, so peeking it can carry
@@ -7585,8 +7601,9 @@ async function gateUnifiedSpanLaw() {
     "Peek of a nested parent named no child to descend into");
   assert(peeked.details.source.includes('"placeholder":"fold"'),
     "Peek of a nested parent did not keep its children placeheld");
-  assert.equal(peekedText.includes(grandchildText), false,
-    "Peek of a nested parent leaked bytes from under its children");
+  assert(grandchildBytes > 4 * peekedText.length,
+    "Peek of a nested parent leaked bytes from under its children: " +
+      `${peekedText.length} peeked against ${grandchildBytes} raw`);
   // The child id, read the same way. Straight through the reader rather than the tool,
   // because this fixture sits at the fence on purpose and admission control is its own
   // law: what is under test here is the depth the read serves, not the room it needs.
@@ -8575,8 +8592,11 @@ async function gateLadderFillsWhatTheAgentLeft() {
   assert(carried, `The briefed fold did not apply: ${JSON.stringify(curatedEpoch.applied)}`);
   const carriedFold = materialized(curated).folds.find((fold) => fold.id === briefedCut.id);
   assert(carriedFold, "The briefed fold left the forest");
-  assert.equal(carriedFold.brief, written, "The commit overwrote the agent's own words");
-  assert.equal(carriedFold.provenance.kind, "supplied",
+  assert(carriedFold.brief.endsWith(` · Agent: ${written}`),
+    `The commit overwrote the agent's own words: ${carriedFold.brief.slice(-200)}`);
+  assert(carriedFold.brief.length > written.length + 12,
+    "The composed brief carries no deterministic head beside the agent's words");
+  assert.equal(carriedFold.provenance.kind, "augmented",
     "The agent's brief landed with someone else's provenance");
   // And the commit fills AROUND it rather than standing down at the one span it named.
   assert(curatedEpoch.applied.length >= 2,
@@ -9966,7 +9986,7 @@ async function gateParentBriefCoversEveryChild() {
         !brief.includes(round.markers.get(part.foldId)) ? [part.foldId] : []);
       assert.deepEqual(missing, [],
         `Rung ${rung} closed ${missing.length} children: their parent's brief never names them`);
-      next = (await commitCandidate(next, deepSnapshot, candidate, { brief })).state;
+      next = (await commitCandidate(next, deepSnapshot, candidate, { brief, briefProvenance: "deterministic" })).state;
     }
     deepState = next;
     rungs.push(owed.length);
@@ -10001,6 +10021,7 @@ async function gateParentBriefCoversEveryChild() {
   assert(firstGroup, "The uneven fixture owed no first group");
   const unevenState = (await commitCandidate(uneven.state, unevenSnapshot, firstGroup, {
     brief: context.deterministicConsolidationBrief(firstGroup, uneven.state),
+    briefProvenance: "deterministic",
   })).state;
   const [wideGroup] = context.selectAutomaticConsolidations(unevenSnapshot, unevenState);
   assert(wideGroup, "The uneven fixture owed no second group");
@@ -10087,6 +10108,7 @@ async function gateParentBriefCannotInheritToolName() {
 
   const committed = await commitCandidate(upgraded, forest.snapshot, candidate, {
     brief: parentBrief,
+    briefProvenance: "deterministic",
     now: 154,
   });
   assert.equal(committed.state.folds.length, upgraded.folds.length + 1,
@@ -12845,8 +12867,9 @@ async function gateFoldEditorWithdrawPinBrief() {
   while (view.staging && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
   await settle();
 
-  // THE TYPED BRIEF IS THE MARK'S BRIEF, provenance supplied, judged by the same
-  // contract: durable state carries both.
+  // THE TYPED BRIEF RIDES THE MARK'S BRIEF: the mark path prepares immediately, so the
+  // stored brief is the augmented composition with the typed words seated after the
+  // deterministic head, and the provenance says so. Durable state carries both.
   const newestState = () => runtime.branch.filter((entry) =>
     entry.customType === context.ACTIVE_CONTEXT_STATE_ENTRY).at(-1).data;
   const userMark = (newestState().pendingMarks ?? []).find((mark) =>
@@ -12854,8 +12877,8 @@ async function gateFoldEditorWithdrawPinBrief() {
   assert(userMark, "the briefed user mark never reached durable state");
   assert(userMark.brief.includes("verdict can cite it verbatim"),
     `the staged brief is not the typed one: ${userMark.brief}`);
-  assert(userMark.briefProvenance.kind === "supplied",
-    `a typed brief did not record supplied provenance: ${JSON.stringify(userMark.briefProvenance)}`);
+  assert(userMark.briefProvenance.kind === "augmented",
+    `a typed brief did not record augmented provenance: ${JSON.stringify(userMark.briefProvenance)}`);
   assert(/PROPOSED \(user\)/.test(view.render(140).join("\n")),
     "the briefed mark does not render as proposed");
 
@@ -13375,6 +13398,83 @@ async function gateChapterBriefIdentifiesCalls() {
   };
 }
 
+/**
+ * A SUPPLIED BRIEF AUGMENTS THE HEAD, NEVER REPLACES IT (2026-08-24). rep 7 of
+ * sol-20260823-live: supplied topic-summary briefs REPLACED the fact-carrying
+ * deterministic head, the run's own briefs deleted the identification, and 74 of 95
+ * peeks recovered values the briefs dropped, at ~$38 against the deterministic twin's
+ * $22.56. The agent's words are judged against their own reserve so the refusal names
+ * the budget the agent actually has, the head keeps the remainder of the one policy
+ * cap, and ONLY the agent's own words take the composing path: a deterministic brief
+ * arriving through the same door IS the head (the first live application composed the
+ * head with itself), and a re-prepared augmented brief is already composed.
+ */
+async function gateSuppliedBriefAugmentsTheHead() {
+  const built = makeFixture({
+    turns: 9, tools: false, chapterChars: 3_500,
+    thresholds: TINY_FOLD_FLOOR, contextWindow: 100_000,
+  });
+  const empty = context.emptyActiveContextState(built.sessionId);
+  const candidate = context.manualFoldCandidate(
+    built.snapshot, empty, [built.turnEntries[0][0], built.turnEntries[0].at(-1)]);
+  const clause = "The DNS cache audit verdict lives behind this fold.";
+  const seam = " · Agent: ";
+
+  // (a) The agent's words commit composed, after the head, provenance augmented.
+  const composed = await context.prepareFold({
+    candidate, snapshot: built.snapshot, state: empty, generation: 1, brief: clause,
+  });
+  assert(composed.fold.brief.endsWith(`${seam}${clause}`),
+    `the agent's words do not close the composed brief: ${composed.fold.brief.slice(-120)}`);
+  assert(composed.fold.brief.length > clause.length + seam.length + 10,
+    "no deterministic head is seated before the agent's words");
+  assert.equal(composed.fold.provenance.kind, "augmented");
+  assert(composed.fold.brief.length <= context.ACTIVE_CONTEXT_POLICY.maxBriefChars,
+    "the composition broke the one policy cap");
+
+  // (b) A deterministic brief through the same door IS the head: byte-identical, no
+  // seam, no self-composition. This is the first live application's defect, pinned.
+  const detBrief = context.deterministicChapterCandidateBrief(built.snapshot, candidate);
+  const passed = await context.prepareFold({
+    candidate, snapshot: built.snapshot, state: empty, generation: 1,
+    brief: detBrief, briefProvenance: "deterministic",
+  });
+  assert.equal(passed.fold.brief, detBrief,
+    "a deterministic brief was recomposed instead of passing through");
+  assert.equal(passed.fold.provenance.kind, "deterministic");
+  assert(!passed.fold.brief.includes(seam), "the head composed with itself");
+
+  // (c) The refusal names the agent's own reserve, and the corrected retry lands.
+  const over = `Real facts about the audited span. ${"detail ".repeat(120)}`;
+  await assert.rejects(() => context.prepareFold({
+    candidate, snapshot: built.snapshot, state: empty, generation: 1, brief: over,
+  }), (error) => {
+    assert(new RegExp(`limit is ${context.ACTIVE_CONTEXT_POLICY.agentBriefReserve}`)
+      .test(error.message), `the refusal does not name the reserve: ${error.message}`);
+    return true;
+  });
+  const corrected = await context.prepareFold({
+    candidate, snapshot: built.snapshot, state: empty, generation: 1, brief: clause,
+  });
+  assert.equal(corrected.fold.provenance.kind, "augmented",
+    "the corrected retry was not accepted composed");
+
+  // (d) A re-prepared augmented brief is already composed: unchanged, one seam.
+  const recut = await context.prepareFold({
+    candidate, snapshot: built.snapshot, state: empty, generation: 1,
+    brief: composed.fold.brief, briefProvenance: { kind: "augmented" },
+  });
+  assert.equal(recut.fold.brief, composed.fold.brief,
+    "a re-cut recomposed a brief that was already composed");
+  assert.equal(recut.fold.brief.split(seam).length, 2, "the re-cut doubled the seam");
+  return {
+    composedCarriesHeadAndClause: true,
+    deterministicPassesThrough: true,
+    refusalNamesReserve: context.ACTIVE_CONTEXT_POLICY.agentBriefReserve,
+    reCutKeepsOneSeam: true,
+  };
+}
+
 async function gateBriefContract() {
   return {
     stageIdentifiedBriefs: await claim("gateStageIdentifiedBriefs", gateStageIdentifiedBriefs),
@@ -13382,6 +13482,7 @@ async function gateBriefContract() {
     openingProseSurvivesDeterministicFolding: await claim("gateOpeningProseSurvivesDeterministicFolding", gateOpeningProseSurvivesDeterministicFolding),
     agentNotesSurviveConsolidation: await claim("gateAgentNotesSurviveConsolidation", gateAgentNotesSurviveConsolidation),
     chapterBriefIdentifiesCalls: await claim("gateChapterBriefIdentifiesCalls", gateChapterBriefIdentifiesCalls),
+    suppliedBriefAugmentsTheHead: await claim("gateSuppliedBriefAugmentsTheHead", gateSuppliedBriefAugmentsTheHead),
   };
 }
 

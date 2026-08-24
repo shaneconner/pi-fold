@@ -72,6 +72,7 @@ import {
   unpinnedStaleFolds,
   deterministicChapterCandidateBrief,
   deterministicConsolidationBrief,
+  oneLine,
   NO_FOLD_KINDS,
   partsForRange,
   resultCall,
@@ -420,13 +421,43 @@ export async function prepareFold(input: {
   let brief: string;
   let provenance: BriefProvenance;
   if (input.brief !== undefined) {
-    const complaint = briefContractComplaint(
-      input.brief.trim(), snapshot.policy.maxBriefChars, snapshot.toolName);
-    if (complaint !== null) throw new Error(`Supplied brief rejected. ${complaint}`);
-    brief = input.brief.trim();
-    provenance = typeof input.briefProvenance === "object"
-      ? clone(input.briefProvenance)
-      : { kind: input.briefProvenance ?? "supplied" };
+    const declaredKind = typeof input.briefProvenance === "object"
+      ? input.briefProvenance.kind
+      : input.briefProvenance ?? "supplied";
+    if (declaredKind === "supplied") {
+      // A SUPPLIED BRIEF AUGMENTS THE HEAD, NEVER REPLACES IT (rep 7 of
+      // sol-20260823-live: replacement deleted the fact-carrying identification and 74
+      // of 95 peeks recovered values the run's own briefs dropped). The agent's clause
+      // is judged against its own reserve so the refusal names the budget the agent
+      // actually has, and the deterministic head keeps the remainder of the one policy
+      // cap. Only the agent's OWN words take this path: a deterministic brief arriving
+      // through the same door IS the head, and a re-prepared augmented brief is already
+      // composed, so each passes through under the whole-brief cap instead.
+      const complaint = briefContractComplaint(
+        input.brief.trim(), snapshot.policy.agentBriefReserve, snapshot.toolName);
+      if (complaint !== null) throw new Error(`Supplied brief rejected. ${complaint}`);
+      const clause = input.brief.trim();
+      const head = candidate.kind === "consolidation"
+        ? deterministicConsolidationBrief(candidate, state, snapshot.toolName, snapshot)
+        : deterministicChapterCandidateBrief(snapshot, candidate);
+      if (head) {
+        const seam = " · Agent: ";
+        const headRoom = Math.max(0, snapshot.policy.maxBriefChars - seam.length - clause.length);
+        brief = `${oneLine(head, headRoom)}${seam}${clause}`;
+        provenance = { kind: "augmented" };
+      } else {
+        brief = clause;
+        provenance = { kind: "supplied" };
+      }
+    } else {
+      const complaint = briefContractComplaint(
+        input.brief.trim(), snapshot.policy.maxBriefChars, snapshot.toolName);
+      if (complaint !== null) throw new Error(`Supplied brief rejected. ${complaint}`);
+      brief = input.brief.trim();
+      provenance = typeof input.briefProvenance === "object"
+        ? clone(input.briefProvenance)
+        : { kind: declaredKind } as BriefProvenance;
+    }
   } else {
     brief = candidate.kind === "consolidation"
       ? deterministicConsolidationBrief(candidate, state, snapshot.toolName, snapshot)

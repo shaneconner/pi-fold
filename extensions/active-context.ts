@@ -118,6 +118,7 @@ import type {
   ActiveContextState,
   ActiveContextThresholds,
   ActiveContextToolAction,
+  BriefProvenance,
   FoldCandidate,
   FoldKind,
   FoldRecordEntry,
@@ -1638,7 +1639,8 @@ export function registerActiveContext(pi: any, options: {
     if (!postFoldNotice) return projected;
     if (!persistence.state) return projected;
     const held = pendingMarks(persistence.state);
-    const unbriefed = held.filter((mark) => mark.briefProvenance?.kind !== "supplied");
+    const unbriefed = held.filter((mark) =>
+      mark.briefProvenance?.kind !== "supplied" && mark.briefProvenance?.kind !== "augmented");
     // BATCHED, AND APPENDED ONCE. A notice per cut is noise, and noise is how guidance
     // gets ignored; the frontier cuts often and this speaks only when a batch has built
     // up. `carrierAdmitted` is what makes it an APPEND rather than a rewrite: once the
@@ -2086,6 +2088,7 @@ export function registerActiveContext(pi: any, options: {
     snapshot: ActiveContextSnapshot;
     candidate: FoldCandidate;
     brief?: string;
+    briefProvenance?: "supplied" | "deterministic" | BriefProvenance;
     ctx: any;
     signal?: AbortSignal;
     maximumSourceChars?: number;
@@ -2103,6 +2106,7 @@ export function registerActiveContext(pi: any, options: {
       state: baseState,
       generation: generationAtStart,
       brief: input.brief,
+      briefProvenance: input.briefProvenance,
       ctx: input.ctx,
       signal: input.signal,
     });
@@ -3398,7 +3402,7 @@ export function registerActiveContext(pi: any, options: {
         }
         const suppliedComplaint = item.brief === undefined
           ? null
-          : briefContractComplaint(item.brief.trim(), snapshot.policy.maxBriefChars, snapshot.toolName);
+          : briefContractComplaint(item.brief.trim(), snapshot.policy.agentBriefReserve, snapshot.toolName);
         if (suppliedComplaint !== null) {
           marks.push({
             id: foldIdFor(candidate.kind, candidate.parts),
@@ -3594,7 +3598,8 @@ export function registerActiveContext(pi: any, options: {
             id: mark.id,
             kind: mark.kind,
             tokens: estimatedTokens(markFreedBytes(snapshot, persistence.state!, mark)),
-            briefed: mark.briefProvenance?.kind === "supplied",
+            briefed: mark.briefProvenance?.kind === "supplied" ||
+              mark.briefProvenance?.kind === "augmented",
             brief: mark.brief ?? null,
             briefProvenance: mark.briefProvenance ? clone(mark.briefProvenance) : null,
           })),
@@ -3700,7 +3705,12 @@ export function registerActiveContext(pi: any, options: {
         for (const part of [recut]) {
           const durable = persistence.persistedFoldRecords.get(foldIdFor(part.kind, part.parts));
           const { preparedFold, nextState } = await prepareAndCommitExplicit({
-            snapshot, candidate: part, brief: durable ? durable.fold.brief : supplied, ctx, signal,
+            // A re-cut carries the durable fold's OWN brief and provenance: those words
+            // were validated when they were first accepted, and re-judging them as a
+            // fresh agent submission would refuse a deterministic or composed brief
+            // against the agent's reserve.
+            snapshot, candidate: part, brief: durable ? durable.fold.brief : supplied,
+            briefProvenance: durable ? durable.fold.provenance : undefined, ctx, signal,
           });
           persistence.state = nextState;
           if (durable && supplied) correctedBriefs[preparedFold.id] = supplied;
@@ -3900,7 +3910,7 @@ export function registerActiveContext(pi: any, options: {
         );
       }
       const text = String(params.brief ?? "").trim();
-      const complaint = briefContractComplaint(text, snapshot.policy.maxBriefChars, snapshot.toolName);
+      const complaint = briefContractComplaint(text, snapshot.policy.agentBriefReserve, snapshot.toolName);
       if (complaint !== null) throw new Error(`Supplied brief rejected. ${complaint}`);
       const nextState = {
         ...persistence.state!,
@@ -3926,7 +3936,8 @@ export function registerActiveContext(pi: any, options: {
         durableRevision: persistence.state!.revision,
         pendingMarks: accounting.pending,
         unbriefed: pendingMarks(persistence.state!)
-          .filter((mark) => mark.briefProvenance?.kind !== "supplied").map((mark) => mark.id),
+          .filter((mark) => mark.briefProvenance?.kind !== "supplied" &&
+            mark.briefProvenance?.kind !== "augmented").map((mark) => mark.id),
         unmarkedSpans: remainder.spans,
         unmarkedTokens: remainder.tokens,
         activation: "durable immediately, and it costs your window nothing: this fold is " +
@@ -4301,7 +4312,7 @@ export function registerActiveContext(pi: any, options: {
     label: toolLabel,
     allowedActions: allowedToolActions,
     fullSurface: true,
-    maxBriefChars: ACTIVE_CONTEXT_POLICY.maxBriefChars,
+    maxBriefChars: ACTIVE_CONTEXT_POLICY.agentBriefReserve,
     statusDetails: ["fold_candidates", "tree", "folds", "objects"],
     minPeekSliceBytes: PEEK_MIN_SLICE_BYTES,
     defaultPeekBytes: PEEK_DEFAULT_MAX_BYTES,

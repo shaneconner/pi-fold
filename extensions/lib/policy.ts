@@ -335,6 +335,11 @@ export const ACTIVE_CONTEXT_POLICY = Object.freeze({
   // was `maxChapterChars` 128,000 and that constant also claimed to cap a chapter.
   maxSourceChars: 200_000,
   maxBriefChars: 2_000,
+  // The agent's share of maxBriefChars when a supplied brief augments the deterministic
+  // head (sol-20260823-live rep 7: supplied briefs REPLACED the fact-carrying head and
+  // 74 of 95 peeks recovered values the run's own briefs dropped). The head keeps the
+  // remainder, so identification can never be displaced by a long agent clause.
+  agentBriefReserve: 600,
   orientationMessages: 2,
   maxOrientationChars: 12_000,
 });
@@ -344,6 +349,7 @@ export type FoldPart = { kind: "raw"; ref: EvidenceRef } | { kind: "fold"; foldI
 export type BriefProvenance =
   | { kind: "supplied" }
   | { kind: "deterministic" }
+  | { kind: "augmented" }
   | {
       kind: "model" | "luna";
       provider: string;

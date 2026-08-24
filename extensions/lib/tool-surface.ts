@@ -62,9 +62,10 @@ export function buildActiveContextTool(input: {
           type: "string",
           minLength: 1,
           maxLength: input.maxBriefChars,
-          description: "Brief only: what this pending fold covers and what you will want " +
-            `back from it, at most ${input.maxBriefChars} characters. Free to write, ` +
-            "because the fold it names is not in your window yet.",
+          description: "Brief only: what you will want back from this pending fold that " +
+            "its automatic brief cannot know. Your sentence is kept BESIDE the automatic " +
+            `brief, never instead of it, at most ${input.maxBriefChars} characters. Free ` +
+            "to write, because the fold it names is not in your window yet.",
         },
         offset: { type: "integer", minimum: 0 },
         ephemeral: {

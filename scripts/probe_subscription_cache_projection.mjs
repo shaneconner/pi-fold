@@ -201,6 +201,7 @@ async function branchLane(identity, modules) {
     state: emptyState,
     generation: 1,
     brief: "cache-topology-target.txt recorded exact target chronology for the projection probe.",
+    briefProvenance: "deterministic",
     now: () => 1,
   });
   const foldedState = activeContext.commitPreparedFold({

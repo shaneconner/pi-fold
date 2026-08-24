@@ -167,7 +167,8 @@ export function parseLeases(value: unknown, foldIds?: ReadonlySet<string>): Reco
 
 export function validProvenance(value: unknown): value is BriefProvenance {
   if (exactRecord(value, ["kind"]) &&
-      (ownValue(value, "kind") === "supplied" || ownValue(value, "kind") === "deterministic")) return true;
+      (ownValue(value, "kind") === "supplied" || ownValue(value, "kind") === "deterministic" ||
+       ownValue(value, "kind") === "augmented")) return true;
   const hasDigest = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "launchContractDigest"));
   if (!exactRecord(value, ["kind", "provider", "model", "effort", ...(hasDigest ? ["launchContractDigest"] : [])]) ||
