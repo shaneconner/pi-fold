@@ -897,6 +897,28 @@ assert.throws(() => validateExperimentRunConfig({ ...runConfig, arm: "nativefenc
 checks.runConfigPinsCheckoutAndModelTriple = true;
 checks.postFoldNoticeConditionPinned = true;
 
+// THE BAND CONDITION (Shane 2026-08-24): an explicit thresholds object for the pifold
+// arm, set whole or not at all, born from the commit-rewrite finding (42-46 percent of
+// pifold's uncached input is the post-commit prefix rewrite, sized by minTarget). The
+// object travels the run config to registerActiveContext, whose own resolveThresholds
+// revalidates it; here the config layer pins the arm rule and the whole-object shape.
+const bandFixture = { maxTarget: 0.8, minTarget: 0.2, consolidateAfter: 10, minFoldChars: 8000 };
+validateExperimentRunConfig({ ...runConfig, arm: "pifold", thresholds: bandFixture });
+assert.throws(() => validateExperimentRunConfig({ ...runConfig, thresholds: bandFixture }),
+  /belongs to the pifold arm alone/, "a native arm accepted a thresholds condition");
+assert.throws(() => validateExperimentRunConfig({ ...runConfig, arm: "nativefence", thresholds: bandFixture }),
+  /belongs to the pifold arm alone/, "the fence arm accepted a thresholds condition");
+assert.throws(() => validateExperimentRunConfig({
+  ...runConfig, arm: "pifold", thresholds: { maxTarget: 0.8, minTarget: 0.2 },
+}), /whole or not at all/, "a partial thresholds object was accepted");
+assert.throws(() => validateExperimentRunConfig({
+  ...runConfig, arm: "pifold", thresholds: { ...bandFixture, minTarget: 0.9 },
+}), /0 < minTarget < maxTarget < 1/, "an inverted band was accepted");
+assert.throws(() => validateExperimentRunConfig({
+  ...runConfig, arm: "pifold", thresholds: { ...bandFixture, extra: 1 },
+}), /whole or not at all/, "an unknown thresholds field was accepted");
+checks.thresholdsBandConditionPinned = true;
+
 // ---------------------------------------------------------------------------
 // GATE 6 - reread-tax hashing determinism and repeat accounting
 // ---------------------------------------------------------------------------

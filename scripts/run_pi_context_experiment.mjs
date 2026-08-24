@@ -374,6 +374,18 @@ async function run() {
     "Experiment run accepts --post-fold-notice off, or nothing at all");
   assertExperiment(requestedNotice === null || arm === "pifold",
     "--post-fold-notice off belongs to the pifold arm alone");
+  // `--thresholds max,min` runs the pifold arm under an explicit band; the two counts
+  // stay at their shipped defaults and the sealed config carries the object whole.
+  const requestedThresholds = argumentValue("--thresholds", null);
+  let thresholds = null;
+  if (requestedThresholds !== null) {
+    assertExperiment(arm === "pifold", "--thresholds belongs to the pifold arm alone");
+    const parts = requestedThresholds.split(",").map((part) => Number.parseFloat(part.trim()));
+    assertExperiment(parts.length === 2 && parts.every((part) => Number.isFinite(part)) &&
+      parts[1] > 0 && parts[0] < 1 && parts[1] < parts[0],
+    "--thresholds takes max,min with 0 < min < max < 1");
+    thresholds = { maxTarget: parts[0], minTarget: parts[1], consolidateAfter: 10, minFoldChars: 8000 };
+  }
   const providerInputBudget = requestedBudget === "none"
     ? null
     : EXPERIMENT_PROVIDER_INPUT_BUDGETS[`${modelProvider}/${modelId}`] ?? null;
@@ -447,6 +459,7 @@ async function run() {
       : {
         ...(providerInputBudget === null ? {} : { providerInputBudget }),
         ...(requestedNotice === "off" ? { postFoldNotice: false } : {}),
+        ...(thresholds === null ? {} : { thresholds }),
         // No brief generator: the deterministic brief carries the opening prose
         // now (package gate 134), and this run measures the no-generator condition
         // the reviews recommend making permanent. See EXPERIMENT_BRIEF_GENERATOR's

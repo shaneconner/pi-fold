@@ -24,6 +24,7 @@ MODEL_ID=gpt-5.6-sol
 EFFORT=xhigh
 # "off" silences the pifold arm's post-fold notice: the deterministic-brief condition.
 NOTICE_ARGS=
+THRESHOLD_ARGS=
 # Basis, not a dial: "none" declares no serving budget, which is what lets native
 # drift past the provider's long-context tier the way a deployment actually does.
 # See run_pi_context_experiment.mjs for what each basis measures.
@@ -45,7 +46,10 @@ while [ "$#" -gt 0 ]; do
     --post-fold-notice)
       case "$2" in off) NOTICE_ARGS="--post-fold-notice off";; *) echo "--post-fold-notice accepts only: off" >&2; exit 2;; esac
       shift 2;;
-    *) echo "usage: $0 --campaign <id> --mode smoke|full [--rep N] [--arms a,b,c] [--repo r] [--provider-input-budget none] [--post-fold-notice off]" >&2; exit 2;;
+    --thresholds)
+      case "$2" in *,*) THRESHOLD_ARGS="--thresholds $2";; *) echo "--thresholds takes max,min" >&2; exit 2;; esac
+      shift 2;;
+    *) echo "usage: $0 --campaign <id> --mode smoke|full [--rep N] [--arms a,b,c] [--repo r] [--provider-input-budget none] [--post-fold-notice off] [--thresholds max,min]" >&2; exit 2;;
   esac
 done
 [ -n "$CAMPAIGN" ] || { echo "--campaign is required" >&2; exit 2; }
@@ -143,7 +147,7 @@ for ARM in $ARMS; do
       $ARM_ARGS \
       --repetition "$REP" --ordinal "$REP" \
       --model-provider "$MODEL_PROVIDER" --model-id "$MODEL_ID" --effort "$EFFORT" \
-      $BUDGET_ARGS $NOTICE_ARGS >/dev/null
+      $BUDGET_ARGS $NOTICE_ARGS $THRESHOLD_ARGS >/dev/null
   UNITS="$UNITS $UNIT"
   IFS=,
 done

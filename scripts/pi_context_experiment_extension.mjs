@@ -312,6 +312,9 @@ export function createPiContextExperimentExtension(config) {
             // The deterministic condition: false silences the brief invitation, so
             // the arm measures the runtime's own words against the same plan.
             ...(config.postFoldNotice === undefined ? {} : { postFoldNotice: config.postFoldNotice }),
+            // The band condition: an explicit thresholds object, validated whole by the
+            // runtime's own resolveThresholds at registration.
+            ...(config.thresholds === undefined ? {} : { thresholds: config.thresholds }),
           });
         } finally {
           pi.registerTool = registerTool;

@@ -2381,6 +2381,12 @@ export const EXPERIMENT_RUN_CONFIG_OPTIONAL_KEYS = Object.freeze([
   // annotation lane costs against the same plan; the arm mechanism is otherwise the
   // shipped one.
   "postFoldNotice",
+  // THE BAND CONDITION (Shane 2026-08-24): an explicit thresholds object for the pifold
+  // runtime, set whole or not at all exactly as resolveThresholds demands, so a sealed
+  // run states the band it ran under in its own config. Born from the commit-rewrite
+  // finding: 42-46 percent of pifold's uncached input is the post-commit prefix rewrite,
+  // sized by minTarget, so the band is a measured lever rather than a taste dial.
+  "thresholds",
 ]);
 
 export function validateExperimentRunConfig(value) {
@@ -2409,6 +2415,24 @@ export function validateExperimentRunConfig(value) {
     (value.sessionType !== EXPERIMENT_CLOSED_BOOK_LABEL &&
       armRuntimeConfiguration(value.arm).activeContextEnabled),
   "Run config post-fold-notice condition belongs to the pifold arm alone");
+  if (value.thresholds !== undefined) {
+    const thresholds = value.thresholds;
+    assertExperiment(typeof thresholds === "object" && thresholds !== null && !Array.isArray(thresholds),
+      "Run config thresholds must be an object");
+    const fields = ["maxTarget", "minTarget", "consolidateAfter", "minFoldChars"];
+    assertExperiment(Object.keys(thresholds).length === fields.length &&
+      fields.every((field) => Object.prototype.hasOwnProperty.call(thresholds, field)),
+    "Run config thresholds is set whole or not at all: maxTarget, minTarget, consolidateAfter, minFoldChars");
+    assertExperiment(typeof thresholds.maxTarget === "number" && typeof thresholds.minTarget === "number" &&
+      thresholds.minTarget > 0 && thresholds.maxTarget < 1 && thresholds.minTarget < thresholds.maxTarget,
+    "Run config thresholds band must satisfy 0 < minTarget < maxTarget < 1");
+    assertExperiment(Number.isSafeInteger(thresholds.consolidateAfter) && thresholds.consolidateAfter >= 1 &&
+      Number.isSafeInteger(thresholds.minFoldChars) && thresholds.minFoldChars >= 1,
+    "Run config thresholds counts must be positive integers");
+    assertExperiment(value.sessionType !== EXPERIMENT_CLOSED_BOOK_LABEL &&
+      armRuntimeConfiguration(value.arm).activeContextEnabled,
+    "Run config thresholds condition belongs to the pifold arm alone");
+  }
   assertExperiment(value.transport === undefined || EXPERIMENT_TRANSPORTS.includes(value.transport),
     "Run config transport is not a known Pi transport");
   assertExperiment(value.version === EXPERIMENT_PROTOCOL_VERSION, "Run config protocol version drifted");
