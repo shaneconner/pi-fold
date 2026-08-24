@@ -137,8 +137,35 @@ export function createPiContextExperimentExtension(config) {
   // the `before_provider_request` handler: it is armed at the crossing and consumed once.
   const fenceState = {
     crossings: 0, inFlight: false, lastTokens: null, abandonPending: false,
+    // THE PROOF CAN OUTLIVE ITS CTX (2026-08-24, nativefence rep 8 at --fence-share
+    // 0.50): a crossing below Pi's own compaction trigger makes our manual compact()
+    // perform the compaction itself, the session is replaced under the captured ctx,
+    // and the onError proof-read hit Pi's stale-ctx guard, an uncaught throw inside
+    // Pi's callback path that killed the worker at stage 9. The proof is deferred to
+    // the next event's FRESH ctx instead: compactionsAtCrossing is the branch's
+    // compaction count recorded before compact() is asked, and pendingVerification
+    // carries the crossing and the error until an event with a live ctx can read the
+    // branch and decide.
+    compactionsAtCrossing: 0, pendingVerification: null,
   };
   const compactionDisposition = nativeCompactionDisposition(config.arm);
+  // Resolves a deferred fence proof at the first event carrying a live ctx: the
+  // crossing is serviced when a compaction entry arrived on the branch since the
+  // crossing was recorded, and latches with the original compact error otherwise.
+  const resolveDeferredFenceVerification = (ctx) => {
+    const pending = fenceState.pendingVerification;
+    if (!pending) return;
+    fenceState.pendingVerification = null;
+    const compactions = ctx.sessionManager.getBranch()
+      .filter((entry) => entry?.type === "compaction").length;
+    if (compactions > fenceState.compactionsAtCrossing) {
+      appendEvent("harness-fence-compacted", {
+        crossing: pending.crossing, serviced_by: "verified-after-stale-ctx",
+      });
+      return;
+    }
+    appendFailure(config, "harness-fence-compaction", `${pending.crossing}:${pending.message}`);
+  };
   const allowedTools = new Set([
     ...EXPERIMENT_ALLOWED_TOOLS,
     ...(pifold ? EXPERIMENT_PIFOLD_EXTRA_TOOLS : []),
@@ -678,6 +705,7 @@ export function createPiContextExperimentExtension(config) {
       });
 
       pi.on("before_provider_request", (event, ctx) => {
+        resolveDeferredFenceVerification(ctx);
         if (inFlightProviderRequest) {
           // OUR OWN ABORT STRANDS ONE REQUEST PER CROSSING. This marker is cleared by the
           // assistant response its request produces, and an aborted request produces none:
@@ -766,6 +794,7 @@ export function createPiContextExperimentExtension(config) {
       });
 
       pi.on("message_end", (event, ctx) => {
+        resolveDeferredFenceVerification(ctx);
         const reason = event.message?.role === "assistant" ? event.message.stopReason : null;
         // A LOCAL ZERO-USAGE ABORT MARKER never fires a crossing: the provider counted
         // nothing, so the occupancy reading is stale, and a marker that armed the
@@ -790,6 +819,8 @@ export function createPiContextExperimentExtension(config) {
             fenceState.inFlight = true;
             fenceState.crossings += 1;
             fenceState.abandonPending = true;
+            fenceState.compactionsAtCrossing = ctx.sessionManager.getBranch()
+              .filter((entry) => entry?.type === "compaction").length;
             appendEvent("harness-fence-crossing", {
               crossing: fenceState.crossings,
               occupancy_tokens: tokens,
@@ -827,7 +858,20 @@ export function createPiContextExperimentExtension(config) {
               onError: (error) => {
                 fenceState.inFlight = false;
                 const message = error?.message ?? String(error);
-                const compacted = ctx.sessionManager.getBranch().at(-1)?.type === "compaction";
+                let compacted;
+                try {
+                  compacted = ctx.sessionManager.getBranch().at(-1)?.type === "compaction";
+                } catch {
+                  // The captured ctx went stale mid-compact (session replacement). The
+                  // proof moves to the next event's fresh ctx; nothing is decided here.
+                  fenceState.pendingVerification = {
+                    crossing: fenceState.crossings, message,
+                  };
+                  appendEvent("harness-fence-verification-deferred", {
+                    crossing: fenceState.crossings, error: message,
+                  });
+                  return;
+                }
                 if (/Already compacted/.test(message) && compacted) {
                   appendEvent("harness-fence-compacted", {
                     crossing: fenceState.crossings, serviced_by: "native-threshold",

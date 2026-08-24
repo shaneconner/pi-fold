@@ -10073,4 +10073,123 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   checks.fenceAbortMarkerAbandonedNeverOrphaned = true;
 }
 
+// GATE 106: THE FENCE PROOF SURVIVES A STALE CTX (2026-08-24). nativefence rep 8 at
+// --fence-share 0.50 crossed BELOW Pi's own compaction trigger, so the manual compact()
+// performed the compaction itself, the session was replaced under the captured ctx, and
+// the onError proof-read (ctx.sessionManager.getBranch()) hit Pi's stale-ctx guard: an
+// uncaught throw inside Pi's callback path that killed the worker at stage 9 with
+// "stage 9 request lost worker: code=1". The proof now defers to the next event's fresh
+// ctx: the crossing is serviced when a compaction entry arrived on the branch since the
+// crossing recorded its count, and latches with the ORIGINAL compact error otherwise; a
+// compaction already standing at crossing time never satisfies the later check.
+{
+  const jitiPath106 = join(PI_INSTALL_ROOT, "node_modules", "jiti", "lib", "jiti.mjs");
+  const typeboxPath106 = join(PI_INSTALL_ROOT, "node_modules", "typebox", "build", "index.mjs");
+  const { createJiti: createJiti106 } = await import(pathToFileURL(jitiPath106));
+  const { createPiContextExperimentExtension } = await createJiti106(import.meta.url, {
+    alias: { typebox: typeboxPath106 },
+  }).import(join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"));
+  const readLines106 = (runDir, name) => {
+    const path = join(runDir, name);
+    if (!existsSync(path)) return [];
+    return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  };
+  const driveStaleFence = (initialBranch = []) => {
+    const runDir = mkdtempSync(join(tmpdir(), "pi-fold-fence-stale-"));
+    const handlers = new Map();
+    const pi = {
+      on(name, handler) {
+        if (!handlers.has(name)) handlers.set(name, []);
+        handlers.get(name).push(handler);
+      },
+      registerTool() {}, registerCommand() {}, sendMessage() {}, async appendEntry() {},
+    };
+    createPiContextExperimentExtension({
+      version: EXPERIMENT_PROTOCOL_VERSION,
+      runId: "fence-stale",
+      runDir,
+      campaignId: "gate-106",
+      arm: "nativefence",
+      mode: "smoke",
+      providerInputBudget: 251_520,
+      firstChallenge: "a".repeat(64),
+      stageCount: EXPERIMENT_MODE_PLANS.smoke.stageCount,
+      watchdogMs: EXPERIMENT_MODE_PLANS.smoke.watchdogMs,
+    }).factory(pi);
+    const state = { stale: false, branch: [...initialBranch], tokens: 236_000 };
+    const compacts = [];
+    const ctx = {
+      get sessionManager() {
+        if (state.stale) {
+          throw new Error("This extension ctx is stale after session replacement or reload.");
+        }
+        return { getLeafId: () => "leaf-1", getBranch: () => state.branch };
+      },
+      model: { provider: "openai-codex", id: "gpt-5.6-sol", contextWindow: 272_000, maxTokens: 128_000 },
+      thinkingLevel: "xhigh",
+      getSystemPrompt: () => "system",
+      getEntries: () => [],
+      getContextUsage: () => ({ tokens: state.tokens }),
+      compact: (options) => { compacts.push(options); },
+    };
+    const request = handlers.get("before_provider_request").at(-1);
+    const messageEnd = handlers.get("message_end").at(-1);
+    return { runDir, state, ctx, request, messageEnd, compacts };
+  };
+  const funded = { message: { role: "assistant", stopReason: "toolUse",
+    usage: { input: 1_000, output: 50, cacheRead: 230_000, cacheWrite: 0, totalTokens: 236_000 } } };
+  const compaction = { type: "compaction", id: "comp-1" };
+
+  // SERVICED: the crossing fires, the ctx goes stale, onError DEFERS rather than throws,
+  // and the next event's fresh ctx finds a new compaction on the branch.
+  const good = driveStaleFence();
+  good.request({ payload: { tools: [] } }, good.ctx);
+  good.messageEnd(funded, good.ctx);
+  assert.equal(good.compacts.length, 1, "the crossing did not ask Pi to compact");
+  good.state.stale = true;
+  good.compacts[0].onError(new Error("compact interrupted by replacement")); // must NOT throw
+  const deferredEvents = readLines106(good.runDir, "worker-events.jsonl").map((entry) => entry.kind);
+  assert(deferredEvents.includes("harness-fence-verification-deferred"),
+    "the stale proof was not deferred by name");
+  good.state.stale = false;
+  good.state.branch = [compaction];
+  good.state.tokens = 1_000;
+  good.request({ payload: { tools: [] } }, good.ctx);
+  const goodEvents = readLines106(good.runDir, "worker-events.jsonl")
+    .filter((entry) => entry.kind === "harness-fence-compacted");
+  assert.equal(goodEvents.length, 1, "the deferred proof did not resolve as serviced");
+  assert.equal(goodEvents[0].details.serviced_by, "verified-after-stale-ctx");
+  assert.equal(readLines106(good.runDir, "failure-latch.jsonl").length, 0,
+    "a serviced deferred proof still latched");
+
+  // LATCHED: same deferral, but no compaction ever lands; the latch carries the
+  // ORIGINAL compact error.
+  const bad = driveStaleFence();
+  bad.request({ payload: { tools: [] } }, bad.ctx);
+  bad.messageEnd(funded, bad.ctx);
+  bad.state.stale = true;
+  bad.compacts[0].onError(new Error("compact interrupted by replacement"));
+  bad.state.stale = false;
+  bad.state.tokens = 1_000;
+  bad.request({ payload: { tools: [] } }, bad.ctx);
+  const badLatch = readLines106(bad.runDir, "failure-latch.jsonl");
+  assert(badLatch.some((entry) => entry.phase === "harness-fence-compaction" &&
+    /compact interrupted by replacement/.test(entry.detail)),
+  "an unserviced deferred proof did not latch with the original error");
+
+  // A COMPACTION ALREADY STANDING AT THE CROSSING NEVER SATISFIES THE LATER CHECK.
+  const prior = driveStaleFence([compaction]);
+  prior.request({ payload: { tools: [] } }, prior.ctx);
+  prior.messageEnd(funded, prior.ctx);
+  prior.state.stale = true;
+  prior.compacts[0].onError(new Error("compact interrupted by replacement"));
+  prior.state.stale = false;
+  prior.state.tokens = 1_000;
+  prior.request({ payload: { tools: [] } }, prior.ctx);
+  assert(readLines106(prior.runDir, "failure-latch.jsonl")
+    .some((entry) => entry.phase === "harness-fence-compaction"),
+  "a pre-existing compaction satisfied a proof it does not own");
+  checks.fenceProofSurvivesAStaleCtx = true;
+}
+
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);
