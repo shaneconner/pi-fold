@@ -65,8 +65,6 @@ export function foldNoticeText(input: {
     `[${brand} folds] Pending folds are waiting for briefs; the list is unavailable this pass.`);
 }
 
-
-
 export interface ContextReceipt {
   kind: string;
   ordinal: number;

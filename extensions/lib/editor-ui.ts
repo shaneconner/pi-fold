@@ -178,7 +178,10 @@ export function buildFoldEditorData(
 			if (at === -1) continue;
 			start = Math.min(start, at);
 			end = Math.max(end, at);
-			entries.push({ id: entryId, role: "", preview: "" });
+			// The mapped window already knows what this entry IS; a proposed row that
+			// names only an id makes the user peek elsewhere to judge the mark.
+			const [mappedEntry] = helpers.mappedRange(at, at);
+			entries.push({ id: entryId, role: mappedEntry?.role ?? "", preview: mappedEntry?.preview ?? "" });
 		}
 		if (entries.length && Number.isFinite(start)) {
 			blocks.push({
@@ -215,6 +218,13 @@ function briefChunks(brief: string): string[] {
 	}
 	if (current) chunks.push(current);
 	return chunks;
+}
+
+/** Detail rows: the full preview (to 480 chars) wrapped like a brief, under the
+ *  entry's own row. One long truncated line plus a mid-word continuation hid the
+ *  middle of the text; wrapping shows all of it in reading order. */
+function detailChunks(preview: string): string[] {
+	return briefChunks(preview.slice(0, 480));
 }
 
 interface RenderRow {
@@ -339,22 +349,26 @@ export class FoldEditorView {
 		for (const entry of entries) {
 			const entryKey = `${foldKey}:${entry.id}`;
 			const detailed = this.detailedEntry === entryKey;
-			const preview = detailed
-				? entry.preview.slice(0, 240)
-				: entry.preview.slice(0, 48);
+			const quoted = !detailed && entry.preview
+				? this.color("dim", ` \u201c${entry.preview.slice(0, 48)}\u201d`)
+				: "";
 			const entryCursor = this.selectedKey === entryKey ? "\u276f" : " ";
 			rows.push({
 				key: entryKey,
-				text: `${entryCursor}${pad}    ${this.color("dim", `\u00b7 ${entry.role} ${shortId(entry.id)}${this.pinnedBadge(entry.id)} \u201c${preview}\u201d`)}`,
+				text: `${entryCursor}${pad}    ${this.color("dim", `\u00b7 ${entry.role} ${shortId(entry.id)}${this.pinnedBadge(entry.id)}`)}${quoted}`,
 				toggleId: null,
 				entryPreview: entry.preview,
 			});
-			if (detailed && entry.preview.length > 240) {
-				rows.push({
-					key: `${entryKey}:more`,
-					text: `${pad}    ${this.color("dim", entry.preview.slice(240, 480))}`,
-					toggleId: null,
-				});
+			if (detailed) {
+				let detailOrdinal = 0;
+				for (const chunk of detailChunks(entry.preview)) {
+					rows.push({
+						key: `${entryKey}:d${detailOrdinal}`,
+						text: `${pad}      ${this.color("dim", chunk)}`,
+						toggleId: null,
+					});
+					detailOrdinal += 1;
+				}
 			}
 		}
 		const endCursor = this.selectedKey === `${foldKey}:end` ? "\u276f" : " ";
@@ -393,9 +407,14 @@ export class FoldEditorView {
 					}
 					for (const entry of block.entries.slice(0, 60)) {
 						const entryKey = `${block.id}:${entry.id}`;
+						// Role and preview come off the mapped window (buildFoldEditorData
+						// resolves them); an entry that fell off the map renders id-only.
+						const label = ["\u00b7", entry.role, `${shortId(entry.id)}${this.pinnedBadge(entry.id)}`]
+							.filter(Boolean).join(" ");
+						const quoted = entry.preview ? ` \u201c${entry.preview.slice(0, 48)}\u201d` : "";
 						rows.push({
 							key: entryKey,
-							text: `${this.selectedKey === entryKey ? "\u276f" : " "}    ${this.color("dim", `\u00b7 ${entry.role} ${shortId(entry.id)}${this.pinnedBadge(entry.id)}`)}`,
+							text: `${this.selectedKey === entryKey ? "\u276f" : " "}    ${this.color("dim", `${label}${quoted}`)}`,
 							toggleId: null,
 							entryPreview: entry.preview,
 						});
@@ -422,13 +441,32 @@ export class FoldEditorView {
 						const markable = typeof entry.index === "number";
 						const anchoredHere = this.anchor !== null && this.anchor.key === entryKey;
 						const badge = anchoredHere ? this.color("warning", " \u25c6 start") : "";
+						// A MARK POINT SHOWS WHAT IT IS (2026-08-23): the row carries its content
+						// preview, because this is where the user decides what to fold. Enter
+						// deepens it in place, exactly like a fold's entries; before this the
+						// toggle set detail state no raw row ever read back.
+						const detailed = this.detailedEntry === entryKey;
+						const quoted = !detailed && entry.preview
+							? this.color("dim", ` \u201c${entry.preview.slice(0, 48)}\u201d`)
+							: "";
 						rows.push({
 							key: entryKey,
-							text: `${cursor}    ${this.color("dim", `\u00b7 ${entry.role} ${shortId(entry.id)}${pinBadge}`)}${badge}`,
+							text: `${cursor}    ${this.color("dim", `\u00b7 ${entry.role} ${shortId(entry.id)}${pinBadge}`)}${badge}${quoted}`,
 							toggleId: null,
 							entryPreview: entry.preview,
 							...(markable ? { markable: true, entryIndex: entry.index, entryId: entry.id } : {}),
 						});
+						if (detailed) {
+							let detailOrdinal = 0;
+							for (const chunk of detailChunks(entry.preview)) {
+								rows.push({
+									key: `${entryKey}:d${detailOrdinal}`,
+									text: `      ${this.color("dim", chunk)}`,
+									toggleId: null,
+								});
+								detailOrdinal += 1;
+							}
+						}
 					}
 				}
 			}
@@ -640,9 +678,12 @@ export class FoldEditorView {
 		const percent = occupancy.usedTokens !== null && occupancy.budgetTokens > 0
 			? ((occupancy.usedTokens / occupancy.budgetTokens) * 100).toFixed(1)
 			: "?";
+		const usedTokensText = occupancy.usedTokens !== null
+			? occupancy.usedTokens.toLocaleString("en-US")
+			: "?";
 		lines.push(truncateToWidth(
 			`${occupancyBar(occupancy.usedTokens, occupancy.budgetTokens)} ` +
-			`${percent}% · ${occupancy.usedTokens ?? "?"}/${occupancy.budgetTokens} tokens · ` +
+			`${percent}% · ${usedTokensText}/${occupancy.budgetTokens.toLocaleString("en-US")} tokens · ` +
 			`commit at ${(occupancy.commitOccupancy * 100).toFixed(0)}%` +
 			`${occupancy.commitDue ? " · COMMIT DUE" : ""}`,
 			width,

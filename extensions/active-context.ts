@@ -149,7 +149,6 @@ import {
   foldMarkFor,
   ladderBrief,
   markAccounting,
-  markEligibility,
   markFreedBytes,
   unmarkedRemainder,
   markClaimingRef,
@@ -1899,7 +1898,6 @@ export function registerActiveContext(pi: any, options: {
     });
     return projected;
   };
-
 
   const holdFrozen = (projected: unknown[]): unknown[] => {
     freeze.projection = [...projected];
@@ -4034,7 +4032,7 @@ export function registerActiveContext(pi: any, options: {
           committed
             ? `Committed ${ownValue(committed, "applied_marks") ?? 0} mark(s)${topUp ? " with automatic top-up" : ""}. ` +
               "Exact source remains expandable."
-            : "Nothing eligible to commit: no pending mark is outside the fresh tail.",
+            : "Nothing to commit: no staged mark could apply (pinned or already-folded spans hold).",
           "info",
         );
         return;
@@ -4190,11 +4188,13 @@ export function registerActiveContext(pi: any, options: {
               const message = item.message as Record<string, unknown> | undefined;
               const role = String(item.ref?.role ?? message?.role ?? "entry");
               const content = message?.content;
+              // 300 chars, same as fold entries: the view shows 48 on the row and
+              // deepens to 240 on Enter, so a 48-char preview made detail a no-op.
               let preview = "";
-              if (typeof content === "string") preview = content.slice(0, 48);
+              if (typeof content === "string") preview = content.slice(0, 300);
               else if (Array.isArray(content)) {
                 const firstText = content.find((part) => part?.type === "text");
-                preview = typeof firstText?.text === "string" ? firstText.text.slice(0, 48) : "";
+                preview = typeof firstText?.text === "string" ? firstText.text.slice(0, 300) : "";
               }
               // THE INDEX IS THE MARK POINT: raw entries carry their mapped position so
               // the view can price a span and name its two boundary ids.

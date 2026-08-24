@@ -3,12 +3,10 @@ import {
   evidenceRef,
   evidenceValue,
   isPlainRecord,
-  objectRefKey,
   sha256Text,
   stableStringify,
 } from "../json.ts";
 import {
-  bytes,
   clone,
   messageRole,
   ownValue,
@@ -24,7 +22,6 @@ import {
   DEFAULT_THRESHOLDS,
   PEEK_READ_ONLY_CONTEXT_ACTIONS,
   servingBudgetTokens,
-  zoneBytes,
 } from "./policy.ts";
 import type {
   ActiveContextSnapshot,

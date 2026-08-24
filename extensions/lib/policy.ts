@@ -179,7 +179,6 @@ export const DEFAULT_THRESHOLDS: Readonly<ActiveContextThresholds> = Object.free
 
 export const MINIMUM_SUPPORTED_BUDGET_TOKENS = 10_000;
 
-
 export class ThresholdPolicyError extends Error {
   readonly invariant: string;
   constructor(invariant: string, message: string) {
@@ -259,7 +258,6 @@ export const ESTIMATED_PLACEHOLDER_OVERHEAD_BYTES = 240;
 export const PEEK_MIN_SLICE_BYTES = 1_024;
 
 export const STATUS_DIET_INDEX_ROWS = 5;
-
 
 export const MAX_CONTEXT_RECEIPTS = 3;
 export const CONTEXT_RECEIPT_BLOCK_BYTES = 900;

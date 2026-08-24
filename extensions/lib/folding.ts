@@ -53,7 +53,6 @@ import {
   PEEK_DEFAULT_MAX_BYTES,
   PEEK_HEAD_SHARE,
   STATUS_DIET_INDEX_ROWS,
-  zoneBytes,
 } from "./policy.ts";
 import type {
   ActiveContextSnapshot,

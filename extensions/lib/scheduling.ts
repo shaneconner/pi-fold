@@ -20,7 +20,6 @@ import type { AutomaticRungSelection } from "./folding.ts";
 import {
   foldInterval,
   budgetOccupancy,
-  hardFenceRatio,
   mappedByKey,
   orderedRoots,
   protectedStaleMass,

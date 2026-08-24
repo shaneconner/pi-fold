@@ -736,59 +736,6 @@ async function chapterForest(count, chapterChars = 3_500) {
   return { ...built, state };
 }
 
-/**
- * The forest as the snap sees it, plus the stalest turn nothing has folded yet.
- *
- * One selection law means automation folds and consolidates on its own schedule, so a
- * fixed turn index is not a span the agent can still fold: by the second commit it may
- * already be inside a consolidation. The crossing-span gates ask the forest instead.
- */
-function foldableSpan(runtime, built, contextWindow = 100_000) {
-  const state = materialized(runtime);
-  const snapshot = context.mapActiveContext({
-    sessionId: built.sessionId,
-    eventMessages: runtime.messages,
-    contextEntries: runtime.branch,
-    contextWindow,
-  });
-  const roots = context.orderedRoots(state, snapshot);
-  const indexOf = new Map(snapshot.mapped.flatMap((item, index) => item.ref ? [[item.ref.entryId, index]] : []));
-  const covered = (index) => roots.some((root) => index >= root.start && index <= root.end);
-  const turn = built.turnEntries.find((entries) => {
-    const indices = entries.map((id) => indexOf.get(id) ?? -1);
-    return indices.every((index) => index >= 0 && !covered(index));
-  });
-  return { state, snapshot, roots, indexOf, covered, turn };
-}
-
-/**
- * A span that starts strictly inside one root fold and ends outside every fold, and that
- * the snap can actually correct.
- *
- * The constructibility test is not decoration. Under the count law a parent can span ten
- * children plus their gaps, and absorbing one of those into a CHAPTER reading exceeds the
- * few-turn chapter limit, so which crossing has a corrected reading is a property of the
- * forest the ladder happened to build. The gate is about the correction being reported by
- * name, so the span it asks about is searched for rather than assumed. A forest where NO
- * crossing is constructible returns null and the caller says so.
- */
-function crossingSpan(runtime, built, contextWindow = 100_000) {
-  const { state, snapshot, roots, covered } = foldableSpan(runtime, built, contextWindow);
-  for (const root of roots) {
-    for (let inside = root.start + 1; inside <= root.end; inside += 1) {
-      if (!snapshot.mapped[inside]?.ref) continue;
-      for (let after = root.end + 1; after < snapshot.mapped.length; after += 1) {
-        if (!snapshot.mapped[after]?.ref || covered(after)) continue;
-        const ids = [snapshot.mapped[inside].ref.entryId, snapshot.mapped[after].ref.entryId];
-        try { context.snapFoldCandidate(snapshot, state, ids, { allowProtected: true }); }
-        catch { continue; }
-        return { root, ids };
-      }
-    }
-  }
-  return null;
-}
-
 /** The root-sibling neighbours a rendered placeholder names, read off the committed state. */
 function foldSiblings(branch, sessionId, foldId, entryTypePrefix) {
   const state = context.materializeActiveContextState(
@@ -1681,7 +1628,6 @@ async function gatePersistenceChain() {
     prePhaseRewrite: "canonical-phase-b-delta",
   };
 }
-
 
 async function gateExpandLeases() {
   // Ten turns rather than four, so the commit below has enough to build a forest and the
@@ -3087,7 +3033,6 @@ async function gateEpochQuotaTopUp() {
   };
 }
 
-
 async function gateEphemeralPeekMark() {
   const built = makeFixture({
     turns: 10, resultChars: 10_000, contextWindow: 100_000, peekTurns: [0], peekTargetId: "fold_probe",
@@ -3929,7 +3874,6 @@ async function gateSchedulingWireRoundTrip() {
   };
 }
 
-
 /**
  * Above the commit threshold we are already inside the epoch's rewrite turn, so every
  * inline rung stays reachable. Restricting the inline selection to prepared chapters
@@ -4260,7 +4204,6 @@ async function sealedSpineExcursionRuntime(overrides = {}) {
   await project(runtime);
   return runtime;
 }
-
 
 /**
  * The transmission fence, and the stalest-first cut order that serves it.
@@ -5202,7 +5145,6 @@ async function gateContextReceipts() {
     deliveriesRecorded: events.length,
   };
 }
-
 
 /**
  * Re-boundary, in both directions, through one verb.
@@ -6559,7 +6501,6 @@ async function gateMutationBudgetPerHandoff() {
   };
 }
 
-
 /**
  * NO COMMIT THAT FREES CRUMBS, ON ANY PATH.
  *
@@ -6670,7 +6611,6 @@ async function gateFrozenSurface() {
 
   const digest = async () => json.stableStringify((await project(runtime)).messages);
   const before = await digest();
-  const built = runtime.built;
 
   // A BRIEF, which is the only edit the agent has that could plausibly move a byte and
   // must not: the fold it names is pending, so its words are stored outside the window.
@@ -6762,8 +6702,6 @@ async function gateFrozenSurface() {
     postFoldAppends: rearmed.length - rewritten.length,
   };
 }
-
-
 
 /**
  * The rep-19 window shape: paged active_context status calls whose results pile up
@@ -7299,7 +7237,6 @@ async function gatePeekIsAppendOnly() {
 
 async function gateProjectionIsAppendOnly() {
   const runtime = await epochToolRuntime({ turns: 16, resultChars: 8_000 });
-  const built = runtime.built;
   const stream = () => runtime.appended
     .filter((entry) => entry.customType === "pi-fold-context-event")
     .map((entry) => entry.data);
@@ -7534,7 +7471,6 @@ async function gateRecoveryNormAdvertised() {
   return { advertisedOnFull: true, advertisedOnConfigured: true, silentWithoutExpand: true };
 }
 
-
 async function gatePinnedShareCap() {
   // The pin ceiling: protect refuses past MAX_PINNED_SHARE of the working window,
   // names the cap and the release valve, and pins NOTHING on refusal. Under the cap
@@ -7566,7 +7502,6 @@ async function gatePinnedShareCap() {
   assert(pinned > 0, "A pin under the cap must still land");
   return { cap: context.MAX_PINNED_SHARE, refused: true, pinnedUnderCap: pinned };
 }
-
 
 /**
  * THE UNIFIED SPAN LAW, WHERE IT IS NEW.
@@ -8204,7 +8139,6 @@ async function gateFenceOpensTheMiddle() {
     assert.equal(record.stale_boundary, undefined,
       "The deferral still carries a positional boundary");
   }
-  const nothingProposable = deferrals;
 
   return {
     proposedSpans: proposed.length,
@@ -8416,7 +8350,6 @@ async function gateOpenTurnCommits() {
     newestBatchFolded: false,
   };
 }
-
 
 /**
  * THE public surface: five options, and nothing else reaches the runtime.
@@ -8690,7 +8623,6 @@ async function gateLadderFillsWhatTheAgentLeft() {
     blacklistedFillToolFolds: 0,
   };
 }
-
 
 /**
  * DELIVERY IS CACHE-SAFE, OR IT DOES NOT HAPPEN.
@@ -10574,7 +10506,7 @@ async function gateBoundaryCommitsRatherThanNoOp() {
     await settle();
   }
   const state = materialized(boundaryRun);
-  const snapshot = context.mapActiveContext({
+  context.mapActiveContext({
     sessionId,
     eventMessages: boundaryRun.messages,
     contextEntries: boundaryRun.branch,
@@ -11663,7 +11595,6 @@ async function gateCacheTopologyAccounting() {
   // Results over the fold floor, so the agent's mark alone clears the reclaim floor and
   // the commit this gate reads actually fires.
   const runtime = await epochToolRuntime({ turns: 12, resultChars: 10_000 });
-  const built = runtime.built;
   const stream = () => contextEvents(runtime);
   const latestPrefix = () => stream().filter((record) => record.kind === "context.prefix").at(-1);
 
@@ -12178,6 +12109,16 @@ async function gateFoldSettingsRoundTrip() {
     editor.handleInput("\r");
     assert.equal(JSON.parse(readFileSync(editorPath, "utf8")).thresholds.maxTarget, 0.63,
       "an exact off-lattice value did not reach disk");
+    // TYPING REPLACES THE PREFILL (2026-08-23): the first printable keystroke clears
+    // the prefilled value, so "0.7" lands as 0.7 rather than appending to "0.63" and
+    // refusing; the backspace loops above still work because editing keys keep the
+    // prefill for adjustment.
+    editor.handleInput("\r");
+    assert(renders().includes("Enter to apply"), "the exact editor did not reopen");
+    for (const character of "0.7") editor.handleInput(character);
+    editor.handleInput("\r");
+    assert.equal(JSON.parse(readFileSync(editorPath, "utf8")).thresholds.maxTarget, 0.7,
+      "typing into the prefilled editor did not replace the prefill");
     // An invalid exact entry renders the named error and writes nothing.
     editor.handleInput("\x1b[B");
     editor.handleInput("\r");
@@ -12499,6 +12440,33 @@ async function gateFoldEditorRendersReadOnly() {
   assert.equal(plain.length, 1, "an uncovered stretch did not become one raw gap");
   assert.equal(plain[0].type, "raw", "the gap block has the wrong type");
 
+  // A PROPOSED BLOCK'S ENTRIES RESOLVE OFF THE MAPPED WINDOW (2026-08-23): the
+  // builder used to fabricate role "" and preview "" for staged marks, so drill-in
+  // listed bare ids and the user had to peek elsewhere to judge the mark.
+  const withMark = editorModule.buildFoldEditorData(
+    { mapped: [
+      { ref: { entryId: "e0", role: "user" }, message: { role: "user", content: "hello" } },
+      { ref: { entryId: "e1", role: "assistant" }, message: { role: "assistant", content: "hi" } },
+    ] },
+    { folds: [], protected: [] },
+    {
+      foldRows: () => [],
+      pendingMarkRefs: () => [{ id: "m1", origin: "ladder", brief: "b", entryIds: ["e0", "e1"] }],
+      mappedRange: (from, to) => Array.from({ length: to - from + 1 }, (_, offset) => ({
+        id: from + offset === 0 ? "e0" : "e1",
+        role: from + offset === 0 ? "user" : "assistant",
+        preview: from + offset === 0 ? "hello" : "hi",
+      })),
+      entryCount: 2,
+    },
+  );
+  const proposedBlock = withMark.find((block) => block.type === "proposed");
+  assert(proposedBlock, "the staged mark did not become a proposed block");
+  assert.deepEqual(proposedBlock.entries.map((entry) => entry.role), ["user", "assistant"],
+    "proposed entries do not carry their mapped roles");
+  assert.deepEqual(proposedBlock.entries.map((entry) => entry.preview), ["hello", "hi"],
+    "proposed entries do not carry their mapped previews");
+
   // LEFT COLLAPSES THE FOLD YOU ARE INSIDE: expand the parent, walk down into a
   // message row, and one Left folds the parent back up and lands on it.
   const leftKb = { requested: "", matches: (_data, name) => name === leftKb.requested };
@@ -12656,6 +12624,25 @@ async function gateFoldEditorUserMarks() {
   const firstEntryRender = view.render(140).join("\n");
   assert(/· (user|assistant) /.test(firstEntryRender),
     `the expanded raw block lists no entries: ${firstEntryRender.slice(0, 400)}`);
+
+  // A MARK POINT SHOWS WHAT IT IS (2026-08-23): the raw row carries a quoted content
+  // preview, because this is where the user decides what to fold, and Enter deepens
+  // it in place as wrapped detail rows. Before this, raw rows were id-only and the
+  // Enter toggle set detail state no raw row ever read back: the press did nothing.
+  assert(/\u201c.+\u201d/.test(firstEntryRender), "raw entry rows carry no content preview");
+  currentAction = "tui.select.confirm";
+  view.handleInput("\r");
+  const detailedRender = view.render(140).join("\n");
+  assert(detailedRender !== firstEntryRender, "Enter on a raw entry changed nothing");
+  // A detail row is six spaces of indent straight into dim text (no cursor column, no
+  // bullet); the viewport is capped at 24 body rows, so the LINE COUNT cannot carry
+  // this assertion when the expanded block already fills it.
+  assert(/^ {6}\[dim\]/m.test(detailedRender) && !/^ {6}\[dim\]/m.test(firstEntryRender),
+    "detail added no wrapped rows under the entry");
+  view.handleInput("\r");
+  assert.equal(view.render(140).join("\n"), firstEntryRender,
+    "a second Enter did not collapse the detail back to the plain row");
+  currentAction = "tui.select.down";
 
   // FIRST m ANCHORS. The anchor row wears the diamond; nothing is staged yet.
   view.handleInput("m");
@@ -12861,7 +12848,6 @@ async function gateFoldEditorWithdrawPinBrief() {
     if (view.selectedKey === before) break;
   }
   assert(/:r\d+$/.test(view.selectedKey), `did not reach a raw entry row: ${view.selectedKey}`);
-  const pinnedEntryKey = view.selectedKey;
   const fromEvents = runtime.appended.length;
   view.handleInput("p");
   const pinDeadline = Date.now() + 10_000;

@@ -325,12 +325,22 @@ class FoldValueEditor extends Container {
 		this.done(result.display);
 	}
 
+	/** True until the first key: typing then REPLACES the prefill rather than
+	 *  appending to it ("0.35" over "0.4" was landing as "0.40.35" and refusing).
+	 *  Editing keys (backspace, arrows) keep the prefill for adjustment. */
+	private pristine = true;
+
 	handleInput(data: string): void {
+		if (this.pristine && data.length === 1 && data >= " " && data !== "\x7f") {
+			this.input.setValue("");
+			(this.input as any).cursor = 0;
+		}
+		this.pristine = false;
 		this.input.handleInput(data);
 	}
 }
 
-// The /fold-settings screen itself: a SettingsList over the five rows, styled off
+// The /fold-settings screen itself: a SettingsList over the four rows, styled off
 // the live theme, with every applied change persisted immediately the way Pi's own
 // /settings persists. Left/right STEPS the selected row through its allowed
 // increments (clamped at the range ends); Enter opens an exact-value editor.
@@ -449,7 +459,7 @@ export function registerFoldSettings(
 ): void {
 	const settingsPath = options.settingsPath ?? DEFAULT_FOLD_SETTINGS_PATH;
 	pi.registerCommand("fold-settings", {
-		description: "Configure pi-fold: commit trigger, post-commit aim, fresh tail, consolidation divisor, minimum fold size",
+		description: "Configure pi-fold: commit trigger, post-commit aim, consolidation divisor, minimum fold size",
 		handler: async (_args: string, ctx: any) => {
 			if (typeof ctx.ui?.custom !== "function") {
 				throw new Error("/fold-settings needs an interactive UI; set thresholds in the settings file instead");

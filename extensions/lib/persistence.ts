@@ -1118,7 +1118,6 @@ export function refuseRetiredStateFields(value: unknown): void {
   );
 }
 
-
 export function validAdvisoryState(value: unknown): value is NonNullable<ActiveContextState["advisory"]> {
   const hasArmed = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "armed"));
