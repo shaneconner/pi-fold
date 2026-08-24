@@ -366,6 +366,14 @@ async function run() {
   assertExperiment(requestedBudget === null || requestedBudget === "none",
     "Experiment run accepts --provider-input-budget none, or nothing at all: the declared " +
     "budget is a model fact and is not otherwise settable");
+  // `--post-fold-notice off` is a condition, not a dial: it runs the pifold arm with the
+  // brief invitation silenced, so every fold goes out with the runtime's deterministic
+  // words, and the sealed run states the condition in its own config.
+  const requestedNotice = argumentValue("--post-fold-notice", null);
+  assertExperiment(requestedNotice === null || requestedNotice === "off",
+    "Experiment run accepts --post-fold-notice off, or nothing at all");
+  assertExperiment(requestedNotice === null || arm === "pifold",
+    "--post-fold-notice off belongs to the pifold arm alone");
   const providerInputBudget = requestedBudget === "none"
     ? null
     : EXPERIMENT_PROVIDER_INPUT_BUDGETS[`${modelProvider}/${modelId}`] ?? null;
@@ -438,6 +446,7 @@ async function run() {
       ? { sessionType }
       : {
         ...(providerInputBudget === null ? {} : { providerInputBudget }),
+        ...(requestedNotice === "off" ? { postFoldNotice: false } : {}),
         // No brief generator: the deterministic brief carries the opening prose
         // now (package gate 134), and this run measures the no-generator condition
         // the reviews recommend making permanent. See EXPERIMENT_BRIEF_GENERATOR's

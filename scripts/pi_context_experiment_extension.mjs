@@ -309,6 +309,9 @@ export function createPiContextExperimentExtension(config) {
             // The deployment fact, when the run config carries one: without it the
             // runtime measures every threshold against the per-request descriptor.
             ...(config.providerInputBudget === undefined ? {} : { providerInputBudget: config.providerInputBudget }),
+            // The deterministic condition: false silences the brief invitation, so
+            // the arm measures the runtime's own words against the same plan.
+            ...(config.postFoldNotice === undefined ? {} : { postFoldNotice: config.postFoldNotice }),
           });
         } finally {
           pi.registerTool = registerTool;

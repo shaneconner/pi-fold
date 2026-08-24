@@ -305,6 +305,7 @@ function makeRuntime(built, {
   // the runtime must fall back to the appended advisory rather than throw.
   omitSendMessage = false,
   providerInputBudget,
+  postFoldNotice,
   packageRegistration = false,
   sessionFile = join(tmpdir(), "pi-fold-test-session.jsonl"),
   // One injection point for a durable write that FAILS. Persistence is the only place
@@ -434,6 +435,7 @@ function makeRuntime(built, {
     // Deleted options, forwarded verbatim so gate 68 can prove they are REFUSED.
     ...(removedOptions ?? {}),
     ...(providerInputBudget === undefined ? {} : { providerInputBudget }),
+    ...(postFoldNotice === undefined ? {} : { postFoldNotice }),
   };
   if (packageRegistration) {
     runtime.registration = piFold.registerPiFold(pi, registrationOptions);
@@ -2642,6 +2644,7 @@ async function epochToolRuntime({ omitSendMessage, ...fixture } = {}) {
   const runtime = makeRuntime(built, {
     ...(omitSendMessage ? { omitSendMessage } : {}),
     ...(fixture.thresholds ? { thresholds: fixture.thresholds } : {}),
+    ...(fixture.postFoldNotice === undefined ? {} : { postFoldNotice: fixture.postFoldNotice }),
   });
   await startRuntime(runtime);
   return runtime;
@@ -12201,6 +12204,49 @@ async function gateFoldSettingsRoundTrip() {
  * AND IT STANDS DOWN, because a carrier that cannot stop asking is one the agent learns
  * to skip.
  */
+
+/**
+ * MECHANISM. THE DETERMINISTIC CONDITION (Shane, 2026-08-24). `postFoldNotice: false` on
+ * the INTERNAL seam silences the brief invitation: the frontier still cuts, the commit
+ * still lands, and every fold goes out with the runtime's own deterministic words. It
+ * exists for the experiment arm that prices the annotation lane against the same plan,
+ * and it is NOT a deployment option: registerPiFold refuses the name, because a
+ * deployment that silences the notice has an agent that can never annotate what it is
+ * never told about.
+ */
+async function gateFoldNoticeSilenced() {
+  const noticeType = "pi-fold-active-context-fold-notice";
+  const notices = (projected) => projected.messages
+    .filter((message) => message?.customType === noticeType);
+  const runtime = await epochToolRuntime({ turns: 7, resultChars: 9_000, postFoldNotice: false });
+  await measure(runtime, 20_000, 100_000);
+  const cut = await frontierCuts(runtime);
+  assert(cut.length >= context.UNBRIEFED_FOLDS_BEFORE_NOTICE,
+    `The frontier cut ${cut.length} folds, under the batch the notice would speak past`);
+  assert.equal(notices(await project(runtime)).length, 0,
+    "The silenced runtime appended a notice anyway");
+  // The commit lands and every fold carries the runtime's own words.
+  const committed = await measureAndCommit(runtime, 86_000, 100_000);
+  assert(committed.folds.length > 0, "The silenced condition folded nothing");
+  for (const fold of committed.folds) {
+    assert.equal(fold.provenance.kind, "deterministic",
+      `Fold ${fold.id} carries ${fold.provenance.kind} provenance under the silenced condition`);
+  }
+  // NOT a deployment option: the public surface refuses the name before registering.
+  assert.throws(
+    () => piFold.registerPiFold(
+      { registerTool() {}, registerCommand() {}, on() {} }, { postFoldNotice: false }),
+    /postFoldNotice is not a pi-fold option/,
+    "registerPiFold accepted the internal seam's switch");
+  return {
+    cutsStaged: cut.length,
+    noticesWhileSilenced: 0,
+    foldsCommitted: committed.folds.length,
+    deterministicProvenance: true,
+    publiclyRefused: true,
+  };
+}
+
 async function gateFoldNoticeInvitesBriefs() {
   const noticeType = "pi-fold-active-context-fold-notice";
   const notices = (projected) => projected.messages
@@ -13310,6 +13356,7 @@ async function gateRuntimeSpeech() {
   return {
     contextReceipts: await claim("gateContextReceipts", gateContextReceipts),
     foldNoticeInvitesBriefs: await claim("gateFoldNoticeInvitesBriefs", gateFoldNoticeInvitesBriefs),
+    foldNoticeSilenced: await claim("gateFoldNoticeSilenced", gateFoldNoticeSilenced),
   };
 }
 

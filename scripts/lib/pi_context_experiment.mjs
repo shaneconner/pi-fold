@@ -2375,6 +2375,12 @@ export const EXPERIMENT_RUN_CONFIG_OPTIONAL_KEYS = Object.freeze([
   // the supervisor from the ledger and the frozen query seed, because the seed
   // itself plus the ledger geometry is a derivable question list.
   "sessionDir", "endBlockPrompt",
+  // THE DETERMINISTIC CONDITION (Shane 2026-08-24): false suppresses the runtime's
+  // post-fold notice on the pifold arm, so no carrier invites a brief and every fold
+  // goes out with the runtime's own deterministic words. It measures what the agent's
+  // annotation lane costs against the same plan; the arm mechanism is otherwise the
+  // shipped one.
+  "postFoldNotice",
 ]);
 
 export function validateExperimentRunConfig(value) {
@@ -2395,6 +2401,14 @@ export function validateExperimentRunConfig(value) {
   "Run config provider input budget is invalid");
   assertExperiment(value.briefGenerator === undefined || validBriefGenerator(value.briefGenerator),
     "Run config brief generator is not a provider/model/effort descriptor");
+  assertExperiment(value.postFoldNotice === undefined || typeof value.postFoldNotice === "boolean",
+    "Run config post-fold-notice condition is invalid");
+  // The notice belongs to the arm that registers the runtime; on any other arm the
+  // switch would be a fact about nothing, the briefGenerator rule one option over.
+  assertExperiment(value.postFoldNotice === undefined ||
+    (value.sessionType !== EXPERIMENT_CLOSED_BOOK_LABEL &&
+      armRuntimeConfiguration(value.arm).activeContextEnabled),
+  "Run config post-fold-notice condition belongs to the pifold arm alone");
   assertExperiment(value.transport === undefined || EXPERIMENT_TRANSPORTS.includes(value.transport),
     "Run config transport is not a known Pi transport");
   assertExperiment(value.version === EXPERIMENT_PROTOCOL_VERSION, "Run config protocol version drifted");

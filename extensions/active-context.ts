@@ -252,6 +252,12 @@ export function registerActiveContext(pi: any, options: {
   blacklistAutoFoldTools?: ReadonlySet<string>;
   providerInputBudget?: number;
   thresholds?: ActiveContextThresholds;
+  /** INTERNAL SEAM ONLY (the experiment's deterministic condition): false suppresses
+   *  the post-fold notice, so no carrier ever invites a brief and every fold goes out
+   *  with the runtime's own words. registerPiFold refuses the name, because a
+   *  deployment that silences the notice has an agent that can never annotate what it
+   *  is never told about. */
+  postFoldNotice?: boolean;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
 } {
@@ -260,6 +266,7 @@ export function registerActiveContext(pi: any, options: {
   const brandNoun = options.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN;
   const entryTypePrefix = options.entryTypePrefix ?? DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX;
   const blacklistAutoFoldTools = options.blacklistAutoFoldTools ?? AUTO_FOLD_BLACKLIST_DEFAULT;
+  const postFoldNotice = options.postFoldNotice ?? true;
   for (const removed of ["foldScheduling", "foldPeekResults", "toolActions"]) {
     if (Object.hasOwn(options, removed)) {
       throw new Error(`${removed} is no longer an option: epoch scheduling, peek foldability ` +
@@ -1626,6 +1633,9 @@ export function registerActiveContext(pi: any, options: {
    * and it does not: the rebuild reads the marks, not its own last text.
    */
   const appendFoldNotice = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
+    // The deterministic experiment condition: cuts stage and commits land exactly as
+    // ever, but nothing invites a brief, so briefs stay the runtime's own.
+    if (!postFoldNotice) return projected;
     if (!persistence.state) return projected;
     const held = pendingMarks(persistence.state);
     const unbriefed = held.filter((mark) => mark.briefProvenance?.kind !== "supplied");

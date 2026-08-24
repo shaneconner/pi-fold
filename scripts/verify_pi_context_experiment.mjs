@@ -882,7 +882,20 @@ assert.throws(() => validateExperimentRunConfig({ ...runConfig, repoDir: "/tmp/e
 assert.throws(() => validateExperimentRunConfig({ ...runConfig, model: { provider: "p", id: "m" } }),
   /run config shape|provider, model id and effort/);
 assert.throws(() => validateExperimentRunConfig({ ...runConfig, watchdogMs: 5 }), /pacing drifted/);
+// THE DETERMINISTIC CONDITION (Shane 2026-08-24): postFoldNotice false silences the
+// pifold arm's brief invitation, so the sealed run states its own condition. Boolean
+// only, and it belongs to the arm that registers the runtime: on any other arm the
+// switch is a fact about nothing, the briefGenerator rule one option over.
+validateExperimentRunConfig({ ...runConfig, arm: "pifold", postFoldNotice: false });
+validateExperimentRunConfig({ ...runConfig, arm: "pifold", postFoldNotice: true });
+assert.throws(() => validateExperimentRunConfig({ ...runConfig, arm: "pifold", postFoldNotice: "off" }),
+  /post-fold-notice condition is invalid/);
+assert.throws(() => validateExperimentRunConfig({ ...runConfig, postFoldNotice: false }),
+  /post-fold-notice condition belongs to the pifold arm alone/);
+assert.throws(() => validateExperimentRunConfig({ ...runConfig, arm: "nativefence", postFoldNotice: false }),
+  /post-fold-notice condition belongs to the pifold arm alone/);
 checks.runConfigPinsCheckoutAndModelTriple = true;
+checks.postFoldNoticeConditionPinned = true;
 
 // ---------------------------------------------------------------------------
 // GATE 6 - reread-tax hashing determinism and repeat accounting
