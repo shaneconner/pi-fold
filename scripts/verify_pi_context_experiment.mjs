@@ -9935,4 +9935,107 @@ const report = {
 };
 assert(Object.values(checks).every((value) => value === true), "a gate did not report");
 process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+// ---------------------------------------------------------------------------
+// GATE 103 - the fence abort's local marker is abandoned by name, never orphaned
+// ---------------------------------------------------------------------------
+// nativefence rep 2 of sol-20260823-live: the arm's first run under the sandbox-era
+// response seal. The fence crossed at 249,189 against its 235,674 threshold, compact()
+// aborted the live operation BETWEEN building a projection and dispatching the request,
+// Pi emitted the LOCAL zero-usage abort marker (gate 97's local class, never on the
+// provider ledger), and the seal latched orphan-provider-response and killed the worker
+// one event after the compaction it had correctly caused. The allowance mirrors the
+// stranded-request side exactly: armed at the crossing, consumed ONCE, zero-usage
+// markers only. A marker without a crossing, and a funded response without an identity,
+// each still latch by name.
+{
+  const jitiPath103 = join(PI_INSTALL_ROOT, "node_modules", "jiti", "lib", "jiti.mjs");
+  const typeboxPath103 = join(PI_INSTALL_ROOT, "node_modules", "typebox", "build", "index.mjs");
+  const { createJiti: createJiti103 } = await import(pathToFileURL(jitiPath103));
+  const { createPiContextExperimentExtension } = await createJiti103(import.meta.url, {
+    alias: { typebox: typeboxPath103 },
+  }).import(join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"));
+  const readLines103 = (runDir, name) => {
+    const path = join(runDir, name);
+    if (!existsSync(path)) return [];
+    return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  };
+  const driveFence = () => {
+    const runDir = mkdtempSync(join(tmpdir(), "pi-fold-fence-abandon-"));
+    const handlers = new Map();
+    const pi = {
+      on(name, handler) {
+        if (!handlers.has(name)) handlers.set(name, []);
+        handlers.get(name).push(handler);
+      },
+      registerTool() {}, registerCommand() {}, sendMessage() {}, async appendEntry() {},
+    };
+    createPiContextExperimentExtension({
+      version: EXPERIMENT_PROTOCOL_VERSION,
+      runId: "fence-abandon",
+      runDir,
+      campaignId: "gate-103",
+      arm: "nativefence",
+      mode: "smoke",
+      providerInputBudget: 251_520,
+      firstChallenge: "a".repeat(64),
+      stageCount: EXPERIMENT_MODE_PLANS.smoke.stageCount,
+      watchdogMs: EXPERIMENT_MODE_PLANS.smoke.watchdogMs,
+    }).factory(pi);
+    const compactCalls = [];
+    const ctx = {
+      sessionManager: { getLeafId: () => "leaf-1", getBranch: () => [] },
+      model: { provider: "openai-codex", id: "gpt-5.6-sol", contextWindow: 272_000, maxTokens: 128_000 },
+      thinkingLevel: "xhigh",
+      getSystemPrompt: () => "system",
+      getEntries: () => [],
+      getContextUsage: () => ({ tokens: 236_000 }),
+      compact: (options) => { compactCalls.push(options); },
+    };
+    const request = handlers.get("before_provider_request").at(-1);
+    const messageEnd = handlers.get("message_end").at(-1);
+    return { runDir, ctx, request, messageEnd, compactCalls };
+  };
+  const funded = (stopReason) => ({ message: { role: "assistant", stopReason,
+    usage: { input: 1_000, output: 50, cacheRead: 230_000, cacheWrite: 0, totalTokens: 236_000 } } });
+  const marker = { message: { role: "assistant", stopReason: "error", errorMessage: "This operation was aborted",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 } } };
+
+  // THE ALLOWANCE: crossing, then the local marker with no request in flight.
+  const allowed = driveFence();
+  allowed.request({ payload: { tools: [] } }, allowed.ctx);
+  allowed.messageEnd(funded("toolUse"), allowed.ctx); // seals the response AND fires the crossing
+  assert.equal(allowed.compactCalls.length, 1, "the crossing did not ask Pi to compact");
+  allowed.messageEnd(marker, allowed.ctx); // must NOT throw
+  const allowedEvents = readLines103(allowed.runDir, "worker-events.jsonl").map((entry) => entry.kind);
+  assert(allowedEvents.includes("harness-fence-crossing"), "no crossing was recorded");
+  assert(allowedEvents.includes("harness-fence-abandoned-response"),
+    "the abandoned marker was not recorded by name");
+  assert.equal(readLines103(allowed.runDir, "failure-latch.jsonl").length, 0,
+    "the allowance still latched a failure");
+  const sealed = readLines103(allowed.runDir, "provider-requests.jsonl")
+    .filter((entry) => entry.kind === "provider-response");
+  assert.equal(sealed.length, 1, "the marker was sealed as a provider response");
+
+  // CONSUMED ONCE: a second identityless marker after the allowance still latches.
+  assert.throws(() => allowed.messageEnd(marker, allowed.ctx),
+    /no exact provider-request identity/, "a second marker rode the same allowance");
+
+  // NO CROSSING, NO ALLOWANCE: the same marker on a fresh extension latches by name.
+  const bare = driveFence();
+  assert.throws(() => bare.messageEnd(marker, bare.ctx), /no exact provider-request identity/,
+    "an identityless marker with no crossing behind it did not latch");
+  assert(readLines103(bare.runDir, "failure-latch.jsonl")
+    .some((entry) => entry.phase === "orphan-provider-response"),
+  "the orphan latch was not written for the uncovered marker");
+
+  // A FUNDED RESPONSE NEVER RIDES IT: after a crossing, an identityless response that
+  // spent tokens is still the breach the seal exists to catch.
+  const spent = driveFence();
+  spent.request({ payload: { tools: [] } }, spent.ctx);
+  spent.messageEnd(funded("toolUse"), spent.ctx);
+  assert.throws(() => spent.messageEnd(funded("stop"), spent.ctx),
+    /no exact provider-request identity/, "a funded identityless response rode the allowance");
+  checks.fenceAbortMarkerAbandonedNeverOrphaned = true;
+}
+
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);

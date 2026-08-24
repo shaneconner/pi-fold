@@ -764,11 +764,22 @@ export function createPiContextExperimentExtension(config) {
 
       pi.on("message_end", (event, ctx) => {
         const reason = event.message?.role === "assistant" ? event.message.stopReason : null;
+        // A LOCAL ZERO-USAGE ABORT MARKER never fires a crossing: the provider counted
+        // nothing, so the occupancy reading is stale, and a marker that armed the
+        // abandon allowance would consume it for ITSELF in the same pass, hiding the
+        // orphan the seal exists to catch while leaving the fence's own stranded marker
+        // to latch anyway.
+        const markerUsage = event.message?.usage ?? {};
+        const localAbortMarker = event.message?.role === "assistant" &&
+          (event.message.stopReason === "error" || event.message.stopReason === "aborted") &&
+          ["input", "output", "cacheRead", "cacheWrite", "totalTokens"]
+            .every((key) => !markerUsage[key]);
         // THE FENCE FIRES ON WHAT THE PROVIDER COUNTED, on the same reading pi-fold's own
         // fence is anchored to, and it fires ONCE per crossing: `compact` does not await,
         // so without the in-flight latch a single crossing would queue one compaction per
         // message until the summary landed.
-        if (harnessFence && event.message?.role === "assistant" && !fenceState.inFlight) {
+        if (harnessFence && event.message?.role === "assistant" && !fenceState.inFlight &&
+            !localAbortMarker) {
           const usage = typeof ctx?.getContextUsage === "function" ? ctx.getContextUsage() : null;
           const tokens = typeof usage?.tokens === "number" ? usage.tokens : null;
           fenceState.lastTokens = tokens;
@@ -828,6 +839,25 @@ export function createPiContextExperimentExtension(config) {
         }
         if (event.message?.role === "assistant") {
           if (!inFlightProviderRequest) {
+            // OUR OWN ABORT CAN LAND BEFORE THE NEXT REQUEST OPENS. The fence's compact
+            // aborts the live operation between building a projection and dispatching the
+            // request, and Pi then emits a LOCAL zero-usage abort marker (gate 97's local
+            // class) that never touched the provider ledger: nativefence rep 2 of
+            // sol-20260823-live died here on its FIRST crossing, the fence itself having
+            // worked (crossing at 249,189 against 235,674, Pi's threshold pass summarized
+            // the branch), because this seal is sandbox-era and the fence arm had never
+            // run under it. Same allowance as the stranded request above: armed at the
+            // crossing, consumed ONCE, and only for a marker that spent nothing. Every
+            // other identityless assistant message still latches.
+            if (fenceState.abandonPending && localAbortMarker) {
+              fenceState.abandonPending = false;
+              appendEvent("harness-fence-abandoned-response", {
+                crossing: fenceState.crossings,
+                message_sha256: sha256Json(event.message),
+                stop_reason: event.message.stopReason,
+              });
+              return;
+            }
             appendFailure(config, "orphan-provider-response", sha256Json(event.message));
             throw new Error("An assistant response has no exact provider-request identity");
           }
