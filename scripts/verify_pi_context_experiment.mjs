@@ -4391,13 +4391,45 @@ try {
     plan.stages.find((entry) => entry.kind !== "probe"),
   ]) {
     assert(stage, "the plan offers no stage of this kind, so the payload sweep is scanning nothing");
+    const sealedShape = plan.stages.some((entry) => entry.codeWord !== null || entry.kind === "probe");
     const rendered = stagePayloadText(visibleStage(stage));
     assert(rendered.length > 0, "the rendered payload is empty, so the sweep is scanning nothing");
     assert.deepEqual(testAwarenessLeaks(rendered), [],
       `the rendered ${stage.kind} payload tells the model it is being tested or what to hoard`);
     assert(!/^STAGE \d/m.test(rendered),
       "the rendered payload still announces a numbered protocol stage");
+    // AND THE VOCABULARY SCAN, ON THE RENDERED BYTES. This sweep ran `testAwarenessLeaks`
+    // alone, which is how `DELIVERABLE deliverable-16:` survived the 2026-08-25 de-priming
+    // for an hour: the renderer concatenates the label and the id downstream of every scan
+    // `validateStagePlan` performs, so a plan whose `instructions` are provably clean still
+    // rendered a protocol label and an ordinal-encoding id into the model's context four
+    // times a run. Scanning the RENDERED payload is the only place that can catch a leak the
+    // renderer itself introduces. Sealed-shape stages are exempt, as everywhere else.
+    // Exempt on the plan's OWN SHAPE, the same rule `validateStagePlan` applies: this
+    // fixture is a SEALED-shape plan carrying code words and audit traces, and its payload
+    // renders them because it was built to. What must be clean is the renderer's own
+    // additions, which the standalone check below pins directly.
+    if (!sealedShape) {
+      assert.deepEqual(protocolVocabularyLeaks(rendered, stage.files.map((file) => file.path)), [],
+        "the rendered payload carries protocol vocabulary the plan-side scan cannot see");
+    }
   }
+  // The pre-fix proof: the exact string the renderer used to emit is caught by the scan this
+  // sweep now runs, so an empty result above means something.
+  assert(protocolVocabularyLeaks(
+    "DELIVERABLE deliverable-16: Reply with a short structured note.").length > 0,
+  "the rendered-payload sweep would not have caught the label it was added for");
+  // And the renderer adds NOTHING of its own: a current-shape stage whose instructions and
+  // deliverable are clean must render clean, which is the property the sealed fixture above
+  // cannot demonstrate. Driven through the real renderer, not asserted over source.
+  const cleanStage = {
+    ...visibleStage(plan.stages.find((entry) => entry.kind !== "probe" && entry.deliverable)),
+    instructions: "Read these files from the curl checkout at /work: lib/a.c, lib/b.c.",
+    probes: [],
+    deliverable: { id: "deliverable-16", instructions: "Reply with a short structured note." },
+  };
+  assert.deepEqual(protocolVocabularyLeaks(stagePayloadText(cleanStage)), [],
+    "the renderer injects protocol vocabulary into a payload whose plan text is clean");
 
   // A guess is not evidence of recall. Inviting one turned pi-fold's lost stage-15
   // code word into a confident cw-509a30 that exists nowhere in the plan, and the

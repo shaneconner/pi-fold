@@ -1451,7 +1451,18 @@ export function stagePayloadText(stage) {
     header.push("");
     for (const probe of stage.probes) header.push(`- ${probe.id}: ${probe.question}`);
   }
-  if (stage.deliverable) header.push("", `DELIVERABLE ${stage.deliverable.id}: ${stage.deliverable.instructions}`);
+  // NO LABEL AND NO ID (Shane, 2026-08-25). This pushed `DELIVERABLE deliverable-16: ...` into
+  // the model's context four times a full run: an all-caps protocol label plus an id built from
+  // the true stage ordinal, so the model was handed both the numbering and its own position in
+  // it. Our OWN `PROTOCOL_VOCABULARY_PATTERNS` contains /\bdeliverable-\d/i and catches the
+  // rendered string; it survived because `validateStagePlan` scans `stage.instructions` and
+  // `stage.deliverable.instructions`, which are clean, and the label was concatenated here,
+  // downstream of every scan. Worse, `deliverableHeadingPattern` then matched that id in the
+  // MODEL'S OWN reply, so it was expected to be echoed into assistant text where a compaction
+  // summary can index by it. The id still exists and grading still joins on it; it simply never
+  // reaches the model, and `gradeDeliverables` already falls back to the first non-empty
+  // assistant block for a reply that carries no heading.
+  if (stage.deliverable) header.push("", stage.deliverable.instructions);
   // THE HARNESS NO LONGER INJECTS FILE BODIES (Shane, 2026-08-25). The payload used to close
   // with a BEGIN/END block per file, tens of thousands of characters of source, and that is
   // what killed the pifold arm of sol-20260825-full: a stage is a USER MESSAGE now, so all of
