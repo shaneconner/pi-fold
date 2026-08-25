@@ -11248,6 +11248,64 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     /A sandboxed run config names a run directory the namespace does not have/,
     "a sandboxed config carrying a run directory was accepted");
 
+  // THE WORKER MUST BE ABLE TO EXIT (2026-08-25, found by sol-20260825-fdsmoke, not by this
+  // suite). A socket is a libuv handle: an open one holds the event loop up by itself. Both
+  // arms of that smoke delivered all 8 stages, answered the end block, wrote their manifest
+  // and their report, printed the final summary line, ran off the end of the worker script,
+  // and then sat there. The supervisor waits on the child's exit, so two runs that had done
+  // every piece of their work correctly were going to be killed at the 90 minute watchdog and
+  // reported as failures.
+  //
+  // DRIVEN, in a child process, because the defect is a property of the running process and
+  // no source scan states it. The child models the two halves `openDeliveryChannel` has, and
+  // it needs BOTH: without the unref it never exits, and without a REFERENCED in-flight timer
+  // it exits before its answer arrives. It calls no `process.exit`, which is exactly what hid
+  // this the first time it was probed.
+  {
+    const exitDir = mkdtempSync(join(tmpdir(), "pi-fold-delivery-exit-"));
+    const childPath = join(exitDir, "child.mjs");
+    writeFileSync(childPath, [
+      'import { Socket } from "node:net";',
+      'const s = new Socket({ fd: 3, readable: true, writable: true });',
+      's.setEncoding("utf8");',
+      's.unref();',
+      'let waiting = null;',
+      's.on("data", (chunk) => {',
+      '  clearTimeout(waiting);',
+      '  process.stdout.write(chunk);',
+      '});',
+      'waiting = setTimeout(() => { throw new Error("deadline"); }, 30_000);',
+      's.write("ask\\n");',
+    ].join("\n"));
+    const child = spawn(process.execPath, [childPath], { stdio: ["ignore", "pipe", "ignore", "pipe"] });
+    let answered = "";
+    child.stdout.on("data", (chunk) => { answered += chunk.toString("utf8"); });
+    const socket120 = child.stdio[3];
+    socket120.on("error", () => { /* the child exits first, so a late write can EPIPE */ });
+    socket120.on("data", () => { socket120.write("answered\n"); });
+    const exit120 = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve("never exited"), 20_000);
+      child.on("exit", (code, signal) => { clearTimeout(timer); resolve(`${code}/${signal}`); });
+    });
+    rmSync(exitDir, { recursive: true, force: true });
+    assert.equal(answered.trim(), "answered",
+      "the delivery round trip did not complete, so this gate would pass for the wrong reason");
+    assert.equal(exit120, "0/null",
+      "a worker that finished its delivery could not exit: the socket is holding the event loop");
+  }
+  // And the runtime still does it. The driven check above proves the SHAPE works; this proves
+  // the extension is still built that way, since the child above is a model rather than the
+  // thing itself.
+  const delivery120 = source("scripts/pi_context_experiment_extension.mjs");
+  const channel120 = delivery120.slice(
+    delivery120.indexOf("function openDeliveryChannel("),
+    delivery120.indexOf("function responseIdentity("));
+  assert(channel120.length > 0, "the delivery channel was not found where this gate reads it");
+  assert(/socket\.unref\(\)/.test(channel120),
+    "the delivery socket is referenced again, so a finished worker will never exit");
+  assert(!/timer[^\n]*unref\(\)/.test(channel120),
+    "the in-flight timer is unreferenced, so a worker can exit before its stage arrives");
+
   checks.theRunDirectoryIsNotInTheNamespace = true;
 }
 

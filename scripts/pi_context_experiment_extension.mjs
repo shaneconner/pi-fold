@@ -83,6 +83,16 @@ function appendFailure(config, phase, detail) {
 function openDeliveryChannel(fd) {
   const socket = new Socket({ fd, readable: true, writable: true });
   socket.setEncoding("utf8");
+  // UNREFERENCED, or the worker never exits (2026-08-25, found by sol-20260825-fdsmoke).
+  // A socket is a libuv handle and an open one holds the event loop up on its own. Both arms
+  // of that smoke delivered all 8 stages, answered the end block, wrote their manifest and
+  // their report, printed the final summary line, ran off the end of the worker script, and
+  // then sat there: the supervisor waits on the child's exit, so a run that had done every
+  // piece of its work correctly was going to be killed at the 90 minute watchdog and reported
+  // as a failure. Nothing needs this handle to hold the loop: the worker awaits one stage at a
+  // time and the per-request timer below is referenced, so the loop stays up exactly as long
+  // as a request is actually in flight and not one moment longer.
+  socket.unref();
   let buffered = "";
   let waiting = null;
   const settle = (error, value) => {
