@@ -1248,14 +1248,19 @@ export function auditStepSentence(step) {
   const subject = step.index === 1
     ? `the file ${step.anchor}`
     : `the file you recorded as ${auditStepId(step.chainId, step.index - 1)}`;
+  // "ASSIGNED", NOT "DELIVERED" (2026-08-25). The harness stopped pasting file bodies, so a
+  // stage NAMES its files and the model opens them; "delivered" would invite the reading that
+  // a file the model never got round to opening was never delivered, and the hop would then
+  // measure that ambiguity rather than the chain. The order is the order the stage's own
+  // sentence lists, which is the order the plan holds, so the answers are unchanged.
   if (step.hop === "SOF") {
-    return `${label} which stage of this session delivered ${subject}? ` +
+    return `${label} which stage of this session assigned ${subject}? ` +
       `Record it on its own line as \`${id}: <stage number>\`.`;
   }
   if (step.hop === "FIN") {
-    return `${label} name the ${ordinalWord(step.hopIndex)} file delivered in the stage you ` +
+    return `${label} name the ${ordinalWord(step.hopIndex)} file assigned by the stage you ` +
       `recorded as ${auditStepId(step.chainId, step.index - 1)}, counting files in the order ` +
-      `that stage delivered them. Record it on its own line as \`${id}: <repository-relative path>\`.`;
+      `that stage listed them. Record it on its own line as \`${id}: <repository-relative path>\`.`;
   }
   return `${label} open ${subject} and name the target of its ` +
     `${ordinalWord(step.hopIndex)} quoted include. Count every line whose first non-space ` +
@@ -1420,8 +1425,27 @@ export function stagePayloadText(stage) {
     for (const probe of stage.probes) header.push(`- ${probe.id}: ${probe.question}`);
   }
   if (stage.deliverable) header.push("", `DELIVERABLE ${stage.deliverable.id}: ${stage.deliverable.instructions}`);
-  const body = stage.files.map((file) =>
-    `\n----- BEGIN ${file.path} (${file.lines} lines) -----\n${file.text}\n----- END ${file.path} -----\n`).join("");
+  // THE HARNESS NO LONGER INJECTS FILE BODIES (Shane, 2026-08-25). The payload used to close
+  // with a BEGIN/END block per file, tens of thousands of characters of source, and that is
+  // what killed the pifold arm of sol-20260825-full: a stage is a USER MESSAGE now, so all of
+  // that mass landed on the user channel, and `automaticToolBatches` folds TOOL RESULTS. At
+  // stage 10 the pifold transcript held 980,174 chars in 15 user messages against 860 chars in
+  // one tool result, 0.1% of it foldable; nine commits fired and every one deferred with
+  // `nothing-proposable` and `unmarked_stale_spans: 0` while the projection ran to 1,166,009
+  // chars and Pi's derived output budget collapsed to 16 tokens.
+  //
+  // It was never pi-fold's defect. A REAL SESSION PUTS ITS MASS IN TOOL RESULTS, because the
+  // agent reads files; nobody pastes 66k chars into a prompt sixty-four times. Pull delivery
+  // was accidentally faithful on that axis (the payload arrived as a `repo_stage` tool result)
+  // and push delivery broke it while fixing the turn structure. The stage now NAMES its files
+  // and the model reads them itself, which puts the bytes back on the channel a session
+  // actually uses, keeps every turn boundary so Pi's own compaction still evaluates per turn,
+  // and needs no delivery tool, no key, no fence and no resume.
+  //
+  // The cost, accepted: the harness no longer controls how many tokens a stage adds, because
+  // the model chooses what to read. `assignedChars` is the size we still govern, and whether
+  // an arm actually read its assignment is measured rather than assumed.
+  const body = "";
   // NO DELIVERY KEY (Shane, 2026-08-25: "I'd like to remove next key essentially"). The
   // payload used to close with `NEXT_KEY: <64 hex>`, which the model had to echo back to
   // receive the next stage. Nothing in the harness ever needed the model to hold it: the
@@ -1716,9 +1740,17 @@ export function validateStagePlan(plan) {
     }
     assertExperiment(HEX_64.test(stage.payloadSha256) && Number.isSafeInteger(stage.payloadChars) &&
       stage.payloadChars > 0, `Invalid payload attestation at stage ${index + 1}`);
+    // THE FLOOR MOVED FROM THE RENDERED PAYLOAD TO THE ASSIGNED SOURCE (2026-08-25). It always
+    // meant "this stage carries enough mass to be worth folding"; the harness no longer pastes
+    // the bodies, so the rendered payload is a few hundred characters of instruction and the
+    // mass arrives as the model's own reads. What the plan still governs is how much source a
+    // stage ASSIGNS, so that is what the floor binds. A sealed plan passes either reading:
+    // its files sum to roughly payloadTargetChars whether or not the bodies were pasted.
     if (stage.kind !== "probe") {
-      assertExperiment(stage.payloadChars >= modePlan.payloadFloorChars,
-        `Stage ${index + 1} payload is below the fold-eligibility floor`);
+      const assignedChars = stage.files.reduce((total, file) => total + file.chars, 0);
+      assertExperiment(assignedChars >= modePlan.payloadFloorChars,
+        `Stage ${index + 1} assigns ${assignedChars} chars of source, below the ` +
+        `${modePlan.payloadFloorChars} fold-eligibility floor`);
     }
   }
   assertExperiment(plan.probeCount === probeCount && plan.deliverableCount === deliverableCount &&

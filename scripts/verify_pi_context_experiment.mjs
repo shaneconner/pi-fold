@@ -2246,11 +2246,11 @@ try {
     .filter((stage) => stage.chainStep !== null)
     .map((stage) => stage.chainStep);
   assert.equal(auditStepSentence(sofStep),
-    "AUDIT TRACE trace-a, step 01: which stage of this session delivered the file " +
+    "AUDIT TRACE trace-a, step 01: which stage of this session assigned the file " +
     "stage-1.rs? Record it on its own line as `trace-a-01: <stage number>`.");
   assert.equal(auditStepSentence(finStep),
-    "AUDIT TRACE trace-a, step 02: name the 2nd file delivered in the stage you " +
-    "recorded as trace-a-01, counting files in the order that stage delivered them. " +
+    "AUDIT TRACE trace-a, step 02: name the 2nd file assigned by the stage you " +
+    "recorded as trace-a-01, counting files in the order that stage listed them. " +
     "Record it on its own line as `trace-a-02: <repository-relative path>`.");
   assert.equal(auditStepSentence(incStep),
     "AUDIT TRACE trace-a, step 03: open the file you recorded as trace-a-02 and name " +
@@ -4272,7 +4272,7 @@ try {
   // The working half of the instruction stays: dropping the premise must not drop
   // the task. What survives is the ASSIGNMENT, not a memory strategy.
   assert(staging.includes("build an accurate working") &&
-    staging.includes("model of what it does, what it depends on, and which names it exports."),
+    staging.includes("model of what they do, what they depend on, and which names they export."),
   "the reading task was dropped along with the hoarding direction");
   // Scoped to the function BODY: the comment above it quotes the removed line on
   // purpose, and a scan of the whole file would be satisfied by deleting the
@@ -10890,6 +10890,100 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 
   checks.theInRunProbeWavesAreDeletedAndAPartialScheduleIsRefused = true;
   checks.theWatchdogIsTheOneConstantASealedPlanMayDisagreeWith = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 119 - the harness NAMES a stage's files and never pastes their bodies, and the
+// fold-eligibility floor binds the ASSIGNED SOURCE rather than the rendered payload.
+//
+// Shane 2026-08-25, after the pifold arm of sol-20260825-full died at stage 10. A stage is a
+// USER MESSAGE since the key deletion, and `automaticToolBatches` folds TOOL RESULTS, so
+// pasting tens of thousands of characters of source into the payload put the entire workload
+// on a channel pi-fold cannot touch: 980,174 chars across 15 user messages against 860 chars
+// in one tool result, 0.1% foldable. Nine commits fired and every one deferred with
+// `nothing-proposable` and `unmarked_stale_spans: 0` while the projection ran to 1,166,009
+// chars and Pi's derived output budget collapsed to 16 tokens. Folding never suspended and
+// never errored; it had nothing it was permitted to fold.
+//
+// It was never pi-fold's defect. A REAL SESSION PUTS ITS MASS IN TOOL RESULTS because the
+// agent reads files, and nobody pastes 66k chars into a prompt sixty-four times. The stage now
+// names its files and the model opens them itself, which puts the bytes back on the channel a
+// session actually uses while keeping every turn boundary. The smokes could not have caught
+// it: at eight stages the model made 29 to 64 bash calls, so there WAS tool-result mass to
+// fold and the total never approached the window. Only scale exposes it, which is why this
+// gate asserts the SHAPE rather than waiting for another ten-hour run to report it.
+// ---------------------------------------------------------------------------
+{
+  // THE RENDERER IGNORES BODIES EVEN WHEN HANDED THEM. The supervisor's `renderStage` still
+  // reads every file to verify the checkout has not drifted from the plan, and hands the
+  // renderer facts CARRYING `text`; the proof that nothing is pasted has to be driven with
+  // that text present, or it passes vacuously on a fixture whose files have none. This is the
+  // assertion that fails on the pre-change renderer, which spliced a BEGIN/END block per file.
+  const bodyStage = plan.stages.find((stage) => stage.files.length > 0);
+  assert(bodyStage, "no fixture stage assigns files, so this gate proves nothing");
+  const withText = {
+    ...visibleStage(bodyStage),
+    files: bodyStage.files.map((file) => ({ ...file, text: "X".repeat(40_000) })),
+  };
+  const withoutText = stagePayloadText(visibleStage(bodyStage));
+  const withTextRendered = stagePayloadText(withText);
+  assert.equal(withTextRendered, withoutText,
+    "the renderer's output changes when file bodies are present, so it is still pasting them");
+  assert(!/-----\s*BEGIN /.test(withTextRendered) && !/-----\s*END /.test(withTextRendered),
+    "the payload still carries a file-body block");
+  assert(!withTextRendered.includes("X".repeat(200)),
+    "the payload carries the file text it was handed");
+  assert(withTextRendered.length < 8_000,
+    `the payload renders ${withTextRendered.length} chars: the harness is still injecting source`);
+
+  // THE FLOOR BINDS ASSIGNED SOURCE. A stage whose rendered payload is tiny is fine; one that
+  // assigns too little source is not, because that is what the fold-eligibility floor was
+  // always about.
+  const reseal119 = (mutated) => {
+    mutated.planSha256 = stagePlanSha256(mutated);
+    return mutated;
+  };
+  const floor = EXPERIMENT_MODE_PLANS[plan.mode].payloadFloorChars;
+  const target = plan.stages.findIndex((stage) => stage.kind !== "probe" && stage.files.length > 0);
+  assert(target >= 0, "the fixture offers no payload stage to test the floor on");
+  const starved = structuredClone(plan);
+  starved.stages[target].files = starved.stages[target].files.map((file) => ({ ...file, chars: 1 }));
+  assert.throws(() => validateStagePlan(reseal119(starved)), /below the .* fold-eligibility floor/,
+    "a stage assigning almost no source is accepted, so the floor moved to nothing");
+  // And the floor is NOT reading the rendered payload any more: a stage whose payload is far
+  // below the floor but whose assigned source clears it must validate, which is exactly the
+  // shape every stage now has and what the pre-change validator refused.
+  const rendered = stagePayloadText(visibleStage(plan.stages[target]));
+  const assigned = plan.stages[target].files.reduce((total, file) => total + file.chars, 0);
+  assert(rendered.length < floor && assigned >= floor,
+    `the fixture stage renders ${rendered.length} and assigns ${assigned} against a ${floor} floor: ` +
+    "it does not demonstrate the split, so this assertion would pass for the wrong reason");
+  validateStagePlan(reseal119(structuredClone(plan)));
+
+  // The instruction tells the model WHERE, since the bytes no longer come to it.
+  const staging119 = source("scripts/stage_pi_context_experiment.mjs");
+  assert(staging119.includes("Read these files from the ${stage.repoKey} checkout at /work"),
+    "the read instruction does not say where to read from, and nothing delivers the bytes now");
+  // And it must LIST the paths, or naming the checkout tells the model nothing about what to
+  // open. Both instruction kinds, since a revisit stage assigns files too.
+  assert.equal(
+    (staging119.match(/Files in this stage: \$\{files\.map\(\(file\) => file\.path\)\.join\(", "\)\}/g) ?? []).length +
+    (staging119.match(/New files in this stage: \$\{files\.map\(\(file\) => file\.path\)\.join\(", "\)\}/g) ?? []).length,
+    2, "the read and revisit instructions must each list the paths they assign");
+  // Anchored to the CODE form, not the prose: the comment above the instruction quotes the old
+  // wording on purpose, and a scan for the bare phrase matches that comment and would be
+  // satisfied by deleting the explanation rather than the instruction. Gate 116's lesson.
+  assert(!/`Read every file delivered/.test(staging119),
+    "an instruction still claims the stage delivered its files");
+  // The audit hops say ASSIGNED, or a file the model has not opened yet reads as undelivered
+  // and the hop measures that ambiguity instead of the chain.
+  const contract119 = source("scripts/lib/pi_context_experiment.mjs");
+  assert(/which stage of this session assigned/.test(contract119) &&
+    /file assigned by the stage you/.test(contract119) &&
+    /counting files in the order [\s\S]*?that stage listed them/.test(contract119),
+  "an audit hop still asks about delivery rather than assignment");
+
+  checks.theHarnessNamesFilesAndNeverPastesThem = true;
 }
 
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);

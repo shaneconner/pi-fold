@@ -171,16 +171,20 @@ function collectCheckoutDefinitions(checkoutDir, plantedWords) {
 // the code does, depends on and exports is the assignment and is enough.
 function readInstruction(stage, files) {
   return [
-    `Read every file delivered in this stage of ${stage.repoKey} and build an accurate working`,
-    "model of what it does, what it depends on, and which names it exports.",
+    // NAMED, NOT DELIVERED (Shane, 2026-08-25). The harness used to paste the bodies in after
+    // this sentence; it names the paths and the model opens them itself, so the source lands
+    // on the tool-result channel a real session uses. "delivered in this stage" would now be
+    // a lie, and the model has to be told where to look, so the wording states the checkout.
+    `Read these files from the ${stage.repoKey} checkout at /work and build an accurate working`,
+    "model of what they do, what they depend on, and which names they export.",
     `Files in this stage: ${files.map((file) => file.path).join(", ")}.`,
   ].join(" ");
 }
 
 function revisitInstruction(stage, files, earlier) {
   return [
-    `Read the newly delivered files and then CROSS-REFERENCE them against material you`,
-    `already received earlier in this session, specifically stage ${earlier.ordinal}`,
+    `Read the new files below from the checkout at /work and then CROSS-REFERENCE them against`,
+    `material you already worked through earlier in this session, specifically stage ${earlier.ordinal}`,
     `(${earlier.paths.join(", ")}).`,
     `New files in this stage: ${files.map((file) => file.path).join(", ")}.`,
     "Name every call, trait, type or route that crosses between the new files and that earlier",
