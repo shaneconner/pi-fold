@@ -9,7 +9,7 @@
 // adjudicator turns into evidence.
 //
 //   node scripts/run_pi_context_experiment.mjs --run-dir <dir> --unit <unit> \
-//        --campaign-dir <dir> --plan <stages.json> --arm pifold|native|unmanaged|nativefence \
+//        --campaign-dir <dir> --plan <stages.json> --arm pifold|native|unmanaged \
 //        [--model-provider openai-codex] [--model-id gpt-5.6-sol] [--effort xhigh]
 
 import { execFileSync, spawn } from "node:child_process";
@@ -17,7 +17,7 @@ import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, re
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  EXPERIMENT_ARMS,
+  EXPERIMENT_LAUNCHABLE_ARMS,
   EXPERIMENT_BEHAVIORAL_MODE,
   EXPERIMENT_CLOSED_BOOK_LABEL,
   EXPERIMENT_SESSION_TYPES,
@@ -61,7 +61,6 @@ import {
   directoryTreeSha256,
   exactKeys,
   fileSha256,
-  freshChallenge,
   monotonicMs,
   paceRecordIdentity,
   parseSystemdShow,
@@ -286,16 +285,14 @@ async function supervisedWait({ state, worker, sessionFile, predicate, label, ab
 // `worker` used to supply the host pid and its start ticks. Inside the namespace the
 // worker reads both from its OWN /proc, so the comparison is against what it
 // reported at readiness: same process, same reading, taken twice.
-function parseRequest(path, config, stage, expectedChallenge, workerIdentity) {
+function parseRequest(path, config, stage, workerIdentity) {
   const request = readJson(path);
   assertExperiment(exactKeys(request, [
-    "version", "runId", "stage", "challenge", "challengeSha256", "toolCallId",
+    "version", "runId", "stage",
     "workerPid", "workerStartTicks", "requestedWallMs", "requestedMonotonicMs", "requestSha256",
   ]), `Invalid stage request shape ${stage}`);
   const { requestSha256, ...identity } = request;
   assertExperiment(request.version === 1 && request.runId === config.runId && request.stage === stage &&
-    request.challenge === expectedChallenge &&
-    request.challengeSha256 === sha256Text(expectedChallenge) &&
     request.workerPid === SANDBOX_WORKER_PID &&
     request.workerStartTicks === workerIdentity.workerStartTicks &&
     request.requestSha256 === sha256Json(identity),
@@ -309,8 +306,10 @@ function responseIdentity(response) {
 }
 
 // Stage content is materialized by the SUPERVISOR from the plan plus the run's pinned
-// checkout, and pin-checked against the plan's payload hash before the nonce is spliced in.
-function renderStage(plan, stage, repoDir, nextChallenge) {
+// checkout. WHAT IS DELIVERED IS EXACTLY WHAT IS PINNED: there is no longer a nonce spliced
+// in afterwards, so the payload hash covers every byte the model sees rather than every byte
+// but the last line.
+function renderStage(plan, stage, repoDir) {
   const files = stage.files.map((file) => ({
     ...file,
     text: readFileSync(join(repoDir, file.path), "utf8"),
@@ -324,7 +323,7 @@ function renderStage(plan, stage, repoDir, nextChallenge) {
   const pinned = stagePayloadText(visible);
   assertExperiment(sha256Text(pinned) === stage.payloadSha256,
     `Stage ${stage.ordinal} rendered payload does not match its planned hash`);
-  return stagePayloadText({ ...visible, nextKeyPlaceholder: nextChallenge });
+  return pinned;
 }
 
 async function run() {
@@ -348,8 +347,8 @@ async function run() {
   const modelId = argumentValue("--model-id", "gpt-5.6-sol");
   const effort = argumentValue("--effort", "xhigh");
   assertExperiment(requestedRunDir && unit && campaignDir && planPath, "Experiment run requires --run-dir, --unit, --campaign-dir and --plan");
-  assertExperiment(closedBook || EXPERIMENT_ARMS.includes(arm),
-    `Experiment run requires --arm ${EXPERIMENT_ARMS.join("|")}`);
+  assertExperiment(closedBook || EXPERIMENT_LAUNCHABLE_ARMS.includes(arm),
+    `Experiment run requires --arm ${EXPERIMENT_LAUNCHABLE_ARMS.join("|")}`);
   // Deployment fact resolved from the model pin, never a tunable: rep 16 aborted after the
   // curation thresholds ran against the 255,616-token descriptor budget because this fact
   // never reached the registration. Unlisted models run in descriptor mode.
@@ -399,23 +398,9 @@ async function run() {
     assertExperiment(Number.isFinite(toolFoldThreshold) && toolFoldThreshold > 0 && toolFoldThreshold < 1,
       "--tool-fold-threshold takes a share strictly between 0 and 1");
   }
-  // `--fence-share X` moves the nativefence compact point off its matched default.
-  const requestedFenceShare = argumentValue("--fence-share", null);
-  let fenceShare = null;
-  if (requestedFenceShare !== null) {
-    assertExperiment(arm === "nativefence", "--fence-share belongs to the nativefence arm alone");
-    fenceShare = Number.parseFloat(requestedFenceShare);
-    assertExperiment(Number.isFinite(fenceShare) && fenceShare > 0 && fenceShare < 1,
-      "--fence-share takes a proportion strictly between 0 and 1");
-  }
   const providerInputBudget = requestedBudget === "none"
     ? null
     : EXPERIMENT_PROVIDER_INPUT_BUDGETS[`${modelProvider}/${modelId}`] ?? null;
-  // The matched fence measures a share of the declared budget, so it has nothing to fence
-  // against without one. Refused here rather than at the extension, so the run fails at
-  // launch instead of after the model has been paid for.
-  assertExperiment(arm !== "nativefence" || providerInputBudget !== null,
-    "The nativefence arm fences against a declared serving budget and cannot run without one");
   const runDir = resolve(requestedRunDir);
   const requiredRoot = join(EXPERIMENT_STATE_ROOT, basename(resolve(campaignDir)), "runs");
   assertExperiment(dirname(runDir) === requiredRoot, `Run directory must live under ${requiredRoot}`);
@@ -483,7 +468,6 @@ async function run() {
         ...(requestedNotice === "off" ? { postFoldNotice: false } : {}),
         ...(thresholds === null ? {} : { thresholds }),
         ...(toolFoldThreshold === null ? {} : { toolFoldThreshold }),
-        ...(fenceShare === null ? {} : { fenceShare }),
         // No brief generator: the deterministic brief carries the opening prose
         // now (package gate 134), and this run measures the no-generator condition
         // the reviews recommend making permanent. See EXPERIMENT_BRIEF_GENERATOR's
@@ -526,7 +510,6 @@ async function run() {
     bootId: bootId(),
     codeCommit: gitStart.head,
     codeTree: gitStart.tree,
-    firstChallenge: freshChallenge(),
     stageCount: plan.stageCount,
     stageIntervalMs: modePlan.stageIntervalMs,
     watchdogMs: modePlan.watchdogMs,
@@ -677,7 +660,6 @@ async function run() {
     state.workerStartTicks = workerReady.workerStartTicks;
     appendHeartbeat(state, worker, workerReady.sessionFile);
 
-    let expectedChallenge = config.firstChallenge;
     let previousRelease = config.createdMonotonicMs;
     // A closed-book session has no stages to release: the loop body never runs and the
     // supervisor drops straight to awaiting the worker's single-turn completion.
@@ -693,7 +675,7 @@ async function run() {
         tolerateExit: armRuntime.toleratesOverflow,
       });
       if (waited.workerExited) { earlyExit = true; break; }
-      const request = parseRequest(requestPath, config, stage, expectedChallenge, workerReady);
+      const request = parseRequest(requestPath, config, stage, workerReady);
       const releaseAt = previousRelease + config.stageIntervalMs;
       const gated = await supervisedWait({
         state, worker, sessionFile: workerReady.sessionFile,
@@ -704,19 +686,15 @@ async function run() {
       });
       if (gated.workerExited) { earlyExit = true; break; }
       const planStage = plan.stages[stage - 1];
-      const nextChallenge = stage === config.stageCount ? "END" : freshChallenge();
-      const content = renderStage(plan, planStage, repoDir, nextChallenge);
+      const content = renderStage(plan, planStage, repoDir);
       const responseBase = {
         version: 1,
         runId,
         stage,
-        challengeSha256: request.challengeSha256,
         requestSha256: request.requestSha256,
         content,
         contentSha256: sha256Text(content),
         payloadSha256: planStage.payloadSha256,
-        nextChallenge,
-        nextChallengeSha256: sha256Text(nextChallenge),
         releasedWallMs: Date.now(),
         releasedMonotonicMs: monotonicMs(),
       };
@@ -725,12 +703,10 @@ async function run() {
         version: 1,
         runId,
         stage,
-        challengeSha256: request.challengeSha256,
         requestSha256: request.requestSha256,
         responseSha256,
         contentSha256: responseBase.contentSha256,
         payloadSha256: planStage.payloadSha256,
-        nextChallengeSha256: responseBase.nextChallengeSha256,
         requestedWallMs: request.requestedWallMs,
         requestedMonotonicMs: request.requestedMonotonicMs,
         releasedWallMs: responseBase.releasedWallMs,
@@ -747,7 +723,6 @@ async function run() {
         join(runDir, "ipc", "responses", `stage-${String(stage).padStart(2, "0")}.json`),
         response,
       );
-      expectedChallenge = nextChallenge;
       previousRelease = pace.releasedMonotonicMs;
       stagesReleased = stage;
       appendHeartbeat(state, worker, workerReady.sessionFile);

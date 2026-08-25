@@ -181,35 +181,26 @@ function workloadSystemPrompt() {
   return [
     "You are a careful software analyst working through a repository.",
     "Read what you are given accurately and write the deliverables you are asked for.",
-    "Work in one continuous run and finish only after the work ends.",
   ].join(" ");
 }
 
-function workloadPrompt(firstChallenge) {
-  return [
-    `Begin the staged repository assignment with key ${firstChallenge}.`,
-    `Call ${EXPERIMENT_TOOL_NAME} with the current key to receive each stage, carry out that`,
-    "stage's instructions in full, and follow each NEXT_KEY until END.",
-    "Do not skip, guess, duplicate, or combine stages.",
-    "Complete this as one continuous run.",
-  ].join(" ");
-}
-
-// AN ORDINARY RESUME (Shane, 2026-08-24: "word it like a normal resume prompt"). It used to
-// say "The assignment is not finished: stage N of 64 has not been delivered. Recover the
-// NEXT_KEY ... Do not write the closing synthesis until a stage returns END", which handed
-// over a total, a position, the fact that progress was being tracked, and an owed final
-// report. It fires once per fence compaction, so its DOSE scaled with how often an arm
-// compacted: 5 to 10 per native run against exactly 0 for every pifold run, which made the
-// priming a cross-arm asymmetry rather than a constant. It says nothing about the work now,
-// so a resumed agent is told only that it was interrupted; gate 56's law is unchanged and
-// strengthened, because withholding the key was always the point.
-function resumePrompt() {
-  return [
-    "You are resuming after a context handoff.",
-    "Continue the work you were doing.",
-  ].join(" ");
-}
+// THERE IS NO WORKLOAD PROMPT AND NO RESUME PROMPT (2026-08-25).
+//
+// The workload prompt said "Begin the staged repository assignment with key <hex>. Call
+// repo_stage with the current key to receive each stage ... follow each NEXT_KEY until END.
+// Do not skip, guess, duplicate, or combine stages. Complete this as one continuous run."
+// Every clause of it described the delivery protocol, and there is no delivery protocol any
+// more: STAGE 1 IS THE FIRST USER MESSAGE, which is what a person working with an agent
+// actually sends. The system prompt carries the only framing left.
+//
+// The resume prompt went with the thing that needed it. Resumes existed because the run was
+// ONE turn: a model that stopped early had to be pushed on, and a fence compaction aborted
+// the live turn and had to be recovered from. Turns end after every stage by design now, so
+// stopping is the expected shape rather than a fault to nudge past. Its dose was 5 to 10 per
+// native run against exactly 0 for every pifold run, which made the priming a cross-arm
+// asymmetry; de-primed to say nothing useful, it instead left an arm that had compacted
+// unable to find its way back to the delivery channel at all (sol-20260825-v5smoke3,
+// nativefence 5/8, worker-resume-bound). Both failure modes are gone with the mechanism.
 
 function lastConversationalMessage(entries) {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
@@ -250,115 +241,26 @@ let session;
 let report;
 let deadlineFired = false;
 let overflow = null;
-const stageNudges = [];
-const stagesDelivered = () => {
-  let delivered = 0;
-  while (existsSync(join(config.runDir, "ipc", "responses",
-    `stage-${String(delivered + 1).padStart(2, "0")}.json`))) delivered += 1;
-  return delivered;
-};
+// THE DELIVERY COUNTER IS A COUNTER (2026-08-25). It used to walk `ipc/responses/stage-NN`
+// because the model drove delivery and the worker could only infer how far it had got. The
+// worker drives it now, so it simply knows. That also retires the coupling gate 74 records:
+// the response files are truncated rather than unlinked BECAUSE this walk needed them to
+// survive as receipts, and a smoke run that deleted them once read zero all session.
+let stagesDeliveredCount = 0;
+const stagesDelivered = () => stagesDeliveredCount;
 const latchedFailures = () => (existsSync(failurePath)
   ? readFileSync(failurePath, "utf8").split("\n").filter((line) => line.trim().length > 0).length
   : 0);
-// A model that chose to end its turn is resumable. A harness that broke is not, and the
-// difference is the whole reason this is a condition rather than an unconditional retry.
-const modelEndedItsTurn = (state) => state?.terminalMessage?.stopReason === "stop" &&
-  latchedFailures() === 0;
-
-// A COMPACTION IS AN ABORT, so the fenced arm must be prompted again or it stops here.
-//
-// Pi's `compact` disconnects the agent and aborts the live turn as its first two
-// statements, so on this arm every crossing ends the turn mid-tool-call: rep 3 of
-// sol-20260814-matched crossed once at stage 1 and delivered 1 of 8 stages, terminal stop
-// reason `toolUse`, which `modelEndedItsTurn` correctly refuses to resume because nothing
-// about it says the model chose to stop. That refusal is right in general and wrong for
-// the one arm whose mechanism is the abort, so the fenced arm gets its own condition
-// rather than a loosened shared one.
-//
-// The evidence is the extension's own event stream, read from the run directory because
-// the worker and the extension share nothing else. It requires a compaction that actually
-// COMPLETED since the last prompt: an abort with no completed compaction behind it is an
-// ordinary abort and still ends the run, and a compaction that has already been resumed
-// past cannot authorize a second resume, so a stalled fence cannot spin here.
-const eventLogPath = join(config.runDir, "worker-events.jsonl");
-const fenceCompactions = () => (existsSync(eventLogPath)
-  ? readFileSync(eventLogPath, "utf8").split("\n").filter((line) => line.trim().length > 0)
-    .filter((line) => {
-      try { return JSON.parse(line).kind === "harness-fence-compacted"; } catch { return false; }
-    }).length
-  : 0);
-let fenceCompactionsResumedPast = 0;
-const fenceCompactedSinceLastPrompt = () => config.arm === "nativefence" &&
-  fenceCompactions() > fenceCompactionsResumedPast && latchedFailures() === 0;
-
-// A CROSSING'S OUTCOME IS AWAITED, NOT ASSUMED. The manual compact() a below-trigger
-// crossing fires is DETACHED from the operation the worker awaits: its abort ends the
-// turn, the prompt promise resolves, and the worker that then reads "no completed
-// compaction, no resume" and walks to its terminal assertions CANCELS the compaction
-// with its own teardown. nativefence rep 9 of sol-20260823-live recorded the whole
-// race in four milliseconds: workerFinished 197781672, "Compaction cancelled" deferred
-// 197781676. Rep 8 died on the identical race one build earlier, with the stale-ctx
-// throw masking the cancellation. At the matched 0.937 share the race never fires
-// because Pi's OWN threshold pass runs inside the operation-end sequence the worker is
-// already awaiting, which is why five crossings serviced cleanly in rep 4 and zero
-// have ever serviced below the trigger. So: while the event log holds more crossings
-// than completed compactions and nothing has latched, the worker WAITS, bounded, and
-// a timeout latches by name with the deferred error when one stands, because a fence
-// that cannot compact is a dead arm and must say so rather than time out quietly.
-const FENCE_OUTCOME_BOUND_MS = 120_000;
-const fenceEvents = (kind) => (existsSync(eventLogPath)
-  ? readFileSync(eventLogPath, "utf8").split("\n").filter((line) => line.trim().length > 0)
-    .filter((line) => {
-      try { return JSON.parse(line).kind === kind; } catch { return false; }
-    })
-  : []);
-const fenceCrossings = () => fenceEvents("harness-fence-crossing").length;
-const fenceOutcomeOwed = (crossings, compactions, latched) =>
-  crossings > compactions && latched === 0;
-const awaitFenceOutcome = async () => {
-  if (config.arm !== "nativefence") return;
-  const started = monotonicMs();
-  while (fenceOutcomeOwed(fenceCrossings(), fenceCompactions(), latchedFailures()) &&
-      !deadlineFired) {
-    if (monotonicMs() - started > FENCE_OUTCOME_BOUND_MS) {
-      const deferred = fenceEvents("harness-fence-verification-deferred").at(-1);
-      let deferredError = null;
-      try { deferredError = deferred ? JSON.parse(deferred).details?.error ?? null : null; } catch { /* detail only */ }
-      const detail = `crossing ${fenceCrossings()} produced no completed compaction and ` +
-        `no latch within ${FENCE_OUTCOME_BOUND_MS}ms` +
-        (deferredError ? `; deferred compact error: ${deferredError}` : "");
-      try {
-        const fd = openSync(failurePath, "a", 0o600);
-        try {
-          writeSync(fd, `${JSON.stringify({
-            version: 1, runId: config.runId, phase: "harness-fence-outcome-timeout", detail,
-            wallMs: Date.now(), monotonicMs: monotonicMs(),
-          })}\n`);
-          fsyncSync(fd);
-        } finally { closeSync(fd); }
-      } catch { /* The throw below carries the same name into the report. */ }
-      throw new Error(`harness-fence-outcome-timeout: ${detail}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-};
-
-// A RESUME BUYS ONE FULL TURN, and delivery is the only progress signal that cannot be
-// faked. sol-20260815-hidden native rep 1 lost stage 39's NEXT_KEY to a compaction,
-// reported it unrecoverable on every pass, and was re-prompted every nine seconds for
-// 4.3 hours: 1,761 provider responses, $127.68, zero stages, ended only by an outside
-// SIGTERM. Three consecutive resumes at the same undelivered stage now fail the run by
-// name instead, whatever ended each turn, because three whole turns that land nothing
-// is a dead run on every arm.
-const RESUME_TURNS_PER_STAGE = 3;
-const resumesWithoutProgress = (nudges, delivered) => {
-  let streak = 0;
-  for (let index = nudges.length - 1; index >= 0; index -= 1) {
-    if (nudges[index].afterStage !== delivered) break;
-    streak += 1;
-  }
-  return streak;
-};
+// THE FENCE, THE RESUME AND THE RESUME BOUND ARE ALL GONE (2026-08-25), and they were one
+// chain. `compact` aborts the live turn as its first act, so every fence crossing ended the
+// turn mid-tool-call and the fenced arm had to be prompted again or stop there; that resume
+// is what primed the model, once per compaction, 1:1 with fence share; and the resume bound
+// existed because a resume could buy no progress forever (sol-20260815-hidden native rep 1:
+// 1,761 provider responses, $127.68, zero stages, 4.3 hours, ended only by an outside
+// SIGTERM). Delivering stages as user messages removes the cause: turns end after every
+// stage, Pi compacts on its own threshold at its own boundary, nothing aborts anything, and
+// there is nothing to resume. Gates 56 and 72 are retired with the mechanism they measured;
+// their numbers stay spent.
 
 // A KILLED WORKER STILL WRITES ITS REPORT.
 //
@@ -467,6 +369,11 @@ try {
     // difference between arms.
     retry: { ...EXPERIMENT_PROVIDER_RETRY },
   });
+  // THE HANDLE IS CAPTURED, not constructed inline, because the worker now DRIVES stage
+  // delivery through it. The same object is what Pi loads as the extension: Pi reads `name`
+  // and `factory`, and `deliverStage` and `collectPendingArtifact` ride alongside so the
+  // event stream keeps exactly one writer (its records carry an ordinal and a hash chain).
+  const experiment = closedBook ? null : createPiContextExperimentExtension(config);
   const loader = new DefaultResourceLoader({
     cwd: config.repoDir,
     agentDir: getAgentDir(),
@@ -478,7 +385,7 @@ try {
     noContextFiles: true,
     systemPrompt,
     appendSystemPrompt: [],
-    extensionFactories: closedBook ? [] : [createPiContextExperimentExtension(config)],
+    extensionFactories: closedBook ? [] : [experiment],
   });
   await loader.reload();
   assertExperiment(loader.getAppendSystemPrompt().length === 0,
@@ -526,7 +433,10 @@ try {
     !activeToolNames.includes(EXPERIMENT_PIFOLD_EXTRA_TOOLS[0]),
   `Arm ${config.arm} exposed the active-context tool it must not have`);
 
-  const prompt = closedBook ? closedBookPrompt(plan) : workloadPrompt(config.firstChallenge);
+  // AN ARM RUN HAS NO WORKLOAD PROMPT to pin: its first user message is stage 1, delivered
+  // in the loop below and pinned by the plan's own payload hash. Only a closed-book session
+  // still opens with a prompt of its own, and the adjudicator checks exactly that one.
+  const prompt = closedBook ? closedBookPrompt(plan) : null;
   writeJsonExclusive(readyPath, {
     version: 1,
     runId: config.runId,
@@ -540,7 +450,7 @@ try {
     configuredSystemPromptSha256: sha256Text(systemPrompt),
     systemPromptSha256: sha256Text(session.systemPrompt),
     appendedSystemPromptCount: loader.getAppendSystemPrompt().length,
-    promptSha256: sha256Text(prompt),
+    promptSha256: prompt === null ? null : sha256Text(prompt),
     checkoutSha256,
     readyWallMs: Date.now(),
     readyMonotonicMs: monotonicMs(),
@@ -563,54 +473,46 @@ try {
   let terminalState = null;
   try {
     try {
-      await session.prompt(prompt, { expandPromptTemplates: false });
-      terminalState = await waitForDurableTerminalQuiescence(manager, session);
-      await awaitFenceOutcome();
-      while (!closedBook && !deadlineFired && stagesDelivered() < plan.stageCount &&
-        (modelEndedItsTurn(terminalState) || fenceCompactedSinceLastPrompt())) {
-        // Which of the two conditions fired is recorded, because they measure different
-        // things: one is a model that stopped early, the other is the cost of forcing a
-        // native compaction into the middle of a task.
-        const delivered = stagesDelivered();
-        if (resumesWithoutProgress(stageNudges, delivered) >= RESUME_TURNS_PER_STAGE) {
-          const detail = `resume-loop-without-progress: stage ${delivered + 1} of ` +
-            `${plan.stageCount} still undelivered after ${RESUME_TURNS_PER_STAGE} resume ` +
-            `prompt(s) that bought no progress`;
-          try {
-            const fd = openSync(failurePath, "a", 0o600);
-            try {
-              writeSync(fd, `${JSON.stringify({
-                version: 1, runId: config.runId, phase: "worker-resume-bound", detail,
-                wallMs: Date.now(), monotonicMs: monotonicMs(),
-              })}\n`);
-              fsyncSync(fd);
-            } finally { closeSync(fd); }
-          } catch { /* The throw below carries the same name into the report. */ }
-          throw new Error(detail);
+      if (closedBook) {
+        // A closed-book session is still ONE prompt: it has no stages to deliver, and its
+        // single turn IS the measurement.
+        await session.prompt(closedBookPrompt(plan), { expandPromptTemplates: false });
+        terminalState = await waitForDurableTerminalQuiescence(manager, session);
+      } else {
+        // ONE STAGE, ONE USER MESSAGE (2026-08-25). The run is a conversation across many
+        // turns rather than one enormous turn wrapping a tool loop, which is both closer to
+        // how a person actually works with an agent and the thing that lets Pi manage its
+        // own context: `_checkCompaction` runs from `_handlePostAgentRun` after each agent
+        // run settles AND inside `prompt()` before each user message is sent, so a 64-stage
+        // run evaluates the threshold 64 times instead of once.
+        //
+        // The worker asks the extension for each stage rather than the model asking for it
+        // with a key, so nothing about receiving work depends on what the model still holds
+        // in context. The stale-artifact collect and plant ride inside `deliverStage`, in
+        // the gap between turns where the model is not running at all.
+        for (let stage = 1; stage <= plan.stageCount; stage += 1) {
+          if (deadlineFired) break;
+          const served = await experiment.deliverStage();
+          assertExperiment(served.stage === stage,
+            `Stage delivery is out of order: asked for ${stage}, got ${served.stage}`);
+          await session.prompt(served.text, { expandPromptTemplates: false });
+          terminalState = await waitForDurableTerminalQuiescence(manager, session);
+          stagesDeliveredCount = stage;
         }
-        const reason = modelEndedItsTurn(terminalState) ? "model-ended-turn" : "fence-compaction";
-        fenceCompactionsResumedPast = fenceCompactions();
-        stageNudges.push({
-          afterStage: delivered, reason,
-          wallMs: Date.now(), monotonicMs: monotonicMs(),
-        });
-        await session.prompt(resumePrompt(),
-          { expandPromptTemplates: false });
-        terminalState = await waitForDurableTerminalQuiescence(manager, session);
-        await awaitFenceOutcome();
-      }
-      // THE WITHHELD END BLOCK (task #79 build 3): asked only after the whole
-      // workload was delivered and the model ended its turn cleanly, so no
-      // pre-phase surface ever carried the questions. Built from the plan's
-      // ledger and the frozen query seed alone, byte-identical across arms;
-      // the manifest below pins the exact bytes. A run that finished dirty
-      // skips it and fails its own terminal assertions instead.
-      if (!closedBook && !deadlineFired && stagesDelivered() === plan.stageCount &&
-        modelEndedItsTurn(terminalState)) {
-        await session.prompt(config.endBlockPrompt,
-          { expandPromptTemplates: false });
-        terminalState = await waitForDurableTerminalQuiescence(manager, session);
-        await awaitFenceOutcome();
+        // THE LAST NOTE IS STILL COLLECTED. Every earlier ask is consumed by the next
+        // stage's delivery; an ask on the final stage has no next delivery, so it would
+        // otherwise be left populated in the checkout, which is exactly the disk-memory
+        // channel the bounds exist to close.
+        experiment.collectPendingArtifact();
+        // THE WITHHELD END BLOCK: asked only after the whole workload was delivered, so no
+        // pre-phase surface ever carried the questions. Composed by the SUPERVISOR and
+        // carried as text, byte-identical across arms, with the manifest pinning the exact
+        // bytes. A run that did not finish its stages skips it and fails its own terminal
+        // assertions instead.
+        if (!deadlineFired && stagesDelivered() === plan.stageCount) {
+          await session.prompt(config.endBlockPrompt, { expandPromptTemplates: false });
+          terminalState = await waitForDurableTerminalQuiescence(manager, session);
+        }
       }
     } catch (error) {
       const text = error instanceof Error ? `${error.message}` : String(error);
@@ -643,8 +545,8 @@ try {
   assertExperiment(!deadlineFired, "Experiment worker hit its watchdog deadline");
   assertExperiment(closedBook || stagesDelivered() === plan.stageCount,
     `Experiment worker ended with ${stagesDelivered()} of ${plan.stageCount} stages delivered ` +
-    `after ${stageNudges.length} resume prompt(s); last stop reason ` +
-    `${terminalMessage?.stopReason ?? "none"} with ${latchedFailures()} latched failure(s)`);
+    `; last stop reason ${terminalMessage?.stopReason ?? "none"} with ` +
+    `${latchedFailures()} latched failure(s)`);
   // A SUSPENDED RUNTIME IS A DEAD RUN, whatever it dies of afterwards.
   //
   // Checked BEFORE the terminal-stop assertion so the report names the cause instead of
@@ -857,7 +759,9 @@ try {
     } : null,
     deadlineFired,
     stagesDelivered: closedBook ? null : stagesDelivered(),
-    stageNudges,
+    // Always empty: there are no resumes to record. Kept so every sealed-run reader,
+    // which counts it against the one-user-message contract, still finds the field.
+    stageNudges: [],
   };
 } catch (error) {
   report = {
@@ -876,7 +780,9 @@ try {
     sessionFile: manager?.getSessionFile?.() ?? null,
     overflow,
     deadlineFired,
-    stageNudges,
+    // Always empty: there are no resumes to record. Kept so every sealed-run reader,
+    // which counts it against the one-user-message contract, still finds the field.
+    stageNudges: [],
     error: error instanceof Error ? { message: error.message, stack: error.stack } : String(error),
   };
   process.exitCode = 1;

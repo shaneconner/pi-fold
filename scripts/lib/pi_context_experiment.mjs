@@ -44,55 +44,41 @@ export function campaignPlanPath(campaignDir) {
 // (a) pifold: active-context runtime ON, native auto-compaction OFF.
 // (b) native: pi-fold OFF, Pi native auto-compaction ON.
 // (c) unmanaged: both OFF; the run terminates at window overflow, which is the datum.
+// READING and LAUNCHING are different questions, and conflating them would either
+// un-adjudicate the sealed corpus or leave a dead arm launchable. `EXPERIMENT_ARMS` is
+// every label a sealed run may carry; `EXPERIMENT_LAUNCHABLE_ARMS` is what a NEW run may
+// be. `nativefence` is readable forever and launchable no longer: see the note below.
 export const EXPERIMENT_ARMS = Object.freeze(["pifold", "native", "unmanaged", "nativefence"]);
+export const EXPERIMENT_LAUNCHABLE_ARMS = Object.freeze(["pifold", "native", "unmanaged"]);
 
-// THE MATCHED-TRIGGER ARM. `native` cannot answer the question that decides whether
-// lossless folding earns its place, because Pi's own threshold check runs only after
-// agent_end and before prompt submission (dist/core/agent-session.js:1508) and this
-// workload is ONE prompt wrapping 64 stages. Measured on sol-20260813-paired: rep 1's
-// agent_end fired once, after all 64 stages, and the arm recorded zero compaction passes
-// while its projection sat inside Pi's nominal band on 24 of 110 requests. A `native` arm
-// therefore compacts once, at the end, or never: it is not a comparator, it is a control
-// for having no context management at all.
+// THE MATCHED-TRIGGER ARM IS RETIRED (2026-08-25), AND IT WAS ALWAYS A COMPENSATOR.
 //
-// `nativefence` supplies the missing comparator. It runs with the fold runtime OFF and
-// the harness invoking `ctx.compact()` at the same occupancy pi-fold's projection fence
-// actually fires at, so both arms transition for the same reason and differ only in WHAT
-// the transition does: preserve the bytes losslessly, or replace them with a summary.
+// Its own justification named the premise that has now gone: "Pi's own threshold check runs
+// only after agent_end and before prompt submission, and this workload is ONE prompt
+// wrapping 64 stages". Under pull-based delivery that was true and fatal, so `native`
+// compacted once at the end or never (sol-20260813-paired rep 1: agent_end fired ONCE after
+// all 64 stages, zero compaction passes, while its projection sat inside Pi's nominal band
+// on 24 of 110 requests), and `nativefence` was built to fire `ctx.compact()` by hand at the
+// occupancy pi-fold's own fence fires at, measured as the median of rep 1's seven commits
+// (0.894, 0.942, 0.953, 0.913, 0.937, 0.911, 0.953) and frozen at 0.937.
 //
-// The share is EMPIRICAL and says so. pi-fold's fence margin is
-// `max(floorShare * window, estimatorError * estimate + expectedInflow)`, whose dynamic
-// terms depend on runtime state the harness cannot reproduce, so a bit-identical formula
-// is not available. This is the median occupancy at which rep 1's seven fence commits
-// actually fired: 0.894, 0.942, 0.953, 0.913, 0.937, 0.911, 0.953. Because a match cannot
-// be asserted it is MEASURED: both arms record the occupancy of every crossing, and the
-// adjudicator reports the realized distributions side by side, so a drift between the
-// triggers is visible in the result rather than assumed away.
-export const MATCHED_FENCE_OCCUPANCY_SHARE = 0.937;
+// STAGES ARE USER MESSAGES NOW, so Pi evaluates its own threshold on every turn boundary,
+// at BOTH of its call sites: `_handlePostAgentRun` after each agent run settles, and inside
+// `prompt()` before each user message is sent (dist/core/agent-session.js:776 and :865). A
+// 64-stage run evaluates it 64 times instead of once. `native` IS the comparator now, on
+// Pi's own trigger at Pi's own cadence with no harness intervention anywhere, which is a
+// strictly more faithful baseline than a hand-fired compact could ever be.
+//
+// What went with it: the fence crossing, its abort, the abandoned response, the deferred
+// verification and its 120s outcome bound, the resume that every abort required, and the
+// priming that every resume delivered. The fence aborted the live turn as `compact`'s first
+// act, which is why it needed resumes at all, and the resume prompt is what confounded the
+// v4 native corpus 1:1 with fence share. One deletion closes the whole chain.
+//
+// `nativefence` stays READABLE forever (EXPERIMENT_ARMS, and `fenceShare` tolerated on a
+// sealed run config) because seven campaigns ran it and their numbers stand. It is simply
+// not launchable, and MATCHED_FENCE_SHARES is gone because nothing applies it any more.
 
-// A SMOKE MUST CROSS ITS OWN FENCE OR IT VALIDATES NOTHING. The first matched-trigger
-// smoke (sol-20260814-matched rep 2) sealed green on both arms and recorded zero fence
-// crossings, because eight stages peak near 0.20 occupancy and the full share is 0.937:
-// the arm was proven to launch and seal, and the mechanism it exists for was never run.
-// The compaction that smoke did record came from Pi's own agent_end path, `fromExtension`
-// false, which is the very trigger gate 66 showed cannot fire mid-run.
-//
-// This is the same shape `compactionTriggerShare` already uses for the same reason, and
-// the bound is the same: the share must sit below what the mode's stages actually
-// accumulate, or the fence is unreachable in that mode by construction.
-//
-// The smoke share is BOUNDED FROM BELOW as well, which the first two smokes were not.
-// Crossing the fence is necessary and not sufficient: Pi keeps `keepRecentTokens` of
-// recent material and summarizes only what lies before the cut, so a fence that fires
-// under that line aborts the turn (which `compact` does first, unconditionally) and then
-// refuses. 0.12 of the serving budget is 30,182 estimated tokens, which leaves roughly
-// 10,000 on the far side of a 20,000-token cut, and the smoke's own floor mass is 48,000.
-export const MATCHED_FENCE_SHARES = Object.freeze({ full: 0.937, smoke: 0.12 });
-
-export function matchedFenceShare(mode) {
-  assertExperiment(EXPERIMENT_MODES.includes(mode), `Unknown mode ${mode}`);
-  return MATCHED_FENCE_SHARES[mode];
-}
 export const EXPERIMENT_MODES = Object.freeze(["smoke", "full"]);
 // A closed-book session receives ONLY the probe questions: no transcript, no stage
 // payloads, no tools, no checkout. It publishes the prior-knowledge floor per probe
@@ -413,14 +399,13 @@ export const EXPERIMENT_LEDGER_TOOL_NAME = "ledger_record";
 // which is the same error as the subtraction, pointing the other way. `bash`
 // covers what they do and is the thing a real session actually has.
 export const PI_STOCK_TOOLS = Object.freeze(["read", "bash", "edit", "write"]);
-// The four stock Pi tools plus the delivery channel. `ledger_record` was the fifth until
-// 2026-08-25; it is deleted, not merely unregistered, so a run cannot be configured back
-// into carrying it. `EXPERIMENT_LEDGER_TOOL_NAME` survives as a NAME ONLY, because the
-// sealed corpus's tool-result ledgers and worker events are full of it and every reader of
-// those runs still has to recognise it.
-export const EXPERIMENT_ALLOWED_TOOLS = Object.freeze([
-  ...PI_STOCK_TOOLS, EXPERIMENT_TOOL_NAME,
-]);
+// STOCK PI AND NOTHING ELSE (2026-08-25). There were three harness tools and now there are
+// none: `ledger_record` went on 2026-08-25 with the ledger, and `repo_stage` went with
+// pull-based delivery the same day. Stages arrive as ordinary user messages, so the arms
+// carry exactly the tools a real session carries and the run has no protocol surface at all.
+// Both names survive as NAMES ONLY, because the sealed corpus's tool-result ledgers and
+// worker events are full of them and every reader of those runs still has to recognise them.
+export const EXPERIMENT_ALLOWED_TOOLS = Object.freeze([...PI_STOCK_TOOLS]);
 
 // READ CONTAINMENT (Shane 2026-08-14). Pi's read tool resolves any path against
 // cwd with no guard of its own, and the corpus sweep found what that permits: 10
@@ -1685,7 +1670,17 @@ export function stagePayloadText(stage) {
   if (stage.deliverable) header.push("", `DELIVERABLE ${stage.deliverable.id}: ${stage.deliverable.instructions}`);
   const body = stage.files.map((file) =>
     `\n----- BEGIN ${file.path} (${file.lines} lines) -----\n${file.text}\n----- END ${file.path} -----\n`).join("");
-  return `${header.join("\n")}\n${body}\nNEXT_KEY: ${stage.nextKeyPlaceholder ?? "<supervisor>"}\n`;
+  // NO DELIVERY KEY (Shane, 2026-08-25: "I'd like to remove next key essentially"). The
+  // payload used to close with `NEXT_KEY: <64 hex>`, which the model had to echo back to
+  // receive the next stage. Nothing in the harness ever needed the model to hold it: the
+  // extension already knew the expected stage and the expected challenge, and `params.key`
+  // appeared exactly once in the whole file, in an equality test against a value it was
+  // holding. It was an in-band retention probe on the DELIVERY CHANNEL, and a structurally
+  // asymmetric one: pifold could peek a fold and recover the nonce losslessly, while an arm
+  // that compacted might hold no copy anywhere, because a random hex token is exactly the
+  // incidental string a summarizer drops. An arm that cannot receive work is not a measured
+  // arm. A stage is now an ordinary user message and the payload is just the work.
+  return `${header.join("\n")}\n${body}`;
 }
 
 /**
@@ -2408,7 +2403,7 @@ export function validateExperimentManifest(manifest) {
 export const EXPERIMENT_RUN_CONFIG_KEYS = Object.freeze([
   "version", "runId", "runDir", "campaignId", "arm", "mode", "repetition",
   "ordinal", "seed", "unit", "invocationId", "supervisorPid", "supervisorStartTicks",
-  "bootId", "codeCommit", "codeTree", "firstChallenge", "stageCount", "stageIntervalMs",
+  "bootId", "codeCommit", "codeTree", "stageCount", "stageIntervalMs",
   "watchdogMs", "heartbeatMs", "createdWallMs", "createdMonotonicMs", "sourceHashes",
   "dependencyHashes", "planPath", "planSha256", "repoDir", "targetCommit", "targetTreeSha256",
   "model",
@@ -2423,6 +2418,11 @@ export const EXPERIMENT_RUN_CONFIG_OPTIONAL_KEYS = Object.freeze([
   "sessionType", "guidance", "foldScheduling", "foldPeekResults", "guidedCuration",
   "providerTotalWindow", "providerInputBudget", "briefGenerator", "transport", "reliabilityLevers",
   "ledgerTasks", "querySeed",
+  // THE DELIVERY KEY, TOLERATED ON READ AND EMITTED BY NOTHING (2026-08-25). Every sealed
+  // run carries one, and the adjudicator revalidates run configs, so dropping it outright
+  // would un-adjudicate the whole corpus. No new run writes it: stages arrive as user
+  // messages and there is no key to issue.
+  "firstChallenge",
   // THE v5 STALE ARTIFACTS (Shane 2026-08-25). Carried as the schedule the extension
   // enforces: which ask drops where, at what path, with what text, and which field keys
   // it will be graded on. The TRUTH never travels, for the same reason the ledger's never
@@ -2647,7 +2647,6 @@ export function validateExperimentRunConfig(value) {
   assertExperiment(Number.isSafeInteger(value.repetition) && value.repetition > 0 &&
     Number.isSafeInteger(value.ordinal) && value.ordinal > 0,
   "Run config repetition/ordinal are invalid");
-  assertExperiment(HEX_64.test(value.firstChallenge), "Run config first challenge is invalid");
   assertExperiment(HEX_40.test(value.codeCommit) && HEX_40.test(value.codeTree) &&
     HEX_40.test(value.targetCommit), "Run config commit pins are invalid");
   assertExperiment(HEX_64.test(value.planSha256) && HEX_64.test(value.targetTreeSha256),

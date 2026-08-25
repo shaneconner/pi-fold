@@ -36,15 +36,12 @@ import {
   EXPERIMENT_MARKER_ENTRY,
   EXPERIMENT_PIFOLD_EXTRA_TOOLS,
   readEscapesCheckout,
-  EXPERIMENT_TOOL_NAME,
   PI_OUTPUT_BUDGET,
   assertExperiment,
   estimateTokens,
   isWindowOverflow,
   nativeCompactionDisposition,
-  matchedFenceShare,
   servedOutputBudget,
-  stageCallDisposition,
   toolResultContentSha256,
   toolResultText,
 } from "./lib/pi_context_experiment.mjs";
@@ -122,76 +119,29 @@ export function createPiContextExperimentExtension(config) {
     "briefGenerator is deleted: the runtime briefs deterministically as of 2026-08-14, " +
     "and reproducing a generator campaign needs a checkout that predates the deletion");
   const pifold = config.arm === "pifold";
-  // THE MATCHED-TRIGGER FENCE. Only the nativefence arm carries it, and only because Pi's
-  // own threshold cannot: `_checkCompaction` runs after agent_end and before prompt
-  // submission, and this workload is one prompt wrapping every stage, so on
-  // sol-20260813-paired rep 1 it was evaluated exactly once, after all 64 stages, while
-  // the projection sat inside its nominal band on 24 of 110 requests.
-  const harnessFence = config.arm === "nativefence";
-  // The SAME budget pi-fold measures its own fence against, so the two arms are compared
-  // on one denominator rather than on two that merely look alike.
-  const fenceBudgetTokens = config.providerInputBudget ?? null;
-  const fenceThresholdTokens = fenceBudgetTokens === null
-    ? null
-    : Math.floor((config.fenceShare ?? matchedFenceShare(config.mode)) * fenceBudgetTokens);
-  assertExperiment(!harnessFence || Number.isSafeInteger(fenceThresholdTokens),
-    "The matched-fence arm requires a declared providerInputBudget to fence against");
-  // `abandonPending` is the one provider request each crossing is allowed to strand. See
-  // the `before_provider_request` handler: it is armed at the crossing and consumed once.
-  const fenceState = {
-    crossings: 0, inFlight: false, lastTokens: null, abandonPending: false,
-    // THE PROOF CAN OUTLIVE ITS CTX (2026-08-24, nativefence rep 8 at --fence-share
-    // 0.50): a crossing below Pi's own compaction trigger makes our manual compact()
-    // perform the compaction itself, the session is replaced under the captured ctx,
-    // and the onError proof-read hit Pi's stale-ctx guard, an uncaught throw inside
-    // Pi's callback path that killed the worker at stage 9. The proof is deferred to
-    // the next event's FRESH ctx instead: compactionsAtCrossing is the branch's
-    // compaction count recorded before compact() is asked, and pendingVerification
-    // carries the crossing and the error until an event with a live ctx can read the
-    // branch and decide.
-    compactionsAtCrossing: 0, completionsAtCrossing: 0, pendingVerification: null,
-  };
-  // The completion witness the deferred proof can consult WITHOUT a ctx: session_compact
-  // fires only after a summary is appended and the transcript replaced, so a count taken
-  // at the crossing and compared in the stale-ctx catch decides service on the
-  // extension's own evidence rather than waiting for a model event a settling worker
-  // may never send (nativefence rep 9: the deferral's resolver needed a fresh-ctx event,
-  // the worker's resume needed the resolution, and the deadlock ended the run at 8/64).
-  let nativeCompactionCompletions = 0;
+  // THE MATCHED-TRIGGER FENCE IS GONE (2026-08-25). It existed for one reason, stated in
+  // its own comment: Pi's `_checkCompaction` runs after agent_end and before prompt
+  // submission, and the workload was ONE prompt wrapping every stage, so on
+  // sol-20260813-paired rep 1 it was evaluated exactly once, after all 64 stages. Stages are
+  // user messages now, so Pi evaluates its own threshold on every turn boundary and `native`
+  // is the comparator on Pi's own trigger. With the fence went its abort, the abandoned
+  // request and response allowances, the deferred stale-ctx verification and its witness
+  // counter, and the resume that every abort required.
+  // HOW A NATIVE COMPACTION IS RECORDED, per arm. This is not fence machinery and it
+  // outlived the fence: the pifold arm runs with compaction enabled and its hook fires are
+  // expected traffic, so what latches is the OUTCOME rather than the pass.
   const compactionDisposition = nativeCompactionDisposition(config.arm);
-  // Resolves a deferred fence proof at the first event carrying a live ctx: the
-  // crossing is serviced when a compaction entry arrived on the branch since the
-  // crossing was recorded, and latches with the original compact error otherwise.
-  const resolveDeferredFenceVerification = (ctx) => {
-    const pending = fenceState.pendingVerification;
-    if (!pending) return;
-    fenceState.pendingVerification = null;
-    const compactions = ctx.sessionManager.getBranch()
-      .filter((entry) => entry?.type === "compaction").length;
-    if (compactions > fenceState.compactionsAtCrossing) {
-      appendEvent("harness-fence-compacted", {
-        crossing: pending.crossing, serviced_by: "verified-after-stale-ctx",
-      });
-      return;
-    }
-    appendFailure(config, "harness-fence-compaction", `${pending.crossing}:${pending.message}`);
-  };
   const allowedTools = new Set([
     ...EXPERIMENT_ALLOWED_TOOLS,
     ...(pifold ? EXPERIMENT_PIFOLD_EXTRA_TOOLS : []),
   ]);
   let expectedStage = 1;
-  let expectedChallenge = config.firstChallenge;
   let requestOrdinal = 0;
   let priorRequestRecordSha256 = null;
   let eventOrdinal = 0;
   let priorEventRecordSha256 = null;
   let toolResultOrdinal = 0;
   let priorToolResultSha256 = null;
-  let inFlight = false;
-  // Wrong-key calls are recoverable behavior with a red line: see the stale-key block.
-  const STALE_KEY_MISS_BUDGET = 8;
-  let staleKeyMisses = 0;
   // The ledger's derive-and-record channel: tasks assigned by delivered stages,
   // results recorded through the ledger tool, stage progression gated on every
   // assigned task holding a record. Refusals are correctable and recorded, with
@@ -204,7 +154,6 @@ export function createPiContextExperimentExtension(config) {
   const pendingProviderErrors = [];
   let inFlightProviderRequest = null;
   let pendingStopTheWorld = null;
-  const usedToolCallIds = new Set();
   let contextToolDefinition = null;
   const requestsDir = join(config.runDir, "ipc", "requests");
   const responsesDir = join(config.runDir, "ipc", "responses");
@@ -229,9 +178,10 @@ export function createPiContextExperimentExtension(config) {
   //   3. BACKDATE      a "stale report from an earlier pass" whose mtime is thirty seconds
   //                    old is a tell, and `stat` is natural analyst behaviour
   //
-  // Both the drop and the consume happen INSIDE a stage tool call, with the model blocked
-  // for the whole window, which is the same airtight argument the response truncate rests
-  // on: there is no turn in which the file exists unexpectedly and the model can run.
+  // Both the drop and the consume happen BETWEEN TURNS, driven by the worker, with the
+  // model not running at all. That is strictly stronger than the old argument, which rested
+  // on the model being blocked inside its own stage tool call: there is no turn in which the
+  // file exists unexpectedly and the model can run.
   const staleArtifacts = new Map((config.staleArtifacts ?? []).map((ask) => [ask.askStage, ask]));
   const artifactLog = join(config.runDir, "stale-artifacts.jsonl");
   let plantedArtifact = null;
@@ -351,8 +301,108 @@ export function createPiContextExperimentExtension(config) {
     pendingStopTheWorld = null;
   };
 
+  // ---------------------------------------------------------------------------
+  // STAGE DELIVERY, DRIVEN BY THE WORKER (2026-08-25).
+  //
+  // This was a TOOL the model called with a 64-hex key it had to keep. Nothing here ever
+  // needed the model to hold that key: `expectedStage` and the challenge were both this
+  // closure's own variables, ordering and replay were enforced off `expectedStage`, and the
+  // supervisor's request identity was built from the challenge this side held, never from
+  // the one the model sent. `params.key` appeared exactly once in the whole file, in an
+  // equality test against a value already in hand. It was an in-band retention probe on the
+  // DELIVERY CHANNEL, and a structurally asymmetric one: pifold could peek a fold and
+  // recover the nonce losslessly, while an arm that had just compacted might hold no copy
+  // anywhere, so the arm that compacts could lose the ability to RECEIVE WORK. That is not
+  // the thing under test, and in sol-20260825-v5smoke3 it ended the nativefence arm at 5/8.
+  //
+  // The IPC is unchanged and still ends at the supervisor, which remains the only renderer
+  // and the only holder of the plan. What changed is who asks: the worker, between turns.
+  //
+  // THE EVENT STREAM KEEPS ONE WRITER. `appendEvent` carries an ordinal and a
+  // priorRecordSha256 chain, so this stays here rather than moving to the worker, and the
+  // worker drives it through the handle returned below.
+  const deliverStage = async () => {
+    const stage = expectedStage;
+    assertExperiment(stage >= 1 && stage <= config.stageCount,
+      `Stage ${stage} is outside the plan`);
+    // COLLECT BEFORE SERVING. Whatever the model did to the last artifact is fixed here,
+    // before it can see anything new, and the file is consumed in the same breath so it can
+    // never be re-read later in place of remembering. The window is airtight for a stronger
+    // reason than it used to be: the model is not merely blocked inside a tool call, it has
+    // ENDED ITS TURN and is not running at all.
+    collectStaleArtifact();
+    const requestIdentity = {
+      version: 1,
+      runId: config.runId,
+      stage,
+      workerPid: process.pid,
+      workerStartTicks: processStartTicks(process.pid),
+      requestedWallMs: Date.now(),
+      requestedMonotonicMs: monotonicMs(),
+    };
+    const request = { ...requestIdentity, requestSha256: sha256Json(requestIdentity) };
+    const requestPath = join(requestsDir, `stage-${String(stage).padStart(2, "0")}.json`);
+    const responsePath = join(responsesDir, `stage-${String(stage).padStart(2, "0")}.json`);
+    try {
+      writeJsonPublished(requestPath, request);
+      appendEvent("stage-request", { stage, requestSha256: request.requestSha256 });
+      await waitForFile(responsePath, responsesDir, null, config.watchdogMs);
+      const response = JSON.parse(readFileSync(responsePath, "utf8"));
+      assertExperiment(exactKeys(response, [
+        "version", "runId", "stage", "requestSha256", "content",
+        "contentSha256", "payloadSha256",
+        "releasedWallMs", "releasedMonotonicMs", "paceRecordSha256", "responseSha256",
+      ]), "Invalid supervisor response shape");
+      assertExperiment(response.version === 1 && response.runId === config.runId &&
+        response.stage === stage && response.requestSha256 === request.requestSha256 &&
+        response.contentSha256 === sha256Text(response.content) &&
+        response.responseSha256 === responseIdentity(response),
+      "Supervisor response identity drifted");
+      // CONSUMED ON READ (gate 74). This file holds the stage's rendered text and used to
+      // survive the whole run: in sealed native rep 5, 27 of 64 responses carried seeded
+      // values, so an arm that lost a stage could re-read it verbatim off disk. Truncated
+      // rather than unlinked, because an empty file is not a recovery channel and is still
+      // a receipt.
+      truncateSync(responsePath, 0);
+      expectedStage += 1;
+      const projectionIdentity = {
+        version: 1,
+        runId: config.runId,
+        ordinal: ++requestOrdinal,
+        kind: "stage-result",
+        stage,
+        requestSha256: request.requestSha256,
+        responseSha256: response.responseSha256,
+        paceRecordSha256: response.paceRecordSha256,
+        payloadSha256: response.payloadSha256,
+        wallMs: Date.now(),
+        monotonicMs: monotonicMs(),
+        priorRecordSha256: priorRequestRecordSha256,
+      };
+      const projectionRecord = { ...projectionIdentity, recordSha256: sha256Json(projectionIdentity) };
+      appendJsonLineFsync(projectionLog, projectionRecord);
+      priorRequestRecordSha256 = projectionRecord.recordSha256;
+      appendEvent("stage-result", { stage, responseSha256: response.responseSha256 });
+      // DROP LATE: the artifact appears only now, as the stage that asks about it is
+      // delivered, so it never sits in the checkout waiting to be found.
+      const planted = plantStaleArtifact(stage);
+      const text = planted
+        ? `${response.content}\n\n${planted.request}\nThe file is at ${planted.path}.\n`
+        : response.content;
+      return { stage, text };
+    } catch (error) {
+      appendFailure(config, "stage-execution", error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  };
+
   return {
     name: "pi-fold-context-experiment",
+    // THE WORKER'S HANDLE. Stage delivery is no longer something the model asks for, so the
+    // worker drives it: one `deliverStage()` per user message, then `collectPendingArtifact`
+    // once more after the last stage so no populated note is left standing in the checkout.
+    deliverStage,
+    collectPendingArtifact: () => collectStaleArtifact(),
     factory(pi) {
       // Native compaction is an EVENT here, not a latch, and the event that counts is the
       // OUTCOME. The pifold arm runs with compaction enabled, so its hook fires are expected
@@ -377,17 +427,6 @@ export function createPiContextExperimentExtension(config) {
       // never reaches it. The session's own compaction entry is the second witness, checked
       // on the branch by the context handler below.
       pi.on("session_compact", (event) => {
-        nativeCompactionCompletions += 1;
-        // A completion arriving while a deferred fence proof stands is by construction
-        // newer than the crossing that deferred it, so it services the crossing without
-        // waiting for a model event.
-        if (fenceState.pendingVerification) {
-          const pending = fenceState.pendingVerification;
-          fenceState.pendingVerification = null;
-          appendEvent("harness-fence-compacted", {
-            crossing: pending.crossing, serviced_by: "verified-after-stale-ctx",
-          });
-        }
         appendEvent("native-compaction", {
           reason: event.reason ?? null,
           willRetry: event.willRetry === true,
@@ -447,174 +486,6 @@ export function createPiContextExperimentExtension(config) {
       // Pi's compaction summary, and an arm holding exact archive search is not a
       // bytes-abandoned baseline. Each arm now carries only its shipped mechanism.
 
-      pi.registerTool({
-        name: EXPERIMENT_TOOL_NAME,
-        label: "Repository Stage",
-        description: "Return the next staged block of pinned repository material for the current key.",
-        promptSnippet: "Request one nonce-bound repository stage at a time.",
-        promptGuidelines: ["Use only the NEXT_KEY returned by the preceding stage."],
-        executionMode: "sequential",
-        parameters: Type.Object({
-          key: Type.String({ minLength: 64, maxLength: 64 }),
-        }, { additionalProperties: false }),
-        async execute(toolCallId, params, signal, _onUpdate, _ctx) {
-          if (inFlight) {
-            appendFailure(config, "parallel-stage", toolCallId);
-            return { content: [{ type: "text", text: "Another stage is already pending." }], isError: true };
-          }
-          const disposition = stageCallDisposition({
-            expectedStage, stageCount: config.stageCount, toolCallId, usedToolCallIds,
-          });
-          if (disposition.kind === "replay") {
-            appendFailure(config, "invalid-stage-capability", `${toolCallId}:${expectedStage}`);
-            return { content: [{ type: "text", text: "The stage key is stale or out of order." }], isError: true };
-          }
-          if (disposition.kind === "post-plan") {
-            // The plan is complete. A trailing call after the last stage is a finished
-            // assignment being tidy, NOT a capability breach: latching it voided a
-            // completed 64/64 native run that made exactly one such call.
-            // Collect here too. The validator already refuses an ask at the last stage,
-            // so a clean run always has a later fetch to collect on, but a plan that ends
-            // on a trailing call must not leave a populated artifact standing in the
-            // checkout: that is precisely the disk-memory channel these bounds close.
-            collectStaleArtifact();
-            appendEvent("post-plan-stage-call", { toolCallId, stage: expectedStage });
-            return { content: [{ type: "text", text: disposition.text }] };
-          }
-          if (params.key !== expectedChallenge) {
-            // A wrong key is BEHAVIOR, not an integrity breach: under pressure the nonce
-            // gets folded or compacted away, and recovering it (peek, expand, reread) is
-            // exactly what the experiment measures. Rep 1 saw the pifold arm lose the key
-            // at stage 57, get this error, peek the fold, and finish all 64 stages —
-            // killed only by the latch. Bounded so a key-guessing loop still latches red.
-            staleKeyMisses += 1;
-            appendEvent("stale-stage-key", {
-              toolCallId, stage: expectedStage, misses: staleKeyMisses,
-            });
-            if (staleKeyMisses > STALE_KEY_MISS_BUDGET) {
-              appendFailure(config, "invalid-stage-capability", `${toolCallId}:${expectedStage}`);
-              return { content: [{ type: "text", text: "The stage key is stale or out of order." }], isError: true };
-            }
-            return { content: [{ type: "text", text:
-              "That key is not the current NEXT_KEY. Recover the exact NEXT_KEY issued by " +
-              "the most recent completed stage (it may be inside a folded or compacted " +
-              "span) and call again." }], isError: true };
-          }
-          // THE DERIVE-AND-RECORD GATE IS GONE with the ledger it enforced (Shane,
-          // 2026-08-25). It refused a stage until every assigned ledger task had been
-          // recorded, and NAMED THE TOOL in the refusal, so every miss told the model that
-          // recording derived facts was the tracked activity.
-          inFlight = true;
-          usedToolCallIds.add(toolCallId);
-          const requestIdentity = {
-            version: 1,
-            runId: config.runId,
-            stage: expectedStage,
-            challenge: expectedChallenge,
-            challengeSha256: sha256Text(expectedChallenge),
-            toolCallId,
-            workerPid: process.pid,
-            workerStartTicks: processStartTicks(process.pid),
-            requestedWallMs: Date.now(),
-            requestedMonotonicMs: monotonicMs(),
-          };
-          // COLLECT BEFORE SERVING. Whatever the model did to the last artifact is fixed
-          // here, before it can see anything new, and the file is consumed in the same
-          // breath so it can never be re-read later in place of remembering.
-          collectStaleArtifact();
-          const request = { ...requestIdentity, requestSha256: sha256Json(requestIdentity) };
-          const requestPath = join(requestsDir, `stage-${String(expectedStage).padStart(2, "0")}.json`);
-          const responsePath = join(responsesDir, `stage-${String(expectedStage).padStart(2, "0")}.json`);
-          try {
-            writeJsonPublished(requestPath, request);
-            appendEvent("stage-request", {
-              stage: expectedStage, requestSha256: request.requestSha256, toolCallId,
-            });
-            await waitForFile(responsePath, responsesDir, signal, config.watchdogMs);
-            const response = JSON.parse(readFileSync(responsePath, "utf8"));
-            assertExperiment(exactKeys(response, [
-              "version", "runId", "stage", "challengeSha256", "requestSha256", "content",
-              "contentSha256", "payloadSha256", "nextChallenge", "nextChallengeSha256",
-              "releasedWallMs", "releasedMonotonicMs", "paceRecordSha256", "responseSha256",
-            ]), "Invalid supervisor response shape");
-            assertExperiment(response.version === 1 && response.runId === config.runId &&
-              response.stage === expectedStage && response.challengeSha256 === request.challengeSha256 &&
-              response.requestSha256 === request.requestSha256 &&
-              response.contentSha256 === sha256Text(response.content) &&
-              response.nextChallengeSha256 === sha256Text(response.nextChallenge) &&
-              response.responseSha256 === responseIdentity(response),
-            "Supervisor response identity drifted");
-            // CONSUMED ON READ (Shane 2026-08-21). This file holds the stage's
-            // rendered text, and it used to survive the whole run: in sealed
-            // native rep 5, 27 of the 64 responses carried seeded ledger values,
-            // so an arm that lost a stage to compaction could re-read that stage
-            // verbatim off disk. That is a recovery channel the harness invented,
-            // available to neither mechanism under test, and now that the tool
-            // surface is stock Pi the model has `grep` to find it with.
-            //
-            // The unlink is airtight rather than racy: the model is blocked inside
-            // its own tool call for the whole window between write and unlink, so
-            // there is no turn in which the file exists and the model can run. The
-            // delivery evidence is unaffected, because pace.jsonl records this
-            // response's own responseSha256 and contentSha256 on the supervisor
-            // side, where the model was never able to reach.
-            //
-            // TRUNCATED rather than unlinked, because the worker's own delivery
-            // counter walks these paths to learn how many stages have landed. A
-            // smoke run deleted them and the counter read zero all session, which
-            // tripped the resume bound at stage 1 of 8 while the supervisor had
-            // released all eight. An empty file is not a recovery channel and it
-            // is still a receipt.
-            truncateSync(responsePath, 0);
-            const stage = expectedStage;
-            expectedStage += 1;
-            expectedChallenge = response.nextChallenge;
-            const projectionIdentity = {
-              version: 1,
-              runId: config.runId,
-              ordinal: ++requestOrdinal,
-              kind: "stage-result",
-              stage,
-              requestSha256: request.requestSha256,
-              responseSha256: response.responseSha256,
-              paceRecordSha256: response.paceRecordSha256,
-              payloadSha256: response.payloadSha256,
-              wallMs: Date.now(),
-              monotonicMs: monotonicMs(),
-              priorRecordSha256: priorRequestRecordSha256,
-            };
-            const projectionRecord = { ...projectionIdentity, recordSha256: sha256Json(projectionIdentity) };
-            appendJsonLineFsync(projectionLog, projectionRecord);
-            priorRequestRecordSha256 = projectionRecord.recordSha256;
-            appendEvent("stage-result", { stage, responseSha256: response.responseSha256 });
-            // DROP LATE: the artifact appears only now, as the stage that asks about it is
-            // served, so it never sits in the checkout waiting to be found.
-            const planted = plantStaleArtifact(stage);
-            const text = planted
-              ? `${response.content}\n\n${planted.request}\nThe file is at ${planted.path}.\n`
-              : response.content;
-            return {
-              content: [{ type: "text", text }],
-              details: {
-                version: 1,
-                runId: config.runId,
-                stage,
-                requestSha256: request.requestSha256,
-                responseSha256: response.responseSha256,
-                contentSha256: response.contentSha256,
-                payloadSha256: response.payloadSha256,
-                paceRecordSha256: response.paceRecordSha256,
-                releasedMonotonicMs: response.releasedMonotonicMs,
-              },
-            };
-          } catch (error) {
-            appendFailure(config, "stage-execution", error instanceof Error ? error.message : String(error));
-            throw error;
-          } finally {
-            inFlight = false;
-          }
-        },
-      });
 
       // `ledger_record` IS DELETED (Shane, 2026-08-25: "I'd get rid of them for sure").
       //
@@ -732,14 +603,7 @@ export function createPiContextExperimentExtension(config) {
         // the crossing that caused it, and an aborted context anywhere outside that window
         // latches exactly as it always has.
         if (identity.signalAborted) {
-          if (fenceState.inFlight) {
-            appendEvent("harness-fence-abort", {
-              crossing: fenceState.crossings,
-              leaf_id: identity.leafId ?? null,
-            });
-          } else {
-            appendFailure(config, "context-aborted", identity.leafId ?? "no-leaf");
-          }
+          appendFailure(config, "context-aborted", identity.leafId ?? "no-leaf");
         }
         const native = ctx.sessionManager.getBranch().find((entry) => entry?.type === "compaction" ||
           (entry?.type === "custom" && [
@@ -755,27 +619,9 @@ export function createPiContextExperimentExtension(config) {
       });
 
       pi.on("before_provider_request", (event, ctx) => {
-        resolveDeferredFenceVerification(ctx);
         if (inFlightProviderRequest) {
-          // OUR OWN ABORT STRANDS ONE REQUEST PER CROSSING. This marker is cleared by the
-          // assistant response its request produces, and an aborted request produces none:
-          // rep 2 of sol-20260814-fenced opened a 174,562-char request 4ms after the fence
-          // abort landed, that request died unanswered (13 requests, 12 responses), and the
-          // next one read as parallel traffic and latched a capability breach that had not
-          // happened. The allowance is armed at the crossing and consumed ONCE, so a second
-          // stranded request, or any stranded request without a crossing behind it, is
-          // still the breach this invariant exists to catch.
-          if (fenceState.abandonPending) {
-            fenceState.abandonPending = false;
-            appendEvent("harness-fence-abandoned-request", {
-              crossing: fenceState.crossings,
-              record_sha256: inFlightProviderRequest.recordSha256,
-            });
-            inFlightProviderRequest = null;
-          } else {
-            appendFailure(config, "parallel-provider-request", inFlightProviderRequest.recordSha256);
-            throw new Error("A provider request began before its predecessor produced an assistant response");
-          }
+          appendFailure(config, "parallel-provider-request", inFlightProviderRequest.recordSha256);
+          throw new Error("A provider request began before its predecessor produced an assistant response");
         }
         const providerTools = Array.isArray(event.payload?.tools) ? event.payload.tools : [];
         const payloadChars = allStrings(event.payload).reduce((total, text) => total + text.length, 0);
@@ -844,7 +690,6 @@ export function createPiContextExperimentExtension(config) {
       });
 
       pi.on("message_end", (event, ctx) => {
-        resolveDeferredFenceVerification(ctx);
         const reason = event.message?.role === "assistant" ? event.message.stopReason : null;
         // A LOCAL ZERO-USAGE ABORT MARKER never fires a crossing: the provider counted
         // nothing, so the occupancy reading is stale, and a marker that armed the
@@ -856,114 +701,8 @@ export function createPiContextExperimentExtension(config) {
           (event.message.stopReason === "error" || event.message.stopReason === "aborted") &&
           ["input", "output", "cacheRead", "cacheWrite", "totalTokens"]
             .every((key) => !markerUsage[key]);
-        // THE FENCE FIRES ON WHAT THE PROVIDER COUNTED, on the same reading pi-fold's own
-        // fence is anchored to, and it fires ONCE per crossing: `compact` does not await,
-        // so without the in-flight latch a single crossing would queue one compaction per
-        // message until the summary landed.
-        if (harnessFence && event.message?.role === "assistant" && !fenceState.inFlight &&
-            !localAbortMarker) {
-          const usage = typeof ctx?.getContextUsage === "function" ? ctx.getContextUsage() : null;
-          const tokens = typeof usage?.tokens === "number" ? usage.tokens : null;
-          fenceState.lastTokens = tokens;
-          if (tokens !== null && tokens > fenceThresholdTokens) {
-            fenceState.inFlight = true;
-            fenceState.crossings += 1;
-            fenceState.abandonPending = true;
-            fenceState.compactionsAtCrossing = ctx.sessionManager.getBranch()
-              .filter((entry) => entry?.type === "compaction").length;
-            fenceState.completionsAtCrossing = nativeCompactionCompletions;
-            appendEvent("harness-fence-crossing", {
-              crossing: fenceState.crossings,
-              occupancy_tokens: tokens,
-              threshold_tokens: fenceThresholdTokens,
-              occupancy_share: tokens / fenceBudgetTokens,
-              share_rule: config.fenceShare ?? matchedFenceShare(config.mode),
-              budget_tokens: fenceBudgetTokens,
-            });
-            ctx.compact({
-              onComplete: () => {
-                fenceState.inFlight = false;
-                appendEvent("harness-fence-compacted", {
-                  crossing: fenceState.crossings, serviced_by: "fence",
-                });
-              },
-              // A FENCE THAT CANNOT COMPACT IS A DEAD ARM, so it says so and latches
-              // rather than quietly leaving the window to grow unopposed. One outcome is
-              // not that, and it is the one this arm turns out to produce most of the time.
-              //
-              // ALREADY COMPACTED IS THE CROSSING BEING SERVICED. `compact` aborts the live
-              // turn before it prepares anything, and that abort ends the agent operation,
-              // which is precisely the boundary Pi's own `_checkCompaction` runs at. Gate
-              // 66 found that boundary never arrives during a single long pull-based turn;
-              // the fence supplies one. In rep 1 of sol-20260814-fenced the crossing fired
-              // at 51,853 tokens, the abort landed 18ms later, Pi's own threshold pass
-              // opened 10ms after that and had summarized the branch 12.5 seconds later
-              // (reason "threshold", fromExtension false, entry aed93cd9). Our manual
-              // request then reached `prepareCompaction`, found a branch already ending in
-              // a compaction entry, and threw. The crossing got exactly the compaction it
-              // asked for, from the trigger the arm is matched to.
-              //
-              // Accepted only on PROOF of that, the compaction entry standing on the
-              // branch, which is the same condition `prepareCompaction` refused on. The
-              // message alone is never enough, and every other error still latches.
-              onError: (error) => {
-                fenceState.inFlight = false;
-                const message = error?.message ?? String(error);
-                let compacted;
-                try {
-                  compacted = ctx.sessionManager.getBranch().at(-1)?.type === "compaction";
-                } catch {
-                  // The captured ctx went stale mid-compact (session replacement). A
-                  // completion the crossing has not seen IS the replacement that made
-                  // the ctx stale, so it services the crossing here; otherwise the
-                  // proof moves to the next fresh ctx and nothing is decided yet.
-                  if (nativeCompactionCompletions > fenceState.completionsAtCrossing) {
-                    appendEvent("harness-fence-compacted", {
-                      crossing: fenceState.crossings, serviced_by: "verified-after-stale-ctx",
-                    });
-                    return;
-                  }
-                  fenceState.pendingVerification = {
-                    crossing: fenceState.crossings, message,
-                  };
-                  appendEvent("harness-fence-verification-deferred", {
-                    crossing: fenceState.crossings, error: message,
-                  });
-                  return;
-                }
-                if (/Already compacted/.test(message) && compacted) {
-                  appendEvent("harness-fence-compacted", {
-                    crossing: fenceState.crossings, serviced_by: "native-threshold",
-                  });
-                  return;
-                }
-                appendFailure(config, "harness-fence-compaction",
-                  `${fenceState.crossings}:${message}`);
-              },
-            });
-          }
-        }
         if (event.message?.role === "assistant") {
           if (!inFlightProviderRequest) {
-            // OUR OWN ABORT CAN LAND BEFORE THE NEXT REQUEST OPENS. The fence's compact
-            // aborts the live operation between building a projection and dispatching the
-            // request, and Pi then emits a LOCAL zero-usage abort marker (gate 97's local
-            // class) that never touched the provider ledger: nativefence rep 2 of
-            // sol-20260823-live died here on its FIRST crossing, the fence itself having
-            // worked (crossing at 249,189 against 235,674, Pi's threshold pass summarized
-            // the branch), because this seal is sandbox-era and the fence arm had never
-            // run under it. Same allowance as the stranded request above: armed at the
-            // crossing, consumed ONCE, and only for a marker that spent nothing. Every
-            // other identityless assistant message still latches.
-            if (fenceState.abandonPending && localAbortMarker) {
-              fenceState.abandonPending = false;
-              appendEvent("harness-fence-abandoned-response", {
-                crossing: fenceState.crossings,
-                message_sha256: sha256Json(event.message),
-                stop_reason: event.message.stopReason,
-              });
-              return;
-            }
             appendFailure(config, "orphan-provider-response", sha256Json(event.message));
             throw new Error("An assistant response has no exact provider-request identity");
           }
@@ -1063,17 +802,6 @@ export function createPiContextExperimentExtension(config) {
         appendEvent("agent-end", { messageCount: event.messages?.length ?? null });
       });
       pi.on("session_shutdown", () => {
-        // The same one-per-crossing allowance: a run that ends while a crossing's stranded
-        // request is still outstanding never had a response owed to it. Unarmed, this is
-        // the unanswered request it always was.
-        if (inFlightProviderRequest && fenceState.abandonPending) {
-          fenceState.abandonPending = false;
-          appendEvent("harness-fence-abandoned-request", {
-            crossing: fenceState.crossings,
-            record_sha256: inFlightProviderRequest.recordSha256,
-          });
-          inFlightProviderRequest = null;
-        }
         if (inFlightProviderRequest) {
           appendFailure(config, "provider-request-without-response", inFlightProviderRequest.recordSha256);
         }

@@ -131,9 +131,6 @@ import {
   EXPERIMENT_SESSION_TYPES,
   closedBookPrompt,
   closedBookQuestions,
-  MATCHED_FENCE_OCCUPANCY_SHARE,
-  MATCHED_FENCE_SHARES,
-  matchedFenceShare,
   closedBookSystemPrompt,
   closedBookTranscript,
   campaignPlanPath,
@@ -260,60 +257,14 @@ assert.deepEqual(armRuntimeConfiguration("nativefence"), armRuntimeConfiguration
 // to the table gets its disposition from the same rule as every other.
 assert.deepEqual(nativeCompactionDisposition("nativefence"),
   { latchOnPass: false, stopsTheWorld: true, latchOnCompletion: false });
-// The share is a number the comparison rests on, so it is pinned rather than left to
-// drift: it is the MEDIAN occupancy of sol-20260813-paired rep 1's seven fence commits
-// (0.894, 0.942, 0.953, 0.913, 0.937, 0.911, 0.953), and it must sit inside that observed
-// range or it is no longer the empirical match it claims to be.
-assert.equal(MATCHED_FENCE_OCCUPANCY_SHARE, 0.937);
-assert(MATCHED_FENCE_OCCUPANCY_SHARE > 0.894 && MATCHED_FENCE_OCCUPANCY_SHARE < 0.953,
-  "The matched fence share left the range of crossings it was derived from");
-assert.equal(matchedFenceShare("full"), MATCHED_FENCE_OCCUPANCY_SHARE);
-assert.throws(() => matchedFenceShare("hybrid"), /Unknown mode/);
-// EVERY MODE MUST BE ABLE TO REACH ITS OWN FENCE. The first matched-trigger smoke sealed
-// green on both arms having never crossed once: eight stages peak near 0.20 occupancy
-// against a 0.937 share, so the arm proved it could launch and never ran the mechanism it
-// exists for. A share a mode cannot reach is an unreachable branch wearing a green tick.
-//
-// The bound is the mode's own accumulated payload, the same quantity gate 59 bounds the
-// compaction trigger against: stages times the floor payload, at four chars per token,
-// against the serving budget the fence is measured on.
-// CROSSING IS NECESSARY AND NOT SUFFICIENT, which the first two smokes did not know.
-// `prepareCompaction` cuts the branch at `keepRecentTokens` and returns undefined when
-// nothing older than that cut is left to summarize, and `compact` disconnects the agent
-// and aborts the live turn BEFORE it discovers that. A fence set under Pi's own floor
-// therefore buys an aborted turn and no compaction at all: rep 3 of sol-20260814-matched
-// crossed at 12,737 tokens against a 7,545 threshold and came straight back with "Nothing
-// to compact (session too small)", one stage into an eight-stage run.
-//
-// Pi's floor is READ from Pi's source rather than restated here, on gate 52's rule: an
-// upgrade that moves the number breaks this gate rather than silently unfencing a mode.
-const piCompactionSource = readFileSync(
-  join(PI_INSTALL_ROOT, "dist", "core", "compaction", "compaction.js"), "utf8");
-const piKeepRecentTokens = Number(/keepRecentTokens:\s*(\d+)/.exec(piCompactionSource)?.[1]);
-assert(Number.isSafeInteger(piKeepRecentTokens) && piKeepRecentTokens > 0,
-  "Pi's compaction keep-recent floor could not be read, so no fence can be bounded against it");
-// Enough has to lie on the far side of the cut that the summary is worth the turn it
-// costs. A quarter of the kept window is the smallest slice that is plainly not noise.
-const compactableFloorTokens = piKeepRecentTokens * 1.25;
-for (const mode of EXPERIMENT_MODES) {
-  const plan = EXPERIMENT_MODE_PLANS[mode];
-  const share = matchedFenceShare(mode);
-  assert(share > 0 && share < 1, `${mode} matched-fence share is not a share: ${share}`);
-  // The floor binds every stage EXCEPT a probe (`stage.kind !== "probe"`), so a probe
-  // stage guarantees nothing and counting it here would overstate what the mode is certain
-  // to accumulate. The smoke's margin is narrow enough that the difference decides it.
-  const payloadStages = plan.stageCount - plan.probeStages.length;
-  const reachableTokens = (payloadStages * plan.payloadFloorChars) / 4;
-  const budget = EXPERIMENT_PROVIDER_INPUT_BUDGETS["openai-codex/gpt-5.6-sol"];
-  assert(share * budget < reachableTokens,
-    `${mode} fences at ${Math.floor(share * budget)} tokens but its stages accumulate at ` +
-    `most ${Math.floor(reachableTokens)}, so the fence can never be crossed in that mode`);
-  assert(share * budget > compactableFloorTokens,
-    `${mode} fences at ${Math.floor(share * budget)} tokens, inside Pi's own ` +
-    `${piKeepRecentTokens}-token keep-recent window, so the crossing would abort the turn ` +
-    "and then refuse to compact");
-}
-checks.everyModeCanReachItsMatchedFence = true;
+// THE MATCHED FENCE IS RETIRED (2026-08-25) and this gate's subject went with it. It
+// pinned the empirical share (0.937, the median of sol-20260813-paired rep 1's seven fence
+// commits) and proved every mode could actually REACH its own fence, after the first
+// matched-trigger smoke sealed green on both arms having never crossed once. The fence
+// existed only because a pull-delivered run was one turn and Pi's own threshold check was
+// therefore evaluated once; stages are user messages now, Pi evaluates it at every turn
+// boundary, and `native` is the comparator on Pi's own trigger. `nativefence` stays
+// READABLE, which is why its runtime disposition above is still pinned.
 assert.throws(() => armRuntimeConfiguration("hybrid"), /Unknown arm/);
 checks.armContractExclusive = true;
 
@@ -1098,10 +1049,14 @@ assert(worker.includes("closedBook || checkoutSha256 === config.targetTreeSha256
 assert(supervisor.includes("claimSlot(") && supervisor.includes("writeJsonExclusive(slotPath") &&
   supervisor.includes("worktree\", \"add\", \"--quiet\", \"--detach\""),
 "the supervisor must claim an exclusive campaign slot and use a pinned detached worktree");
-assert(supervisor.includes("renderStage(plan, planStage, repoDir, nextChallenge)") &&
-  supervisor.includes("rendered payload does not match its planned hash"),
-"the supervisor owns stage release and pin-checks the payload before splicing the nonce");
-assert(adjudicator.includes("One-user-message contract broken") &&
+// WHAT IS DELIVERED IS EXACTLY WHAT IS PINNED. There is no nonce spliced in after the pin
+// any more, so the payload hash covers every byte the model sees rather than every byte but
+// the last line.
+assert(supervisor.includes("renderStage(plan, planStage, repoDir)") &&
+  supervisor.includes("rendered payload does not match its planned hash") &&
+  !supervisor.includes("nextChallenge"),
+"the supervisor owns stage release and delivers exactly the payload it pin-checked");
+assert(adjudicator.includes("User-message contract broken") &&
   adjudicator.includes("computeRereadTax(rereadRecords)") &&
   adjudicator.includes("voluntaryFoldShare") &&
   adjudicator.includes("overflowPoint") &&
@@ -1113,10 +1068,13 @@ assert(adjudicator.includes("usageSeriesFromLedger(ledger)") &&
   adjudicator.includes("headlineMutationMetric: \"usage.mutations\"") &&
   adjudicator.includes("totalFoldsCounts: \"fold-records\""),
 "the adjudicator must report the per-request usage series, observed mutations and the stall proxy, and must say that totalFolds counts fold records");
-assert(extension.includes("disposition.kind === \"post-plan\"") &&
-  extension.includes("appendEvent(\"post-plan-stage-call\"") &&
-  extension.includes("stageCallDisposition({"),
-"a trailing stage call on a completed plan must be answered as an event, never latched");
+// A TRAILING STAGE CALL CANNOT HAPPEN ANY MORE. `stageCallDisposition` answered a model
+// that called the delivery tool once more after the last stage, which a finished assignment
+// being tidy did on a completed 64/64 native run and which latching once voided. The model
+// does not ask for stages at all now, so the disposition has no caller; it stays EXPORTED
+// because the sealed corpus's tool-result ledgers are full of the calls it classified.
+assert(!extension.includes("stageCallDisposition("),
+  "the extension still classifies stage calls the model can no longer make");
 assert(!adjudicator.includes("acceptance: true"),
   "the adjudicator must not authorize anything");
 assert(grader.includes("assertBlindPacket(packet)") &&
@@ -4012,88 +3970,11 @@ try {
   checks.aKilledWorkerStillWritesItsReport = true;
 }
 
-// GATE 56 - a model that ends its turn early is resumed; a harness that broke never is.
-//
-// The workload is pull-based: one prompt, and the agent fetches all 64 stages itself by
-// following NEXT_KEY. Nothing made it keep pulling. sol-20260812 rep 8 lost BOTH arms to
-// that in the same window: each answered stage 32's recall probe, ended its turn without
-// calling the stage tool again, and the worker read a normal terminal stop and wrote
-// `ok: true` over a run that had covered half the workload. Only the supervisor's
-// stagesReleased 32 of 64 caught it. Rep 4 stopped at 32 too, rep 3 at 27, rep 1 at 18.
-//
-// The resume is deliberately narrow, because a nudge that fires on a broken harness would
-// paper over exactly the failures this suite exists to surface (Shane 2026-08-13). It fires
-// only when the model chose to end its turn: a clean "stop" with nothing in the failure
-// latch. A stage tool erroring, a supervisor that stopped answering, an aborted or truncated
-// response: none of those are resumable, and each still fails the run by name.
-//
-// The prompt withholds the key. A run whose agent has LOST the key is measuring recovery,
-// which is what rep 1 recorded when the pifold arm lost it at stage 57, peeked the fold and
-// finished all 64 stages. Handing the key back would delete that measurement.
-// ---------------------------------------------------------------------------
-{
-  const worker = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
-
-  const counterSource = worker.slice(
-    worker.indexOf("const stagesDelivered = () => {"),
-    worker.indexOf("const latchedFailures = () =>"),
-  );
-  assert(counterSource.length > 0, "the delivered-stage counter was not found where it is pinned");
-  const scratch = mkdtempSync(join(tmpdir(), "pi-fold-gate56-"));
-  try {
-    mkdirSync(join(scratch, "ipc", "responses"), { recursive: true });
-    const countStages = new Function("existsSync", "join", "config",
-      `${counterSource}; return stagesDelivered;`)(existsSync, join, { runDir: scratch });
-    assert.equal(countStages(), 0, "the counter claims delivered stages before any response exists");
-    for (const stage of [1, 2, 3]) {
-      writeFileSync(join(scratch, "ipc", "responses", `stage-0${stage}.json`), "{}\n");
-    }
-    assert.equal(countStages(), 3, "the counter miscounts the responses actually on disk");
-    // Counts the run of stages actually delivered, not whatever files happen to be there:
-    // a gap means the next stage never landed, which is the state a resume must act on.
-    writeFileSync(join(scratch, "ipc", "responses", "stage-05.json"), "{}\n");
-    assert.equal(countStages(), 3, "the counter reads past a gap and reports a run as further along");
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
-
-  const guardSource = worker.slice(
-    worker.indexOf("const modelEndedItsTurn = "),
-    worker.indexOf("\n\n// A COMPACTION IS AN ABORT,"),
-  );
-  assert(guardSource.length > 0, "the resume guard was not found where it is pinned");
-  const guardWith = (latched) => new Function("latchedFailures",
-    `${guardSource}; return modelEndedItsTurn;`)(() => latched);
-  assert.equal(guardWith(0)({ terminalMessage: { stopReason: "stop" } }), true,
-    "a clean model stop with a quiet latch is not resumable, so nothing would ever be nudged");
-  for (const stopReason of ["error", "length", "aborted", null, undefined]) {
-    assert.equal(guardWith(0)({ terminalMessage: { stopReason } }), false,
-      `a run that ended on ${stopReason} is treated as a model ending its turn`);
-  }
-  assert.equal(guardWith(1)({ terminalMessage: { stopReason: "stop" } }), false,
-    "a latched harness failure still resumes, so a broken harness is nudged past instead of reported");
-  assert.equal(guardWith(0)(null), false, "a missing terminal state is treated as resumable");
-
-  assert(/while \(!closedBook && !deadlineFired && stagesDelivered\(\) < plan\.stageCount &&\s*\(modelEndedItsTurn\(terminalState\) \|\| fenceCompactedSinceLastPrompt\(\)\)\)/.test(worker),
-    "the resume loop is not bounded by the deadline, the plan count and the resume guards together");
-  const resume = worker.slice(worker.indexOf("function resumePrompt("), worker.indexOf("function lastConversationalMessage("));
-  assert(resume.length > 0, "the resume prompt was not found where it is pinned");
-  // THE LAW IS THAT THE PROMPT HANDS OVER NO KEY, so a run whose agent has lost one is
-  // measuring recovery. It used to be checked through one specific sentence ("Recover the
-  // NEXT_KEY"), which the 2026-08-24 de-priming rewrite deleted along with the stage
-  // accounting and the owed synthesis that rode beside it. Checked directly now, so a
-  // prompt that starts handing anything over fails whatever words it uses.
-  assert(!/NEXT_KEY|challenge|\bkeys?\b/i.test(resume),
-    "the resume prompt hands the agent a key instead of making it recover one");
-  assert(!/\bstages?\b|\bof \d+|\bdeliver/i.test(resume),
-    "the resume prompt carries progress accounting, which is a retention directive");
-  assert(/stagesDelivered\(\) === plan\.stageCount/.test(worker),
-    "a run that ends with stages undelivered does not fail by that name");
-  assert(/stageNudges,/.test(worker) && /stagesDelivered: closedBook \? null : stagesDelivered\(\)/.test(worker),
-    "the report does not carry what was delivered and what had to be nudged");
-
-  checks.anEarlyModelStopIsResumedAndAShortRunFails = true;
-}
+// GATE 56 IS RETIRED (2026-08-25). It pinned the resume: a model that ended its turn early
+// was nudged on, a harness that broke never was, and the prompt withheld the key so a run
+// whose agent had lost one was measuring recovery. Delivery is push now, so there is no key
+// to withhold, no turn to resume, and the delivered-stage counter is the worker's own rather
+// than a walk over response files. Its number stays spent.
 
 // GATE 57 - a supervisor killed from outside still writes the run's candidate report, and
 // does not wait forever for a worker that cannot answer.
@@ -4302,208 +4183,12 @@ try {
   checks.theCompactionTriggerClearsTheFence = true;
 }
 
-// GATE 60 - a forced compaction aborts the turn, so the fenced arm is resumed past its own
-// abort and no other arm ever is.
-//
-// Pi's `compact` runs `_disconnectFromAgent()` and `await abort()` as its first two
-// statements, before it reads a setting or checks whether it can compact at all. On the
-// matched-fence arm that is not an edge case, it is every crossing: the turn dies mid tool
-// call and the pull-based workload stops there unless something prompts it again.
-// sol-20260814-matched rep 3 delivered 1 of 8 stages that way, terminal stop reason
-// `toolUse`, which gate 56's guard correctly refuses to resume because nothing about it
-// says the model chose to stop.
-//
-// So the abort is reclassified in exactly two places and nowhere else. The extension
-// records `harness-fence-abort` instead of latching, but only while a crossing is in
-// flight. The worker resumes, but only on evidence that a compaction COMPLETED since its
-// last prompt. Both bounds are the gate: an abort with no completed compaction behind it
-// is an ordinary abort and still ends the run, one completed compaction authorizes exactly
-// one resume, and an arm that is not fenced is never resumed past an abort at all.
-// ---------------------------------------------------------------------------
-{
-  const worker = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
-  const source = worker.slice(
-    worker.indexOf("const eventLogPath = join("),
-    worker.indexOf("\n\n// A KILLED WORKER STILL WRITES ITS REPORT."),
-  );
-  assert(source.length > 0, "the fence resume rule was not found where it is pinned");
-
-  const scratch = mkdtempSync(join(tmpdir(), "pi-fold-gate60-"));
-  try {
-    const eventLine = (kind) => `${JSON.stringify({ version: 1, kind, details: {} })}\n`;
-    const build = (arm, latched) => new Function("join", "existsSync", "readFileSync",
-      "config", "latchedFailures",
-      `${source}; return { fenceCompactedSinceLastPrompt, fenceCompactions,` +
-      " markResumed: () => { fenceCompactionsResumedPast = fenceCompactions(); } };")(
-      join, existsSync, readFileSync, { runDir: scratch, arm }, () => latched);
-
-    // No event log at all: nothing has crossed, so nothing is resumable.
-    const fenced = build("nativefence", 0);
-    assert.equal(fenced.fenceCompactions(), 0, "compactions are counted before any event exists");
-    assert.equal(fenced.fenceCompactedSinceLastPrompt(), false,
-      "a run with no completed compaction is resumable, so an ordinary abort would be nudged past");
-
-    // A crossing that ABORTED and never completed is not a licence to continue: this is
-    // precisely rep 3's state, and the run must still fail on it.
-    const log = join(scratch, "worker-events.jsonl");
-    writeFileSync(log, eventLine("harness-fence-crossing") + eventLine("harness-fence-abort"));
-    assert.equal(fenced.fenceCompactions(), 0, "an abort is counted as a completed compaction");
-    assert.equal(fenced.fenceCompactedSinceLastPrompt(), false,
-      "a crossing that never compacted authorizes a resume");
-
-    // A completed compaction authorizes exactly ONE resume, and the next one needs its own.
-    writeFileSync(log, readFileSync(log, "utf8") + eventLine("harness-fence-compacted"));
-    assert.equal(fenced.fenceCompactions(), 1, "a completed compaction is not counted");
-    assert.equal(fenced.fenceCompactedSinceLastPrompt(), true,
-      "a completed compaction does not authorize the resume the arm cannot continue without");
-    fenced.markResumed();
-    assert.equal(fenced.fenceCompactedSinceLastPrompt(), false,
-      "the same compaction authorizes a second resume, so a stalled fence spins here");
-    writeFileSync(log, readFileSync(log, "utf8") + eventLine("harness-fence-compacted"));
-    assert.equal(fenced.fenceCompactedSinceLastPrompt(), true,
-      "a second completed compaction does not authorize its own resume");
-
-    // A LATCHED FAILURE STILL ENDS THE RUN. Gate 56's rule is not relaxed by this one:
-    // whatever the fence did, a broken harness is reported rather than nudged past.
-    assert.equal(build("nativefence", 1).fenceCompactedSinceLastPrompt(), false,
-      "a latched harness failure is resumed past whenever a compaction happens to have completed");
-
-    // AND NO OTHER ARM IS EVER RESUMED PAST AN ABORT, on the same evidence.
-    for (const arm of EXPERIMENT_ARMS.filter((candidate) => candidate !== "nativefence")) {
-      assert.equal(build(arm, 0).fenceCompactedSinceLastPrompt(), false,
-        `the ${arm} arm is resumed past an abort, which is the failure gate 56 exists to report`);
-    }
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
-
-  assert(/const reason = modelEndedItsTurn\(terminalState\) \? "model-ended-turn" : "fence-compaction"/
-    .test(worker), "a resume does not record which of the two conditions fired");
-
-  // The extension's half: the reclassification is bounded to a crossing in flight, and the
-  // latch is what happens otherwise. A blanket suppression here would make every aborted
-  // context on this arm invisible, which is the failure this arm would be least able to see.
-  const extension = readFileSync(
-    join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"), "utf8");
-  assert(/if \(identity\.signalAborted\) \{\s*if \(fenceState\.inFlight\) \{\s*appendEvent\("harness-fence-abort"/
-    .test(extension), "an aborted context is not recorded against the crossing that caused it");
-  assert(/\} else \{\s*appendFailure\(config, "context-aborted"/.test(extension),
-    "an aborted context outside a crossing no longer latches");
-
-  // AND THE CROSSING'S OWN OUTCOME, driven rather than matched. The abort creates the
-  // boundary Pi's `_checkCompaction` runs at, so most crossings are serviced by Pi's own
-  // threshold pass before our manual request is prepared, and the manual request then
-  // throws "Already compacted". That is the arm working. It is accepted only against the
-  // compaction entry actually standing on the branch, which is the same condition
-  // `prepareCompaction` refused on: the message alone is a claim, not evidence.
-  const onErrorBody = extension.slice(
-    extension.indexOf("onError: (error) => {") + "onError: (error) => {".length,
-    extension.indexOf("\n              },\n            });"),
-  );
-  assert(onErrorBody.length > 0, "the fence's error path was not found where it is pinned");
-  const driveOnError = (message, lastEntryType) => {
-    const emitted = [];
-    const latched = [];
-    const state = { crossings: 3, inFlight: true };
-    new Function("fenceState", "ctx", "appendEvent", "appendFailure", "config",
-      `return (error) => {${onErrorBody}};`)(
-      state,
-      { sessionManager: { getBranch: () => [{ type: "message" }, { type: lastEntryType }] } },
-      (kind, details) => emitted.push({ kind, details }),
-      (_config, phase, detail) => latched.push({ phase, detail }),
-      {},
-    )(new Error(message));
-    assert.equal(state.inFlight, false,
-      "a crossing that errored stays in flight, so no later crossing can ever fire");
-    return { emitted, latched };
-  };
-
-  const serviced = driveOnError("Already compacted", "compaction");
-  assert.deepEqual(serviced.latched, [],
-    "a crossing serviced by Pi's own threshold pass is latched as a failure, which kills the arm");
-  assert.equal(serviced.emitted.length, 1, "a serviced crossing records no completion");
-  assert.equal(serviced.emitted[0].kind, "harness-fence-compacted",
-    "a serviced crossing does not record the completion the worker resumes on");
-  assert.equal(serviced.emitted[0].details.serviced_by, "native-threshold",
-    "a serviced crossing does not name which trigger compacted it");
-
-  // PROOF IS REQUIRED. The same message with no compaction on the branch is a real
-  // failure, and every other message is one whatever the branch looks like.
-  const unproven = driveOnError("Already compacted", "message");
-  assert.deepEqual(unproven.emitted, [],
-    "the fence accepts the error message alone, so a crossing that compacted nothing reads as serviced");
-  assert.equal(unproven.latched.length, 1, "an unproven claim of compaction does not latch");
-  for (const message of ["Nothing to compact (session too small)", "No model selected", "boom"]) {
-    const failed = driveOnError(message, "compaction");
-    assert.deepEqual(failed.emitted, [],
-      `a crossing that failed with "${message}" records a completion`);
-    assert.equal(failed.latched.length, 1,
-      `a crossing that failed with "${message}" does not latch, so the window grows unopposed`);
-    assert.equal(failed.latched[0].phase, "harness-fence-compaction",
-      "a failed crossing latches under some other name");
-  }
-
-  // AND THE ONE REQUEST THE ABORT STRANDS. The in-flight marker is cleared by the assistant
-  // response its request produces, and an aborted request produces none, so the next
-  // request read as parallel traffic and latched a capability breach that had not happened.
-  // The allowance is armed at the crossing and consumed once: a second stranded request, or
-  // one with no crossing behind it, is still the breach the invariant exists to catch.
-  assert(/fenceState\.crossings \+= 1;\s*fenceState\.abandonPending = true;/.test(extension),
-    "the stranded-request allowance is not armed at the crossing that strands it");
-  const guard = extension.slice(
-    extension.indexOf("        if (inFlightProviderRequest) {\n          // OUR OWN ABORT"),
-    extension.indexOf("\n        const providerTools ="),
-  );
-  assert(guard.length > 0, "the in-flight provider-request guard was not found where it is pinned");
-  const driveGuard = (state, marker) => {
-    const emitted = [];
-    const latched = [];
-    let threw = false;
-    try {
-      new Function("fenceState", "appendEvent", "appendFailure", "config",
-        `return (inFlightProviderRequest) => {${guard}\n return inFlightProviderRequest; };`)(
-        state, (kind, details) => emitted.push({ kind, details }),
-        (_config, phase, detail) => latched.push({ phase, detail }), {})(marker);
-    } catch { threw = true; }
-    return { emitted, latched, threw };
-  };
-  const armed = { crossings: 2, abandonPending: true };
-  const first = driveGuard(armed, { recordSha256: "abc" });
-  assert.deepEqual(first.latched, [], "the request our own abort stranded is latched as parallel traffic");
-  assert.equal(first.threw, false, "a stranded request still throws, so the run dies on our own abort");
-  assert.equal(first.emitted[0]?.kind, "harness-fence-abandoned-request",
-    "a stranded request is dropped without a record of it");
-  assert.equal(armed.abandonPending, false, "the allowance is not consumed, so it covers every later request");
-  const second = driveGuard(armed, { recordSha256: "def" });
-  assert.equal(second.latched[0]?.phase, "parallel-provider-request",
-    "a second stranded request on one crossing does not latch");
-  assert.equal(second.threw, true, "a second stranded request does not stop the request that follows it");
-  const unarmed = driveGuard({ crossings: 0, abandonPending: false }, { recordSha256: "ghi" });
-  assert.equal(unarmed.latched[0]?.phase, "parallel-provider-request",
-    "genuine parallel provider traffic no longer latches");
-  assert.equal(unarmed.threw, true, "genuine parallel provider traffic is allowed to proceed");
-  assert.deepEqual(driveGuard({ crossings: 0, abandonPending: true }, null).latched, [],
-    "the guard acts when no request is in flight at all");
-
-  // AND THE ADJUDICATOR'S OWN CONTRACT, which a resumed run necessarily breaks. The rule
-  // was a bare count of one user message, enforcing that the workload is delivered as one
-  // continuous task rather than fed turn by turn. That held only while nothing could
-  // legitimately prompt again; this arm prompts once per compaction by construction. The
-  // count is now checked against the resumes the worker RECORDED, so an extra user message
-  // that no resume accounts for still breaks it, and the resumes are reported split by
-  // cause: on this arm they are a cost of the mechanism, not an incident.
-  assert(/const recordedResumes = Array\.isArray\(worker\.stageNudges\)/.test(adjudicator),
-    "the resume count is not read from the worker's own record, so nothing constrains it");
-  assert(/userMessages === 1 \+ recordedResumes/.test(adjudicator),
-    "the user-message contract is not checked against the recorded resumes");
-  assert(!/userMessages === 1,/.test(adjudicator),
-    "the bare one-user-message count survives, so every resumed run fails adjudication");
-  assert(/resumesAfterFenceCompaction:[\s\S]{0,160}"fence-compaction"/.test(adjudicator) &&
-    /resumesAfterModelStop:[\s\S]{0,160}"model-ended-turn"/.test(adjudicator),
-    "the adjudicated workload does not split resumes by what caused them");
-
-  checks.aForcedCompactionAbortsTheTurnAndOnlyTheFencedArmResumes = true;
-}
+// GATE 60 IS RETIRED (2026-08-25). Its subject was the forced compaction: `compact` aborts
+// the live turn as its first act, so every fence crossing ended the turn mid-tool-call and
+// ONLY the fenced arm was resumed past its own abort, with the stranded request and the
+// abandoned response each allowed exactly once per crossing. The fence is gone, and with it
+// the abort, the allowances and the resume. Pi compacts at its own turn boundary now, where
+// nothing is in flight to strand. Its number stays spent.
 
 // GATE 61 - both arms' out-of-band provider calls are counted, and the bill is read rather
 // than computed.
@@ -4718,16 +4403,21 @@ try {
   // which is how "keep an exact working memory of the identifiers, paths and line
   // positions you have seen" survived the first pass.
   const worker = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
+  // THE WORKER BUILDS EXACTLY ONE MODEL-FACING SURFACE NOW. The workload prompt and the
+  // resume prompt are both deleted (2026-08-25): stage 1 is simply the first user message,
+  // and turns end after every stage, so there is nothing to introduce and nothing to nudge.
+  // Between them they carried the delivery protocol, a stage total, a progress checkpoint
+  // and an owed closing synthesis, which is most of what this gate was written to catch.
   for (const [name, pattern] of [
     ["workloadSystemPrompt", /function workloadSystemPrompt\(\) \{\n  return \[\n([\s\S]*?)\n  \]/],
-    ["workloadPrompt", /function workloadPrompt\(firstChallenge\) \{\n  return \[\n([\s\S]*?)\n  \]/],
-    ["resumePrompt", /function resumePrompt\(\) \{\n  return \[\n([\s\S]*?)\n  \]/],
   ]) {
     const found = pattern.exec(worker);
     assert(found, `the sweep cannot read ${name}, so it is scanning nothing`);
     assert.deepEqual(testAwarenessLeaks(found[1]), [],
       `${name} tells the model it is being tested or what to hoard`);
   }
+  assert(!/function workloadPrompt\(|function resumePrompt\(/.test(worker),
+    "the worker still builds a workload or resume prompt, which v5 deleted");
   assert(!/keep an exact working memory/.test(worker),
     "the worker still directs the model's memory strategy");
 
@@ -4763,15 +4453,21 @@ try {
   const stockSession = createCodingTools(PROJECT).map((tool) => tool.name).sort();
   assert.deepEqual([...PI_STOCK_TOOLS].sort(), stockSession,
     "the arms no longer carry exactly what a stock Pi session ships");
-  // ONE harness tool, not two. `ledger_record` was deleted 2026-08-25: it stood in the
-  // list every turn saying "Record the result of an assigned ledger task", which told the
-  // model continuously that recording derived facts was the graded activity. The stale
-  // artifact supplies its one irreplaceable property (a record fixed at record time)
-  // through an ordinary file edit. `repo_stage` stays until delivery moves to user
-  // messages, and it is arm-symmetric.
-  assert.deepEqual([...EXPERIMENT_ALLOWED_TOOLS],
-    [...PI_STOCK_TOOLS, EXPERIMENT_TOOL_NAME],
-    "the surface is stock Pi plus the one arm-symmetric delivery tool, and nothing else");
+  // ZERO HARNESS TOOLS. There were three and now there are none: the transcript search was
+  // withdrawn 2026-08-14 for measuring itself, `ledger_record` was deleted 2026-08-25
+  // because a tool saying "Record the result" tells the model continuously what the graded
+  // activity is, and `repo_stage` went the same day with pull-based delivery. Stages arrive
+  // as ordinary user messages, so the run has no protocol surface at all and the arms carry
+  // exactly what a real session carries.
+  assert.deepEqual([...EXPERIMENT_ALLOWED_TOOLS], [...PI_STOCK_TOOLS],
+    "the surface is stock Pi and nothing else");
+  assert(!EXPERIMENT_ALLOWED_TOOLS.includes(EXPERIMENT_TOOL_NAME),
+    "the delivery tool is permitted again, so the model can be asked to hold a key");
+  const workerSurface = readFileSync(
+    join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
+  assert(/experiment\.deliverStage\(\)/.test(workerSurface) &&
+    /await session\.prompt\(served\.text/.test(workerSurface),
+  "the worker does not deliver stages as user messages, so something else still does");
   assert(!EXPERIMENT_ALLOWED_TOOLS.includes(EXPERIMENT_LEDGER_TOOL_NAME),
     "the deleted record tool is permitted again");
   const extensionSurface = readFileSync(
@@ -4814,8 +4510,10 @@ try {
   assert(/--provider-input-budget/.test(runner), "the run cannot declare its own basis");
   assert(/requestedBudget === null \|\| requestedBudget === "none"/.test(runner),
     "the budget is settable to an arbitrary number, which makes it a tuning dial rather than a basis");
-  assert(/arm !== "nativefence" \|\| providerInputBudget !== null/.test(runner),
-    "the matched-fence arm can be launched with no budget to fence against, and would die after being paid for");
+  // The matched-fence precondition went with the arm: nothing fences against the budget any
+  // more, so a declared basis is a measurement basis only, and no arm requires one to run.
+  assert(!/nativefence/.test(runner),
+    "the supervisor still knows how to launch the retired matched-fence arm");
   // The declared value still comes from the model pin and never from the flag: the flag can
   // only say "none", so a run cannot quietly serve a budget no deployment would have.
   assert(/EXPERIMENT_PROVIDER_INPUT_BUDGETS\[`\$\{modelProvider\}\/\$\{modelId\}`\]/.test(runner),
@@ -5616,85 +5314,53 @@ try {
     sendMessage() {},
     async appendEntry() {},
   };
-  createPiContextExperimentExtension({
+  const handle = createPiContextExperimentExtension({
     version: EXPERIMENT_PROTOCOL_VERSION,
     runId: "ledger-gate",
     runDir,
     campaignId: "gate-70",
     arm: "native",
     mode: "smoke",
-    firstChallenge: keyOne,
     stageCount: EXPERIMENT_MODE_PLANS.smoke.stageCount,
     watchdogMs: 10_000,
     ledgerTasks: [{ id: "lt-01", stage: 1 }],
-  }).factory(mockPi);
-  const stageTool = tools.get(EXPERIMENT_TOOL_NAME);
-  assert(stageTool, "the delivery tool must register on every arm");
-  // `ledger_record` AND ITS PROGRESSION GATE ARE DELETED (Shane, 2026-08-25: "I'd get rid
-  // of them for sure"). What this gate used to prove -- an echo restating a record
-  // verbatim, a duplicate refused naming the standing value, a fetch refused until the
-  // owed task was recorded, the refusal naming task and tool and repair -- described a
-  // tool sitting in the model's list EVERY TURN saying "Record the result of an assigned
-  // ledger task". That is a standing instruction to hoard derived facts, delivered
-  // continuously, which hands back most of what the de-priming bought.
+  });
+  handle.factory(mockPi);
+  // NO TOOL REGISTERS AT ALL NOW, and that is the assertion. `ledger_record` was deleted
+  // 2026-08-25 because a tool sitting in the model's list every turn saying "Record the
+  // result of an assigned ledger task" is a standing instruction to hoard derived facts,
+  // delivered continuously, which hands back most of what the de-priming bought. `repo_stage`
+  // went the same day: it asked the model to echo back a 64-hex key the extension was
+  // already holding, which measured retention of the DELIVERY CHANNEL and let an arm that
+  // had just compacted lose the ability to receive work.
   //
-  // Its one irreplaceable property, a record fixed AT RECORD TIME (what made the
-  // faithful-to-wrong cell unfakeable), is supplied by the stale artifact instead: the
-  // model writes into the note and the harness snapshots it at collection. Gate 111 owns
-  // that. So the live assertions here become an ABSENCE, driven through the same factory.
+  // The property that made `ledger_record` hard to give up, a record fixed AT RECORD TIME,
+  // is supplied by the stale artifact: the model writes into the note and the harness
+  // snapshots it at collection. Gate 111 owns that.
+  assert.equal(tools.get(EXPERIMENT_TOOL_NAME), undefined,
+    "an arm still registers the delivery tool, so the model can be asked to hold a key");
   assert.equal(tools.get(EXPERIMENT_LEDGER_TOOL_NAME), undefined,
     "an arm still registers the record tool");
-  const serveStage = async (stage, key, nextKey, toolCallId) => {
-    const requestPath = join(runDir, "ipc", "requests", `stage-${String(stage).padStart(2, "0")}.json`);
-    const responsePath = join(runDir, "ipc", "responses", `stage-${String(stage).padStart(2, "0")}.json`);
-    const pending = stageTool.execute(toolCallId, { key });
-    const deadline = Date.now() + 5_000;
-    while (!existsSync(requestPath)) {
-      assert(Date.now() < deadline, `the stage tool never wrote its stage ${stage} request`);
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    const request = JSON.parse(readFileSync(requestPath, "utf8"));
-    const content = `stage ${stage} content`;
-    const responseBase = {
-      version: 1,
-      runId: "ledger-gate",
-      stage,
-      challengeSha256: request.challengeSha256,
-      requestSha256: request.requestSha256,
-      content,
-      contentSha256: sha256Text(content),
-      payloadSha256: "0".repeat(64),
-      nextChallenge: nextKey,
-      nextChallengeSha256: sha256Text(nextKey),
-      releasedWallMs: Date.now(),
-      releasedMonotonicMs: 1,
-    };
-    const responseSha256 = sha256Json(responseBase);
-    writeJsonPublished(responsePath,
-      { ...responseBase, paceRecordSha256: "0".repeat(64), responseSha256 });
-    return pending;
-  };
-  const stageOne = await serveStage(1, keyOne, keyTwo, "t-stage-1");
-  assert(!stageOne.isError, "stage 1 has no assigned tasks and must deliver");
-  // Stage 2 is served with lt-01 assigned and NOTHING recorded: the deleted gate would
-  // have refused it by name, so this is the removal proven rather than assumed.
-  const stageTwo = await serveStage(2, keyTwo, "3".repeat(64), "t-stage-2");
-  assert(!stageTwo.isError,
-    "a stage is still refused for an unrecorded task after the gate was removed");
-  assert(!/ledger task|recorded result|record each/i.test(stageTwo.content[0].text ?? ""),
-    "the delivery still tells the model to record a result");
-  // No record and no refusal reach the event stream any more, because neither exists.
-  // Asserted rather than assumed: a leftover code path emitting either would mean the
-  // model still saw the channel.
-  const gateEvents = readFileSync(join(runDir, "worker-events.jsonl"), "utf8")
-    .split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  assert.equal(tools.size, 0,
+    `the extension registers ${tools.size} tool(s); the arms carry stock Pi and nothing else`);
+  // Delivery is a HANDLE the worker drives, not a tool the model calls.
+  assert.equal(typeof handle.deliverStage, "function",
+    "the extension exposes no stage delivery for the worker to drive");
+  assert.equal(typeof handle.collectPendingArtifact, "function",
+    "nothing collects the last stage's artifact, so a populated note survives the run");
+  // Neither deleted channel reaches the event stream, asserted rather than assumed: a
+  // leftover code path emitting either would mean the model still saw it.
+  const gateEvents = existsSync(join(runDir, "worker-events.jsonl"))
+    ? readFileSync(join(runDir, "worker-events.jsonl"), "utf8")
+      .split("\n").filter(Boolean).map((line) => JSON.parse(line))
+    : [];
   assert(!gateEvents.some((event) =>
     event.kind === "ledger-record" || event.kind === "ledger-record-refused" ||
-    event.kind === "ledger-gate-refusal"),
-  "the deleted record channel still emits events");
+    event.kind === "ledger-gate-refusal" || event.kind === "stale-stage-key"),
+  "a deleted channel still emits events");
   assert(!existsSync(join(runDir, "failure-latch.jsonl")) ||
     readFileSync(join(runDir, "failure-latch.jsonl"), "utf8").trim() === "",
-  "the deleted gate still latches");
+  "a deleted gate still latches");
   rmSync(runDir, { recursive: true, force: true });
   // The frozen-seed law at the stager, and the supervisor forwarding ids and
   // stages only: expected values never reach the run config.
@@ -5885,16 +5551,28 @@ try {
     "the worker still reaches for the ledger the sandboxed plan does not carry");
   assert(worker.includes("endBlockSha256: sha256Text(config.endBlockPrompt ?? \"\")"),
     "the worker manifest must pin the end block's exact bytes");
-  assert(/stagesDelivered\(\) === plan\.stageCount &&\n\s*modelEndedItsTurn\(terminalState\)\) \{\n\s*await session\.prompt\(config\.endBlockPrompt/.test(worker),
-    "the end block is asked only after the whole workload was delivered cleanly");
+  // The clean-stop half of this condition went with the resume: turns now end after every
+  // stage by design, so "the model chose to stop" no longer distinguishes anything. What
+  // still binds, and is the part this gate exists for, is that the end block comes only
+  // after the WHOLE workload was delivered, so no pre-phase surface ever carried it.
+  assert(/if \(!deadlineFired && stagesDelivered\(\) === plan\.stageCount\) \{\n\s*await session\.prompt\(config\.endBlockPrompt/.test(worker),
+    "the end block is asked before the whole workload was delivered");
   assert(adjudicator.includes(
     "manifest.endBlockSha256 === sha256Text(composeEndBlockPrompt(plan, config.querySeed))"),
   "the adjudicator must recompute the end-block pin rather than trust it");
   assert(adjudicator.includes("endBlockVerdicts({") &&
     adjudicator.includes("endBlockAdjacencyTranscript({"),
   "the adjudicator must grade the end block through the shared lens, of either kind");
-  assert(adjudicator.includes("userMessages === 1 + recordedResumes + endBlockDelivered"),
-    "the one-user-message contract must count the identified end block, and only it");
+  // TWO DELIVERY SHAPES, ONE CONTRACT. A pull-delivered run (a `firstChallenge` in its
+  // config) carries one user message plus its recorded resumes plus the end block; a
+  // push-delivered one carries exactly one per stage plus the end block and no resumes at
+  // all. Both are counted, so sealed v4 runs keep validating and a v5 run cannot smuggle in
+  // an extra message either.
+  assert(adjudicator.includes("const pullDelivered = config.firstChallenge !== undefined") &&
+    adjudicator.includes("1 + recordedResumes + endBlockDelivered") &&
+    adjudicator.includes("plan.stageCount + endBlockDelivered") &&
+    adjudicator.includes("userMessages === expectedUserMessages"),
+  "the user-message contract must count the identified end block, and only it, on both delivery shapes");
   const supervisor71 = source("scripts/run_pi_context_experiment.mjs");
   assert(supervisor71.includes('"hidden-mass-seeds.json"') &&
     supervisor71.includes("querySeed: hiddenMassSeeds.querySeed"),
@@ -5902,66 +5580,13 @@ try {
   checks.theWithheldEndBlockAsksEverythingAndGradesThreeWays = true;
 }
 
-// GATE 72 - a resume that buys no progress fails the run by name, before the bill does.
-//
-// Gate 56 built the nudge and named the watchdog its only cadence bound; nothing bounded
-// how many nudges a run could spend at one stage. sol-20260815-hidden native rep 1 is the
-// proof: Pi's compaction summarized away stage 39's NEXT_KEY, the model correctly reported
-// the key unrecoverable on every pass, and the worker re-prompted the same dead question
-// every nine seconds for 4.3 hours, 1,761 provider responses and $127.68 for zero stages,
-// until an outside SIGTERM ended it. The pifold arm recovered from the same loss class at
-// stage 57 of an earlier rep in ONE resume (peeked the fold, finished), so the bound is
-// three whole turns at one undelivered stage: generous against every observed recovery,
-// and three nudges' spend against a dead run instead of a wall clock's.
-//
-// Delivery is the only progress signal that cannot be faked, so the streak is defined on
-// stagesDelivered() alone and is reason-blind: a fence-compaction resume that lands
-// nothing three turns running is the same dead run. The latch entry is written BEFORE the
-// throw so the cause survives even a report that never lands (gate 55's lesson), and the
-// thrown error carries the same name so the worker report and gate 53's reader agree.
-// ---------------------------------------------------------------------------
-{
-  const worker = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
-
-  // The streak function, driven as a function per gate 56's pattern.
-  const streakSource = worker.slice(
-    worker.indexOf("const RESUME_TURNS_PER_STAGE"),
-    worker.indexOf("\n\n// A KILLED WORKER STILL WRITES ITS REPORT."),
-  );
-  assert(streakSource.length > 0, "the resume progress bound was not found where it is pinned");
-  const { limit, streak } = new Function(
-    `${streakSource}; return { limit: RESUME_TURNS_PER_STAGE, streak: resumesWithoutProgress };`)();
-  assert.equal(limit, 3, "the bound is not the three turns the defect record fixed it at");
-  const nudge = (afterStage) => ({ afterStage });
-  assert.equal(streak([], 39), 0, "an empty nudge history claims a streak");
-  assert.equal(streak([nudge(12), nudge(12), nudge(12)], 12), 3,
-    "three same-stage nudges do not count as three");
-  // Progress resets the streak: nudges spent at EARLIER stages never count against the
-  // stage now owed, however many there were.
-  assert.equal(streak([nudge(12), nudge(12), nudge(12), nudge(13)], 13), 1,
-    "a delivery does not reset the streak, so an honest recovery inherits a dead run's debt");
-  assert.equal(streak([nudge(12), nudge(12), nudge(12)], 13), 0,
-    "nudges at an earlier stage count against the stage now owed");
-  assert.equal(streak([nudge(12), nudge(13), nudge(13)], 13), 2,
-    "the streak is not the trailing run of same-stage nudges");
-
-  // The wiring: the bound is checked inside the resume loop, before the nudge is recorded
-  // and before the prompt is sent, and the refusal both latches and throws the same name.
-  const loopStart = worker.indexOf("while (!closedBook && !deadlineFired && stagesDelivered() < plan.stageCount");
-  const boundCheck = worker.indexOf("resumesWithoutProgress(stageNudges, delivered) >= RESUME_TURNS_PER_STAGE");
-  const latchWrite = worker.indexOf('phase: "worker-resume-bound"');
-  const boundThrow = worker.indexOf("throw new Error(detail)");
-  const nudgePush = worker.indexOf("stageNudges.push(");
-  const resumeSend = worker.indexOf("await session.prompt(resumePrompt(");
-  assert(loopStart >= 0 && boundCheck > loopStart && boundCheck < nudgePush && nudgePush < resumeSend,
-    "the bound does not run inside the resume loop before the nudge and the prompt");
-  assert(latchWrite > boundCheck && boundThrow > latchWrite && boundThrow < nudgePush,
-    "the refusal does not latch before it throws, inside the guarded branch");
-  assert(/resume-loop-without-progress: stage \$\{delivered \+ 1\} of/.test(worker),
-    "the failure does not name itself and the stage it is owed");
-
-  checks.aResumeThatBuysNoProgressFailsByName = true;
-}
+// GATE 72 IS RETIRED (2026-08-25). It bounded a resume that bought no progress: three
+// consecutive nudges at one undelivered stage failed the run by name, born from
+// sol-20260815-hidden native rep 1, which lost stage 39's key to compaction and was
+// re-prompted every nine seconds for 4.3 hours, 1,761 provider responses and $127.68 for
+// zero stages. There are no resumes to bound: stages arrive as user messages, turns end
+// after each one by design, and a model that stops is finished rather than stalled. Its
+// number stays spent.
 
 // GATE 73 - a deposited campaign reads its own plan after relocation.
 //
@@ -9877,25 +9502,28 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
 // channel the harness invented: neither compaction nor folding puts it there, and
 // with the tool surface restored to stock Pi the model has `grep` to find it with.
 //
-// The worker consumes the file the moment it validates it. The window is not a
-// race, because the model is blocked inside its own tool call for all of it. What
-// the deletion must not cost is the proof that the stage was delivered, and that
-// proof was never in the file: it is in pace.jsonl, on the supervisor's side.
+// The worker consumes the file the moment it validates it. The window is not a race, and as
+// of 2026-08-25 it is airtight for a stronger reason than before: the model is not merely
+// blocked inside its own tool call, it has ENDED ITS TURN and is not running at all. What
+// the deletion must not cost is the proof that the stage was delivered, and that proof was
+// never in the file: it is in pace.jsonl, on the supervisor's side.
 // ---------------------------------------------------------------------------
 {
   const extension = source("scripts/pi_context_experiment_extension.mjs");
   assert(/truncateSync\(responsePath, 0\);/.test(extension),
     "the stage response is not consumed on read");
-  assert(/truncateSync\(responsePath[\s\S]{0,600}const stage = expectedStage;/.test(extension),
+  assert(/Supervisor response identity drifted[\s\S]{0,900}truncateSync\(responsePath, 0\);/.test(extension),
     "the response is consumed somewhere other than after its identity is validated");
-  // EMPTIED, NOT UNLINKED. The worker's own delivery counter walks these paths to
-  // learn how many stages have landed, and a smoke run that deleted them read zero
-  // all session, tripping the resume bound at stage 1 of 8 while the supervisor had
-  // released all eight. The seal keeps listing them so a payload that survived
-  // would show up as a hash rather than going unnoticed.
+  // STILL EMPTIED RATHER THAN UNLINKED, for a narrower reason than before. The old reason
+  // was that the worker's delivery counter WALKED these paths to learn how far the run had
+  // got, and a smoke run that deleted them read zero all session. The worker drives delivery
+  // now and simply counts, so that coupling is gone; an empty file is kept because it is
+  // still a receipt, and because a path that vanishes where a stage response used to be is
+  // its own tell. The seal keeps listing them so a payload that survived would show up as a
+  // hash rather than going unnoticed.
   const worker74 = source("scripts/run_pi_context_experiment_worker.mjs");
-  assert(/existsSync\(join\(config\.runDir, "ipc", "responses",/.test(worker74),
-    "the delivery counter no longer walks the response paths this gate keeps present");
+  assert(/const stagesDelivered = \(\) => stagesDeliveredCount;/.test(worker74),
+    "the delivery counter is inferred again rather than being what the worker itself did");
   const runner = source("scripts/run_pi_context_experiment.mjs");
   assert(/ipc\/responses\/stage-/.test(runner) && /ipc\/requests\/stage-/.test(runner),
     "the seal stopped covering the stage channel");
@@ -10048,328 +9676,23 @@ const report = {
 assert(Object.values(checks).every((value) => value === true), "a gate did not report");
 process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 // ---------------------------------------------------------------------------
-// GATE 103 - the fence abort's local marker is abandoned by name, never orphaned
-// ---------------------------------------------------------------------------
-// nativefence rep 2 of sol-20260823-live: the arm's first run under the sandbox-era
-// response seal. The fence crossed at 249,189 against its 235,674 threshold, compact()
-// aborted the live operation BETWEEN building a projection and dispatching the request,
-// Pi emitted the LOCAL zero-usage abort marker (gate 97's local class, never on the
-// provider ledger), and the seal latched orphan-provider-response and killed the worker
-// one event after the compaction it had correctly caused. The allowance mirrors the
-// stranded-request side exactly: armed at the crossing, consumed ONCE, zero-usage
-// markers only. A marker without a crossing, and a funded response without an identity,
-// each still latch by name.
-{
-  const jitiPath103 = join(PI_INSTALL_ROOT, "node_modules", "jiti", "lib", "jiti.mjs");
-  const typeboxPath103 = join(PI_INSTALL_ROOT, "node_modules", "typebox", "build", "index.mjs");
-  const { createJiti: createJiti103 } = await import(pathToFileURL(jitiPath103));
-  const { createPiContextExperimentExtension } = await createJiti103(import.meta.url, {
-    alias: { typebox: typeboxPath103 },
-  }).import(join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"));
-  const readLines103 = (runDir, name) => {
-    const path = join(runDir, name);
-    if (!existsSync(path)) return [];
-    return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
-  };
-  const driveFence = () => {
-    const runDir = mkdtempSync(join(tmpdir(), "pi-fold-fence-abandon-"));
-    const handlers = new Map();
-    const pi = {
-      on(name, handler) {
-        if (!handlers.has(name)) handlers.set(name, []);
-        handlers.get(name).push(handler);
-      },
-      registerTool() {}, registerCommand() {}, sendMessage() {}, async appendEntry() {},
-    };
-    createPiContextExperimentExtension({
-      version: EXPERIMENT_PROTOCOL_VERSION,
-      runId: "fence-abandon",
-      runDir,
-      campaignId: "gate-103",
-      arm: "nativefence",
-      mode: "smoke",
-      providerInputBudget: 251_520,
-      firstChallenge: "a".repeat(64),
-      stageCount: EXPERIMENT_MODE_PLANS.smoke.stageCount,
-      watchdogMs: EXPERIMENT_MODE_PLANS.smoke.watchdogMs,
-    }).factory(pi);
-    const compactCalls = [];
-    const ctx = {
-      sessionManager: { getLeafId: () => "leaf-1", getBranch: () => [] },
-      model: { provider: "openai-codex", id: "gpt-5.6-sol", contextWindow: 272_000, maxTokens: 128_000 },
-      thinkingLevel: "xhigh",
-      getSystemPrompt: () => "system",
-      getEntries: () => [],
-      getContextUsage: () => ({ tokens: 236_000 }),
-      compact: (options) => { compactCalls.push(options); },
-    };
-    const request = handlers.get("before_provider_request").at(-1);
-    const messageEnd = handlers.get("message_end").at(-1);
-    return { runDir, ctx, request, messageEnd, compactCalls };
-  };
-  const funded = (stopReason) => ({ message: { role: "assistant", stopReason,
-    usage: { input: 1_000, output: 50, cacheRead: 230_000, cacheWrite: 0, totalTokens: 236_000 } } });
-  const marker = { message: { role: "assistant", stopReason: "error", errorMessage: "This operation was aborted",
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 } } };
+// GATE 103 IS RETIRED (2026-08-25). It pinned the fence abort's local zero-usage marker
+// being abandoned BY NAME rather than orphaned, one per crossing, after nativefence rep 2 of
+// sol-20260823-live died on its first crossing with the fence itself having worked. Nothing
+// aborts a turn from outside any more: Pi compacts at its own boundary, where no request is
+// in flight to strand. Its number stays spent.
 
-  // THE ALLOWANCE: crossing, then the local marker with no request in flight.
-  const allowed = driveFence();
-  allowed.request({ payload: { tools: [] } }, allowed.ctx);
-  allowed.messageEnd(funded("toolUse"), allowed.ctx); // seals the response AND fires the crossing
-  assert.equal(allowed.compactCalls.length, 1, "the crossing did not ask Pi to compact");
-  allowed.messageEnd(marker, allowed.ctx); // must NOT throw
-  const allowedEvents = readLines103(allowed.runDir, "worker-events.jsonl").map((entry) => entry.kind);
-  assert(allowedEvents.includes("harness-fence-crossing"), "no crossing was recorded");
-  assert(allowedEvents.includes("harness-fence-abandoned-response"),
-    "the abandoned marker was not recorded by name");
-  assert.equal(readLines103(allowed.runDir, "failure-latch.jsonl").length, 0,
-    "the allowance still latched a failure");
-  const sealed = readLines103(allowed.runDir, "provider-requests.jsonl")
-    .filter((entry) => entry.kind === "provider-response");
-  assert.equal(sealed.length, 1, "the marker was sealed as a provider response");
+// GATE 106 IS RETIRED (2026-08-25). It pinned that the fence proof survived a stale ctx:
+// a crossing below Pi's own trigger made our manual compact() perform the compaction itself,
+// the session was replaced under the captured ctx, and the proof-read hit Pi's stale-ctx
+// guard and killed the worker at stage 9 (nativefence rep 8 at --fence-share 0.50). There is
+// no manual compact to prove. Its number stays spent.
 
-  // CONSUMED ONCE: a second identityless marker after the allowance still latches.
-  assert.throws(() => allowed.messageEnd(marker, allowed.ctx),
-    /no exact provider-request identity/, "a second marker rode the same allowance");
-
-  // NO CROSSING, NO ALLOWANCE: the same marker on a fresh extension latches by name.
-  const bare = driveFence();
-  assert.throws(() => bare.messageEnd(marker, bare.ctx), /no exact provider-request identity/,
-    "an identityless marker with no crossing behind it did not latch");
-  assert(readLines103(bare.runDir, "failure-latch.jsonl")
-    .some((entry) => entry.phase === "orphan-provider-response"),
-  "the orphan latch was not written for the uncovered marker");
-
-  // A FUNDED RESPONSE NEVER RIDES IT: after a crossing, an identityless response that
-  // spent tokens is still the breach the seal exists to catch.
-  const spent = driveFence();
-  spent.request({ payload: { tools: [] } }, spent.ctx);
-  spent.messageEnd(funded("toolUse"), spent.ctx);
-  assert.throws(() => spent.messageEnd(funded("stop"), spent.ctx),
-    /no exact provider-request identity/, "a funded identityless response rode the allowance");
-  checks.fenceAbortMarkerAbandonedNeverOrphaned = true;
-}
-
-// GATE 106: THE FENCE PROOF SURVIVES A STALE CTX (2026-08-24). nativefence rep 8 at
-// --fence-share 0.50 crossed BELOW Pi's own compaction trigger, so the manual compact()
-// performed the compaction itself, the session was replaced under the captured ctx, and
-// the onError proof-read (ctx.sessionManager.getBranch()) hit Pi's stale-ctx guard: an
-// uncaught throw inside Pi's callback path that killed the worker at stage 9 with
-// "stage 9 request lost worker: code=1". The proof now defers to the next event's fresh
-// ctx: the crossing is serviced when a compaction entry arrived on the branch since the
-// crossing recorded its count, and latches with the ORIGINAL compact error otherwise; a
-// compaction already standing at crossing time never satisfies the later check.
-{
-  const jitiPath106 = join(PI_INSTALL_ROOT, "node_modules", "jiti", "lib", "jiti.mjs");
-  const typeboxPath106 = join(PI_INSTALL_ROOT, "node_modules", "typebox", "build", "index.mjs");
-  const { createJiti: createJiti106 } = await import(pathToFileURL(jitiPath106));
-  const { createPiContextExperimentExtension } = await createJiti106(import.meta.url, {
-    alias: { typebox: typeboxPath106 },
-  }).import(join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"));
-  const readLines106 = (runDir, name) => {
-    const path = join(runDir, name);
-    if (!existsSync(path)) return [];
-    return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
-  };
-  const driveStaleFence = (initialBranch = []) => {
-    const runDir = mkdtempSync(join(tmpdir(), "pi-fold-fence-stale-"));
-    const handlers = new Map();
-    const pi = {
-      on(name, handler) {
-        if (!handlers.has(name)) handlers.set(name, []);
-        handlers.get(name).push(handler);
-      },
-      registerTool() {}, registerCommand() {}, sendMessage() {}, async appendEntry() {},
-    };
-    createPiContextExperimentExtension({
-      version: EXPERIMENT_PROTOCOL_VERSION,
-      runId: "fence-stale",
-      runDir,
-      campaignId: "gate-106",
-      arm: "nativefence",
-      mode: "smoke",
-      providerInputBudget: 251_520,
-      firstChallenge: "a".repeat(64),
-      stageCount: EXPERIMENT_MODE_PLANS.smoke.stageCount,
-      watchdogMs: EXPERIMENT_MODE_PLANS.smoke.watchdogMs,
-    }).factory(pi);
-    const state = { stale: false, branch: [...initialBranch], tokens: 236_000 };
-    const compacts = [];
-    const ctx = {
-      get sessionManager() {
-        if (state.stale) {
-          throw new Error("This extension ctx is stale after session replacement or reload.");
-        }
-        return { getLeafId: () => "leaf-1", getBranch: () => state.branch };
-      },
-      model: { provider: "openai-codex", id: "gpt-5.6-sol", contextWindow: 272_000, maxTokens: 128_000 },
-      thinkingLevel: "xhigh",
-      getSystemPrompt: () => "system",
-      getEntries: () => [],
-      getContextUsage: () => ({ tokens: state.tokens }),
-      compact: (options) => { compacts.push(options); },
-    };
-    const request = handlers.get("before_provider_request").at(-1);
-    const messageEnd = handlers.get("message_end").at(-1);
-    const sessionCompact = handlers.get("session_compact").at(-1);
-    return { runDir, state, ctx, request, messageEnd, compacts, sessionCompact };
-  };
-  const funded = { message: { role: "assistant", stopReason: "toolUse",
-    usage: { input: 1_000, output: 50, cacheRead: 230_000, cacheWrite: 0, totalTokens: 236_000 } } };
-  const compaction = { type: "compaction", id: "comp-1" };
-
-  // SERVICED: the crossing fires, the ctx goes stale, onError DEFERS rather than throws,
-  // and the next event's fresh ctx finds a new compaction on the branch.
-  const good = driveStaleFence();
-  good.request({ payload: { tools: [] } }, good.ctx);
-  good.messageEnd(funded, good.ctx);
-  assert.equal(good.compacts.length, 1, "the crossing did not ask Pi to compact");
-  good.state.stale = true;
-  good.compacts[0].onError(new Error("compact interrupted by replacement")); // must NOT throw
-  const deferredEvents = readLines106(good.runDir, "worker-events.jsonl").map((entry) => entry.kind);
-  assert(deferredEvents.includes("harness-fence-verification-deferred"),
-    "the stale proof was not deferred by name");
-  good.state.stale = false;
-  good.state.branch = [compaction];
-  good.state.tokens = 1_000;
-  good.request({ payload: { tools: [] } }, good.ctx);
-  const goodEvents = readLines106(good.runDir, "worker-events.jsonl")
-    .filter((entry) => entry.kind === "harness-fence-compacted");
-  assert.equal(goodEvents.length, 1, "the deferred proof did not resolve as serviced");
-  assert.equal(goodEvents[0].details.serviced_by, "verified-after-stale-ctx");
-  assert.equal(readLines106(good.runDir, "failure-latch.jsonl").length, 0,
-    "a serviced deferred proof still latched");
-
-  // LATCHED: same deferral, but no compaction ever lands; the latch carries the
-  // ORIGINAL compact error.
-  const bad = driveStaleFence();
-  bad.request({ payload: { tools: [] } }, bad.ctx);
-  bad.messageEnd(funded, bad.ctx);
-  bad.state.stale = true;
-  bad.compacts[0].onError(new Error("compact interrupted by replacement"));
-  bad.state.stale = false;
-  bad.state.tokens = 1_000;
-  bad.request({ payload: { tools: [] } }, bad.ctx);
-  const badLatch = readLines106(bad.runDir, "failure-latch.jsonl");
-  assert(badLatch.some((entry) => entry.phase === "harness-fence-compaction" &&
-    /compact interrupted by replacement/.test(entry.detail)),
-  "an unserviced deferred proof did not latch with the original error");
-
-  // A COMPACTION ALREADY STANDING AT THE CROSSING NEVER SATISFIES THE LATER CHECK.
-  const prior = driveStaleFence([compaction]);
-  prior.request({ payload: { tools: [] } }, prior.ctx);
-  prior.messageEnd(funded, prior.ctx);
-  prior.state.stale = true;
-  prior.compacts[0].onError(new Error("compact interrupted by replacement"));
-  prior.state.stale = false;
-  prior.state.tokens = 1_000;
-  prior.request({ payload: { tools: [] } }, prior.ctx);
-  assert(readLines106(prior.runDir, "failure-latch.jsonl")
-    .some((entry) => entry.phase === "harness-fence-compaction"),
-  "a pre-existing compaction satisfied a proof it does not own");
-  // SERVICED AT THE CATCH: a completion the crossing has not seen IS the replacement
-  // that made the ctx stale, so the catch services the crossing on the extension's own
-  // completion count with no deferral and no model event (nativefence rep 9's deadlock:
-  // the deferral's resolver needed a fresh-ctx event, the worker's resume needed the
-  // resolution, and the run ended at 8 of 64 stages).
-  const witnessed = driveStaleFence();
-  witnessed.request({ payload: { tools: [] } }, witnessed.ctx);
-  witnessed.messageEnd(funded, witnessed.ctx);
-  witnessed.sessionCompact({ reason: "manual", compactionEntry: { id: "comp-w" } });
-  witnessed.state.stale = true;
-  witnessed.compacts[0].onError(new Error("Compaction cancelled"));
-  const witnessedKinds = readLines106(witnessed.runDir, "worker-events.jsonl").map((entry) => entry.kind);
-  assert(!witnessedKinds.includes("harness-fence-verification-deferred"),
-    "a witnessed completion still deferred the proof");
-  const witnessedCompacted = readLines106(witnessed.runDir, "worker-events.jsonl")
-    .filter((entry) => entry.kind === "harness-fence-compacted");
-  assert.equal(witnessedCompacted.length, 1, "the witnessed completion did not service the crossing");
-  assert.equal(witnessedCompacted[0].details.serviced_by, "verified-after-stale-ctx");
-  assert.equal(readLines106(witnessed.runDir, "failure-latch.jsonl").length, 0,
-    "a witnessed completion still latched");
-
-  // RESOLVED BY THE COMPLETION ITSELF: a deferral standing when session_compact fires is
-  // by construction older than that completion, so the completion resolves it without
-  // waiting for a model event the settling worker will never send.
-  const resolved = driveStaleFence();
-  resolved.request({ payload: { tools: [] } }, resolved.ctx);
-  resolved.messageEnd(funded, resolved.ctx);
-  resolved.state.stale = true;
-  resolved.compacts[0].onError(new Error("Compaction cancelled"));
-  const resolvedDeferred = readLines106(resolved.runDir, "worker-events.jsonl").map((entry) => entry.kind);
-  assert(resolvedDeferred.includes("harness-fence-verification-deferred"),
-    "the unwitnessed cancellation did not defer");
-  resolved.sessionCompact({ reason: "manual", compactionEntry: { id: "comp-r" } });
-  const resolvedCompacted = readLines106(resolved.runDir, "worker-events.jsonl")
-    .filter((entry) => entry.kind === "harness-fence-compacted");
-  assert.equal(resolvedCompacted.length, 1, "the completion did not resolve the standing deferral");
-  assert.equal(resolvedCompacted[0].details.serviced_by, "verified-after-stale-ctx");
-  assert.equal(readLines106(resolved.runDir, "failure-latch.jsonl").length, 0,
-    "a completion-resolved deferral still latched");
-
-  checks.fenceProofSurvivesAStaleCtx = true;
-}
-
-// GATE 107: A CROSSING'S OUTCOME IS AWAITED, NOT ASSUMED (2026-08-24). The manual
-// compact() a below-trigger crossing fires is DETACHED from the operation the worker
-// awaits: its abort ends the turn, the prompt promise resolves, and a worker that reads
-// "no completed compaction, no resume" and walks to its terminal assertions CANCELS the
-// in-flight compaction with its own teardown. nativefence rep 9 of sol-20260823-live
-// recorded the race in four milliseconds (workerFinished 197781672, "Compaction
-// cancelled" deferred 197781676) and rep 8 died on the identical race with the stale-ctx
-// throw masking the cancellation; at the matched 0.937 share it never fires because Pi's
-// own threshold pass runs inside the operation-end sequence the worker already awaits,
-// which is why five crossings serviced in rep 4 and zero ever serviced below the
-// trigger. The worker now waits, bounded, while the event log holds more crossings than
-// completed compactions and nothing has latched; the timeout latches by name, carrying
-// the deferred compact error when one stands, before it throws the same name.
-{
-  const worker = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment_worker.mjs"), "utf8");
-
-  // The owed predicate, driven as a function per gate 56's pattern.
-  const owedSource = worker.slice(
-    worker.indexOf("const FENCE_OUTCOME_BOUND_MS"),
-    worker.indexOf("const awaitFenceOutcome"),
-  );
-  assert(owedSource.length > 0, "the fence outcome machinery was not found where it is pinned");
-  const { bound, owed } = new Function("existsSync", "readFileSync",
-    `${owedSource}; return { bound: FENCE_OUTCOME_BOUND_MS, owed: fenceOutcomeOwed };`)(
-    () => false, () => "");
-  assert.equal(bound, 120_000, "the settlement bound moved from the 120s the build fixed");
-  assert.equal(owed(1, 0, 0), true, "an unserviced crossing does not hold the worker");
-  assert.equal(owed(1, 1, 0), false, "a serviced crossing still holds the worker");
-  assert.equal(owed(0, 0, 0), false, "a quiet turn is held with nothing owed");
-  assert.equal(owed(1, 0, 1), false,
-    "a latched failure still holds the worker instead of failing the run by its own name");
-  assert.equal(owed(3, 2, 0), true, "only the first crossing of several is awaited");
-
-  // The wiring: the wait follows EVERY quiescence read, is fenced to the nativefence
-  // arm, breaks for the watchdog, and the timeout latches by name before it throws.
-  const quiescenceReads = worker.split("terminalState = await waitForDurableTerminalQuiescence(manager, session);").length - 1;
-  const outcomeWaits = worker.split("await awaitFenceOutcome();").length - 1;
-  assert.equal(quiescenceReads, 3, "a quiescence read was added or removed; re-pin the waits");
-  assert.equal(outcomeWaits, quiescenceReads,
-    "a quiescence read is not followed by the fence outcome wait");
-  for (let from = 0, read = 0; read < quiescenceReads; read += 1) {
-    const at = worker.indexOf("waitForDurableTerminalQuiescence(manager, session);", from);
-    const wait = worker.indexOf("await awaitFenceOutcome();", at);
-    const nextRead = worker.indexOf("waitForDurableTerminalQuiescence(manager, session);", at + 1);
-    assert(wait > at && (nextRead < 0 || wait < nextRead),
-      "a quiescence read is not IMMEDIATELY covered by the wait that follows it");
-    from = at + 1;
-  }
-  assert(worker.includes('if (config.arm !== "nativefence") return;'),
-    "the wait is not fenced to the arm whose mechanism it serves");
-  assert(worker.includes("!deadlineFired) {"),
-    "the wait does not break for the watchdog");
-  const timeoutLatch = worker.indexOf('phase: "harness-fence-outcome-timeout"');
-  const timeoutThrow = worker.indexOf("throw new Error(`harness-fence-outcome-timeout");
-  assert(timeoutLatch >= 0 && timeoutThrow > timeoutLatch,
-    "the timeout does not latch by name before it throws");
-  assert(worker.includes("deferred compact error"),
-    "the timeout does not carry the deferred compact error it is explaining");
-  checks.fenceOutcomeAwaitedNotAssumed = true;
-}
+// GATE 107 IS RETIRED (2026-08-25). It pinned that a crossing's outcome was AWAITED rather
+// than assumed: the manual compact() a below-trigger crossing fired was detached from the
+// operation the worker awaited, so its abort resolved the prompt promise and the worker's
+// own teardown then CANCELLED the compaction (nativefence rep 9 of sol-20260823-live
+// recorded the race in four milliseconds). No crossing, no race. Its number stays spent.
 
 
 // ---------------------------------------------------------------------------
@@ -10809,19 +10132,24 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   // COLLECT BEFORE SERVE, PLANT AFTER. Serving first would let the model see the next
   // stage with the old artifact still on disk; planting before the result is returned
   // would put the file in the checkout during a turn nobody asked about it.
-  const fetchAt = extensionSource.indexOf("const requestIdentity = {");
-  const collectAt = extensionSource.indexOf("collectStaleArtifact();", fetchAt);
-  const waitAt = extensionSource.indexOf("await waitForFile(responsePath", fetchAt);
-  const plantAt = extensionSource.indexOf("plantStaleArtifact(stage)", fetchAt);
-  assert(fetchAt >= 0 && collectAt > fetchAt && waitAt > collectAt,
+  const deliverAt = extensionSource.indexOf("const deliverStage = async () => {");
+  const collectAt = extensionSource.indexOf("collectStaleArtifact();", deliverAt);
+  const waitAt = extensionSource.indexOf("await waitForFile(responsePath", deliverAt);
+  const plantAt = extensionSource.indexOf("plantStaleArtifact(stage)", deliverAt);
+  assert(deliverAt >= 0 && collectAt > deliverAt && waitAt > collectAt,
     "the previous artifact is not collected before the next stage is requested");
   assert(plantAt > waitAt, "the artifact is planted before its own stage has been served");
-  // The run-end path collects too, so a plan ending on a trailing call leaves nothing.
-  assert(extensionSource.slice(
-    extensionSource.indexOf('if (disposition.kind === "post-plan")'),
-    extensionSource.indexOf("if (params.key !== expectedChallenge)"),
-  ).includes("collectStaleArtifact();"),
-  "a run ending on a trailing stage call leaves its artifact standing in the checkout");
+  // THE LAST STAGE'S ARTIFACT IS COLLECTED TOO. Every earlier ask is consumed by the next
+  // stage's delivery; an ask on the final stage has no next delivery, so without this it
+  // would be left populated in the checkout, which is the disk-memory channel these bounds
+  // exist to close. The worker calls it after the loop and before the end block.
+  assert(extensionSource.includes("collectPendingArtifact: () => collectStaleArtifact()"),
+    "the extension exposes no way to collect the last stage's artifact");
+  const worker111 = source("scripts/run_pi_context_experiment_worker.mjs");
+  const loopEnd = worker111.indexOf("experiment.collectPendingArtifact();");
+  const endBlockAt = worker111.indexOf("await session.prompt(config.endBlockPrompt");
+  assert(loopEnd > 0 && endBlockAt > loopEnd,
+    "the last stage's artifact is not collected before the end block is asked");
 
   // THE RUN CONFIG CONTRACT, driven against the suite's own fixture so it cannot drift
   // from what the rest of this file already pins.
@@ -11280,6 +10608,91 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     "the stale-artifact instrument is not pinned, so a run does not seal the code that graded it");
 
   checks.oneDefinitionOfWhichEndBlockAPlanAsks = true;
+}
+
+
+// ---------------------------------------------------------------------------
+// GATE 116 - a stage is a user message, and Pi's own compaction trigger is reachable.
+//
+// Almost every tell and every resume defect descended from ONE decision. `repo_stage`
+// existed because delivery was pull-based; pull made the run one enormous turn; the giant
+// turn starved Pi's own threshold check; that starvation is why the fence existed; the fence
+// aborted turns; the aborts triggered resumes; the resumes were the priming whose dose
+// scaled 1:1 with fence share. Delivering stages as ordinary user messages collapses the
+// whole chain, and the load-bearing claim underneath it is about PI'S source, not ours: that
+// `_checkCompaction` is reached at a turn boundary. That claim is READ from Pi rather than
+// restated here, on gate 52's rule, so an upgrade that moves the arithmetic breaks this gate
+// instead of silently leaving the native arm unable to compact.
+// ---------------------------------------------------------------------------
+{
+  const worker = source("scripts/run_pi_context_experiment_worker.mjs");
+  const extension = source("scripts/pi_context_experiment_extension.mjs");
+  const lib = source("scripts/lib/pi_context_experiment.mjs");
+
+  // ONE STAGE, ONE USER MESSAGE, and the worker asks for it rather than the model.
+  assert(/for \(let stage = 1; stage <= plan\.stageCount; stage \+= 1\)/.test(worker),
+    "the worker does not walk the plan's stages itself");
+  const loop = worker.slice(
+    worker.indexOf("for (let stage = 1; stage <= plan.stageCount; stage += 1)"),
+    worker.indexOf("experiment.collectPendingArtifact();"));
+  assert(/const served = await experiment\.deliverStage\(\);/.test(loop) &&
+    /await session\.prompt\(served\.text/.test(loop),
+  "a stage is not delivered as a user message");
+  assert(/waitForDurableTerminalQuiescence/.test(loop),
+    "the worker sends the next stage without waiting for the turn to settle");
+
+  // THE MODEL IS NEVER HANDED A KEY, anywhere. `params.key` was the only consumer and the
+  // payload's trailing NEXT_KEY line was the only carrier; both are gone, and the run config
+  // no longer issues one.
+  assert(!/NEXT_KEY/.test(lib) || !/nextKeyPlaceholder/.test(lib),
+    "the stage payload still closes with a delivery key");
+  assert(!/nextKeyPlaceholder/.test(lib),
+    "the renderer still splices a key placeholder into the payload");
+  // The COMPARISON, not the word: the block above explains what was deleted and names it.
+  assert(!/params\.key\s*[!=]==/.test(extension),
+    "something still checks a key the model was asked to carry");
+  assert(!/Type\.Object\(\{\s*key:/.test(extension),
+    "a registered tool still takes a key parameter");
+  const contract = await import(
+    pathToFileURL(join(PROJECT, "scripts", "lib", "pi_context_experiment.mjs")));
+  assert(!contract.EXPERIMENT_RUN_CONFIG_KEYS.includes("firstChallenge"),
+    "a new run still issues a first challenge");
+  assert(contract.EXPERIMENT_RUN_CONFIG_OPTIONAL_KEYS.includes("firstChallenge"),
+    "a sealed run's first challenge is refused on read, which un-adjudicates the corpus");
+
+  // NOTHING RESUMES, because nothing aborts and stopping is the expected shape.
+  for (const [name, text] of [["worker", worker], ["extension", extension]]) {
+    assert(!/resumePrompt|fenceCompactedSinceLastPrompt|awaitFenceOutcome|harness-fence/.test(text),
+      `the ${name} still carries the fence or the resume it required`);
+  }
+
+  // THE RETIRED ARM IS READABLE AND NOT LAUNCHABLE.
+  assert(EXPERIMENT_ARMS.includes("nativefence"),
+    "a sealed nativefence run no longer validates, so seven campaigns stop adjudicating");
+  assert(!contract.EXPERIMENT_LAUNCHABLE_ARMS.includes("nativefence"),
+    "the retired matched-fence arm can still be launched");
+  for (const arm of contract.EXPERIMENT_LAUNCHABLE_ARMS) {
+    assert(EXPERIMENT_ARMS.includes(arm), `${arm} is launchable but not readable`);
+  }
+
+  // PI'S OWN TRIGGER IS REACHABLE, read from Pi. Two call sites carry the whole claim:
+  // one after an agent run settles, one before each user message is sent. Under pull
+  // delivery the first fired ONCE for a 64-stage run and the second never mattered, which
+  // is why plain native only ever hit the overflow path. One user message per stage
+  // reaches both, every turn.
+  const piSession = readFileSync(
+    join(PI_INSTALL_ROOT, "dist", "core", "agent-session.js"), "utf8");
+  const postRun = /_handlePostAgentRun\(\)\s*\{[\s\S]*?await this\._checkCompaction\(msg\)/.test(piSession);
+  assert(postRun,
+    "Pi no longer checks compaction after an agent run settles, so the turn boundary buys nothing");
+  const beforeSend = /await this\._checkCompaction\(lastAssistant, false\)/.test(piSession);
+  assert(beforeSend,
+    "Pi no longer checks compaction before sending a user message, so pushed stages never trigger it");
+  // And the threshold branch it reaches is the proactive one, not just overflow rescue.
+  assert(/shouldCompact\(contextTokens, contextWindow, settings\)/.test(piSession),
+    "Pi's proactive threshold branch is gone, so a turn boundary cannot compact on occupancy");
+
+  checks.aStageIsAUserMessageAndPisOwnTriggerIsReachable = true;
 }
 
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);

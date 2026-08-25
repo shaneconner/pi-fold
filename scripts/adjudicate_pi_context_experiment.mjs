@@ -395,9 +395,21 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
       : endBlockTranscript({
         entries: runEntries, ledger: plan.ledger, querySeed: config.querySeed,
       })).delivered ? 1 : 0;
-  assertExperiment(userMessages === 1 + recordedResumes + endBlockDelivered,
-    `One-user-message contract broken: ${userMessages} user messages in the run span ` +
-    `against ${recordedResumes} recorded resume(s) and ${endBlockDelivered} end block(s)`);
+  // TWO DELIVERY SHAPES, AND THE RUN CONFIG SAYS WHICH. A pull-delivered run carries a
+  // `firstChallenge`, because the key IS that protocol; a push-delivered one does not.
+  //
+  // Pull: ONE user message wrapping every stage, plus the resumes the report recorded, plus
+  // the end block. Push: ONE USER MESSAGE PER STAGE, plus the end block, and no resumes at
+  // all, because turns end after every stage by design and there is nothing to nudge.
+  const pullDelivered = config.firstChallenge !== undefined;
+  const expectedUserMessages = closedBook ? 1
+    : pullDelivered
+      ? 1 + recordedResumes + endBlockDelivered
+      : plan.stageCount + endBlockDelivered;
+  assertExperiment(userMessages === expectedUserMessages,
+    `User-message contract broken: ${userMessages} user messages in the run span against ` +
+    `${expectedUserMessages} expected for ${pullDelivered ? "pull" : "push"} delivery ` +
+    `(${recordedResumes} recorded resume(s), ${endBlockDelivered} end block(s))`);
 
   // Closed-book runs grade through the SAME mechanical verdicts and stop there. The
   // prompt law makes "no stage payload bytes" checkable: the sealed prompt hash must
