@@ -9,9 +9,9 @@
 
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   EXPERIMENT_ARMS,
@@ -11307,6 +11307,92 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     "the in-flight timer is unreferenced, so a worker can exit before its stage arrives");
 
   checks.theRunDirectoryIsNotInTheNamespace = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 121 - the checkout carries no pointer back to the campaign that made it.
+//
+// `git worktree add` leaves a `.git` FILE in the checkout root, and its whole content is
+// `gitdir: <abs path>/pi-context-experiment/<campaign>/repo.git/worktrees/<name>`. The
+// checkout is the model's cwd, so `cat .git` returned the operator's home, the word
+// pi-context-experiment, the campaign id and a worktree ordinal.
+//
+// It is the most reachable disclosure the harness had, and more so than /proc by a wide
+// margin: the path fence permits the checkout (which is where this sits) and `bash` is not
+// fenced at all, so nothing stopped it. Reading `.git` is also ordinary orientation rather
+// than probing, and the sealed corpus shows models doing it unprompted: sol-20260809 rep 5
+// (`.git` then `.git/config`), sol-20260812 rep 9, sol-20260814-fenced rep 2 (which walked
+// `.git`, `../.git` AND `../../.git`), and sol-20260815-hidden rep 1 (`.git`, `.git/config`,
+// `.git/HEAD`).
+//
+// DRIVEN AGAINST A REAL WORKTREE, because the claim is about what `git worktree add` writes,
+// not about what our source says. The fixture proves the pointer EXISTS and names its own
+// campaign before proving the removal takes it away, so the gate cannot pass by git changing
+// its mind about worktree layout.
+// ---------------------------------------------------------------------------
+{
+  const gitRoot = mkdtempSync(join(tmpdir(), "pi-fold-worktree-"));
+  const origin = join(gitRoot, "pi-context-experiment", "campaign-fixture-121", "origin");
+  mkdirSync(origin, { recursive: true });
+  const git121 = (args, cwd) => execFileSync("git", args, {
+    cwd, encoding: "utf8",
+    env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t",
+      GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t", GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_SYSTEM: "/dev/null" },
+  });
+  git121(["init", "--quiet", "-b", "main", "."], origin);
+  writeFileSync(join(origin, "a.c"), "int main(void){return 0;}\n");
+  git121(["add", "a.c"], origin);
+  git121(["commit", "--quiet", "-m", "c"], origin);
+  const commit = git121(["rev-parse", "HEAD"], origin).trim();
+  const checkout = join(gitRoot, "pi-context-experiment", "campaign-fixture-121", "runs",
+    "run-1", "repo");
+  mkdirSync(dirname(checkout), { recursive: true });
+  git121(["worktree", "add", "--quiet", "--detach", checkout, commit], origin);
+
+  // THE POINTER IS REAL, and it names the campaign. Asserted first so the removal below is
+  // proved to remove something.
+  const pointer = join(checkout, ".git");
+  assert(existsSync(pointer), "git no longer writes a .git pointer, so this gate proves nothing");
+  const pointerText = readFileSync(pointer, "utf8");
+  assert(/^gitdir:/.test(pointerText.trim()),
+    "the worktree pointer is not a gitdir file, so its disclosure has changed shape");
+  assert(pointerText.includes("pi-context-experiment") &&
+    pointerText.includes("campaign-fixture-121"),
+  "the fixture pointer does not name its own campaign, so it is not the disclosure under test");
+  assert(existsSync(join(checkout, "a.c")), "the fixture worktree has no corpus in it");
+
+  // What the supervisor does, and what it must leave behind: the corpus, not the pointer.
+  rmSync(pointer, { force: true });
+  assert(!existsSync(pointer), "the worktree pointer survived removal");
+  assert.equal(readFileSync(join(checkout, "a.c"), "utf8"), "int main(void){return 0;}\n",
+    "removing the pointer disturbed the corpus the run grades");
+  // NOTHING under the checkout may name the campaign once the pointer is gone.
+  const named121 = [];
+  const walk121 = (directory) => {
+    for (const name of readdirSync(directory)) {
+      const child = join(directory, name);
+      if (statSync(child).isDirectory()) { walk121(child); continue; }
+      const text = readFileSync(child, "utf8");
+      if (text.includes("pi-context-experiment") || text.includes("campaign-fixture-121")) {
+        named121.push(relative(checkout, child));
+      }
+    }
+  };
+  walk121(checkout);
+  assert.deepEqual(named121, [],
+    `the checkout still names its campaign in: ${named121.join(", ")}`);
+  rmSync(gitRoot, { recursive: true, force: true });
+
+  // And the supervisor actually does it, after the fingerprint that pins the staged corpus.
+  const runner121 = source("scripts/run_pi_context_experiment.mjs");
+  const addAt = runner121.indexOf('"worktree", "add"');
+  const rmAt = runner121.indexOf('rmSync(join(repoDir, ".git")', addAt);
+  const fingerprintAt = runner121.indexOf("Run checkout does not reproduce the planned staged corpus", addAt);
+  assert(addAt >= 0 && rmAt > fingerprintAt && fingerprintAt > addAt,
+    "the supervisor does not remove the worktree pointer after pinning the checkout");
+
+  checks.theCheckoutCarriesNoPointerBackToItsCampaign = true;
 }
 
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);

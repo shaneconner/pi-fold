@@ -13,7 +13,7 @@
 //        [--model-provider openai-codex] [--model-id gpt-5.6-sol] [--effort xhigh]
 
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -450,6 +450,24 @@ async function run() {
     })));
     assertExperiment(checkoutFingerprint === plannedFingerprint,
       "Run checkout does not reproduce the planned staged corpus");
+    // THE WORKTREE POINTER IS NOT PART OF THE CORPUS (2026-08-25). `git worktree add` leaves a
+    // `.git` FILE in the checkout root holding
+    // `gitdir: <...>/pi-context-experiment/<campaign>/repo.git/worktrees/<name>`, and the
+    // checkout is the model's cwd. `cat .git` therefore returned the operator's home, the word
+    // pi-context-experiment, the campaign id and the worktree ordinal, from inside a fence that
+    // cannot stop it: the path fence permits the checkout, which is exactly where this sits,
+    // and `bash` is not fenced at all. It is the most reachable disclosure the harness had, far
+    // more so than /proc: reading `.git` is ordinary orientation, and the corpus shows models
+    // doing it unprompted in sol-20260809 rep 5, sol-20260812 rep 9, sol-20260814-fenced rep 2
+    // (which walked `.git`, `../.git` and `../../.git`) and sol-20260815-hidden rep 1.
+    //
+    // Deleted rather than rewritten, because a relative gitdir still names `repo.git` and a
+    // worktree ordinal. Nothing downstream wants it: the corpus manifest never contained it,
+    // `adjudicate` and the staging builder both skip `.git` by name when they walk the tree,
+    // and what the model was asked for is a directory of source files. The mirror keeps a
+    // bookkeeping entry that `git worktree prune` collects; it lives on the host and no run
+    // reads it.
+    rmSync(join(repoDir, ".git"), { force: true });
   }
 
   const config = validateExperimentRunConfig({
