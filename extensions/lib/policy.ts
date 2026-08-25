@@ -447,6 +447,7 @@ export interface ActiveContextCheckpointV2 {
   leases?: Record<string, number>;
   pendingMarks?: PendingMark[];
   briefs?: Record<string, BriefOverride>;
+  clips?: ToolClip[];
   advisory?: NonNullable<ActiveContextState["advisory"]>;
   rider?: NonNullable<ActiveContextState["rider"]>;
   lastCall?: NonNullable<ActiveContextState["lastCall"]>;
@@ -478,6 +479,16 @@ export interface ActiveContextDeltaV2 {
   briefs?: Record<string, BriefOverride>;
   addBriefs?: Record<string, BriefOverride>;
   removeBriefIds?: string[];
+  // `clips` on a delta is the WHOLE array: what every delta written before 2026-08-24
+  // carries, and what sealed sessions replay. New deltas carry the change instead. Clips
+  // are appended and never edited, so the change is a count of what the base already holds
+  // plus the ones that are new; a rollback that shortens the array states a lower count.
+  // The order list the marks use would be WORSE than the bug here, because a callId is
+  // about a hundred characters and re-listing thirty of them on every delta costs more
+  // than the array it replaces.
+  clips?: ToolClip[];
+  clipBase?: number;
+  addClips?: ToolClip[];
   advisory?: NonNullable<ActiveContextState["advisory"]>;
   rider?: NonNullable<ActiveContextState["rider"]>;
   lastCall?: NonNullable<ActiveContextState["lastCall"]>;

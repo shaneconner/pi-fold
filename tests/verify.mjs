@@ -40,6 +40,7 @@ const piFold = await jiti.import(join(projectRoot, "extensions", "index.js"));
 const evidenceModule = await jiti.import(join(projectRoot, "extensions", "evidence.js"));
 const settingsModule = await jiti.import(join(projectRoot, "extensions", "settings.ts"));
 const measurementModule = await jiti.import(join(projectRoot, "extensions", "lib", "measurement.ts"));
+const persistenceModule = await jiti.import(join(projectRoot, "extensions", "lib", "persistence.ts"));
 
 // One synthetic deployment identity, written out in full, so every brand-derived string
 // the runtime renders is asserted against a literal rather than another derivation of
@@ -14289,12 +14290,117 @@ async function gateClipOptionIsValidated() {
   return { refused: refused.length };
 }
 
+/**
+ * A CLIP DELTA CARRIES THE CHANGE, NEVER THE WHOLE ARRAY (2026-08-24).
+ *
+ * `makeStateDelta` shipped `clips` whole on every write, which was 50.1 percent of all
+ * state bytes on sealed sol-20260823-live rep 11 (472,750 of 942,902) and 49.2 percent on
+ * rep 12, for an array that never held more than 34 entries. It is the third instance of
+ * the defect the two comments above that line were written about: the brief map at 81
+ * percent of state bytes, and the pending marks at 2.55 MB. The diet arrived without
+ * inheriting their encoding.
+ *
+ * Clips are APPENDED and never edited, so the change is a count of what the base already
+ * holds plus the ones that are new. The marks' order list would be WORSE than the bug
+ * here, because a callId runs about a hundred characters and re-listing thirty of them on
+ * every delta costs more than the array it replaces, which is why this carries a count.
+ *
+ * Fails on the pre-fix encoder at its first assertion, which is that a delta whose base
+ * already holds clips does not restate them.
+ */
+async function gateClipDeltaCarriesOnlyTheChange() {
+  const { makeStateDelta, makeStateCheckpoint, parseActiveContextState } = persistenceModule;
+  const sessionId = "clip-delta";
+  // Built through the runtime's own parser, because `stableStringify` walks own keys in
+  // INSERTION order (the reason the legacy digest helpers in persistence.ts exist), so a
+  // hand-ordered fixture digests differently from the state the reader reconstructs and
+  // every replay below would fail on the fixture rather than on the encoding.
+  const canonical = (state) => parseActiveContextState(state, sessionId, false);
+  const clipAt = (index) => ({
+    // A realistic callId, because its LENGTH is the whole reason this carries a count
+    // rather than an order list: a short synthetic id would make the wrong encoding look
+    // affordable and the assertion below vacuous.
+    callId: `call_${"x".repeat(24)}${index}|fc_${"y".repeat(48)}${index}`,
+    entryId: `entry-${index}`,
+  });
+  const withClips = (revision, count) => canonical({
+    version: 1, sessionId, revision, folds: [], expanded: [], protected: [],
+    tokensSinceToolFold: 0, leases: {},
+    ...(count ? { clips: Array.from({ length: count }, (unused, index) => clipAt(index)) } : {}),
+  });
+
+  // Anti-vacuity: one clip is long enough that restating the array is a real cost, so a
+  // delta that restated thirty of them could not hide inside the rest of the wire.
+  assert(JSON.stringify(clipAt(0)).length > 100, "The fixture clip is too short to prove anything about bytes");
+
+  // THE CHANGE, NOT THE ARRAY. Thirty clips already durable and one appended: the delta
+  // states the base count and the single new clip, and never the thirty.
+  const thirty = withClips(2, 30);
+  const thirtyOne = withClips(3, 31);
+  const appended = makeStateDelta(thirty, thirtyOne);
+  assert.equal(appended.clips, undefined,
+    "The delta restated the whole clips array instead of the change");
+  assert.equal(appended.clipBase, 30, "The delta did not state what its base already holds");
+  assert.equal(appended.addClips.length, 1, "The delta carried more than the one appended clip");
+  assert.equal(appended.addClips[0].entryId, "entry-30");
+  // The byte claim the defect is about, stated as a number rather than implied.
+  assert(JSON.stringify(appended).length < JSON.stringify(thirtyOne.clips).length / 4,
+    `A one-clip delta cost ${JSON.stringify(appended).length} bytes against an array of ` +
+    `${JSON.stringify(thirtyOne.clips).length}`);
+
+  // REPLAY IS EXACT, through the runtime's OWN reader rather than a copy of it here: a
+  // gate that re-implements the reassembly proves only that the gate agrees with itself.
+  const replayed = (wire, previous) => context.materializeActiveContextState([
+    stateEntry(sessionId, makeStateCheckpoint(previous), "clip-base"),
+    stateEntry(sessionId, wire, "clip-delta", "clip-base"),
+  ], sessionId).clips ?? [];
+  assert.deepEqual(replayed(appended, thirty), thirtyOne.clips,
+    "The replayed clips are not the ones the delta was made from");
+
+  // A ROLLBACK THAT SHORTENS THE ARRAY states a lower base and replays exactly. Nothing
+  // edits a clip, so a shorter next is the only way the array can move backwards.
+  const shrunk = makeStateDelta(thirtyOne, withClips(4, 12));
+  assert.equal(shrunk.clipBase, 12, "A rollback did not state its lower base");
+  assert.equal(shrunk.addClips, undefined, "A rollback invented clips to add");
+  assert.deepEqual(replayed(shrunk, thirtyOne), withClips(4, 12).clips,
+    "A rollback did not replay to the state it was made from");
+
+  // THE FIRST CLIPS a session ever mints: no base, and every one of them is new.
+  const first = makeStateDelta(withClips(2, 0), withClips(3, 3));
+  assert.equal(first.clipBase, 0, "The first clips did not state an empty base");
+  assert.equal(first.addClips.length, 3, "The first clips did not all travel");
+  // A session that never clips carries no clip fields at all, so the wire is unchanged for
+  // every deployment that leaves the diet off.
+  const none = makeStateDelta(withClips(2, 0), withClips(3, 0));
+  assert.equal(none.clipBase, undefined, "A diet-free session grew a clip field");
+  assert.equal(none.addClips, undefined, "A diet-free session grew a clip field");
+
+  // THE READER OUTLIVES THE WRITER. A delta written before this change states the whole
+  // array, and sealed sessions replay it exactly as they did, which is the same
+  // compatibility rule the briefs and the marks each carry.
+  const legacy = { ...appended, clips: thirtyOne.clips };
+  delete legacy.clipBase;
+  delete legacy.addClips;
+  assert.deepEqual(replayed(legacy, thirty), thirtyOne.clips,
+    "A pre-change delta no longer replays its whole array");
+
+  return {
+    clipBytes: JSON.stringify(clipAt(0)).length,
+    wholeArrayBytes: JSON.stringify(thirtyOne.clips).length,
+    appendedDeltaBytes: JSON.stringify(appended).length,
+    statesTheChange: true,
+    rollbackStatesALowerBase: true,
+    legacyWholeArrayStillReplays: true,
+  };
+}
+
 async function gateToolCallDiet() {
   return {
     clipSelection: await claim("gateClipSelection", gateClipSelection),
     clipCommitRendersAndRecovers: await claim("gateClipCommitRendersAndRecovers", gateClipCommitRendersAndRecovers),
     clipsNeverTouchTheFoldedBytes: await claim("gateClipsNeverTouchTheFoldedBytes", gateClipsNeverTouchTheFoldedBytes),
     clipOptionIsValidated: await claim("gateClipOptionIsValidated", gateClipOptionIsValidated),
+    clipDeltaCarriesOnlyTheChange: await claim("gateClipDeltaCarriesOnlyTheChange", gateClipDeltaCarriesOnlyTheChange),
   };
 }
 

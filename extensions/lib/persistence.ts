@@ -612,6 +612,10 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     Object.prototype.hasOwnProperty.call(value, "removeBriefIds"));
   const hasWireClips = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "clips"));
+  const hasClipBase = Boolean(value && typeof value === "object" &&
+    Object.prototype.hasOwnProperty.call(value, "clipBase"));
+  const hasAddClips = Boolean(value && typeof value === "object" &&
+    Object.prototype.hasOwnProperty.call(value, "addClips"));
   const hasLegacyRider = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "rider"));
   refuseRetiredStateFields(value);
@@ -627,6 +631,8 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     ...(hasAddBriefs ? ["addBriefs"] : []),
     ...(hasRemoveBriefIds ? ["removeBriefIds"] : []),
     ...(hasWireClips ? ["clips"] : []),
+    ...(hasClipBase ? ["clipBase"] : []),
+    ...(hasAddClips ? ["addClips"] : []),
     // Carried no further than the digest check in `materializeStatePersistence`, which is
     // the only thing on a load that the rider's absence can change.
     ...(hasLegacyRider ? ["rider"] : []),
@@ -647,6 +653,16 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     ownValue(value, "pendingMarks"), ownValue(value, "briefs"),
   );
   if (hasWireClips) parseToolClips(ownValue(value, "clips"));
+  if (hasAddClips) parseToolClips(ownValue(value, "addClips"));
+  if (hasClipBase) {
+    const base = ownValue(value, "clipBase");
+    if (!Number.isSafeInteger(base) || Number(base) < 0) throw new Error("Invalid active-context clip base");
+  }
+  // A whole array and a change cannot both be the truth on one wire.
+  if (hasWireClips && (hasClipBase || hasAddClips)) {
+    throw new Error("Invalid active-context clips: whole array beside a change");
+  }
+  if (hasAddClips && !hasClipBase) throw new Error("Invalid active-context clips: change without a base");
   if (checkpoint) {
     const refs = denseOwnArrayValues(ownValue(value, "foldRefs"));
     if (!refs || refs.length > MAX_ACTIVE_FOLD_RECORDS) throw new Error("Invalid active-context checkpoint refs");
@@ -954,11 +970,25 @@ export function materializeStatePersistence(
           return mark;
         });
       }
+      // The clips replay by the same discriminator rule as the briefs and the marks: the
+      // presence of the CHANGE is what says a wire carries one. A delta written before
+      // 2026-08-24 states the whole array when it has one and states nothing when it does
+      // not, so "no array" means "no clips" there, exactly as it does for the marks.
+      const clips = wire.clipBase === undefined
+        ? (wire.clips !== undefined ? clone(wire.clips) : [])
+        : [...(state.clips ?? []).slice(0, wire.clipBase), ...clone(wire.addClips ?? [])];
+      if (wire.clipBase !== undefined && wire.clipBase > (state.clips ?? []).length) {
+        throw new Error(`Unknown active-context clip base ${wire.clipBase}`);
+      }
+      if (new Set(clips.map((clip) => clip.callId)).size !== clips.length) {
+        throw new Error("Invalid active-context clips: duplicate call id");
+      }
       state = stateFromFoldRefs(
         {
           ...wire,
           briefs: Object.keys(briefs).length ? briefs : undefined,
           pendingMarks: marks.length ? marks : undefined,
+          clips: clips.length ? clips : undefined,
         },
         [...byId.values()],
         records,
@@ -1066,6 +1096,23 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
     return !held || sha256Value(held) !== sha256Value(mark);
   });
   const marksTravel = previousMarks.length > 0 || nextMarks.length > 0;
+  // THE CLIPS ARE THE SAME RULE A THIRD TIME (2026-08-24). They shipped whole on every
+  // delta, which was 50.1 percent of all state bytes on sol-20260823-live rep 11, 472,750
+  // of 942,902, for an array that never held more than 34 entries: the same defect the two
+  // comments above were written about, arriving with a feature that did not inherit their
+  // encoding. Clips are APPENDED and never edited, so the change is a count of what the
+  // base already holds plus the ones that are new, and a rollback that shortens the array
+  // states a lower count. The marks' order list would be worse than the bug here: a callId
+  // is about a hundred characters, so re-listing them all on every delta costs more than
+  // the array it replaces.
+  const previousClips = previous.clips ?? [];
+  const nextClips = next.clips ?? [];
+  let clipBase = 0;
+  while (clipBase < previousClips.length && clipBase < nextClips.length &&
+    previousClips[clipBase].callId === nextClips[clipBase].callId &&
+    previousClips[clipBase].entryId === nextClips[clipBase].entryId) clipBase += 1;
+  const addClips = nextClips.slice(clipBase);
+  const clipsTravel = previousClips.length > 0 || nextClips.length > 0;
   // The rest travel whole and stay that way. Measured on the same run, the two that were
   // worth a diff were 20.0 MB of the 21.6 MB ledger; what remained were bounded objects
   // with their own caps rather than collections that grow with the epoch (the largest,
@@ -1091,7 +1138,7 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
     ...(addPendingMarks.length ? { addPendingMarks: clone(addPendingMarks) } : {}),
     ...(Object.keys(addBriefs).length ? { addBriefs } : {}),
     ...(removeBriefIds.length ? { removeBriefIds } : {}),
-    ...(next.clips?.length ? { clips: clone(next.clips) } : {}),
+    ...(clipsTravel ? { clipBase: clipBase, ...(addClips.length ? { addClips: clone(addClips) } : {}) } : {}),
     ...(next.advisory ? { advisory: clone(next.advisory) } : {}),
     stateSha256: semanticStateSha256(next),
   }, next.sessionId) as ActiveContextDeltaV2;
