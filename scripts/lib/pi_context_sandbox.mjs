@@ -89,6 +89,10 @@ export const HARNESS_SOURCE = Object.freeze([
   "scripts/run_pi_context_experiment_worker.mjs",
   "scripts/pi_context_experiment_extension.mjs",
   "scripts/lib/pi_context_experiment.mjs",
+  // The v5 stale-artifact bounds, which the extension imports to plant and collect.
+  // A run without it dies before its first turn with MODULE_NOT_FOUND at
+  // pi_context_experiment_extension.mjs, which is how the first v5 smoke campaign died.
+  "scripts/lib/pi_context_artifacts.mjs",
   "scripts/lib/pi_context_soak_attestation.mjs",
   "scripts/lib/pi_fold_identity.mjs",
   "scripts/lib/pi_context_sandbox.mjs",

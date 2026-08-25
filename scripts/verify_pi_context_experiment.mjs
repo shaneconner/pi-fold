@@ -10966,4 +10966,83 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   checks.artifactVerdictsSeparateRecallFromRederivation = true;
 }
 
+
+// ---------------------------------------------------------------------------
+// GATE 113 - everything the harness imports is everything the harness copies.
+//
+// The sandbox mounts a COPY of the harness, listed file by file in HARNESS_SOURCE, and the
+// worker imports the whole graph eagerly at startup. A module that the extension imports
+// but the list omits is not a subtle failure: the worker dies before its first turn with
+// MODULE_NOT_FOUND and the supervisor reports "worker readiness lost", which is what killed
+// the first v5 smoke campaign on both arms simultaneously. `scripts/lib/pi_context_
+// artifacts.mjs` was imported by the extension and absent from the list.
+//
+// Nothing caught it, because every other gate imports from the CHECKOUT, where the file is
+// obviously present. Only the namespace is missing it. So this walks the relative import
+// graph from the listed entry points and asserts closure: reachable implies copied.
+// ---------------------------------------------------------------------------
+{
+  const { HARNESS_SOURCE, STEER_HARNESS_SOURCE } = await import(
+    pathToFileURL(join(PROJECT, "scripts", "lib", "pi_context_sandbox.mjs")));
+
+  // Relative specifiers only. A bare specifier is a dependency resolved from the mounted
+  // node_modules, not something this list is responsible for.
+  const RELATIVE_IMPORT = /(?:^|\n)\s*(?:import|export)[\s\S]{0,400}?from\s+["'](\.[^"']+)["']/g;
+  const DYNAMIC_IMPORT = /import\(\s*["'](\.[^"']+)["']\s*\)/g;
+
+  const reachableFrom = (roots, listed) => {
+    const seen = new Set();
+    const missing = [];
+    const queue = [...roots];
+    while (queue.length > 0) {
+      const file = queue.shift();
+      if (seen.has(file)) continue;
+      seen.add(file);
+      const absolute = join(PROJECT, file);
+      if (!existsSync(absolute)) continue;
+      const text = readFileSync(absolute, "utf8");
+      const dir = file.includes("/") ? file.slice(0, file.lastIndexOf("/")) : "";
+      for (const pattern of [RELATIVE_IMPORT, DYNAMIC_IMPORT]) {
+        pattern.lastIndex = 0;
+        for (const match of text.matchAll(pattern)) {
+          // Normalise `dir/./x` and `dir/../x` without touching the filesystem, so the
+          // check is about the LIST rather than about what happens to exist.
+          const parts = `${dir}/${match[1]}`.split("/");
+          const stack = [];
+          for (const part of parts) {
+            if (part === "." || part === "") continue;
+            if (part === "..") stack.pop();
+            else stack.push(part);
+          }
+          const resolved = stack.join("/");
+          if (!existsSync(join(PROJECT, resolved))) continue;
+          if (!listed.includes(resolved)) missing.push(`${file} -> ${resolved}`);
+          queue.push(resolved);
+        }
+      }
+    }
+    return missing;
+  };
+
+  const entryPoints = [
+    "scripts/run_pi_context_experiment_worker.mjs",
+    "scripts/pi_context_experiment_extension.mjs",
+  ];
+  assert.deepEqual(reachableFrom(entryPoints, HARNESS_SOURCE), [],
+    "the harness imports a module the sandbox never copies, so the worker dies at startup");
+  assert.deepEqual(
+    reachableFrom([...entryPoints, "scripts/run_steer_session_worker.mjs"], STEER_HARNESS_SOURCE),
+    [], "a steer run imports a module its namespace never copies");
+
+  // THE WALK WORKS BEFORE IT IS TRUSTED. Removing a module the extension genuinely imports
+  // must be reported, or an empty result above means nothing.
+  const withoutArtifacts = HARNESS_SOURCE.filter(
+    (file) => file !== "scripts/lib/pi_context_artifacts.mjs");
+  const found = reachableFrom(entryPoints, withoutArtifacts);
+  assert(found.some((edge) => edge.endsWith("-> scripts/lib/pi_context_artifacts.mjs")),
+    "the import walk misses a module that is actually imported, so its empty result is vacuous");
+
+  checks.everythingTheHarnessImportsIsEverythingItCopies = true;
+}
+
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);
