@@ -71,6 +71,16 @@ export const SANDBOX_PATHS = Object.freeze({
   // for an unrelated provider) and the interactive pi-fold deployment. None of
   // that belongs to this run.
   scratch: "/tmp",
+  // A WRITABLE DIRECTORY INSIDE THE READ-ONLY CHECKOUT (2026-08-25). The v5 stale
+  // artifacts are notes the model is asked to bring up to date, so it must be able to edit
+  // one, and the checkout is read-only ON PURPOSE (the tree is graded material). The whole
+  // tree cannot be opened up for that. This is a fresh per-run directory layered over the
+  // read-only bind, so the corpus stays pristine and only the notes are writable.
+  //
+  // It lives INSIDE /work rather than in /tmp or $HOME because `read` is fenced to the
+  // checkout (gate 67): a note the model could not open with its ordinary reading tool,
+  // and had to reach with `bash` instead, would be a tell in itself.
+  notes: "/work/notes",
   agent: `${SANDBOX_HOME}/.pi/agent`,
   auth: `${SANDBOX_HOME}/.pi/agent/auth.json`,
   // The config and the plan are WRITTEN INTO the harness copy rather than bound
@@ -168,6 +178,8 @@ export function sandboxArgv(layout) {
     bwrap = "/usr/bin/bwrap",
     checkoutDir, sessionDir, runDir, harnessDir,
     piRoot, nodeExecutable, homeDir, identityDir, agentDir, authPath, scratchDir,
+    // Optional: a v4 campaign has no notes and must keep running exactly as it ran.
+    notesDir = null,
     // The steer protocol grades the tree the agent LEAVES BEHIND, so its checkout has
     // to be writable and its worker is a different script. Both default to the v4
     // shape, because a sealed campaign must keep running exactly as it ran.
@@ -244,6 +256,9 @@ export function sandboxArgv(layout) {
     // bound read-write and the pristine copy the grader diffs against never enters the
     // namespace at all.
     workWritable ? "--bind" : "--ro-bind", checkoutDir, SANDBOX_PATHS.work,
+    // LAYERED OVER the checkout bind, so it must come after it. A read-only tree with one
+    // writable directory in it: the notes can be edited, the corpus cannot.
+    ...(notesDir === null ? [] : ["--bind", notesDir, SANDBOX_PATHS.notes]),
     "--bind", sessionDir, SANDBOX_PATHS.session,
     "--bind", runDir, SANDBOX_PATHS.run,
     "--bind", harnessDir, SANDBOX_PATHS.harness,
@@ -350,7 +365,7 @@ export function sandboxIdentityFiles(uid, gid) {
 // and the run directory holds the harness's own artifacts. Returned sorted so a
 // run's manifest is stable, with content hashed rather than carried, because the
 // point is to be able to ASK whether an answer came from here.
-export function modelWrittenFiles(homeDir, scratchDir) {
+export function modelWrittenFiles(homeDir, scratchDir, notesDir = null) {
   const found = [];
   const walk = (root, label) => {
     if (!existsSync(root)) return;
@@ -368,6 +383,10 @@ export function modelWrittenFiles(homeDir, scratchDir) {
   };
   walk(homeDir, SANDBOX_PATHS.home);
   walk(scratchDir, SANDBOX_PATHS.scratch);
+  // The notes directory is writable too, so every byte the model leaves there is sealed
+  // beside the rest. The harness's own planted text lands here as well, which is right:
+  // the seal states what was on disk, and the artifact snapshots state who wrote it.
+  if (notesDir !== null) walk(notesDir, SANDBOX_PATHS.notes);
   return found.sort((left, right) => left.path.localeCompare(right.path));
 }
 

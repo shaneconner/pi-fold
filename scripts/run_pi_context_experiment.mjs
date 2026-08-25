@@ -565,9 +565,26 @@ async function run() {
   // The model's scratch. Bound rather than a tmpfs so everything it writes is
   // captured: see modelWrittenFiles and the note in the sandbox argv.
   const scratchDir = join(sandboxRoot, "scratch");
-  for (const dir of [sessionDir, sandboxRoot, harnessDir, homeDir, agentDir, identityDir, scratchDir]) {
+  // The v5 notes directory: writable, layered over the read-only checkout at /work/notes,
+  // and created for EVERY run so the mount shape does not vary with the plan. A run with
+  // no artifacts simply leaves it empty, which is a fact the seal can state.
+  const notesDir = join(sandboxRoot, "notes");
+  for (const dir of [sessionDir, sandboxRoot, harnessDir, homeDir, agentDir, identityDir,
+    scratchDir, notesDir]) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
+  // THE MOUNTPOINT MUST ALREADY EXIST IN THE CHECKOUT. bwrap creates missing mount targets
+  // itself, but it cannot create one inside a bind it has just mounted read-only, and the
+  // failure is fatal at startup ("Can't mkdir /work/notes: Read-only file system") rather
+  // than at the first ask. The checkout is a private per-run worktree, so the directory is
+  // made here, AFTER the fingerprint that pins the staged corpus and over a path no staged
+  // file occupies, which leaves the graded bytes untouched.
+  const notesMountPoint = join(repoDir, basename(SANDBOX_PATHS.notes));
+  assertExperiment(!plan.stages.some((stage) => stage.files.some((file) =>
+    file.path === basename(SANDBOX_PATHS.notes) ||
+    file.path.startsWith(`${basename(SANDBOX_PATHS.notes)}/`))),
+  "The staged corpus occupies the notes mount point");
+  mkdirSync(notesMountPoint, { recursive: true, mode: 0o700 });
   for (const relative of HARNESS_SOURCE) {
     const target = join(harnessDir, relative);
     mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
@@ -602,7 +619,7 @@ async function run() {
   const sandbox = sandboxArgv({
     checkoutDir: repoDir, sessionDir, runDir, harnessDir,
     piRoot: PI_INSTALL_ROOT, nodeExecutable: process.execPath,
-    homeDir, identityDir, agentDir, authPath, scratchDir,
+    homeDir, identityDir, agentDir, authPath, scratchDir, notesDir,
   });
   const worker = spawn(sandbox[0], sandbox.slice(1), {
     cwd: PROJECT,
@@ -801,7 +818,7 @@ async function run() {
   writeJsonExclusive(join(runDir, "model-writes.json"), {
     version: 1,
     runId,
-    files: modelWrittenFiles(homeDir, scratchDir),
+    files: modelWrittenFiles(homeDir, scratchDir, notesDir),
   });
   artifactPaths.push("model-writes.json");
   const artifacts = Object.fromEntries(artifactPaths.map((relative) =>

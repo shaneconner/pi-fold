@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   EXPERIMENT_ARMS,
@@ -11043,6 +11043,151 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     "the import walk misses a module that is actually imported, so its empty result is vacuous");
 
   checks.everythingTheHarnessImportsIsEverythingItCopies = true;
+}
+
+
+// ---------------------------------------------------------------------------
+// GATE 114 - one writable directory inside a read-only checkout.
+//
+// The v5 stale artifacts are notes the model is asked to bring up to date, so it has to be
+// able to EDIT one. The checkout is read-only on purpose (the tree is graded material), and
+// the first v5 smoke run died on exactly that: both arms delivered four stages, hit the ask
+// stage, and latched "ENOENT: no such file or directory, mkdir '/work/notes'".
+//
+// Opening the whole tree was the wrong fix. A per-run directory is layered over the
+// read-only bind instead: the corpus stays pristine and only the notes are writable. It
+// lives INSIDE /work rather than in /tmp or $HOME because `read` is fenced to the checkout
+// (gate 67), and a note the model could not open with its ordinary reading tool, and had to
+// reach with `bash` instead, would be a tell in itself.
+// ---------------------------------------------------------------------------
+{
+  const { SANDBOX_PATHS, sandboxArgv, modelWrittenFiles, sandboxIdentityFiles } = await import(
+    pathToFileURL(join(PROJECT, "scripts", "lib", "pi_context_sandbox.mjs")));
+
+  const layout = {
+    checkoutDir: "/host/repo", sessionDir: "/host/session", runDir: "/host/run",
+    harnessDir: "/host/harness", piRoot: "/host/pi", nodeExecutable: "/host/node",
+    homeDir: "/host/home", identityDir: "/host/identity", agentDir: "/host/agent",
+    authPath: "/host/auth.json", scratchDir: "/host/scratch",
+  };
+  const withNotes = sandboxArgv({ ...layout, notesDir: "/host/notes" });
+  const without = sandboxArgv(layout);
+
+  // The checkout is READ-ONLY, and stays so.
+  const workAt = withNotes.indexOf(SANDBOX_PATHS.work);
+  assert.equal(withNotes[workAt - 2], "--ro-bind",
+    "the checkout is no longer read-only, so the graded tree can be edited");
+
+  // The notes bind exists and is WRITABLE.
+  const notesAt = withNotes.indexOf(SANDBOX_PATHS.notes);
+  assert(notesAt > 0, "no writable notes directory is bound, so planting an artifact fails");
+  assert.equal(withNotes[notesAt - 2], "--bind", "the notes directory is bound read-only");
+  assert.equal(withNotes[notesAt - 1], "/host/notes", "the notes bind names the wrong host directory");
+
+  // ORDER IS THE WHOLE MECHANISM: a bind layered over the checkout must come AFTER it, or
+  // the read-only mount covers it and the artifact is unwritable again.
+  assert(notesAt > workAt,
+    "the notes bind is applied before the checkout, so the read-only mount covers it");
+
+  // It sits inside the checkout, so the read fence does not have to learn about it.
+  assert(SANDBOX_PATHS.notes.startsWith(`${SANDBOX_PATHS.work}/`),
+    "the notes directory is outside the checkout, where the read tool refuses to open it");
+
+  // A v4 campaign has no notes and its mount shape is unchanged, so sealed campaigns keep
+  // running exactly as they ran.
+  assert(!without.includes(SANDBOX_PATHS.notes),
+    "a run with no artifacts still gets a notes bind, changing the sealed mount shape");
+
+  // Whatever the model leaves in the notes directory is SEALED beside its home and scratch.
+  const scratchRoot = mkdtempSync(join(tmpdir(), "pi-fold-notes-"));
+  try {
+    const home = join(scratchRoot, "home");
+    const scratch = join(scratchRoot, "scratch");
+    const notes = join(scratchRoot, "notes");
+    for (const dir of [home, scratch, notes]) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(notes, "review-passes.md"), "# Review passes\n");
+    const sealed = modelWrittenFiles(home, scratch, notes);
+    assert(sealed.some((file) => file.path === `${SANDBOX_PATHS.notes}/review-passes.md`),
+      "a file left in the notes directory is not sealed with the rest of the model's writes");
+    assert.deepEqual(modelWrittenFiles(home, scratch), [],
+      "the write audit invents notes for a run that has none");
+  } finally {
+    rmSync(scratchRoot, { recursive: true, force: true });
+  }
+
+  // And the supervisor creates it for EVERY run, so the mount shape does not vary with the
+  // plan, and passes it to both the sandbox and the write audit.
+  const supervisor = readFileSync(
+    join(PROJECT, "scripts", "run_pi_context_experiment.mjs"), "utf8");
+  assert(supervisor.includes('const notesDir = join(sandboxRoot, "notes")'),
+    "the supervisor does not create the notes directory");
+  assert(supervisor.includes("scratchDir, notesDir,") &&
+    supervisor.includes("modelWrittenFiles(homeDir, scratchDir, notesDir)"),
+  "the supervisor does not pass the notes directory to the sandbox and the write audit");
+
+  // AND IT CREATES THE MOUNT POINT IN THE CHECKOUT. bwrap makes a missing mount target
+  // itself, but it cannot make one inside a bind it has just mounted read-only, so the bind
+  // above is not sufficient on its own: without the directory the run dies at STARTUP with
+  // "Can't mkdir /work/notes: Read-only file system", before a single stage is delivered.
+  assert(/mkdirSync\(notesMountPoint/.test(supervisor),
+    "the supervisor does not create the notes mount point inside the checkout");
+  assert(/The staged corpus occupies the notes mount point/.test(supervisor),
+    "nothing refuses a corpus whose own files would be covered by the notes mount");
+
+  // The mount is PROVEN, not argued. Everything above reads argv and source; only running
+  // the namespace shows whether the kernel accepts the layering, and the two live smoke
+  // campaigns died on exactly the parts argv cannot speak for.
+  const probeRoot = mkdtempSync(join(tmpdir(), "pi-fold-mount-"));
+  try {
+    const dirs = Object.fromEntries(["repo", "notes", "session", "run", "harness", "pi",
+      "home", "identity", "agent", "scratch"].map((name) => [name, join(probeRoot, name)]));
+    for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true });
+    // What the supervisor now does: the mount point exists in the checkout before the bind.
+    mkdirSync(join(dirs.repo, basename(SANDBOX_PATHS.notes)));
+    writeFileSync(join(dirs.repo, "corpus.txt"), "graded material\n");
+    const authPath = join(probeRoot, "auth.json");
+    writeFileSync(authPath, "{}\n");
+    const identity = sandboxIdentityFiles(process.getuid(), process.getgid());
+    writeFileSync(join(dirs.identity, "passwd"), identity.passwd);
+    writeFileSync(join(dirs.identity, "group"), identity.group);
+
+    const argv = sandboxArgv({
+      checkoutDir: dirs.repo, notesDir: dirs.notes, sessionDir: dirs.session, runDir: dirs.run,
+      harnessDir: dirs.harness, piRoot: dirs.pi, nodeExecutable: process.execPath,
+      homeDir: dirs.home, identityDir: dirs.identity, agentDir: dirs.agent,
+      authPath, scratchDir: dirs.scratch,
+    });
+    const mounts = argv.slice(0, argv.lastIndexOf("--"));
+    const notes = SANDBOX_PATHS.notes;
+    const work = SANDBOX_PATHS.work;
+    const probe = spawnSync(mounts[0], [...mounts.slice(1), "--", "/bin/sh", "-c", [
+      `echo stale > ${notes}/review.md && echo NOTES_WRITABLE`,
+      `echo corrected > ${notes}/review.md && echo NOTES_EDITABLE`,
+      `echo tampered > ${work}/corpus.txt 2>/dev/null && echo CORPUS_WRITABLE`,
+      `rm -f ${work}/corpus.txt 2>/dev/null && echo CORPUS_DELETABLE`,
+      `cat ${work}/corpus.txt`,
+    ].join("; ")], { encoding: "utf8" });
+
+    assert.equal(probe.status, 0,
+      `the sandbox does not start with a notes directory bound: ${probe.stderr}`);
+    assert(probe.stdout.includes("NOTES_WRITABLE"),
+      "the model cannot write the stale artifact it is asked to bring up to date");
+    assert(probe.stdout.includes("NOTES_EDITABLE"),
+      "the model cannot edit the note a second time");
+    assert(!probe.stdout.includes("CORPUS_WRITABLE"),
+      "the graded corpus is writable, so an edit there drifts the material being measured");
+    assert(!probe.stdout.includes("CORPUS_DELETABLE"),
+      "the graded corpus can be deleted from inside the namespace");
+    assert(probe.stdout.includes("graded material"),
+      "the corpus did not survive the run that tried to overwrite it");
+    // The write reaches the HOST, which is the only reason the seal can see it.
+    assert.equal(readFileSync(join(dirs.notes, "review.md"), "utf8"), "corrected\n",
+      "what the model writes to the notes directory never reaches the host, so it is unsealed");
+  } finally {
+    rmSync(probeRoot, { recursive: true, force: true });
+  }
+
+  checks.oneWritableDirectoryInsideAReadOnlyCheckout = true;
 }
 
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);
