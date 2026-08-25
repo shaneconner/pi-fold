@@ -8,7 +8,7 @@
 //   node scripts/verify_pi_context_experiment.mjs
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
@@ -221,7 +221,9 @@ import {
   sandboxArgv,
   sandboxConfig,
   SANDBOX_PLAN_KEYS,
+  modelWritableTrees,
   modelWrittenFiles,
+  runBindSources,
   sandboxPlan,
   runChannelFd,
   seededTokenCarriers,
@@ -1011,7 +1013,7 @@ assert(supervisor.includes("claimSlot(") && supervisor.includes("writeJsonExclus
 // WHAT IS DELIVERED IS EXACTLY WHAT IS PINNED. There is no nonce spliced in after the pin
 // any more, so the payload hash covers every byte the model sees rather than every byte but
 // the last line.
-assert(supervisor.includes("renderStage(plan, planStage, repoDir)") &&
+assert(supervisor.includes("renderStage(plan, planStage, checkoutDir)") &&
   supervisor.includes("rendered payload does not match its planned hash") &&
   !supervisor.includes("nextChallenge"),
 "the supervisor owns stage release and delivers exactly the payload it pin-checked");
@@ -10594,11 +10596,17 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   // plan, and passes it to both the sandbox and the write audit.
   const supervisor = readFileSync(
     join(PROJECT, "scripts", "run_pi_context_experiment.mjs"), "utf8");
-  assert(supervisor.includes('const notesDir = join(sandboxRoot, "notes")'),
+  assert(supervisor.includes("const [homeDir, scratchDir, notesDir] = modelWritableTrees(sandboxRoot)"),
     "the supervisor does not create the notes directory");
   assert(supervisor.includes("scratchDir, notesDir,") &&
-    supervisor.includes("modelWrittenFiles(homeDir, scratchDir, notesDir)"),
+    supervisor.includes("modelWrittenFiles(...modelWritableTrees(bindSources.sealed.sandbox))"),
   "the supervisor does not pass the notes directory to the sandbox and the write audit");
+  // The write audit reads the sandbox tree where the SEAL leaves it. The run executes out of
+  // an opaque staging root (gate 122) and the trees are renamed into <runDir>.sandbox once
+  // the worker is gone, so an audit reading the live root would find nothing at all.
+  assert.deepEqual(modelWritableTrees("/r.sandbox"),
+    ["/r.sandbox/home", "/r.sandbox/scratch", "/r.sandbox/notes"],
+    "the writable trees the sandbox binds and the write audit reads have drifted apart");
 
   // AND IT CREATES THE MOUNT POINT IN THE CHECKOUT. bwrap makes a missing mount target
   // itself, but it cannot make one inside a bind it has just mounted read-only, so the bind
@@ -11387,12 +11395,127 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   // And the supervisor actually does it, after the fingerprint that pins the staged corpus.
   const runner121 = source("scripts/run_pi_context_experiment.mjs");
   const addAt = runner121.indexOf('"worktree", "add"');
-  const rmAt = runner121.indexOf('rmSync(join(repoDir, ".git")', addAt);
+  const rmAt = runner121.indexOf('rmSync(join(checkoutDir, ".git")', addAt);
   const fingerprintAt = runner121.indexOf("Run checkout does not reproduce the planned staged corpus", addAt);
   assert(addAt >= 0 && rmAt > fingerprintAt && fingerprintAt > addAt,
     "the supervisor does not remove the worktree pointer after pinning the checkout");
 
   checks.theCheckoutCarriesNoPointerBackToItsCampaign = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 122 - a run's bind sources name nothing about the run.
+//
+// Gate 120 took the run directory out of the namespace and gate 121 took the campaign
+// pointer out of the checkout, and neither closes the channel that states the same facts
+// without opening a single file. bwrap repeats its whole argv at /proc/1/cmdline, and the
+// kernel records every bind WITH ITS SOURCE PATH at /proc/self/mountinfo, which a process
+// may always read about itself. A source under the campaign therefore named the experiment,
+// the campaign id, the arm and the repetition to anything that looked, and no way of naming
+// a mount launders its source: --ro-bind-fd keeps the path out of the argv and mountinfo
+// still records the subtree it resolved to.
+//
+// So the run executes out of an opaque directory and its bind sources are RENAMED into the
+// run directory at seal, once the worker is gone. Two halves, and this gate drives both:
+// nothing in the argv names the run, and the sealed positions are still exactly where every
+// downstream reader has always looked. The first half is proved anti-vacuously against the
+// paths the previous build passed, because an argv assertion that cannot fail is worthless.
+// ---------------------------------------------------------------------------
+{
+  const runDir122 = "/host/runs/ops/pi-context-experiment/sol-20260825/2026-08-25T00-00-00Z-pifold-rep3-abcd1234";
+  const stagingRoot122 = "/opaque/cache/0Kq7Xz";
+  const naming122 = ["pi-context-experiment", "sol-20260825", "pifold", "rep3", "abcd1234"];
+  const sources122 = runBindSources(runDir122, stagingRoot122);
+  assert.deepEqual(Object.keys(sources122.live), Object.keys(sources122.sealed),
+    "the live and sealed bind sources disagree about what a run stages, so a rename has no destination");
+  for (const [key, path] of Object.entries(sources122.live)) {
+    assert(path.startsWith(`${stagingRoot122}/`),
+      `the ${key} bind source is not staged: the model can read where it came from`);
+  }
+  assert.equal(sources122.sealed.checkout, join(runDir122, "repo"));
+  assert.equal(sources122.sealed.session, join(runDir122, "session"));
+  assert.equal(sources122.sealed.sandbox, `${runDir122}.sandbox`);
+
+  const layout122 = {
+    checkoutDir: sources122.live.checkout, sessionDir: sources122.live.session,
+    harnessDir: join(sources122.live.sandbox, "harness"), piRoot: "/host/pi",
+    nodeExecutable: "/host/node", homeDir: join(sources122.live.sandbox, "home"),
+    identityDir: join(sources122.live.sandbox, "identity"),
+    agentDir: join(sources122.live.sandbox, "agent"), authPath: "/host/auth.json",
+    scratchDir: join(sources122.live.sandbox, "scratch"),
+    notesDir: join(sources122.live.sandbox, "notes"),
+  };
+  const staged122 = sandboxArgv(layout122).join(" ");
+  for (const token of naming122) {
+    assert(!staged122.includes(token),
+      `the namespace argv still names ${token}, which is one read of /proc/1/cmdline away`);
+  }
+
+  // ANTI-VACUITY: the same builder given the paths the previous build passed puts every one
+  // of those words back, so the assertion above is testing the relocation and not the shape
+  // of an argv.
+  const unstaged122 = sandboxArgv({
+    ...layout122,
+    checkoutDir: sources122.sealed.checkout, sessionDir: sources122.sealed.session,
+    harnessDir: join(sources122.sealed.sandbox, "harness"),
+    homeDir: join(sources122.sealed.sandbox, "home"),
+    identityDir: join(sources122.sealed.sandbox, "identity"),
+    agentDir: join(sources122.sealed.sandbox, "agent"),
+    scratchDir: join(sources122.sealed.sandbox, "scratch"),
+    notesDir: join(sources122.sealed.sandbox, "notes"),
+  }).join(" ");
+  for (const token of naming122) {
+    assert(unstaged122.includes(token),
+      `an unstaged argv does not name ${token}, so this gate proves nothing about staging`);
+  }
+
+  // THE RELOCATION COMPOSES WITH EVERY READER DOWNSTREAM. A rename that lands somewhere the
+  // adjudicator does not look loses the run's evidence silently, which is the whole risk
+  // this half exists to cover, so the fixture is moved for real and then read through the
+  // same definitions the adjudicator uses rather than through its own string joins.
+  const root122 = mkdtempSync(join(tmpdir(), "pi-fold-staging-"));
+  const liveRun122 = join(root122, "run");
+  const liveStaging122 = join(root122, "0Kq7Xz");
+  const moved122 = runBindSources(liveRun122, liveStaging122);
+  mkdirSync(liveRun122, { recursive: true });
+  mkdirSync(moved122.live.checkout, { recursive: true });
+  mkdirSync(moved122.live.session, { recursive: true });
+  writeFileSync(join(moved122.live.checkout, "a.c"), "int main(void){return 0;}\n");
+  writeFileSync(join(moved122.live.session, "s-1.jsonl"), "{}\n");
+  for (const tree of modelWritableTrees(moved122.live.sandbox)) {
+    mkdirSync(tree, { recursive: true });
+    writeFileSync(join(tree, "note.md"), `${basename(tree)}\n`);
+  }
+  for (const key of Object.keys(moved122.live)) {
+    renameSync(moved122.live[key], moved122.sealed[key]);
+  }
+  rmSync(liveStaging122, { recursive: true, force: true });
+
+  assert.equal(readFileSync(join(liveRun122, "repo", "a.c"), "utf8"), "int main(void){return 0;}\n",
+    "the graded corpus is not where the adjudicator reads a sealed checkout");
+  const session122 = hostSessionFile(liveRun122, `${SANDBOX_PATHS.session}/s-1.jsonl`);
+  assert(existsSync(session122),
+    "the session file is not where hostSessionFile resolves it, so no sweep can read the run");
+  assert(session122.startsWith(`${liveRun122}/`),
+    "the session landed outside the run directory the seal addresses relatively");
+  assert.deepEqual(
+    modelWrittenFiles(...modelWritableTrees(moved122.sealed.sandbox)).map((file) => file.path),
+    [`${SANDBOX_PATHS.home}/note.md`, `${SANDBOX_PATHS.scratch}/note.md`,
+      `${SANDBOX_PATHS.notes}/note.md`],
+    "the write audit cannot see what the model wrote once the sandbox tree is sealed");
+  rmSync(root122, { recursive: true, force: true });
+
+  // And the supervisor is still built this way: it renames from the pairing rather than by
+  // hand, so a bind source added to one half and not the other cannot quietly stay behind,
+  // and it drops the forwarding address it leaves for a SIGKILL only after the move lands.
+  const runner122 = source("scripts/run_pi_context_experiment.mjs");
+  assert(runner122.includes("renameSync(bindSources.live[key], bindSources.sealed[key])"),
+    "the supervisor no longer relocates its bind sources from the one definition of where they go");
+  const movedAt122 = runner122.indexOf("renameSync(bindSources.live[key]");
+  assert(runner122.indexOf("unlinkSync(stagingPointer)", movedAt122) > movedAt122,
+    "the staging pointer is dropped before the move lands, so a killed run cannot be found");
+
+  checks.aRunsBindSourcesNameNothingAboutTheRun = true;
 }
 
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);

@@ -497,6 +497,38 @@ export function sandboxIdentityFiles(uid, gid) {
   };
 }
 
+// WHERE A RUN'S BIND SOURCES LIVE, AND WHERE THEY END UP. Every path the namespace binds
+// is staged under an opaque root and renamed into the run directory at seal, because bwrap
+// repeats its whole argv in /proc/1/cmdline and records each bind's SOURCE path in
+// /proc/self/mountinfo, and a source under the campaign names the experiment, the campaign,
+// the arm and the repetition to anything that reads either file. Nothing can launder a
+// mount source, so the repair is to mount from somewhere that says nothing. Both halves are
+// defined together so a rename cannot land in the wrong place, and so the sealed half stays
+// exactly what every reader of a sealed run has always addressed.
+export function runBindSources(runDir, stagingRoot) {
+  return {
+    live: {
+      checkout: join(stagingRoot, "repo"),
+      session: join(stagingRoot, "session"),
+      sandbox: join(stagingRoot, "sandbox"),
+    },
+    sealed: {
+      checkout: join(runDir, "repo"),
+      session: join(runDir, "session"),
+      sandbox: `${runDir}.sandbox`,
+    },
+  };
+}
+
+// The trees the model can write, addressed under whichever root currently holds them.
+// A run stages its bind sources under an opaque directory and renames them into
+// <runDir>.sandbox at seal, so the supervisor needs these same three names at two
+// different roots: naming them once here is what keeps the two agreeing. Order matches
+// modelWrittenFiles' own parameters.
+export function modelWritableTrees(root) {
+  return [join(root, "home"), join(root, "scratch"), join(root, "notes")];
+}
+
 // Everything the model itself put on disk, for the adjudicator to read. The two
 // writable places it has are its home and its scratch; the checkout is read-only
 // and the run directory holds the harness's own artifacts. Returned sorted so a

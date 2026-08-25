@@ -13,7 +13,7 @@
 //        [--model-provider openai-codex] [--model-id gpt-5.6-sol] [--effort xhigh]
 
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -46,6 +46,8 @@ import {
   RUN_CHANNEL_FILES,
   SANDBOX_PATHS,
   hostSessionFile,
+  modelWritableTrees,
+  runBindSources,
   SANDBOX_WORKER_PID,
   sandboxArgv,
   sandboxConfig,
@@ -310,10 +312,10 @@ function responseIdentity(response) {
 // checkout. WHAT IS DELIVERED IS EXACTLY WHAT IS PINNED: there is no longer a nonce spliced
 // in afterwards, so the payload hash covers every byte the model sees rather than every byte
 // but the last line.
-function renderStage(plan, stage, repoDir) {
+function renderStage(plan, stage, checkoutDir) {
   const files = stage.files.map((file) => ({
     ...file,
-    text: readFileSync(join(repoDir, file.path), "utf8"),
+    text: readFileSync(join(checkoutDir, file.path), "utf8"),
   }));
   assertExperiment(files.every((file) => sha256Text(file.text) === file.sha256),
     `Stage ${stage.ordinal} checkout bytes drifted from the plan`);
@@ -434,19 +436,51 @@ async function run() {
   const slotPath = claimSlot(resolve(campaignDir), arm, repetition, runId);
 
   mkdirSync(runDir, { recursive: false, mode: 0o700 });
+  // WHERE THE RUN'S BIND SOURCES LIVE WHILE IT EXECUTES (2026-08-25). Taking /run out of
+  // the namespace stopped the model reading the run directory, and deleting the worktree's
+  // .git file stopped it reading a pointer back to its campaign. Neither closes the channel
+  // that names the same things without opening a single file: bwrap's own argv is readable
+  // at /proc/1/cmdline, and every bind it performs is recorded WITH ITS SOURCE PATH in
+  // /proc/self/mountinfo. A bind cannot launder a path however it is named, so the only
+  // repair is to bind from somewhere that says nothing. The checkout, the session and the
+  // sandbox tree are staged under an opaque directory and RENAMED into their documented
+  // places at seal, once the worker is gone and before anything is read. The run executes
+  // out of <home>/.cache/<random>/repo; every consumer afterwards reads <runDir>/repo,
+  // exactly as it always has.
+  //
+  // Same filesystem is a precondition, not a hope: those renames have to be atomic and
+  // instant, so a campaign directory on another device fails here at minute zero rather
+  // than at the end of a six-hour run.
+  const cacheRoot = join(RUNTIME_HOME, ".cache");
+  mkdirSync(cacheRoot, { recursive: true });
+  const stagingRoot = mkdtempSync(join(cacheRoot, "0"));
+  assertExperiment(statSync(stagingRoot).dev === statSync(runDir).dev,
+    "The run directory and the staging root are on different filesystems");
+  const bindSources = runBindSources(runDir, stagingRoot);
+  // A SIGKILLED SUPERVISOR LEAVES A FORWARDING ADDRESS. Everything else that ends a run
+  // routes through the failure path and reaches the renames below, signals included; only
+  // SIGKILL skips them, and it would strand the session file and the model's own writes
+  // under a random cache directory nothing names. This is deleted the moment the renames
+  // land, so its presence in a run directory means exactly one thing: that run was killed
+  // outright and its bind sources are still where this says.
+  const stagingPointer = join(runDir, "staging-root");
+  writeFileSync(stagingPointer, `${stagingRoot}\n`, { mode: 0o600 });
   // Every arm run reads its OWN detached worktree at the pinned commit. A closed-book
   // session gets an EMPTY directory in the same position: no checkout bytes exist to
   // leak, and the run-config law that the repo path lives inside the run dir holds.
-  const repoDir = join(runDir, "repo");
+  // The run config records where the checkout ENDS UP, which is what every reader of a
+  // sealed run addresses; checkoutDir is where it lives while the model has it open.
+  const repoDir = bindSources.sealed.checkout;
+  const checkoutDir = bindSources.live.checkout;
   const stagedFiles = plan.stages.flatMap((stage) => stage.files);
   const plannedFingerprint = corpusManifestSha256(stagedFiles);
   if (closedBook) {
-    mkdirSync(repoDir, { mode: 0o700 });
+    mkdirSync(checkoutDir, { mode: 0o700 });
   } else {
     gitExec(["-C", join(resolve(campaignDir), "repo.git"), "worktree", "add", "--quiet", "--detach",
-      repoDir, plan.repo.commit]);
+      checkoutDir, plan.repo.commit]);
     const checkoutFingerprint = corpusManifestSha256(stagedFiles.map((file) => ({
-      path: file.path, sha256: sha256Text(readFileSync(join(repoDir, file.path), "utf8")),
+      path: file.path, sha256: sha256Text(readFileSync(join(checkoutDir, file.path), "utf8")),
     })));
     assertExperiment(checkoutFingerprint === plannedFingerprint,
       "Run checkout does not reproduce the planned staged corpus");
@@ -467,7 +501,7 @@ async function run() {
     // and what the model was asked for is a directory of source files. The mirror keeps a
     // bookkeeping entry that `git worktree prune` collects; it lives on the host and no run
     // reads it.
-    rmSync(join(repoDir, ".git"), { force: true });
+    rmSync(join(checkoutDir, ".git"), { force: true });
   }
 
   const config = validateExperimentRunConfig({
@@ -551,23 +585,23 @@ async function run() {
   // user's home and every other session on the machine. See
   // scripts/lib/pi_context_sandbox.mjs for what the argv builds and why.
   //
-  // The staging root is a sibling of the run directory, so /run stays the run's
-  // own artifacts. The session directory is INSIDE the run directory because the
-  // seal addresses it relatively, and it holds exactly one file, so an agent that
-  // finds its own history finds nothing else beside it.
-  const sandboxRoot = `${runDir}.sandbox`;
-  const sessionDir = join(runDir, "session");
+  // Every bind source sits under the opaque staging root while the run executes and is
+  // renamed into place at seal: the sandbox tree to <runDir>.sandbox and the session
+  // directory to <runDir>/session, which is where the seal addresses it relatively. The
+  // session directory holds exactly one file either way, so an agent that finds its own
+  // history finds nothing else beside it.
+  const sandboxRoot = bindSources.live.sandbox;
+  const sessionDir = bindSources.live.session;
   const harnessDir = join(sandboxRoot, "harness");
-  const homeDir = join(sandboxRoot, "home");
   const agentDir = join(sandboxRoot, "agent");
   const identityDir = join(sandboxRoot, "identity");
-  // The model's scratch. Bound rather than a tmpfs so everything it writes is
-  // captured: see modelWrittenFiles and the note in the sandbox argv.
-  const scratchDir = join(sandboxRoot, "scratch");
-  // The v5 notes directory: writable, layered over the read-only checkout at /work/notes,
-  // and created for EVERY run so the mount shape does not vary with the plan. A run with
-  // no artifacts simply leaves it empty, which is a fact the seal can state.
-  const notesDir = join(sandboxRoot, "notes");
+  // The three trees the model itself can write: its home, its scratch (bound rather than
+  // a tmpfs so everything it writes is captured, see modelWrittenFiles and the note in the
+  // sandbox argv) and the v5 notes directory, which is writable, layered over the
+  // read-only checkout at /work/notes, and created for EVERY run so the mount shape does
+  // not vary with the plan. A run with no artifacts simply leaves it empty, which is a
+  // fact the seal can state. Named once, addressed under whichever root holds them.
+  const [homeDir, scratchDir, notesDir] = modelWritableTrees(sandboxRoot);
   for (const dir of [sessionDir, sandboxRoot, harnessDir, homeDir, agentDir, identityDir,
     scratchDir, notesDir]) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -578,7 +612,7 @@ async function run() {
   // than at the first ask. The checkout is a private per-run worktree, so the directory is
   // made here, AFTER the fingerprint that pins the staged corpus and over a path no staged
   // file occupies, which leaves the graded bytes untouched.
-  const notesMountPoint = join(repoDir, basename(SANDBOX_PATHS.notes));
+  const notesMountPoint = join(checkoutDir, basename(SANDBOX_PATHS.notes));
   assertExperiment(!plan.stages.some((stage) => stage.files.some((file) =>
     file.path === basename(SANDBOX_PATHS.notes) ||
     file.path.startsWith(`${basename(SANDBOX_PATHS.notes)}/`))),
@@ -626,7 +660,7 @@ async function run() {
     // rather than creating one.
     name === "failure-latch.jsonl" ? "a" : "ax", 0o600));
   const sandbox = sandboxArgv({
-    checkoutDir: repoDir, sessionDir, harnessDir,
+    checkoutDir, sessionDir, harnessDir,
     piRoot: PI_INSTALL_ROOT, nodeExecutable: process.execPath,
     homeDir, identityDir, agentDir, authPath, scratchDir, notesDir,
   });
@@ -717,9 +751,12 @@ async function run() {
     // The worker names its session file from inside the namespace. Everything on
     // this side of the boundary reads the host path for the same inode, through the
     // one definition the adjudicator also uses.
-    workerReady.sessionFile = hostSessionFile(runDir, workerReady.sessionFile);
-    assertExperiment(workerReady.sessionFile.startsWith(`${runDir}/`),
-      "The session file landed outside the run directory the seal addresses");
+    // While the run executes that inode lives under the staging root; the seal renames it
+    // into <runDir>/session once the worker is gone, and everything downstream of the seal
+    // addresses it there.
+    workerReady.sessionFile = hostSessionFile(stagingRoot, workerReady.sessionFile);
+    assertExperiment(workerReady.sessionFile.startsWith(`${stagingRoot}/`),
+      "The session file landed outside the staging root the run executes from");
     state.workerStartTicks = workerReady.workerStartTicks;
     appendHeartbeat(state, worker, workerReady.sessionFile);
 
@@ -749,7 +786,7 @@ async function run() {
       });
       if (gated.workerExited) { earlyExit = true; break; }
       const planStage = plan.stages[stage - 1];
-      const content = renderStage(plan, planStage, repoDir);
+      const content = renderStage(plan, planStage, checkoutDir);
       const responseBase = {
         version: 1,
         runId,
@@ -814,6 +851,24 @@ async function run() {
   // open one would hold the supervisor's own event loop past its seal.
   delivery.destroy();
   await waitTick(2);
+
+  // THE BIND SOURCES COME HOME (2026-08-25). The worker's namespace and every mount in it
+  // went with it, and nothing has read an artifact yet, so this is the one moment where
+  // these renames are both safe and invisible. Same filesystem was asserted before the run
+  // started, so each is atomic and costs nothing. What executed out of an opaque cache
+  // directory is addressed from here on exactly where it has always been addressed:
+  // <runDir>/repo, <runDir>/session and <runDir>.sandbox.
+  for (const key of Object.keys(bindSources.live)) {
+    renameSync(bindSources.live[key], bindSources.sealed[key]);
+  }
+  rmSync(stagingRoot, { recursive: true, force: true });
+  unlinkSync(stagingPointer);
+  // The path follows the inode. The worker's own report names the session from inside the
+  // namespace and is untouched by any of this; this is the supervisor's host-side copy,
+  // which the seal addresses relative to the run directory.
+  if (workerReady?.sessionFile) {
+    workerReady.sessionFile = join(bindSources.sealed.session, basename(workerReady.sessionFile));
+  }
   // AN UNWRITTEN DOCUMENT IS AN ABSENT ONE. These files exist from the moment the supervisor
   // opened them, but every reader downstream, this one and `adjudicate` both, has always
   // distinguished "the worker never wrote a report" by the file not being there ("Run is
@@ -863,7 +918,7 @@ async function run() {
   writeJsonExclusive(join(runDir, "model-writes.json"), {
     version: 1,
     runId,
-    files: modelWrittenFiles(homeDir, scratchDir, notesDir),
+    files: modelWrittenFiles(...modelWritableTrees(bindSources.sealed.sandbox)),
   });
   artifactPaths.push("model-writes.json");
   const artifacts = Object.fromEntries(artifactPaths.map((relative) =>
