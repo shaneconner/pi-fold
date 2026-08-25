@@ -2837,15 +2837,39 @@ export function assistantText(entry) {
     .join("\n");
 }
 
-export function stageResultIndexByOrdinal(entries) {
+// A STAGE IS ADDRESSED BY ORDINAL, and how a stage ARRIVES depends on the delivery shape.
+// Pull (every sealed v4 run): a `repo_stage` tool result carrying `details.stage`. Push
+// (2026-08-25 onward): the Nth user message, because the worker sends one per stage.
+//
+// The shape is PASSED IN rather than sniffed. Sniffing would read a pull run that delivered
+// zero stages as a push run and index its workload prompt as stage 1, inventing an answer
+// window where the run had none, and a lens that quietly invents windows on exactly the runs
+// that failed is the dishonesty this suite exists to prevent. Default is pull, so every
+// sealed run reads byte-identically.
+export function stageResultIndexByOrdinal(entries, { pushDelivered = false, stageCount = null } = {}) {
   const byStage = new Map();
+  if (!pushDelivered) {
+    entries.forEach((entry, index) => {
+      const message = entry?.type === "message" ? entry.message : null;
+      if (message?.role !== "toolResult" || message.toolName !== EXPERIMENT_TOOL_NAME) return;
+      if (message.isError === true) return;
+      const stage = message.details?.stage;
+      if (!Number.isSafeInteger(stage) || byStage.has(stage)) return;
+      byStage.set(stage, index);
+    });
+    return byStage;
+  }
+  // The end block is a user message too, and it is the one AFTER the last stage, so the
+  // count bounds what may be claimed as a stage. Without it the end block would be read as
+  // stage stageCount+1 and any probe scanning forward from it would run off the transcript.
+  let ordinal = 0;
   entries.forEach((entry, index) => {
     const message = entry?.type === "message" ? entry.message : null;
-    if (message?.role !== "toolResult" || message.toolName !== EXPERIMENT_TOOL_NAME) return;
-    if (message.isError === true) return;
-    const stage = message.details?.stage;
-    if (!Number.isSafeInteger(stage) || byStage.has(stage)) return;
-    byStage.set(stage, index);
+    if (message?.role !== "user") return;
+    ordinal += 1;
+    if (stageCount !== null && ordinal > stageCount) return;
+    if (byStage.has(ordinal)) return;
+    byStage.set(ordinal, index);
   });
   return byStage;
 }
@@ -2962,8 +2986,8 @@ export function probeWaveRecovery({ entries, transcripts }) {
   });
 }
 
-export function probeTranscripts({ entries, plan }) {
-  const stageIndex = stageResultIndexByOrdinal(entries);
+export function probeTranscripts({ entries, plan, pushDelivered = false }) {
+  const stageIndex = stageResultIndexByOrdinal(entries, { pushDelivered, stageCount: plan.stageCount });
   const probeStages = plan.stages.filter((stage) => stage.probes.length > 0);
   return probeStages.map((stage, position) => {
     const resultIndex = stageIndex.get(stage.ordinal);
@@ -3391,8 +3415,8 @@ export function endBlockVerdicts({ entries, ledger, querySeed, events }) {
 // surface runs from its stage result to the SAME chain's next step stage (the
 // value must exist before its consumer reads it), and to the end of the session
 // for a final link. Steps parse with the probe parser: no new parser, no new law.
-export function traceStepTranscripts({ entries, plan }) {
-  const stageIndex = stageResultIndexByOrdinal(entries);
+export function traceStepTranscripts({ entries, plan, pushDelivered = false }) {
+  const stageIndex = stageResultIndexByOrdinal(entries, { pushDelivered, stageCount: plan.stageCount });
   return plan.chains.map((chain) => ({
     chainId: chain.id,
     steps: chain.links.map((link, position) => {
@@ -3650,7 +3674,7 @@ function wholeWordIn(text, answer) {
   return new RegExp(`(?<![A-Za-z0-9_./-])${escaped}(?![A-Za-z0-9_./-])`).test(text);
 }
 
-export function probeProvenance({ entries, plan, probes, steps }) {
+export function probeProvenance({ entries, plan, probes, steps, pushDelivered = false }) {
   const carriers = [];
   entries.forEach((entry, index) => {
     if (entry?.type === "custom" && String(entry.customType ?? "").endsWith("-fold-record")) {
@@ -3678,7 +3702,7 @@ export function probeProvenance({ entries, plan, probes, steps }) {
   const chainById = new Map((plan.chains ?? []).map((chain) => [chain.id, chain]));
   const stepByStepId = new Map((steps ?? []).flatMap((chain) =>
     chain.steps.map((step) => [step.stepId, step])));
-  const stageIndex = stageResultIndexByOrdinal(entries);
+  const stageIndex = stageResultIndexByOrdinal(entries, { pushDelivered, stageCount: plan.stageCount });
   const rows = [];
   const waves = [];
   for (const [position, wave] of probes.entries()) {
@@ -3787,8 +3811,8 @@ export function probeProvenance({ entries, plan, probes, steps }) {
   return { rows, waves, carriers: carriers.map(({ index, kind }) => ({ index, kind })) };
 }
 
-export function deliverableTranscripts({ entries, plan }) {
-  const stageIndex = stageResultIndexByOrdinal(entries);
+export function deliverableTranscripts({ entries, plan, pushDelivered = false }) {
+  const stageIndex = stageResultIndexByOrdinal(entries, { pushDelivered, stageCount: plan.stageCount });
   const deliverableStages = plan.stages.filter((stage) => stage.deliverable);
   return deliverableStages.map((stage, position) => {
     const resultIndex = stageIndex.get(stage.ordinal);

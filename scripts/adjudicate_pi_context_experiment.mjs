@@ -402,6 +402,9 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   // the end block. Push: ONE USER MESSAGE PER STAGE, plus the end block, and no resumes at
   // all, because turns end after every stage by design and there is nothing to nudge.
   const pullDelivered = config.firstChallenge !== undefined;
+  // Every transcript lens is anchored on stage ordinals, and where a stage LANDS
+  // depends on the shape: a tool result under pull, a user message under push.
+  const pushDelivered = !closedBook && !pullDelivered;
   const expectedUserMessages = closedBook ? 1
     : pullDelivered
       ? 1 + recordedResumes + endBlockDelivered
@@ -581,8 +584,8 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     assertExperiment(overflowPoint === null, `Arm ${config.arm} hit the window wall`);
   }
 
-  const probes = probeTranscripts({ entries: runEntries, plan });
-  const deliverables = deliverableTranscripts({ entries: runEntries, plan });
+  const probes = probeTranscripts({ entries: runEntries, plan, pushDelivered });
+  const deliverables = deliverableTranscripts({ entries: runEntries, plan, pushDelivered });
   // Parse rates by probe class, before grading: conversation-class probes are the
   // recall instrument, derived-class the audit-trace values, repo-class the
   // control, and a run that never even ANSWERED one class should be visible
@@ -674,10 +677,10 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
       return [];
     }
   };
-  const auditTranscripts = traceStepTranscripts({ entries: runEntries, plan });
+  const auditTranscripts = traceStepTranscripts({ entries: runEntries, plan, pushDelivered });
   const auditTraces = traceStepVerdicts({ transcripts: auditTranscripts, plan, includeTargets });
   const provenance = probeProvenance({
-    entries: runEntries, plan, probes, steps: auditTranscripts,
+    entries: runEntries, plan, probes, steps: auditTranscripts, pushDelivered,
   });
 
   // (g) The per-request dials the iteration comparison runs on. The ledger is the source

@@ -1064,7 +1064,7 @@ assert(adjudicator.includes("User-message contract broken") &&
 "the adjudicator must report usage splits, reread tax, voluntary-fold share and the overflow point");
 assert(adjudicator.includes("usageSeriesFromLedger(ledger)") &&
   adjudicator.includes("thinkTimeFromPace(paceRecords)") &&
-  adjudicator.includes("probeTranscripts({ entries: runEntries, plan })") &&
+  adjudicator.includes("probeTranscripts({ entries: runEntries, plan, pushDelivered })") &&
   adjudicator.includes("headlineMutationMetric: \"usage.mutations\"") &&
   adjudicator.includes("totalFoldsCounts: \"fold-records\""),
 "the adjudicator must report the per-request usage series, observed mutations and the stall proxy, and must say that totalFolds counts fold records");
@@ -2439,7 +2439,7 @@ try {
   // The adjudicator threads the SHARED machinery: same transcripts, same
   // verdicts, the one evaluator inside them, and the derived class in the
   // parse-rate summary.
-  assert(adjudicator.includes("traceStepTranscripts({ entries: runEntries, plan })") &&
+  assert(adjudicator.includes("traceStepTranscripts({ entries: runEntries, plan, pushDelivered })") &&
     adjudicator.includes("traceStepVerdicts({ transcripts: auditTranscripts, plan, includeTargets })") &&
     adjudicator.includes("auditTraces,") &&
     adjudicator.includes("traceStepTranscriptSha256"),
@@ -10005,6 +10005,59 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
       .test(request),
     `the ${schema} request does not offer the model a way to decline a value it doubts`);
   }
+  // A POSITIONAL KEY REQUIRES A FIXED ROW SET, or a correct answer grades as invention.
+  //
+  // sol-20260825-push1 had BOTH arms return a byte-identical note that inserted a new first
+  // pass and shifted the rest down: its pass-02 was the true pass-01 (all six files) and its
+  // pass-03 the true pass-02. Recall was perfect; the grade was two confabulations and zero
+  // corrections, because a manifest field is keyed by POSITION IN THE NOTE and every row had
+  // moved. Adding the pass it remembered coming first is arguably the better answer, which
+  // is exactly why the ask has to say which question it is asking.
+  //
+  // Driven off the KEYS rather than the schema name, so a future schema that keys by
+  // position inherits the rule instead of quietly reintroducing the defect. `manifest` keys
+  // `pass-NN`; `worklog` and `extent` key by the pass's leading file path and `crossref` by
+  // its hop input, so all three survive an inserted row and are exempt by construction.
+  const positional = /^pass-\d+$/;
+  const keyStages = [];
+  for (let ordinal = 1; ordinal <= 24; ordinal += 1) {
+    keyStages.push({
+      ordinal,
+      files: [
+        { path: `lib/k${ordinal}a.c`, lines: 10 },
+        { path: `lib/k${ordinal}b.c`, lines: 10 },
+      ],
+    });
+  }
+  const keyChains = [{
+    id: "trace-k",
+    links: [
+      { index: 1, stage: 3, hop: "INC", input: "lib/k3a.c", expectedAnswer: "lib/k5a.c" },
+      { index: 2, stage: 9, hop: "INC", input: "lib/k9a.c", expectedAnswer: "lib/k11a.c" },
+      { index: 3, stage: 15, hop: "INC", input: "lib/k15a.c", expectedAnswer: "lib/k17a.c" },
+    ],
+  }];
+  const keySeeds = JSON.parse(readFileSync(
+    join(PROJECT, "docs", "fold_vs_compaction", "hidden-mass-seeds.json"), "utf8"));
+  const keyed = artifacts.buildStaleArtifacts({
+    stages: keyStages, chains: keyChains,
+    contentSeed: keySeeds.contentSeed, querySeed: keySeeds.querySeed,
+    schemas: [...artifacts.ARTIFACT_SCHEMAS], fieldCount: 3,
+  });
+  let positionalSeen = 0;
+  for (const ask of keyed) {
+    if (!ask.fields.every((field) => positional.test(field.key))) continue;
+    positionalSeen += 1;
+    assert(/there are no others|as they stand|do not add|no more than these/i.test(ask.request),
+      `the ${ask.schema} ask is keyed by position but does not fix its row set, so a model ` +
+      "that adds a remembered row grades as confabulating every row after it");
+  }
+  // Anti-vacuity: at least one schema really is position-keyed, or the loop above proves
+  // nothing. `manifest` is the one; the others key by a path or a hop input and survive an
+  // inserted row by construction.
+  assert.equal(positionalSeen, 1,
+    `expected exactly one position-keyed schema, found ${positionalSeen}`);
+
   // The four requests are genuinely different wordings, not one sentence with the noun
   // swapped, so the ask never becomes a recognisable ritual.
   const requests = artifacts.ARTIFACT_SCHEMAS.map((schema) => artifacts.artifactRequestText(schema));
@@ -10693,6 +10746,81 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     "Pi's proactive threshold branch is gone, so a turn boundary cannot compact on occupancy");
 
   checks.aStageIsAUserMessageAndPisOwnTriggerIsReachable = true;
+}
+
+
+// ---------------------------------------------------------------------------
+// GATE 117 - a stage is found by ordinal under BOTH delivery shapes, and a failed pull run
+// is never given windows it did not have.
+//
+// Every transcript lens (probes, deliverables, audit traces, provenance) is anchored on
+// `stageResultIndexByOrdinal`, which found stages by their `repo_stage` tool result. A push
+// run has no such tool results, so without this the anchor returns an empty map and every
+// probe on every v5 run reads as unanswered: a silent zero, which is the worst shape a
+// grading defect can take.
+//
+// The shape is PASSED IN rather than sniffed, and that is the load-bearing decision. A pull
+// run that delivered zero stages also has no stage tool results, so a sniffing anchor would
+// fall through to counting user messages and index that run's workload prompt as stage 1,
+// inventing an answer window on exactly the runs that failed.
+// ---------------------------------------------------------------------------
+{
+  const { stageResultIndexByOrdinal } = await import(
+    pathToFileURL(join(PROJECT, "scripts", "lib", "pi_context_experiment.mjs")));
+
+  const userMsg = (text) => ({ type: "message", message: { role: "user", content: text } });
+  const assistantMsg = (text) => ({ type: "message", message: { role: "assistant", content: text } });
+  const stageResult = (stage) => ({
+    type: "message",
+    message: { role: "toolResult", toolName: EXPERIMENT_TOOL_NAME, details: { stage } },
+  });
+
+  // PULL, unchanged: addressed by the ordinal the extension stamped, never by position.
+  const pull = [userMsg("workload"), assistantMsg("a"), stageResult(1), assistantMsg("b"), stageResult(2)];
+  const pullIndex = stageResultIndexByOrdinal(pull);
+  assert.deepEqual([...pullIndex.entries()], [[1, 2], [2, 4]],
+    "a pull run's stages are no longer found by their tool result's own ordinal");
+  // An errored stage result is not a delivery.
+  const errored = [{ type: "message", message: {
+    role: "toolResult", toolName: EXPERIMENT_TOOL_NAME, isError: true, details: { stage: 1 } } }];
+  assert.equal(stageResultIndexByOrdinal(errored).size, 0,
+    "a failed stage call counts as a delivered stage");
+
+  // PUSH: one user message per stage, in order.
+  const push = [userMsg("stage 1"), assistantMsg("a"), userMsg("stage 2"), assistantMsg("b"),
+    userMsg("stage 3"), assistantMsg("c")];
+  const pushIndex = stageResultIndexByOrdinal(push, { pushDelivered: true, stageCount: 3 });
+  assert.deepEqual([...pushIndex.entries()], [[1, 0], [2, 2], [3, 4]],
+    "a push run's stages are not found as the user messages that carried them");
+
+  // THE END BLOCK IS A USER MESSAGE TOO and must never be claimed as a stage: a probe
+  // scanning forward from it would run off the end of the transcript.
+  const withEndBlock = [...push, userMsg("end block"), assistantMsg("answers")];
+  const bounded = stageResultIndexByOrdinal(withEndBlock, { pushDelivered: true, stageCount: 3 });
+  assert.equal(bounded.size, 3, "the end block was claimed as a stage");
+  assert(!bounded.has(4), "the end block was indexed as stage 4");
+
+  // THE FALSIFICATION OF SNIFFING. A pull run that delivered NOTHING has one user message
+  // and no stage results; asked as the pull run it is, it yields no windows at all.
+  const failedPull = [userMsg("workload"), assistantMsg("I cannot continue")];
+  assert.equal(stageResultIndexByOrdinal(failedPull).size, 0,
+    "a pull run that delivered no stages is given a window it never had");
+  // Asked as a push run, the SAME transcript would have produced one, which is exactly why
+  // the shape is passed in rather than detected.
+  assert.equal(stageResultIndexByOrdinal(failedPull, { pushDelivered: true, stageCount: 8 }).size, 1,
+    "the fixture no longer demonstrates what sniffing would have cost");
+
+  // THE ADJUDICATOR SAYS WHICH SHAPE, from the run's own config, and threads it to every lens.
+  const adj = source("scripts/adjudicate_pi_context_experiment.mjs");
+  assert(/const pushDelivered = !closedBook && !pullDelivered;/.test(adj),
+    "the adjudicator does not derive the delivery shape from the run config");
+  for (const lens of ["probeTranscripts", "deliverableTranscripts", "traceStepTranscripts",
+    "probeProvenance"]) {
+    const call = new RegExp(`${lens}\\(\\{[^}]*pushDelivered`);
+    assert(call.test(adj), `${lens} is not told which delivery shape it is reading`);
+  }
+
+  checks.aStageIsFoundByOrdinalUnderBothDeliveryShapes = true;
 }
 
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);
