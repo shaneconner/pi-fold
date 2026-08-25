@@ -346,23 +346,68 @@ function extentFields({ stages, window, seed, fieldCount }) {
   });
 }
 
-function crossrefFields({ chains, stages, seed, fieldCount }) {
-  // The include hops of the audit trace chains: "this file's include of X resolves to Y".
-  // A relationship between two earlier items, and the one schema a model can answer by
-  // re-opening the file, which is why its fields are marked rederivable.
-  const hops = chains.flatMap((chain) =>
+/**
+ * The one hop a file contributes to the cross-reference relation, given every include of
+ * its own that resolves inside the checkout. THE HOP IS THE FILE'S MOST SPECIFIC
+ * DEPENDENCY, not its first: a C file opens with the project's setup header, so taking
+ * the first resolvable include seated `lib/curl_setup.h` as the truth of five of six
+ * fields, and an ask whose answer is the same path six times over is answerable by
+ * noticing the pattern rather than by either recall or re-derivation, which is exactly the
+ * discrimination crossref exists to provide. Rarest target across the staged set wins,
+ * ties broken by the order the file itself states them in. Pure on purpose: the stager
+ * reads the checkout and this states the rule, so the rule can be driven without one.
+ */
+export function rarestIncludeHops(resolved) {
+  const frequency = new Map();
+  for (const file of resolved) {
+    for (const target of file.targets) frequency.set(target, (frequency.get(target) ?? 0) + 1);
+  }
+  return resolved
+    .filter((file) => file.targets.length > 0)
+    .map((file) => ({
+      stage: file.stage,
+      input: file.input,
+      truth: file.targets.reduce((rarest, target) =>
+        frequency.get(target) < frequency.get(rarest) ? target : rarest),
+    }));
+}
+
+// The include hops a cross-reference ask draws from: "this file's include of X resolves to
+// Y". That relation is a property of the CORPUS, not of any instrument built over it, and
+// reading it off the audit trace chains was only ever convenience. When the chains went
+// (e656ff0, the de-priming deletion) it took full mode's ability to stage with it: crossref
+// is one of full's four schemas and this had nothing left to draw, so every full plan since
+// has died at "No include hops exist to build a cross-reference index".
+//
+// A plan now states its own hops, derived at staging from the pinned checkout, and an ask
+// draws only from the files inside its own window, so a subject is always material the model
+// was given. Plans sealed before that field carry the chains instead and are read exactly as
+// they were, hops off the INC links and no windowing, because windowing them would
+// regenerate a different ask and refuse every sealed plan as drift against itself.
+function crossrefHops({ includeHops, chains, window }) {
+  if (Array.isArray(includeHops) && includeHops.length > 0) {
+    const delivered = new Set(window);
+    return includeHops
+      .filter((hop) => delivered.has(hop.stage))
+      .map((hop) => ({ input: hop.input, truth: hop.truth }));
+  }
+  return (chains ?? []).flatMap((chain) =>
     chain.links
       .filter((link) => link.hop === "INC")
-      .map((link) => ({ chainId: chain.id, input: link.input, truth: link.expectedAnswer })));
+      .map((link) => ({ input: link.input, truth: link.expectedAnswer })));
+}
+
+function crossrefFields({ hops, stages, seed, fieldCount }) {
+  // A relationship between two earlier items, and the one schema a model can answer by
+  // re-opening the file, which is why its fields are marked rederivable.
   assertExperiment(hops.length > 0, "No include hops exist to build a cross-reference index");
   const chosen = seededShuffle(hops, `${seed}:crossref:subjects`).slice(0, fieldCount);
   const draws = seededSequence(`${seed}:crossref:values`, chosen.length);
   // A broken link is drawn from EVERY delivered path, not only from the other include
-  // targets. Smoke mode runs one short chain, so the target pool can hold a single entry
-  // and `wrongPick` had nothing to draw: staging died with "a stale value needs at least
-  // one alternative to draw". A link pointing at some other file in the tree is exactly as
-  // plausible as one pointing at another chain's target, and the wider pool exists at every
-  // mode.
+  // targets. A narrow pool can hold a single entry and leave `wrongPick` nothing to draw,
+  // which is how staging once died at "a stale value needs at least one alternative to
+  // draw". A link pointing at some other file in the tree is exactly as plausible as one
+  // pointing at another hop's target, and the wider pool exists at every mode.
   const targets = [
     ...hops.map((hop) => hop.truth),
     ...(stages ?? []).flatMap((stage) => (stage.files ?? []).map((file) => file.path)),
@@ -385,7 +430,7 @@ function crossrefFields({ chains, stages, seed, fieldCount }) {
  * which is what lets the validator re-derive the whole set and refuse any drift.
  */
 export function buildStaleArtifacts({
-  stages, chains, contentSeed, querySeed, schemas: allowed, fieldCount,
+  stages, chains, includeHops, contentSeed, querySeed, schemas: allowed, fieldCount,
 }) {
   assertExperiment(Array.isArray(stages) && stages.length > 0,
     "Stale artifacts require the plan's stages");
@@ -438,7 +483,10 @@ export function buildStaleArtifacts({
     const fields = schema === "manifest" ? manifestFields({ stages, window, seed: askSeed, fieldCount })
       : schema === "worklog" ? worklogFields({ stages, window, seed: askSeed, fieldCount })
         : schema === "extent" ? extentFields({ stages, window, seed: askSeed, fieldCount })
-          : crossrefFields({ chains: chains ?? [], stages, seed: askSeed, fieldCount });
+          : crossrefFields({
+            hops: crossrefHops({ includeHops, chains, window }),
+            stages, seed: askSeed, fieldCount,
+          });
     assertExperiment(fields.length >= ARTIFACT_MIN_FIELDS,
       `Artifact ask ${index + 1} (${schema}) seats ${fields.length} fields, below the ` +
       `floor of ${ARTIFACT_MIN_FIELDS}: this mode's geometry cannot measure it`);
@@ -549,12 +597,14 @@ export function staleArtifactsDigest(artifacts) {
  * regenerate, and refuse a geometry that would measure re-injection instead of
  * recall. Gate 70's discipline, one instrument over.
  */
-export function validateStaleArtifacts({ artifacts, stages, chains, contentSeed, querySeed, fieldCount }) {
+export function validateStaleArtifacts({
+  artifacts, stages, chains, includeHops, contentSeed, querySeed, fieldCount,
+}) {
   assertExperiment(Array.isArray(artifacts) && artifacts.length > 0,
     "A plan carrying stale artifacts must carry at least one ask");
 
   const regenerated = buildStaleArtifacts({
-    stages, chains, contentSeed, querySeed, fieldCount,
+    stages, chains, includeHops, contentSeed, querySeed, fieldCount,
     schemas: artifacts.map((ask) => ask.schema),
   });
   assertExperiment(staleArtifactsDigest(artifacts) === staleArtifactsDigest(regenerated),

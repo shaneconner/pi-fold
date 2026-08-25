@@ -1630,7 +1630,7 @@ export function validateStagePlan(plan) {
     "version", "mode", "repo", "seed", "stageCount", "stageIntervalMs", "watchdogMs",
     "heartbeatMs", "corpus", "stages", "chains", "probeCount", "deliverableCount",
     "planSha256",
-  ], ["ledger", "staleArtifacts", "endBlockAdjacency"]), "Invalid stage plan shape");
+  ], ["ledger", "staleArtifacts", "endBlockAdjacency", "includeHops"]), "Invalid stage plan shape");
   assertExperiment(plan.version === EXPERIMENT_PROTOCOL_VERSION, "Stage plan protocol version drifted");
   assertExperiment(EXPERIMENT_MODES.includes(plan.mode), "Invalid stage plan mode");
   const modePlan = EXPERIMENT_MODE_PLANS[plan.mode];

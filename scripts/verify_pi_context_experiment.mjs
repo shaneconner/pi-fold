@@ -11518,4 +11518,134 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   checks.aRunsBindSourcesNameNothingAboutTheRun = true;
 }
 
+// ---------------------------------------------------------------------------
+// GATE 123 - a cross-reference ask is drawn from the corpus, not from a deleted instrument.
+//
+// The de-priming deletion (e656ff0) removed the audit trace chains, and crossref read its
+// relation off their INC links. Nothing noticed, because the suite only ever built what the
+// current builder makes and smoke mode does not seat crossref: FULL MODE COULD NOT STAGE AT
+// ALL from that commit until this one, dying at "No include hops exist to build a
+// cross-reference index" before writing a plan. The only full plan on disk was staged before
+// the deletion and is unusable for the opposite reason, so the campaign had no launchable
+// plan in either direction.
+//
+// The relation never needed a chain: "this file's include of X resolves to Y" is a property
+// of the checkout. A plan now states its own hops and an ask draws from the ones inside its
+// own window. And the hop is the file's MOST SPECIFIC dependency rather than its first,
+// because a C file opens with the project setup header: taking the first resolvable include
+// made `lib/curl_setup.h` the truth of five fields out of six, and an ask answerable by
+// noticing that pattern measures neither recall nor re-derivation, which is the one
+// discrimination crossref exists to provide.
+// ---------------------------------------------------------------------------
+{
+  const artifacts123 = await import(pathToFileURL(join(PROJECT, "scripts", "lib",
+    "pi_context_artifacts.mjs")));
+  const seeds123 = JSON.parse(readFileSync(
+    join(PROJECT, "docs", "fold_vs_compaction", "hidden-mass-seeds.json"), "utf8"));
+
+  // THE RULE, driven on its own. Every file includes the shared setup header and one header
+  // of its own, and the shared one is what a first-resolvable rule would seat every time.
+  const resolved123 = ["a", "b", "c", "d"].map((name, index) => ({
+    stage: index + 2,
+    input: `lib/${name}.c`,
+    targets: ["lib/setup.h", `lib/${name}.h`],
+  }));
+  const hops123 = artifacts123.rarestIncludeHops(resolved123);
+  assert.deepEqual(hops123.map((hop) => hop.truth),
+    ["lib/a.h", "lib/b.h", "lib/c.h", "lib/d.h"],
+    "the hop is the file's first include rather than its most specific dependency");
+  assert.deepEqual(artifacts123.rarestIncludeHops([{ stage: 1, input: "lib/x.c", targets: [] }]), [],
+    "a file with no resolvable include still contributes a hop, whose truth is undefined");
+  // Ties break on the order the file states them in, so the rule is total rather than
+  // dependent on Map iteration order for equally rare targets.
+  assert.equal(artifacts123.rarestIncludeHops(
+    [{ stage: 1, input: "lib/t.c", targets: ["lib/first.h", "lib/second.h"] }])[0].truth,
+  "lib/first.h", "equally rare targets do not break on the order the file states them in");
+
+  const stages123 = [];
+  for (let ordinal = 1; ordinal <= 24; ordinal += 1) {
+    stages123.push({
+      ordinal,
+      kind: "read",
+      files: [{ path: `lib/g${ordinal}a.c`, lines: 10 }, { path: `lib/g${ordinal}b.c`, lines: 10 }],
+    });
+  }
+  const includeHops123 = artifacts123.rarestIncludeHops(stages123.flatMap((stage) =>
+    stage.files.map((file) => ({
+      stage: stage.ordinal, input: file.path, targets: ["lib/shared.h", `${file.path.slice(0, -2)}.h`],
+    }))));
+  const inputs123 = {
+    stages: stages123, chains: [], includeHops: includeHops123,
+    contentSeed: seeds123.contentSeed, querySeed: seeds123.querySeed, fieldCount: 4,
+  };
+
+  // THE CASE THAT COULD NOT BE STAGED: no chains at all, and a crossref ask is seated.
+  const built123 = artifacts123.buildStaleArtifacts({ ...inputs123, schemas: ["crossref"] });
+  const ask123 = built123.find((ask) => ask.schema === "crossref");
+  assert(ask123 !== undefined, "a plan with no chains cannot seat a cross-reference ask");
+  assert.equal(ask123.fields.length, 4, "the cross-reference ask did not seat its fields");
+  assert.equal(new Set(ask123.fields.map((field) => field.key)).size, ask123.fields.length,
+    "a cross-reference ask asks about the same file twice, so one line contradicts the other");
+  assert(ask123.fields.every((field) => field.stale !== field.truth),
+    "a cross-reference field is planted with its own truth, so nothing is stale to correct");
+  assert(ask123.fields.every((field) => field.rederivable === true),
+    "cross-reference fields stopped being marked re-derivable, and the control pools with recall");
+  // EVERY SUBJECT IS MATERIAL THE MODEL WAS GIVEN, inside this ask's own window. The chain
+  // path could not state that: it drew from every chain in the plan regardless of window.
+  const window123 = new Set(ask123.window);
+  assert(ask123.fields.every((field) =>
+    includeHops123.some((hop) => hop.input === field.key && window123.has(hop.stage))),
+  "a cross-reference subject was never delivered inside the window the ask covers");
+  // Determinism, the same discipline the other schemas are held to.
+  assert.equal(
+    artifacts123.staleArtifactsDigest(built123),
+    artifacts123.staleArtifactsDigest(
+      artifacts123.buildStaleArtifacts({ ...inputs123, schemas: ["crossref"] })),
+    "the same seeds do not regenerate the same cross-reference ask");
+  artifacts123.validateStaleArtifacts({ ...inputs123, artifacts: built123 });
+
+  // ANTI-VACUITY: this is exactly the state full mode was left in, and it must still refuse
+  // rather than seat a thinner ask. Without it the gate above passes on a builder that
+  // silently tolerates having nothing to ask about.
+  assert.throws(
+    () => artifacts123.buildStaleArtifacts({
+      ...inputs123, includeHops: [], chains: [], schemas: ["crossref"],
+    }),
+    /No include hops exist to build a cross-reference index/,
+    "a plan with neither hops nor chains seated a cross-reference ask out of nothing");
+
+  // AND A SEALED PLAN IS READ AS IT WAS. It carries chains and no hops, so the ask comes off
+  // the INC links, unwindowed, exactly as it did when it was sealed: windowing them would
+  // regenerate a different ask and refuse every sealed plan as drift against itself.
+  const sealed123 = artifacts123.buildStaleArtifacts({
+    ...inputs123,
+    includeHops: undefined,
+    chains: [{
+      id: "trace-a",
+      links: [
+        { index: 1, stage: 3, hop: "INC", input: "lib/g3a.c", expectedAnswer: "lib/g5a.c" },
+        { index: 2, stage: 9, hop: "INC", input: "lib/g9a.c", expectedAnswer: "lib/g11a.c" },
+        { index: 3, stage: 15, hop: "INC", input: "lib/g15a.c", expectedAnswer: "lib/g17a.c" },
+        { index: 4, stage: 21, hop: "SOF", input: "lib/g21a.c", expectedAnswer: 1 },
+      ],
+    }],
+    schemas: ["crossref"],
+  }).find((ask) => ask.schema === "crossref");
+  assert.deepEqual([...sealed123.fields.map((field) => field.key)].sort(),
+    ["lib/g15a.c", "lib/g3a.c", "lib/g9a.c"],
+    "a sealed plan's cross-reference ask no longer comes off its own chain links");
+  assert(sealed123.fields.every((field) => field.truth !== undefined),
+    "a sealed chain hop lost the expected answer it was sealed with");
+
+  // The plan shape carries the field, and a plan without it is still a plan: every sealed
+  // campaign predates it and must keep validating, which is the same law `ledger`,
+  // `staleArtifacts` and `endBlockAdjacency` are already held to.
+  const planShape123 = source("scripts/lib/pi_context_experiment.mjs");
+  assert(planShape123.includes(
+    '["ledger", "staleArtifacts", "endBlockAdjacency", "includeHops"]'),
+  "the plan shape refuses the include hops a current plan records");
+
+  checks.aCrossReferenceAskIsDrawnFromTheCorpus = true;
+}
+
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);

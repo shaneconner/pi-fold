@@ -19,10 +19,12 @@ import {
   EXPERIMENT_PROTOCOL_VERSION,
   EXPERIMENT_REPOS,
   assertExperiment,
+  buildIncludeResolver,
   plantedWordCollisions,
   corpusManifestSha256,
   extractDefinitions,
   fileFacts,
+  quotedIncludeSpecs,
   seededShuffle,
   stagePayloadText,
   stagePlanSha256,
@@ -32,6 +34,7 @@ import {
 import {
   buildEndBlockAdjacency,
   buildStaleArtifacts,
+  rarestIncludeHops,
   validateStaleArtifacts,
 } from "./lib/pi_context_artifacts.mjs";
 import { freshChallenge, sha256Text, writeJsonExclusive } from "./lib/pi_context_soak_attestation.mjs";
@@ -214,7 +217,7 @@ function deliverableInstruction() {
 }
 
 function buildPlan({
-  repo, mode, seed, facts, contentSeed, querySeed,
+  repo, mode, seed, facts, contentSeed, querySeed, checkoutDir, paths,
 }) {
   const modePlan = EXPERIMENT_MODE_PLANS[mode];
   const eligible = facts.filter((fact) => fact.lines >= MIN_FILE_LINES && fact.lines <= MAX_FILE_LINES);
@@ -340,15 +343,34 @@ function buildPlan({
     stages.push(stage);
   }
 
+  // THE CROSS-REFERENCE RELATION IS A PROPERTY OF THE CORPUS (2026-08-26). "This file's
+  // include of X resolves to Y" used to be read off the audit trace chains' INC links, and
+  // when the chains went with the de-priming deletion (e656ff0) full mode stopped staging
+  // altogether: crossref is one of its four schemas and had nothing left to draw. The
+  // relation never needed a chain. One hop per staged file that has a resolvable quoted
+  // include, in stage order, resolved through the same two primitives the adjudicator
+  // grades an agent's own answer with, so the instrument cannot disagree with its ground
+  // truth. Recorded in the plan, which is what lets the ask be regenerated from the plan
+  // alone exactly as it was from the chains.
+  const resolveInclude = buildIncludeResolver(paths);
+  const resolvedIncludes = stages.flatMap((stage) => stage.files.map((file) => ({
+    stage: stage.ordinal,
+    input: file.path,
+    targets: [...new Set(quotedIncludeSpecs(readFileSync(join(checkoutDir, file.path), "utf8"))
+      .map((spec) => resolveInclude(file.path, spec))
+      .filter((resolved) => resolved !== null && resolved !== file.path))],
+  })));
+  const includeHops = rarestIncludeHops(resolvedIncludes);
+
   // The asks are built and validated BEFORE the plan literal, so a geometry that cannot
   // seat them (too few delivered stages, an ask with an empty window, a field planted with
   // its own truth) refuses staging rather than shipping a plan the runtime cannot honour.
   const staleArtifacts = buildStaleArtifacts({
-    stages, chains, contentSeed, querySeed,
+    stages, chains, includeHops, contentSeed, querySeed,
     schemas: modePlan.artifacts.schemas, fieldCount: modePlan.artifacts.fields,
   });
   const artifactVerdict = validateStaleArtifacts({
-    artifacts: staleArtifacts, stages, chains, contentSeed, querySeed,
+    artifacts: staleArtifacts, stages, chains, includeHops, contentSeed, querySeed,
     fieldCount: modePlan.artifacts.fields,
   });
 
@@ -376,6 +398,7 @@ function buildPlan({
     },
     stages,
     chains,
+    includeHops,
     // THE v5 STALE ARTIFACTS (2026-08-25). Built from the plan's own stages and chains
     // once the geometry exists, because every subject is a pass that actually happened and
     // every truth is read from what that pass delivered. Both seeds are the FROZEN ones,
@@ -436,9 +459,12 @@ try {
       // The collision scan outlives the code words: it now guards the ONE planted set left,
       // the seeded values the stale artifacts carry, which are answerable from disk exactly
       // as a code word would have been if the checkout already contained them.
-      collectCheckoutDefinitions(checkoutDir, []);
+      // The path universe the scan collects is the same one an agent resolves a quoted
+      // include against, and the cross-reference relation is read against it, so it is
+      // taken from here rather than rebuilt from the staged subset.
+      const { paths } = collectCheckoutDefinitions(checkoutDir, []);
       plan = buildPlan({
-        repo, mode, seed, facts,
+        repo, mode, seed, facts, checkoutDir, paths,
         contentSeed: hiddenMassSeeds.contentSeed,
         querySeed: hiddenMassSeeds.querySeed,
       });
