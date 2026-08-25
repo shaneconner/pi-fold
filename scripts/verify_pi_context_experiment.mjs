@@ -88,6 +88,7 @@ import {
   usageSeriesFromLedger,
   outOfBandUsage,
   testAwarenessLeaks,
+  protocolVocabularyLeaks,
   EXPERIMENT_HISTORY_TOOL_NAME,
   EXPERIMENT_ALLOWED_TOOLS,
   PI_STOCK_TOOLS,
@@ -106,6 +107,7 @@ import {
   HIDDEN_TRACE_LINK_KEYS,
   auditStepId,
   auditStepSentence,
+  auditStepSentences,
   buildAuditTraces,
   buildIncludeResolver,
   echoVerdicts,
@@ -2045,22 +2047,24 @@ try {
 // per class before anyone opens the blind packet.
 // ---------------------------------------------------------------------------
 {
-  assert(staging.includes("stageCodeWords(seed, EXPERIMENT_MODE_PLANS[mode].stageCount)"),
-    "the stager must generate one seeded code word per stage");
-  assert(staging.includes("codeWordSentence(ordinal, codeWord)"),
-    "the stager must weave the code word into the stage instructions");
-  // The ledger-token half of the collision scan went with the ledger on 2026-08-25:
-  // nothing plants `lv-` tokens any more, so scanning for them would assert over an empty
-  // set. Code words are still planted and still scanned.
-  // The symbol-uniqueness half of this scan went with the repo-class probes on
-  // 2026-08-25: nothing claims THE defining file any more. The collision scan and the
-  // include resolver stay, because code words are still planted and the audit chain still
-  // resolves quoted includes over the whole checkout.
-  assert(staging.includes("collectCheckoutDefinitions(checkoutDir,\n        [...codeWords, ...reissueWords])") &&
-    staging.includes("checkoutPaths: checkoutDefinitions.paths"),
-  "planted-word collisions and include resolution must be judged over the whole checkout");
-  assert(staging.includes("codeWord: codeWords[ordinal - 1],"),
-    "every stage must carry its own seeded code word");
+  // THE CODE WORDS AND THE AUDIT TRACES ARE GONE (2026-08-25), asserted on the staging
+  // source the same way the probe waves are below: a builder that starts emitting either
+  // again fails here rather than in a ten-hour run. They were the last instruments that
+  // could only be written in protocol vocabulary, and sol-20260825-readfull showed what
+  // that cost: 218 "stage", 102 "code word" and 24 "AUDIT TRACE" across 64 instructions,
+  // and a native summary that came back indexed by "Stage NN analyzed ...".
+  assert(!/stageCodeWords|stageCodeWordReissues|codeWordSentence|codeWordReissueSentence/.test(staging),
+    "the stager still reaches for the code word generators or their sentences");
+  assert(!/buildAuditTraces|auditStepSentence|auditStepId/.test(staging),
+    "the stager still reaches for the audit trace builder or its sentences");
+  assert(staging.includes("codeWord: null,") && staging.includes("codeWordReissue: null,") &&
+    staging.includes("chainStep: null,") && staging.includes("const chains = [];"),
+  "the stager must write the code word, reissue, chain step and chain fields empty rather than dropping them");
+  // The collision scan outlives what it was built for: the seeded stale-artifact values are
+  // the one planted set left, and a value the checkout already contains is answerable from
+  // disk exactly as a code word would have been.
+  assert(staging.includes("collectCheckoutDefinitions(checkoutDir, [])"),
+    "planted-word collisions must still be judged over the whole checkout");
   // THE PROBE WAVES ARE GONE. Asserted on the staging source so a builder that starts
   // emitting them again fails here rather than in a five-hour run: no probe id is minted,
   // no wave schedule is read, and the field the readers key off is written empty.
@@ -2245,13 +2249,45 @@ try {
   const [sofStep, finStep, incStep] = plan.stages
     .filter((stage) => stage.chainStep !== null)
     .map((stage) => stage.chainStep);
+  // BOTH SHIPPED WORDINGS, pinned by value. This function is an archive reader now: the
+  // audit traces are deleted from production, its only caller is the sealed-plan validator,
+  // and that validator asserts a stage's instructions CONTAIN the sentence it reproduces.
+  // bc3889a reworded "delivered" to "assigned" and thereby refused every sealed plan ever
+  // built, which `adjudicate` runs before it grades, so the whole v4 and v5 corpus was
+  // un-adjudicable and the suite passed anyway: it drives a freshly-built fixture, and a
+  // fixture built by the current builder always matches the current wording. That is the
+  // hole. The eras are pinned by value, and the DEFAULT stays the older one because that is
+  // what 17 of the 19 v4+ sealed plans contain.
   assert.equal(auditStepSentence(sofStep),
-    "AUDIT TRACE trace-a, step 01: which stage of this session assigned the file " +
+    "AUDIT TRACE trace-a, step 01: which stage of this session delivered the file " +
     "stage-1.rs? Record it on its own line as `trace-a-01: <stage number>`.");
-  assert.equal(auditStepSentence(finStep),
+  assert.deepEqual(auditStepSentences(sofStep), [
+    "AUDIT TRACE trace-a, step 01: which stage of this session delivered the file " +
+    "stage-1.rs? Record it on its own line as `trace-a-01: <stage number>`.",
+    "AUDIT TRACE trace-a, step 01: which stage of this session assigned the file " +
+    "stage-1.rs? Record it on its own line as `trace-a-01: <stage number>`.",
+  ], "the reader no longer speaks both wordings this harness shipped");
+  assert.deepEqual(auditStepSentences(finStep), [
+    "AUDIT TRACE trace-a, step 02: name the 2nd file delivered in the stage you " +
+    "recorded as trace-a-01, counting files in the order that stage delivered them. " +
+    "Record it on its own line as `trace-a-02: <repository-relative path>`.",
     "AUDIT TRACE trace-a, step 02: name the 2nd file assigned by the stage you " +
     "recorded as trace-a-01, counting files in the order that stage listed them. " +
-    "Record it on its own line as `trace-a-02: <repository-relative path>`.");
+    "Record it on its own line as `trace-a-02: <repository-relative path>`.",
+  ], "the FIN hop's two wordings drifted");
+  // A plan carrying EITHER era validates, which is the property the corpus needs. Driven by
+  // rewriting the fixture's own instruction into the other era rather than by asserting over
+  // the source, so a reader that stops accepting one fails here.
+  for (const era of [0, 1]) {
+    const swapped = structuredClone(plan);
+    for (const stage of swapped.stages) {
+      if (stage.chainStep === null) continue;
+      const both = auditStepSentences(stage.chainStep);
+      stage.instructions = stage.instructions.replace(both[era === 0 ? 1 : 0], both[era]);
+    }
+    swapped.planSha256 = stagePlanSha256(swapped);
+    validateStagePlan(swapped);
+  }
   assert.equal(auditStepSentence(incStep),
     "AUDIT TRACE trace-a, step 03: open the file you recorded as trace-a-02 and name " +
     "the target of its 1st quoted include. Count every line whose first non-space " +
@@ -2267,9 +2303,18 @@ try {
     mutated.planSha256 = stagePlanSha256(mutated);
     return mutated;
   };
+  // A plan that carries chain STEPS and no chains to bind them to is the half-deleted
+  // shape, refused by name; dropping one chain of a sealed set is the count law, and both
+  // must still fire, because "chains are gone" and "chains are wrong" are different faults.
   const noChains = rehash(structuredClone(plan));
   noChains.chains = [];
-  assert.throws(() => validateStagePlan(rehash(noChains)), /chain count disagrees/);
+  assert.throws(() => validateStagePlan(rehash(noChains)),
+    /carries chain steps with no chains to bind them to/);
+  // Smoke mode carries exactly one chain, so the count is broken by ADDING rather than by
+  // slicing: slicing reaches zero and trips the deletion law above instead.
+  const extraChains = rehash(structuredClone(plan));
+  extraChains.chains = [...extraChains.chains, structuredClone(extraChains.chains[0])];
+  assert.throws(() => validateStagePlan(rehash(extraChains)), /chain count disagrees/);
   const ontoProbe = structuredClone(plan);
   ontoProbe.chains[0].links[2].stage = 4;
   assert.throws(() => validateStagePlan(rehash(ontoProbe)), /strictly later payload stage/);
@@ -4272,8 +4317,54 @@ try {
   // The working half of the instruction stays: dropping the premise must not drop
   // the task. What survives is the ASSIGNMENT, not a memory strategy.
   assert(staging.includes("build an accurate working") &&
-    staging.includes("model of what they do, what they depend on, and which names they export."),
+    staging.includes("model of what they do, what they depend on, and which names they export"),
   "the reading task was dropped along with the hoarding direction");
+
+  // THE PROTOCOL VOCABULARY (Shane, 2026-08-25). Everything above looks for a plan that
+  // SAYS it is a test. This looks for one SHAPED like a test, which is the leak that got
+  // past every assertion here and ran for 49 minutes: sol-20260825-readfull's 64
+  // instructions said "stage" 218 times, "code word" 102 times and "AUDIT TRACE" 24 times,
+  // and native's compaction summary came back indexed as "Stage NN analyzed ..." with every
+  // code word and trace answer under a "Critical Context" heading. Driven as a function so
+  // the laws are exercised rather than matched, and proved BOTH ways: the exact wording
+  // this builder used to emit is caught, and the wording it emits now is clean.
+  for (const [was, why] of [
+    ["Files in this stage: lib/a.c, lib/b.c.", "the old read instruction's own closing sentence"],
+    ["Read the new files below and CROSS-REFERENCE them against material you already worked" +
+      " through earlier in this session, specifically stage 2 (lib/a.c).", "the old revisit instruction"],
+    ["It MUST cite concrete facts first seen in stage 2 and stage 4.", "the old deliverable"],
+    ["AUDIT TRACE trace-a, step 02: name the 2nd file assigned by the stage you recorded" +
+      " as trace-a-01.", "an audit trace step"],
+    ["Audit note: the code word for stage 03 is cw-d48ca8.", "a code word note"],
+    ["Record it on its own line as `trace-a-02: <repository-relative path>`.", "the recording directive"],
+  ]) {
+    assert(protocolVocabularyLeaks(was).length > 0,
+      `the vocabulary scan misses ${why}, so it would have passed the run that caused it`);
+  }
+  // A real path carrying one of these words is not a leak: curl ships
+  // docs/cmdline-opts/trace-ascii.md and junk-session-cookies.md, and a scan that refused
+  // them is a scan that gets switched off. The paths are stripped before the text is read.
+  assert.deepEqual(protocolVocabularyLeaks(
+    "Read these files: docs/cmdline-opts/trace-ascii.md, docs/cmdline-opts/junk-session-cookies.md.",
+    ["docs/cmdline-opts/trace-ascii.md", "docs/cmdline-opts/junk-session-cookies.md"]), [],
+  "the vocabulary scan refuses a real repository path");
+  // And the wording the builder emits NOW, read out of the source rather than restated.
+  for (const name of ["readInstruction", "revisitInstruction", "deliverableInstruction"]) {
+    const body = new RegExp(`function ${name}\\([^)]*\\) \\{\\n  return \\[\\n([\\s\\S]*?)\\n  \\]`).exec(staging);
+    assert(body, `the sweep cannot read ${name}, so it is scanning nothing`);
+    // Read in the order that makes the scan mean what it says. COMMENTS GO FIRST: the
+    // comment above each of these functions quotes the wording it replaced, on purpose, and
+    // a scan that reads them is satisfied by deleting the explanation instead of the
+    // instruction. That is gate 116's lesson and it has now cost two builds. Interpolations
+    // go next, because `${stage.repoKey}` is code and the parameter is named `stage`. What
+    // is left is the text the model actually receives.
+    const source = body[1].split("\n").filter((line) => !line.trim().startsWith("//")).join("\n")
+      .replace(/\$\{[^}]*\}/g, " ");
+    const quoted = [...source.matchAll(/[`"]([^`"]{10,})[`"]/g)].map((match) => match[1]).join(" ");
+    assert(quoted.length > 0, `${name} has no quoted text to scan`);
+    assert.deepEqual(protocolVocabularyLeaks(quoted), [],
+      `${name} still carries protocol vocabulary`);
+  }
   // Scoped to the function BODY: the comment above it quotes the removed line on
   // purpose, and a scan of the whole file would be satisfied by deleting the
   // explanation rather than the instruction.
@@ -10966,22 +11057,22 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     "the read instruction does not say where to read from, and nothing delivers the bytes now");
   // And it must LIST the paths, or naming the checkout tells the model nothing about what to
   // open. Both instruction kinds, since a revisit stage assigns files too.
+  // The "Files in this stage:" / "New files in this stage:" labels went with the protocol
+  // vocabulary on 2026-08-25; the LISTING is what this gate is about and it survives, now
+  // as a bare join at the end of the ask. Counted on the join expression itself, which is
+  // the part that cannot be satisfied by prose.
   assert.equal(
-    (staging119.match(/Files in this stage: \$\{files\.map\(\(file\) => file\.path\)\.join\(", "\)\}/g) ?? []).length +
-    (staging119.match(/New files in this stage: \$\{files\.map\(\(file\) => file\.path\)\.join\(", "\)\}/g) ?? []).length,
+    (staging119.match(/\$\{files\.map\(\(file\) => file\.path\)\.join\(", "\)\}/g) ?? []).length,
     2, "the read and revisit instructions must each list the paths they assign");
   // Anchored to the CODE form, not the prose: the comment above the instruction quotes the old
   // wording on purpose, and a scan for the bare phrase matches that comment and would be
   // satisfied by deleting the explanation rather than the instruction. Gate 116's lesson.
   assert(!/`Read every file delivered/.test(staging119),
     "an instruction still claims the stage delivered its files");
-  // The audit hops say ASSIGNED, or a file the model has not opened yet reads as undelivered
-  // and the hop measures that ambiguity instead of the chain.
-  const contract119 = source("scripts/lib/pi_context_experiment.mjs");
-  assert(/which stage of this session assigned/.test(contract119) &&
-    /file assigned by the stage you/.test(contract119) &&
-    /counting files in the order [\s\S]*?that stage listed them/.test(contract119),
-  "an audit hop still asks about delivery rather than assignment");
+  // The audit hops moved to ASSIGNED here and that turned out to break every sealed plan,
+  // so both eras are kept and pinned by value in the audit-sentence gate above rather than
+  // by a source scan here. What this gate still owns is that nothing CLAIMS delivery of
+  // bytes the harness no longer sends.
 
   checks.theHarnessNamesFilesAndNeverPastesThem = true;
 }

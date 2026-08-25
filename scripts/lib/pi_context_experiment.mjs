@@ -510,15 +510,20 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
     // measured cadence, which is the case worth testing. Waves alternate between
     // demanding a withdrawn carrier and a standing one, so a run always measures
     // both cells rather than leaving the split to the shuffle.
-    reissueEvery: 3,
-    reissueGap: 3,
-    reissueAlternates: true,
+
     // Audit traces: 4 chains x 6 links, anchored progressively deeper into the run.
     // The early law guarantees wave 16 has aged links to probe; measured headroom on
     // the pinned curl corpus is 3-7 links at stage <= 8 across 12 seeds.
-    chainLength: 6,
-    chainStartAfters: Object.freeze([1, 8, 16, 24]),
-    chainEarlyLaw: Object.freeze({ maxStage: 8, minLinks: 3 }),
+    // READING ONLY, the same shape as `sealedProbeSchedule` and for the same reason. The
+    // audit traces and the code words are DELETED from every plan this builder makes; these
+    // are the constants the sealed campaigns were built to, kept so their plans still
+    // validate here rather than only from a pre-deletion checkout.
+    sealedChainSchedule: Object.freeze({
+      chainLength: 6,
+      chainStartAfters: Object.freeze([1, 8, 16, 24]),
+      chainEarlyLaw: Object.freeze({ maxStage: 8, minLinks: 3 }),
+      reissueEvery: 3, reissueGap: 3, reissueAlternates: true,
+    }),
     // THE SEEDED LEDGER's geometry (see the ledger section below). Sixteen table
     // rows spread one per designated payload stage across the first half are the
     // reconstruction instrument; joins walk three relation hops so a derived
@@ -578,17 +583,19 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
     // all run) but does not demand a withdrawn CARRIER, which is unreachable at
     // this size. Gate 65 drives both selection branches directly, so the path
     // smoke cannot reach is still covered before a full run.
-    reissueEvery: 1,
-    reissueGap: 1,
-    reissueAlternates: false,
+
     // One chain of 3 links exercises every hop evaluator, the step renderer, and the
     // chain laws inside an 8-stage run: a broken chain must not first appear in a
     // 5-hour full run. Roughly half of seeds are unconstructible on the real corpus
     // (few delivered files to hop between), which the stager absorbs by redrawing
     // its seed; an explicitly pinned seed still refuses rather than shortening.
-    chainLength: 3,
-    chainStartAfters: Object.freeze([1]),
-    chainEarlyLaw: Object.freeze({ maxStage: 2, minLinks: 1 }),
+    // READING ONLY. See the full mode plan's own note.
+    sealedChainSchedule: Object.freeze({
+      chainLength: 3,
+      chainStartAfters: Object.freeze([1]),
+      chainEarlyLaw: Object.freeze({ maxStage: 2, minLinks: 1 }),
+      reissueEvery: 1, reissueGap: 1, reissueAlternates: false,
+    }),
     // Small enough to weave into smoke's three first-half payload stages,
     // complete enough that the builder, every sentence renderer, the weave, the
     // validator's re-derivation and the gating tool all run before a full
@@ -1242,25 +1249,45 @@ function ordinalWord(value) {
 // previous step's label (or the literal anchor for step 01), never a value, and it
 // declares its counting and resolution rules in full. No "remember", no "you will
 // be asked": the trace is framed as the work itself.
-export function auditStepSentence(step) {
+// AN ARCHIVE READER MUST SPEAK THE ARCHIVE'S WORDS (Shane, 2026-08-25). bc3889a reworded
+// these three sentences from "delivered" to "assigned" because push delivery had made
+// "delivered" a lie about a file the model had not opened yet. That was right for a LIVE
+// instrument and silently fatal for this one: the validator asserts that a stage's own
+// instructions contain the sentence this function reproduces, so rewording it refused every
+// sealed plan ever built, and `adjudicate` validates the plan before it grades anything. The
+// whole v4 and v5 corpus was un-adjudicable for the length of one session, found only by
+// re-validating all 35 sealed plans rather than the freshly-built fixture the suite drives.
+// The audit traces are DELETED from production now, so this function has exactly one caller
+// left, the sealed reading, and its only correct wording is the one the archive contains.
+// TWO WORDINGS SHIPPED, SO THE READER NAMES BOTH (Shane, 2026-08-25), the same discipline
+// as `sealedWatchdogMs`: an archive reader admits exactly the forms this harness ever wrote
+// and nothing else. Plans through 2026-08-25 say "delivered"; the two built after bc3889a
+// and before this fix say "assigned" and "listed them", which was a defensible rewording for
+// a live instrument (a NAMED file the model has not opened yet was arguably not "delivered")
+// and a corpus-wide refusal for an archived one. Both eras must validate and grade.
+const AUDIT_STEP_ERAS = Object.freeze([
+  Object.freeze({ sof: "delivered", fin: "delivered in", order: "delivered" }),
+  Object.freeze({ sof: "assigned", fin: "assigned by", order: "listed" }),
+]);
+
+export function auditStepSentences(step) {
+  return AUDIT_STEP_ERAS.map((era) => auditStepSentence(step, era));
+}
+
+export function auditStepSentence(step, era = AUDIT_STEP_ERAS[0]) {
   const id = auditStepId(step.chainId, step.index);
   const label = `AUDIT TRACE ${step.chainId}, step ${String(step.index).padStart(2, "0")}:`;
   const subject = step.index === 1
     ? `the file ${step.anchor}`
     : `the file you recorded as ${auditStepId(step.chainId, step.index - 1)}`;
-  // "ASSIGNED", NOT "DELIVERED" (2026-08-25). The harness stopped pasting file bodies, so a
-  // stage NAMES its files and the model opens them; "delivered" would invite the reading that
-  // a file the model never got round to opening was never delivered, and the hop would then
-  // measure that ambiguity rather than the chain. The order is the order the stage's own
-  // sentence lists, which is the order the plan holds, so the answers are unchanged.
   if (step.hop === "SOF") {
-    return `${label} which stage of this session assigned ${subject}? ` +
+    return `${label} which stage of this session ${era.sof} ${subject}? ` +
       `Record it on its own line as \`${id}: <stage number>\`.`;
   }
   if (step.hop === "FIN") {
-    return `${label} name the ${ordinalWord(step.hopIndex)} file assigned by the stage you ` +
+    return `${label} name the ${ordinalWord(step.hopIndex)} file ${era.fin} the stage you ` +
       `recorded as ${auditStepId(step.chainId, step.index - 1)}, counting files in the order ` +
-      `that stage listed them. Record it on its own line as \`${id}: <repository-relative path>\`.`;
+      `that stage ${era.order} them. Record it on its own line as \`${id}: <repository-relative path>\`.`;
   }
   return `${label} open ${subject} and name the target of its ` +
     `${ordinalWord(step.hopIndex)} quoted include. Count every line whose first non-space ` +
@@ -1529,6 +1556,39 @@ export const TEST_AWARENESS_PATTERNS = Object.freeze([
   /cite where you learned/i,
 ]);
 
+// THE PROTOCOL VOCABULARY (Shane, 2026-08-25). `testAwarenessLeaks` looks for a plan that
+// SAYS it is a test; this looks for one that is SHAPED like a test in the model's view. The
+// distinction was worth $?: sol-20260825-readfull passed the awareness scan and still told
+// the model, 218 times in 64 instructions, that it was working through numbered "stages"
+// with "code words" and an "AUDIT TRACE" to keep, and native's compaction summary came back
+// organised as "Stage 01 analyzed ...", "Stage 02 analyzed ...", with every code word and
+// trace answer indexed under "Critical Context". Nothing in it said "you will be asked", and
+// it did not need to. A real session has no numbering: a person hands over files and asks
+// about the work, so any word naming the run's own machinery is the leak.
+//
+// Scanned against the instruction text with the stage's OWN FILE PATHS REMOVED, because
+// curl legitimately ships `docs/cmdline-opts/trace-ascii.md` and `junk-session-cookies.md`
+// and a scan that refuses a real path would be a scan nobody could keep green.
+export const PROTOCOL_VOCABULARY_PATTERNS = Object.freeze([
+  /\bstages?\b/i,
+  /\bcode words?\b/i,
+  /\baudits?\b/i,
+  /\btrace-[a-z]\b/i,
+  /\bin this session\b/i,
+  /\bnext_key\b/i,
+  /\bdeliverable-\d/i,
+  /record it on its own line/i,
+]);
+
+export function protocolVocabularyLeaks(text, paths = []) {
+  if (typeof text !== "string") return [];
+  let scanned = text;
+  for (const path of [...paths].sort((a, b) => b.length - a.length)) scanned = scanned.split(path).join(" ");
+  return PROTOCOL_VOCABULARY_PATTERNS
+    .filter((pattern) => pattern.test(scanned))
+    .map((pattern) => String(pattern));
+}
+
 export function testAwarenessLeaks(text) {
   if (typeof text !== "string") return [];
   return TEST_AWARENESS_PATTERNS
@@ -1587,6 +1647,7 @@ export function validateStagePlan(plan) {
   // adjudicating under this code, so `probeTranscripts` and everything downstream of it
   // are live, and the payload renderer still renders a probe stage because a sealed
   // plan's `payloadSha256` is computed from those bytes.
+  const sealedCodeWordShape = plan.stages.some((stage) => stage.codeWord !== null);
   const sealedProbeShape = plan.stages.some((stage) => stage.kind === "probe");
   let probeCount = 0;
   let deliverableCount = 0;
@@ -1611,6 +1672,15 @@ export function validateStagePlan(plan) {
       const leaks = testAwarenessLeaks(text);
       assertExperiment(leaks.length === 0,
         `Stage ${index + 1} ${surface} tells the model it is being tested: ${leaks.join(", ")}`);
+      // Sealed plans are exempt by their own shape, the same way they are exempt from the
+      // probe, ledger and chain deletions: they carry the vocabulary because they were
+      // built to it, and they must keep validating and grading. A plan this harness makes
+      // carries none of the instruments that could only be phrased in it.
+      if (!sealedCodeWordShape && !sealedProbeShape) {
+        const shaped = protocolVocabularyLeaks(text, stage.files.map((file) => file.path));
+        assertExperiment(shaped.length === 0,
+          `Stage ${index + 1} ${surface} carries protocol vocabulary: ${shaped.join(", ")}`);
+      }
     }
     // A plan this builder made carries no probe wave at all, and one built before the
     // deletion carries the sealed schedule exactly. Which contract a plan is held to is
@@ -1636,12 +1706,15 @@ export function validateStagePlan(plan) {
           : probe.kind === waveKinds[position])),
       `Stage ${index + 1} probe kinds drifted from the mode plan schedule`);
     }
-    // The code word is the conversation-fact channel: exactly one per payload stage,
-    // woven into the instructions, absent from probe stages, never repeated.
-    if (stage.kind === "probe") {
-      assertExperiment(stage.codeWord === null, `Probe stage ${index + 1} carries a code word`);
+    // The code word WAS the conversation-fact channel: exactly one per payload stage,
+    // woven into the instructions, absent from probe stages, never repeated. Deleted from
+    // production 2026-08-25 with the audit traces; the laws below are the reading for
+    // sealed plans, and a plan carrying no code word at all must carry none anywhere, so a
+    // half-woven plan is refused by the same branch that grades a sealed one.
+    if (stage.kind === "probe" || !sealedCodeWordShape) {
+      assertExperiment(stage.codeWord === null, `Stage ${index + 1} carries a code word`);
       assertExperiment(stage.codeWordReissue === null,
-        `Probe stage ${index + 1} carries a code word reissue`);
+        `Stage ${index + 1} carries a code word reissue`);
     } else {
       assertExperiment(typeof stage.codeWord === "string" && CODE_WORD_PATTERN.test(stage.codeWord) &&
         stage.instructions.includes(stage.codeWord) && !seenCodeWords.has(stage.codeWord),
@@ -1781,175 +1854,8 @@ export function validateStagePlan(plan) {
   // is verified at construction and re-verified by the gate suite against a
   // real checkout.
   // -------------------------------------------------------------------------
-  const delivery = auditDelivery(plan.stages);
-  assertExperiment(Array.isArray(plan.chains) &&
-    plan.chains.length === modePlan.chainStartAfters.length,
-  "Stage plan chain count disagrees with its mode plan");
-  const chainFileNodes = new Set();
-  const chainStageNodes = new Set();
-  const linkByStage = new Map();
-  for (const [chainIndex, chain] of plan.chains.entries()) {
-    assertExperiment(exactKeys(chain, ["id", "links"]) &&
-      chain.id === AUDIT_TRACE_IDS[chainIndex] &&
-      Array.isArray(chain.links) && chain.links.length === modePlan.chainLength,
-    `Invalid audit trace shape at chain ${chainIndex + 1}`);
-    const seenNodes = new Set();
-    const claimNode = (node) => {
-      assertExperiment(!seenNodes.has(node), `${chain.id} repeats node ${node}`);
-      seenNodes.add(node);
-      if (node.startsWith("F:")) {
-        assertExperiment(!chainFileNodes.has(node), `Chains share file node ${node}`);
-        chainFileNodes.add(node);
-      } else {
-        chainStageNodes.add(Number(node.slice(2)));
-      }
-    };
-    let previousStage = 0;
-    for (const [linkIndex, link] of chain.links.entries()) {
-      assertExperiment(exactKeys(link, [
-        "index", "stage", "hop", "hopIndex", "input", "expectedAnswer",
-      ]) && link.index === linkIndex + 1 && link.hop === AUDIT_HOP_CYCLE[linkIndex % 3],
-      `Invalid link shape at ${chain.id} link ${linkIndex + 1}`);
-      const carrier = plan.stages[link.stage - 1];
-      assertExperiment(carrier && carrier.kind !== "probe" && link.stage > previousStage,
-        `${chain.id} link ${link.index} is not on a strictly later payload stage`);
-      previousStage = link.stage;
-      assertExperiment(!linkByStage.has(link.stage),
-        `Stage ${link.stage} carries two chain steps`);
-      linkByStage.set(link.stage, { chainId: chain.id, link });
-      if (linkIndex === 0) {
-        claimNode(fileNode(link.input));
-      } else {
-        assertExperiment(link.input === chain.links[linkIndex - 1].expectedAnswer,
-          `${chain.id} link ${link.index} does not consume the previous answer`);
-      }
-      if (link.hop === "SOF") {
-        assertExperiment(link.hopIndex === null &&
-          delivery.stageOfPath.get(link.input) === link.expectedAnswer &&
-          link.expectedAnswer < link.stage,
-        `${chain.id} link ${link.index} disagrees with the delivery map`);
-        claimNode(stageNode(link.expectedAnswer));
-      } else if (link.hop === "FIN") {
-        const files = delivery.filesOfStage.get(link.input) ?? [];
-        assertExperiment(Number.isSafeInteger(link.hopIndex) && link.hopIndex >= 1 &&
-          files[link.hopIndex - 1] === link.expectedAnswer && link.input < link.stage,
-        `${chain.id} link ${link.index} disagrees with the delivery map`);
-        claimNode(fileNode(link.expectedAnswer));
-      } else {
-        // A delivered INC target must precede its step even on the final link:
-        // a later delivery would name the answer in a later instruction.
-        const deliveredAt = delivery.stageOfPath.get(link.expectedAnswer);
-        assertExperiment(Number.isSafeInteger(link.hopIndex) && link.hopIndex >= 1 &&
-          link.hopIndex <= AUDIT_INCLUDE_MAX_INDEX &&
-          typeof link.expectedAnswer === "string" && link.expectedAnswer.length > 0 &&
-          (deliveredAt === undefined
-            ? link.index === modePlan.chainLength
-            : deliveredAt < link.stage),
-        `${chain.id} link ${link.index} INC target is not knowable at its step stage`);
-        claimNode(fileNode(link.expectedAnswer));
-      }
-    }
-  }
-  // Steps and links are a bijection, and every step sentence is woven into its
-  // carrier's instructions exactly as the renderer would speak it.
-  for (const stage of plan.stages) {
-    const bound = linkByStage.get(stage.ordinal);
-    if (!bound) {
-      assertExperiment(stage.chainStep === null,
-        `Stage ${stage.ordinal} carries a chain step no chain claims`);
-      continue;
-    }
-    const { chainId, link } = bound;
-    assertExperiment(stage.chainStep !== null &&
-      exactKeys(stage.chainStep, ["id", "chainId", "index", "hop", "hopIndex", "anchor"]) &&
-      stage.chainStep.id === auditStepId(chainId, link.index) &&
-      stage.chainStep.chainId === chainId && stage.chainStep.index === link.index &&
-      stage.chainStep.hop === link.hop && stage.chainStep.hopIndex === link.hopIndex &&
-      stage.chainStep.anchor === (link.index === 1 ? link.input : null) &&
-      stage.instructions.includes(auditStepSentence(stage.chainStep)),
-    `Stage ${stage.ordinal} chain step disagrees with ${chainId} link ${link.index}`);
-  }
-  const earlyLinks = plan.chains.flatMap((chain) => chain.links)
-    .filter((link) => link.stage <= modePlan.chainEarlyLaw.maxStage);
-  assertExperiment(earlyLinks.length >= modePlan.chainEarlyLaw.minLinks,
-    "Stage plan has too few early chain links for its first probe wave");
-  // Probe-side chain laws: every chain-link probe binds to a real link inside
-  // the carrier horizon, no link is probed twice, no chain twice in one wave,
-  // every wave draws from the oldest third of its eligible pool, every wave
-  // after the first revisits a probed chain, echoes target distinct chain-link
-  // probes from strictly earlier waves, the derivation control rides no chain
-  // file, and stage-binding carriers avoid chain stage nodes.
-  const probedLinkKeys = new Set();
-  const probedChains = new Set();
-  const echoedTargets = new Set();
-  const earlierChainLinkIds = new Set();
-  for (const stage of plan.stages) {
-    if (stage.kind !== "probe") continue;
-    const priorLinkKeys = new Set(probedLinkKeys);
-    const priorChains = new Set(probedChains);
-    const waveChains = new Set();
-    const waveLinkKeys = [];
-    for (const probe of stage.probes) {
-      if (probe.kind === "chain-link") {
-        const chain = plan.chains.find((candidate) => candidate.id === probe.chainId);
-        const link = chain?.links[probe.linkIndex - 1];
-        assertExperiment(link !== undefined && link.stage === probe.sourceStage &&
-          String(link.expectedAnswer) === probe.expectedAnswer &&
-          link.stage <= Math.ceil(stage.ordinal / 2),
-        `chain-link probe at stage ${stage.ordinal} disagrees with its link`);
-        const key = `${probe.chainId}:${probe.linkIndex}`;
-        assertExperiment(!probedLinkKeys.has(key), `Chain link ${key} is probed twice`);
-        assertExperiment(!waveChains.has(probe.chainId),
-          `Wave ${stage.ordinal} probes chain ${probe.chainId} twice`);
-        probedLinkKeys.add(key);
-        probedChains.add(probe.chainId);
-        waveChains.add(probe.chainId);
-        waveLinkKeys.push(key);
-      } else if (probe.kind === "echo") {
-        assertExperiment(earlierChainLinkIds.has(probe.targetProbeId) &&
-          !echoedTargets.has(probe.targetProbeId),
-        `Echo at stage ${stage.ordinal} must target a distinct earlier chain-link probe`);
-        echoedTargets.add(probe.targetProbeId);
-      } else if (probe.kind === "derivation-control") {
-        assertExperiment(delivery.stageOfPath.has(probe.sourcePath) &&
-          !chainFileNodes.has(fileNode(probe.sourcePath)),
-        `Derivation control at stage ${stage.ordinal} rides a chain file`);
-      } else if (probe.kind === "stage-binding") {
-        assertExperiment(!chainStageNodes.has(probe.sourceStage),
-          `stage-binding probe at stage ${stage.ordinal} carries a chain stage node`);
-      }
-    }
-    if (waveLinkKeys.length > 0) {
-      const eligible = plan.chains.flatMap((chain) => chain.links
-        .filter((link) => link.stage <= Math.ceil(stage.ordinal / 2) &&
-          !priorLinkKeys.has(`${chain.id}:${link.index}`))
-        .map((link) => ({ key: `${chain.id}:${link.index}`, stage: link.stage })))
-        .sort((left, right) => left.stage - right.stage);
-      const oldestThird = new Set(eligible.slice(0, Math.ceil(eligible.length / 3))
-        .map((entry) => entry.key));
-      assertExperiment(waveLinkKeys.some((key) => oldestThird.has(key)),
-        `Wave ${stage.ordinal} never draws from the oldest third of its pool`);
-      assertExperiment(priorChains.size === 0 ||
-        [...waveChains].some((chainId) => priorChains.has(chainId)),
-      `Wave ${stage.ordinal} never revisits a probed chain`);
-    }
-    for (const probe of stage.probes) {
-      if (probe.kind === "chain-link") earlierChainLinkIds.add(probe.id);
-    }
-  }
-  // A revisit instruction names an earlier stage together with its full path list,
-  // which would hand over both hop answers for any stage a chain resolves to.
-  for (const stage of plan.stages) {
-    if (stage.kind !== "revisit") continue;
-    const named = /specifically stage (\d+)/.exec(stage.instructions);
-    assertExperiment(named === null || !chainStageNodes.has(Number(named[1])),
-      `Revisit stage ${stage.ordinal} names a chain stage node`);
-  }
-  // Anti-leak scan over every INSTRUCTION SURFACE (stage instructions, probe
-  // questions, deliverable instructions; file bodies are the corpus and exempt):
-  // no path-valued link answer, and no (stage, path) pair belonging to an
-  // SOF or FIN link, may appear at or after that link's step stage. Bare stage
-  // ordinals are ordinary prose and are only refused PAIRED with their path.
+  // Every model-visible surface of the plan, in stage order: the chain anti-leak laws and
+  // the ledger occurrence laws both read it, so it is built once above both.
   const surfaces = plan.stages.map((stage) => ({
     ordinal: stage.ordinal,
     text: [
@@ -1958,19 +1864,203 @@ export function validateStagePlan(plan) {
       stage.deliverable === null ? "" : stage.deliverable.instructions,
     ].join("\n"),
   }));
-  for (const chain of plan.chains) {
-    for (const link of chain.links) {
-      const pathAnswer = typeof link.expectedAnswer === "string" ? link.expectedAnswer : null;
-      const pair = link.hop === "SOF"
-        ? { stage: link.expectedAnswer, path: link.input }
-        : link.hop === "FIN" ? { stage: link.input, path: link.expectedAnswer } : null;
-      for (const surface of surfaces) {
-        if (surface.ordinal < link.stage) continue;
-        assertExperiment(pathAnswer === null || !surface.text.includes(pathAnswer),
-          `Stage ${surface.ordinal} names the answer of ${chain.id} link ${link.index}`);
-        assertExperiment(pair === null || !(surface.text.includes(pair.path) &&
-          new RegExp(`\\bstage\\s+0*${pair.stage}\\b`, "i").test(surface.text)),
-        `Stage ${surface.ordinal} pairs ${chain.id} link ${link.index}'s stage and path`);
+  // THE AUDIT TRACES AND THE CODE WORDS ARE RETIRED FROM PRODUCTION (Shane, 2026-08-25),
+  // NOT FROM READING, exactly as the ledger and the probe waves were. A plan this harness
+  // builds carries `chains: []` and a null `codeWord`, `codeWordReissue` and `chainStep` on
+  // every stage, because both instruments could only be written in protocol vocabulary and
+  // that vocabulary told the model the run was an exam over numbered units. Every sealed
+  // plan carries them and must keep validating and grading byte for byte, so which contract
+  // a plan is held to is read from the plan's OWN shape, the way `plan.ledger` is above.
+  assertExperiment(Array.isArray(plan.chains), "Stage plan carries no chain array");
+  const sealedChainShape = plan.chains.length > 0;
+  assertExperiment(sealedChainShape ||
+    plan.stages.every((stage) => stage.chainStep === null),
+  "Stage plan carries chain steps with no chains to bind them to");
+  if (sealedChainShape) {
+    const delivery = auditDelivery(plan.stages);
+    assertExperiment(Array.isArray(plan.chains) &&
+      plan.chains.length === modePlan.sealedChainSchedule.chainStartAfters.length,
+    "Stage plan chain count disagrees with its mode plan");
+    const chainFileNodes = new Set();
+    const chainStageNodes = new Set();
+    const linkByStage = new Map();
+    for (const [chainIndex, chain] of plan.chains.entries()) {
+      assertExperiment(exactKeys(chain, ["id", "links"]) &&
+        chain.id === AUDIT_TRACE_IDS[chainIndex] &&
+        Array.isArray(chain.links) && chain.links.length === modePlan.sealedChainSchedule.chainLength,
+      `Invalid audit trace shape at chain ${chainIndex + 1}`);
+      const seenNodes = new Set();
+      const claimNode = (node) => {
+        assertExperiment(!seenNodes.has(node), `${chain.id} repeats node ${node}`);
+        seenNodes.add(node);
+        if (node.startsWith("F:")) {
+          assertExperiment(!chainFileNodes.has(node), `Chains share file node ${node}`);
+          chainFileNodes.add(node);
+        } else {
+          chainStageNodes.add(Number(node.slice(2)));
+        }
+      };
+      let previousStage = 0;
+      for (const [linkIndex, link] of chain.links.entries()) {
+        assertExperiment(exactKeys(link, [
+          "index", "stage", "hop", "hopIndex", "input", "expectedAnswer",
+        ]) && link.index === linkIndex + 1 && link.hop === AUDIT_HOP_CYCLE[linkIndex % 3],
+        `Invalid link shape at ${chain.id} link ${linkIndex + 1}`);
+        const carrier = plan.stages[link.stage - 1];
+        assertExperiment(carrier && carrier.kind !== "probe" && link.stage > previousStage,
+          `${chain.id} link ${link.index} is not on a strictly later payload stage`);
+        previousStage = link.stage;
+        assertExperiment(!linkByStage.has(link.stage),
+          `Stage ${link.stage} carries two chain steps`);
+        linkByStage.set(link.stage, { chainId: chain.id, link });
+        if (linkIndex === 0) {
+          claimNode(fileNode(link.input));
+        } else {
+          assertExperiment(link.input === chain.links[linkIndex - 1].expectedAnswer,
+            `${chain.id} link ${link.index} does not consume the previous answer`);
+        }
+        if (link.hop === "SOF") {
+          assertExperiment(link.hopIndex === null &&
+            delivery.stageOfPath.get(link.input) === link.expectedAnswer &&
+            link.expectedAnswer < link.stage,
+          `${chain.id} link ${link.index} disagrees with the delivery map`);
+          claimNode(stageNode(link.expectedAnswer));
+        } else if (link.hop === "FIN") {
+          const files = delivery.filesOfStage.get(link.input) ?? [];
+          assertExperiment(Number.isSafeInteger(link.hopIndex) && link.hopIndex >= 1 &&
+            files[link.hopIndex - 1] === link.expectedAnswer && link.input < link.stage,
+          `${chain.id} link ${link.index} disagrees with the delivery map`);
+          claimNode(fileNode(link.expectedAnswer));
+        } else {
+          // A delivered INC target must precede its step even on the final link:
+          // a later delivery would name the answer in a later instruction.
+          const deliveredAt = delivery.stageOfPath.get(link.expectedAnswer);
+          assertExperiment(Number.isSafeInteger(link.hopIndex) && link.hopIndex >= 1 &&
+            link.hopIndex <= AUDIT_INCLUDE_MAX_INDEX &&
+            typeof link.expectedAnswer === "string" && link.expectedAnswer.length > 0 &&
+            (deliveredAt === undefined
+              ? link.index === modePlan.sealedChainSchedule.chainLength
+              : deliveredAt < link.stage),
+          `${chain.id} link ${link.index} INC target is not knowable at its step stage`);
+          claimNode(fileNode(link.expectedAnswer));
+        }
+      }
+    }
+    // Steps and links are a bijection, and every step sentence is woven into its
+    // carrier's instructions exactly as the renderer would speak it.
+    for (const stage of plan.stages) {
+      const bound = linkByStage.get(stage.ordinal);
+      if (!bound) {
+        assertExperiment(stage.chainStep === null,
+          `Stage ${stage.ordinal} carries a chain step no chain claims`);
+        continue;
+      }
+      const { chainId, link } = bound;
+      assertExperiment(stage.chainStep !== null &&
+        exactKeys(stage.chainStep, ["id", "chainId", "index", "hop", "hopIndex", "anchor"]) &&
+        stage.chainStep.id === auditStepId(chainId, link.index) &&
+        stage.chainStep.chainId === chainId && stage.chainStep.index === link.index &&
+        stage.chainStep.hop === link.hop && stage.chainStep.hopIndex === link.hopIndex &&
+        stage.chainStep.anchor === (link.index === 1 ? link.input : null) &&
+        auditStepSentences(stage.chainStep).some((sentence) => stage.instructions.includes(sentence)),
+      `Stage ${stage.ordinal} chain step disagrees with ${chainId} link ${link.index}`);
+    }
+    const earlyLinks = plan.chains.flatMap((chain) => chain.links)
+      .filter((link) => link.stage <= modePlan.sealedChainSchedule.chainEarlyLaw.maxStage);
+    assertExperiment(earlyLinks.length >= modePlan.sealedChainSchedule.chainEarlyLaw.minLinks,
+      "Stage plan has too few early chain links for its first probe wave");
+    // Probe-side chain laws: every chain-link probe binds to a real link inside
+    // the carrier horizon, no link is probed twice, no chain twice in one wave,
+    // every wave draws from the oldest third of its eligible pool, every wave
+    // after the first revisits a probed chain, echoes target distinct chain-link
+    // probes from strictly earlier waves, the derivation control rides no chain
+    // file, and stage-binding carriers avoid chain stage nodes.
+    const probedLinkKeys = new Set();
+    const probedChains = new Set();
+    const echoedTargets = new Set();
+    const earlierChainLinkIds = new Set();
+    for (const stage of plan.stages) {
+      if (stage.kind !== "probe") continue;
+      const priorLinkKeys = new Set(probedLinkKeys);
+      const priorChains = new Set(probedChains);
+      const waveChains = new Set();
+      const waveLinkKeys = [];
+      for (const probe of stage.probes) {
+        if (probe.kind === "chain-link") {
+          const chain = plan.chains.find((candidate) => candidate.id === probe.chainId);
+          const link = chain?.links[probe.linkIndex - 1];
+          assertExperiment(link !== undefined && link.stage === probe.sourceStage &&
+            String(link.expectedAnswer) === probe.expectedAnswer &&
+            link.stage <= Math.ceil(stage.ordinal / 2),
+          `chain-link probe at stage ${stage.ordinal} disagrees with its link`);
+          const key = `${probe.chainId}:${probe.linkIndex}`;
+          assertExperiment(!probedLinkKeys.has(key), `Chain link ${key} is probed twice`);
+          assertExperiment(!waveChains.has(probe.chainId),
+            `Wave ${stage.ordinal} probes chain ${probe.chainId} twice`);
+          probedLinkKeys.add(key);
+          probedChains.add(probe.chainId);
+          waveChains.add(probe.chainId);
+          waveLinkKeys.push(key);
+        } else if (probe.kind === "echo") {
+          assertExperiment(earlierChainLinkIds.has(probe.targetProbeId) &&
+            !echoedTargets.has(probe.targetProbeId),
+          `Echo at stage ${stage.ordinal} must target a distinct earlier chain-link probe`);
+          echoedTargets.add(probe.targetProbeId);
+        } else if (probe.kind === "derivation-control") {
+          assertExperiment(delivery.stageOfPath.has(probe.sourcePath) &&
+            !chainFileNodes.has(fileNode(probe.sourcePath)),
+          `Derivation control at stage ${stage.ordinal} rides a chain file`);
+        } else if (probe.kind === "stage-binding") {
+          assertExperiment(!chainStageNodes.has(probe.sourceStage),
+            `stage-binding probe at stage ${stage.ordinal} carries a chain stage node`);
+        }
+      }
+      if (waveLinkKeys.length > 0) {
+        const eligible = plan.chains.flatMap((chain) => chain.links
+          .filter((link) => link.stage <= Math.ceil(stage.ordinal / 2) &&
+            !priorLinkKeys.has(`${chain.id}:${link.index}`))
+          .map((link) => ({ key: `${chain.id}:${link.index}`, stage: link.stage })))
+          .sort((left, right) => left.stage - right.stage);
+        const oldestThird = new Set(eligible.slice(0, Math.ceil(eligible.length / 3))
+          .map((entry) => entry.key));
+        assertExperiment(waveLinkKeys.some((key) => oldestThird.has(key)),
+          `Wave ${stage.ordinal} never draws from the oldest third of its pool`);
+        assertExperiment(priorChains.size === 0 ||
+          [...waveChains].some((chainId) => priorChains.has(chainId)),
+        `Wave ${stage.ordinal} never revisits a probed chain`);
+      }
+      for (const probe of stage.probes) {
+        if (probe.kind === "chain-link") earlierChainLinkIds.add(probe.id);
+      }
+    }
+    // A revisit instruction names an earlier stage together with its full path list,
+    // which would hand over both hop answers for any stage a chain resolves to.
+    for (const stage of plan.stages) {
+      if (stage.kind !== "revisit") continue;
+      const named = /specifically stage (\d+)/.exec(stage.instructions);
+      assertExperiment(named === null || !chainStageNodes.has(Number(named[1])),
+        `Revisit stage ${stage.ordinal} names a chain stage node`);
+    }
+    // Anti-leak scan over every INSTRUCTION SURFACE (stage instructions, probe
+    // questions, deliverable instructions; file bodies are the corpus and exempt):
+    // no path-valued link answer, and no (stage, path) pair belonging to an
+    // SOF or FIN link, may appear at or after that link's step stage. Bare stage
+    // ordinals are ordinary prose and are only refused PAIRED with their path.
+
+    for (const chain of plan.chains) {
+      for (const link of chain.links) {
+        const pathAnswer = typeof link.expectedAnswer === "string" ? link.expectedAnswer : null;
+        const pair = link.hop === "SOF"
+          ? { stage: link.expectedAnswer, path: link.input }
+          : link.hop === "FIN" ? { stage: link.input, path: link.expectedAnswer } : null;
+        for (const surface of surfaces) {
+          if (surface.ordinal < link.stage) continue;
+          assertExperiment(pathAnswer === null || !surface.text.includes(pathAnswer),
+            `Stage ${surface.ordinal} names the answer of ${chain.id} link ${link.index}`);
+          assertExperiment(pair === null || !(surface.text.includes(pair.path) &&
+            new RegExp(`\\bstage\\s+0*${pair.stage}\\b`, "i").test(surface.text)),
+          `Stage ${surface.ordinal} pairs ${chain.id} link ${link.index}'s stage and path`);
+        }
       }
     }
   }

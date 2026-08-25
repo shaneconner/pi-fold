@@ -19,21 +19,11 @@ import {
   EXPERIMENT_PROTOCOL_VERSION,
   EXPERIMENT_REPOS,
   assertExperiment,
-  auditDelivery,
-  auditStepId,
-  auditStepSentence,
-  buildAuditTraces,
-  buildIncludeResolver,
-  codeWordSentence,
-  codeWordReissueSentence,
   plantedWordCollisions,
-  stageCodeWordReissues,
   corpusManifestSha256,
   extractDefinitions,
   fileFacts,
-  quotedIncludeSpecs,
   seededShuffle,
-  stageCodeWords,
   stagePayloadText,
   stagePlanSha256,
   validateStagePlan,
@@ -173,26 +163,35 @@ function readInstruction(stage, files) {
   return [
     // NAMED, NOT DELIVERED (Shane, 2026-08-25). The harness used to paste the bodies in after
     // this sentence; it names the paths and the model opens them itself, so the source lands
-    // on the tool-result channel a real session uses. "delivered in this stage" would now be
-    // a lie, and the model has to be told where to look, so the wording states the checkout.
+    // on the tool-result channel a real session uses.
+    //
+    // NO PROTOCOL VOCABULARY (Shane, 2026-08-25). This closed with "Files in this stage: ..."
+    // and that word is the whole tell: it tells the model the run is a numbered sequence
+    // whose units are the thing to keep facts against, which is the premise the exam tests.
+    // A person hands over a list of files; they do not number the handover.
     `Read these files from the ${stage.repoKey} checkout at /work and build an accurate working`,
-    "model of what they do, what they depend on, and which names they export.",
-    `Files in this stage: ${files.map((file) => file.path).join(", ")}.`,
+    `model of what they do, what they depend on, and which names they export:`,
+    `${files.map((file) => file.path).join(", ")}.`,
   ].join(" ");
 }
 
+// The same ask with no protocol vocabulary in it (Shane, 2026-08-25). It used to say
+// "CROSS-REFERENCE them against material you already worked through earlier in this session,
+// specifically stage N", which names the numbering, names the session, and states that
+// earlier material is being held against the model, three tells in one sentence. The earlier
+// group is identified by its FILES, which is how a person would refer to it, and the ordinal
+// is not passed in at all any more.
 function revisitInstruction(stage, files, earlier) {
   return [
-    `Read the new files below from the checkout at /work and then CROSS-REFERENCE them against`,
-    `material you already worked through earlier in this session, specifically stage ${earlier.ordinal}`,
-    `(${earlier.paths.join(", ")}).`,
-    `New files in this stage: ${files.map((file) => file.path).join(", ")}.`,
-    "Name every call, trait, type or route that crosses between the new files and that earlier",
-    "material, and say explicitly where each earlier fact came from.",
+    `Read these files from the ${stage.repoKey} checkout at /work:`,
+    `${files.map((file) => file.path).join(", ")}.`,
+    `Then work out how they connect to this earlier group: ${earlier.paths.join(", ")}.`,
+    "Name every call, trait, type or route that crosses between the two groups, and say which",
+    "of the earlier files supplied each fact.",
   ].join(" ");
 }
 
-function deliverableInstruction(ordinal, referencesStages) {
+function deliverableInstruction() {
   return [
     // IN THE REPLY, not on disk (Shane 2026-08-21: "We're asking for deliverables
     // rather than an actual conversational workflow almost"). "Write a short
@@ -204,22 +203,20 @@ function deliverableInstruction(ordinal, referencesStages) {
     // neither mechanism under test. Naming the channel is ordinary task
     // specification, it is symmetric across arms, and it says nothing about what to
     // remember or that anything will be asked later.
-    `Reply with a short structured note (200-400 words) summarising what you now understand about the`,
-    `components read so far. It MUST cite concrete facts (file paths, identifiers, line positions)`,
-    `first seen in stage ${referencesStages.join(" and stage ")}, and it must state how each of`,
-    `those earlier facts connects to what you read in stage ${ordinal}.`,
+    //
+    // AND NO RETENTION DIRECTIVE (Shane, 2026-08-25). It used to require concrete facts
+    // "first seen in stage N and stage M" connected to "what you read in stage O", which
+    // names the numbering AND states outright that earlier material must still be held.
+    // Asking how the pieces fit together is the same analytical work with none of that said.
+    `Reply with a short structured note (200-400 words) summarising what you now understand`,
+    `about the components read so far and how the pieces fit together.`,
   ].join(" ");
 }
 
 function buildPlan({
-  repo, mode, seed, facts, codeWords, reissueWords, checkoutPaths,
-  contentSeed, querySeed,
+  repo, mode, seed, facts, contentSeed, querySeed,
 }) {
   const modePlan = EXPERIMENT_MODE_PLANS[mode];
-  assertExperiment(codeWords.length === modePlan.stageCount,
-    "Stage code words must cover every stage");
-  assertExperiment(reissueWords.length === modePlan.stageCount,
-    "Reissue code words must cover every stage");
   const eligible = facts.filter((fact) => fact.lines >= MIN_FILE_LINES && fact.lines <= MAX_FILE_LINES);
   assertExperiment(eligible.length >= modePlan.stageCount,
     `Pinned corpus has ${eligible.length} eligible files, fewer than ${modePlan.stageCount} stages`);
@@ -246,109 +243,41 @@ function buildPlan({
   const skeletons = [];
   for (let ordinal = 1; ordinal <= modePlan.stageCount; ordinal += 1) {
     const isRevisit = ordinal > modePlan.revisitEvery && ordinal % modePlan.revisitEvery === 0;
-    // The code word rides inside the instructions exactly once; the field is the
-    // ground-truth copy the run-visible plan keeps only via that woven sentence.
     skeletons.push({
       ordinal,
       kind: isRevisit ? "revisit" : "read",
       files: takeFiles(modePlan.payloadTargetChars),
-      codeWord: codeWords[ordinal - 1],
-      codeWordReissue: null,
     });
   }
 
-  // Pass 2: audit traces over the finished map. Quoted includes resolve against
-  // the WHOLE checkout, the same universe the agent resolves against.
-  const resolveInclude = buildIncludeResolver(checkoutPaths);
-  const includeTargetCache = new Map();
-  const includeTargets = (path) => {
-    if (!includeTargetCache.has(path)) {
-      const fact = byPath.get(path);
-      assertExperiment(fact, `Include reader asked for the undelivered file ${path}`);
-      includeTargetCache.set(path,
-        quotedIncludeSpecs(fact.text).map((spec) => resolveInclude(path, spec)));
-    }
-    return includeTargetCache.get(path);
-  };
-  const chains = buildAuditTraces({
-    stages: skeletons,
-    seed,
-    chainLength: modePlan.chainLength,
-    startAfters: modePlan.chainStartAfters,
-    earlyLaw: modePlan.chainEarlyLaw,
-    includeTargets,
-  });
-  const chainStepByStage = new Map();
-  const chainStageNodes = new Set();
-  // Revisit instructions resend an earlier stage's ordinal and full path list,
-  // so they must avoid every stage a chain RESOLVES to (both hop answers) and
-  // every stage that DELIVERED a chain file (a later mention of a link answer
-  // is refused by the plan's anti-leak scan).
-  const revisitExcludedStages = new Set();
-  const skeletonDelivery = auditDelivery(skeletons);
-  for (const chain of chains) {
-    for (const link of chain.links) {
-      chainStepByStage.set(link.stage, {
-        id: auditStepId(chain.id, link.index),
-        chainId: chain.id,
-        index: link.index,
-        hop: link.hop,
-        hopIndex: link.hopIndex,
-        anchor: link.index === 1 ? link.input : null,
-      });
-      if (link.hop === "SOF") {
-        chainStageNodes.add(link.expectedAnswer);
-        revisitExcludedStages.add(link.expectedAnswer);
-      }
-      if (typeof link.expectedAnswer === "string") {
-        const deliveredAt = skeletonDelivery.stageOfPath.get(link.expectedAnswer);
-        if (deliveredAt !== undefined) revisitExcludedStages.add(deliveredAt);
-      }
-    }
-  }
-
-  // Pass 2b: code word reissues, AFTER the chains, because a withdrawal names an
-  // earlier stage number and the plan's anti-leak law refuses any stage whose
-  // text carries both a chain link's stage and that link's path. Revisit
-  // instructions already obey this rule for the same reason; a withdrawal is the
-  // same shape and obeys it the same way, by declining the announcer rather than
-  // by weakening the law. Every reissueEvery-th payload stage has its word
-  // withdrawn, announced at the first legal payload stage at least reissueGap
-  // later. A stage with no legal announcer left in the run is simply not
-  // withdrawn: a correction has to be DELIVERED to be recalled.
-  const chainResolvedStages = new Set();
-  for (const chain of chains) {
-    for (const link of chain.links) {
-      // SOF answers with a stage and is anchored by a path; FIN is the reverse.
-      // Either way the link BINDS one stage to one path, and the anti-leak law
-      // refuses any text carrying both.
-      if (link.hop === "SOF") chainResolvedStages.add(link.expectedAnswer);
-      if (link.hop === "FIN") chainResolvedStages.add(link.input);
-    }
-  }
-  for (const skeleton of skeletons) {
-    if (skeleton.ordinal % modePlan.reissueEvery !== 0) continue;
-    // Excluding every chain-resolved stage is SUFFICIENT rather than merely
-    // careful: the only text a withdrawal adds is a mention of stage S, so the
-    // law can newly fire only where some link binds S to a path the announcing
-    // stage already names. A stage no link resolves to has no such path, and the
-    // announcer's own text was already legal. Predicting the paths instead
-    // failed: a chain step names its ANCHOR path in its own step sentence, not
-    // just the files that stage delivered.
-    if (chainResolvedStages.has(skeleton.ordinal)) continue;
-    const announcer = skeletons.find((candidate) =>
-      candidate.ordinal >= skeleton.ordinal + modePlan.reissueGap &&
-      candidate.codeWordReissue === null);
-    if (announcer === undefined) continue;
-    announcer.codeWordReissue = {
-      stage: skeleton.ordinal,
-      codeWord: reissueWords[skeleton.ordinal - 1],
-    };
-  }
+  // THE AUDIT TRACES AND THE CODE WORDS ARE DELETED (Shane, 2026-08-25).
+  //
+  // They were the last two instruments that could only be expressed in protocol vocabulary,
+  // and between them they wrote "AUDIT TRACE trace-a, step 02", "Audit note: the code word
+  // for stage 03 is ...", "name the 2nd file assigned by the stage you recorded as
+  // trace-a-01" and "Record it on its own line as `trace-a-02: <path>`" into the model's
+  // own instructions: 24 trace headers, 102 code-word mentions and 83 audit notes across a
+  // 64-stage plan. sol-20260825-readfull proved what that buys. Native's compaction summary
+  // came back organised as "Stage 01 analyzed ...", "Stage 02 analyzed ...", with a
+  // "Critical Context" section listing every code word with its corrections resolved, and
+  // every trace answer. (The words themselves are NOT quoted here: this file is copied into
+  // the sandbox, and the seeded-token scan catches a planted value sitting anywhere the
+  // model's own grep can reach it.) The model had correctly read
+  // the run as an exam over numbered units and was keeping an index against them, which is
+  // the premise the experiment is supposed to withhold.
+  //
+  // Nothing replaces them. Recall is measured by material a working session would actually
+  // contain: the stale artifacts, which ask the model to correct an out-of-date note, and
+  // the end block, which asks which files came in around a named one. Neither says a
+  // numbering exists, and neither can be answered by transcribing a summary's own headings.
+  //
+  // Sealed plans keep theirs and keep validating: `plan.chains`, `codeWord`, `codeWordReissue`
+  // and `chainStep` stay in the shape and stay graded, exactly as the probe waves did.
+  const chains = [];
 
   // Pass 3: instructions and payload hashes.
   const stages = [];
-  for (const { ordinal, kind, files: takenFacts, codeWord, codeWordReissue } of skeletons) {
+  for (const { ordinal, kind, files: takenFacts } of skeletons) {
     const deliverable = ordinal % modePlan.deliverableEvery === 0
       ? {
         id: `deliverable-${String(ordinal).padStart(2, "0")}`,
@@ -360,55 +289,36 @@ function buildPlan({
     if (deliverable) {
       assertExperiment(deliverable.referencesStages.length > 0,
         `Deliverable at stage ${ordinal} has no earlier stage to reference`);
-      deliverable.instructions = deliverableInstruction(ordinal, deliverable.referencesStages);
+      deliverable.instructions = deliverableInstruction();
     }
 
     const files = takenFacts;
     let instructions;
     if (kind === "revisit") {
+      // The exclusion set went with the chains: it existed only so a revisit could not name
+      // both a chain link's stage number and that link's path in one instruction.
       const earlierStage = stages.find((stage) => stage.files.length > 0 &&
-        stage.ordinal >= Math.max(1, Math.floor(ordinal / 3)) && stage.ordinal < ordinal &&
-        !revisitExcludedStages.has(stage.ordinal)) ??
-        stages.find((stage) => stage.files.length > 0 && !revisitExcludedStages.has(stage.ordinal));
-      assertExperiment(earlierStage, `Revisit stage ${ordinal} has no chain-free earlier stage`);
+        stage.ordinal >= Math.max(1, Math.floor(ordinal / 3)) && stage.ordinal < ordinal) ??
+        stages.find((stage) => stage.files.length > 0);
+      assertExperiment(earlierStage, `Revisit stage ${ordinal} has no earlier stage to name`);
       instructions = revisitInstruction({ repoKey: repo.key }, files, {
-        ordinal: earlierStage.ordinal,
         paths: earlierStage.files.map((file) => file.path),
       });
     } else {
       instructions = readInstruction({ repoKey: repo.key }, files);
     }
 
-    // Weave order is a law: base instructions, then the audit step (task state the
-    // next step consumes), then the code word sentence LAST with its withdrawal after
-    // it, so the two code-word notes still read in the order they were issued.
-    //
-    // THE LEDGER BLOCK IS GONE (Shane, 2026-08-25). It used to sit between the audit step
-    // and the code word, weaving an enumerated "audit ledger, table row N of M" sentence
-    // into the instructions. That sentence shape is exactly what a summarizer transcribes,
-    // and the sealed corpus proved it: a native run's table score WAS its summary's table
-    // content, as a set identity. The material is the stale artifacts now.
-    //
-    // The example value that stood in this comment is deliberately NOT quoted: this file
-    // is copied into the sandbox, and the seeded-token scan caught it sitting where the
-    // model's own `grep` could reach it.
-    const chainStep = chainStepByStage.get(ordinal) ?? null;
-    if (chainStep !== null) instructions = `${instructions} ${auditStepSentence(chainStep)}`;
-    if (codeWord !== null) instructions = `${instructions} ${codeWordSentence(ordinal, codeWord)}`;
-    // The withdrawal rides LAST, after this stage's own code word, so the two
-    // audit notes read in the order they were issued.
-    if (codeWordReissue !== null) {
-      instructions = `${instructions} ` +
-        `${codeWordReissueSentence(codeWordReissue.stage, codeWordReissue.codeWord)}`;
-    }
-
+    // NOTHING IS WOVEN IN AFTER THE ASK ANY MORE. The audit step, the code word and its
+    // withdrawal used to append here, in that order; all three are deleted above.
     const stage = {
       ordinal,
       kind,
       instructions,
-      codeWord,
-      codeWordReissue,
-      chainStep,
+      // Always null, for the same reason `probes` is always empty: sealed plans carry
+      // these and every reader still keys off them; nothing this builder makes fills them.
+      codeWord: null,
+      codeWordReissue: null,
+      chainStep: null,
       files: files.map((fact) => ({
         path: fact.path, sha256: fact.sha256, lines: fact.lines, chars: fact.chars, bytes: fact.bytes,
       })),
@@ -523,18 +433,14 @@ try {
   const refusedSeeds = [];
   for (;;) {
     try {
-      const codeWords = stageCodeWords(seed, EXPERIMENT_MODE_PLANS[mode].stageCount);
-      const reissueWords = stageCodeWordReissues(seed, EXPERIMENT_MODE_PLANS[mode].stageCount);
-      // Every planted set faces the collision scan: a reissued word or a ledger
-      // token that already exists in the checkout is answerable from disk
-      // exactly as an original code word would be.
-      const checkoutDefinitions = collectCheckoutDefinitions(checkoutDir,
-        [...codeWords, ...reissueWords]);
+      // The collision scan outlives the code words: it now guards the ONE planted set left,
+      // the seeded values the stale artifacts carry, which are answerable from disk exactly
+      // as a code word would have been if the checkout already contained them.
+      collectCheckoutDefinitions(checkoutDir, []);
       plan = buildPlan({
-        repo, mode, seed, facts, codeWords, reissueWords,
+        repo, mode, seed, facts,
         contentSeed: hiddenMassSeeds.contentSeed,
         querySeed: hiddenMassSeeds.querySeed,
-        checkoutPaths: checkoutDefinitions.paths,
       });
       break;
     } catch (error) {
