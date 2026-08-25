@@ -2128,11 +2128,14 @@ try {
     "the stager must generate one seeded code word per stage");
   assert(staging.includes("codeWordSentence(ordinal, codeWord)"),
     "the stager must weave the code word into the stage instructions");
-  assert(staging.includes("collectCheckoutDefinitions(checkoutDir,\n        [...codeWords, ...reissueWords, ...ledgerTokensOf(ledger)])") &&
+  // The ledger-token half of the collision scan went with the ledger on 2026-08-25:
+  // nothing plants `lv-` tokens any more, so scanning for them would assert over an empty
+  // set. Code words are still planted and still scanned.
+  assert(staging.includes("collectCheckoutDefinitions(checkoutDir,\n        [...codeWords, ...reissueWords])") &&
     staging.includes("uniqueIdentifierIndex(checkoutDefinitions.entries)") &&
     staging.includes("checkoutPaths: checkoutDefinitions.paths"),
-  "symbol uniqueness, planted-word collisions (code words AND ledger tokens), and include " +
-  "resolution must be judged over the whole checkout");
+  "symbol uniqueness, planted-word collisions, and include resolution must be judged " +
+  "over the whole checkout");
   assert(staging.includes("const codeWord = isProbe ? null : codeWords[ordinal - 1];"),
     "probe stages must carry no code word");
   assert(staging.includes("usedCarrierStages"),
@@ -4760,9 +4763,21 @@ try {
   const stockSession = createCodingTools(PROJECT).map((tool) => tool.name).sort();
   assert.deepEqual([...PI_STOCK_TOOLS].sort(), stockSession,
     "the arms no longer carry exactly what a stock Pi session ships");
+  // ONE harness tool, not two. `ledger_record` was deleted 2026-08-25: it stood in the
+  // list every turn saying "Record the result of an assigned ledger task", which told the
+  // model continuously that recording derived facts was the graded activity. The stale
+  // artifact supplies its one irreplaceable property (a record fixed at record time)
+  // through an ordinary file edit. `repo_stage` stays until delivery moves to user
+  // messages, and it is arm-symmetric.
   assert.deepEqual([...EXPERIMENT_ALLOWED_TOOLS],
-    [...PI_STOCK_TOOLS, EXPERIMENT_TOOL_NAME, EXPERIMENT_LEDGER_TOOL_NAME],
-    "the surface is stock Pi plus the two arm-symmetric harness tools, and nothing else");
+    [...PI_STOCK_TOOLS, EXPERIMENT_TOOL_NAME],
+    "the surface is stock Pi plus the one arm-symmetric delivery tool, and nothing else");
+  assert(!EXPERIMENT_ALLOWED_TOOLS.includes(EXPERIMENT_LEDGER_TOOL_NAME),
+    "the deleted record tool is permitted again");
+  const extensionSurface = readFileSync(
+    join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"), "utf8");
+  assert(!extensionSurface.includes("Record the result of an assigned ledger task"),
+    "the extension still registers a tool that tells the model to record results");
   // The law this gate protects is SYMMETRY, not scarcity: no arm may hold a
   // recovery mechanism the other lacks. Restoring six tools to BOTH arms keeps it.
   assert(EXPERIMENT_ALLOWED_TOOLS.includes("bash"),
@@ -5552,16 +5567,26 @@ try {
   assert.deepEqual(plantedWordCollisions(
     `int x; /* ${fullTokens[0]} */ cw-aaaaaa`, [fullTokens[0], "cw-bbbbbb"]), [fullTokens[0]]);
   assert.deepEqual(plantedWordCollisions("clean text", fullTokens), []);
-  // Run-config laws: an arm config carries the schedule or refuses, a
-  // closed-book config carrying one refuses as a no-referent key.
+  // Run-config laws after the ledger's retirement (2026-08-25). An ARM run must still
+  // carry ONE graded instrument, or it burns six hours measuring nothing, but WHICH one is
+  // now open: a sealed v4 config carries ledger tasks, a v5 config carries stale artifacts.
+  // What is still refused is a MALFORMED schedule, and a config carrying neither.
   assert.throws(() => validateExperimentRunConfig(
     (({ ledgerTasks: _tasks, ...rest }) => rest)(runConfig)),
-  /must carry the plan's ledger task schedule/);
+  /neither ledger tasks nor stale artifacts/);
+  validateExperimentRunConfig({
+    ...(({ ledgerTasks: _tasks, ...rest }) => rest)(runConfig),
+    staleArtifacts: [{
+      id: "af-01", schema: "manifest", askStage: 4, path: "notes/review-passes.md",
+      request: "bring this up to date where you can", text: "# Review passes\n",
+      fieldKeys: ["pass-01"],
+    }],
+  });
   assert.throws(() => validateExperimentRunConfig({ ...runConfig, ledgerTasks: [] }),
-    /must carry the plan's ledger task schedule/);
+    /must carry it whole/);
   assert.throws(() => validateExperimentRunConfig({
     ...runConfig, ledgerTasks: [{ id: "lt-01", stage: 99 }],
-  }), /must carry the plan's ledger task schedule/);
+  }), /must carry it whole/);
   assert.throws(() => validateExperimentRunConfig((({ guidance: _g, ...rest }) => rest)({
     ...runConfig, sessionType: EXPERIMENT_CLOSED_BOOK_LABEL, arm: EXPERIMENT_CLOSED_BOOK_LABEL,
   })), /arm-condition keys with no referent/);
@@ -5604,16 +5629,21 @@ try {
     ledgerTasks: [{ id: "lt-01", stage: 1 }],
   }).factory(mockPi);
   const stageTool = tools.get(EXPERIMENT_TOOL_NAME);
-  const ledgerTool = tools.get(EXPERIMENT_LEDGER_TOOL_NAME);
-  assert(stageTool && ledgerTool, "both workload tools must register on every arm");
-  const earlyRecord = await ledgerTool.execute("t-early", { id: "lt-01", value: "lv-aaaaaa" });
-  assert(earlyRecord.isError &&
-    /No ledger task with id lt-01 has been assigned/.test(earlyRecord.content[0].text));
-  const fictionalRecord = await ledgerTool.execute("t-fictional", { id: "lt-99", value: "x" });
-  assert(fictionalRecord.isError);
-  assert.equal(earlyRecord.content[0].text.replace("lt-01", "lt-99"),
-    fictionalRecord.content[0].text,
-    "one refusal for future and fictional ids, so a guess can never confirm a task exists");
+  assert(stageTool, "the delivery tool must register on every arm");
+  // `ledger_record` AND ITS PROGRESSION GATE ARE DELETED (Shane, 2026-08-25: "I'd get rid
+  // of them for sure"). What this gate used to prove -- an echo restating a record
+  // verbatim, a duplicate refused naming the standing value, a fetch refused until the
+  // owed task was recorded, the refusal naming task and tool and repair -- described a
+  // tool sitting in the model's list EVERY TURN saying "Record the result of an assigned
+  // ledger task". That is a standing instruction to hoard derived facts, delivered
+  // continuously, which hands back most of what the de-priming bought.
+  //
+  // Its one irreplaceable property, a record fixed AT RECORD TIME (what made the
+  // faithful-to-wrong cell unfakeable), is supplied by the stale artifact instead: the
+  // model writes into the note and the harness snapshots it at collection. Gate 111 owns
+  // that. So the live assertions here become an ABSENCE, driven through the same factory.
+  assert.equal(tools.get(EXPERIMENT_LEDGER_TOOL_NAME), undefined,
+    "an arm still registers the record tool");
   const serveStage = async (stage, key, nextKey, toolCallId) => {
     const requestPath = join(runDir, "ipc", "requests", `stage-${String(stage).padStart(2, "0")}.json`);
     const responsePath = join(runDir, "ipc", "responses", `stage-${String(stage).padStart(2, "0")}.json`);
@@ -5646,33 +5676,25 @@ try {
   };
   const stageOne = await serveStage(1, keyOne, keyTwo, "t-stage-1");
   assert(!stageOne.isError, "stage 1 has no assigned tasks and must deliver");
-  const gatedFetch = await stageTool.execute("t-stage-2-gated", { key: keyTwo });
-  assert(gatedFetch.isError &&
-    /ledger task\(s\) lt-01/.test(gatedFetch.content[0].text) &&
-    gatedFetch.content[0].text.includes(EXPERIMENT_LEDGER_TOOL_NAME) &&
-    /call again with the same key/.test(gatedFetch.content[0].text),
-  "the gate names the owed task, the tool and the repair");
-  const recorded = await ledgerTool.execute("t-record", { id: "lt-01", value: "lv-123456" });
-  assert(!recorded.isError);
-  assert.equal(recorded.content[0].text, "Recorded ledger task lt-01: lv-123456",
-    "the echo restates the record verbatim");
-  const duplicate = await ledgerTool.execute("t-duplicate", { id: "lt-01", value: "lv-999999" });
-  assert(duplicate.isError && /already recorded as lv-123456/.test(duplicate.content[0].text),
-    "a second record is refused naming the standing one");
+  // Stage 2 is served with lt-01 assigned and NOTHING recorded: the deleted gate would
+  // have refused it by name, so this is the removal proven rather than assumed.
   const stageTwo = await serveStage(2, keyTwo, "3".repeat(64), "t-stage-2");
-  assert(!stageTwo.isError, "the gate must release on the SAME key once the record exists");
+  assert(!stageTwo.isError,
+    "a stage is still refused for an unrecorded task after the gate was removed");
+  assert(!/ledger task|recorded result|record each/i.test(stageTwo.content[0].text ?? ""),
+    "the delivery still tells the model to record a result");
+  // No record and no refusal reach the event stream any more, because neither exists.
+  // Asserted rather than assumed: a leftover code path emitting either would mean the
+  // model still saw the channel.
   const gateEvents = readFileSync(join(runDir, "worker-events.jsonl"), "utf8")
     .split("\n").filter(Boolean).map((line) => JSON.parse(line));
-  const recordEvent = gateEvents.find((event) => event.kind === "ledger-record");
-  assert(recordEvent && recordEvent.details.id === "lt-01" &&
-    recordEvent.details.value === "lv-123456" && recordEvent.details.afterStage === 1,
-  "the record lands in the hash-chained event ledger with its value");
-  const refusalEvent = gateEvents.find((event) => event.kind === "ledger-gate-refusal");
-  assert(refusalEvent && refusalEvent.details.owed.includes("lt-01") &&
-    refusalEvent.details.stage === 2, "the refusal lands as its own event");
+  assert(!gateEvents.some((event) =>
+    event.kind === "ledger-record" || event.kind === "ledger-record-refused" ||
+    event.kind === "ledger-gate-refusal"),
+  "the deleted record channel still emits events");
   assert(!existsSync(join(runDir, "failure-latch.jsonl")) ||
     readFileSync(join(runDir, "failure-latch.jsonl"), "utf8").trim() === "",
-  "a correctable refusal latches nothing");
+  "the deleted gate still latches");
   rmSync(runDir, { recursive: true, force: true });
   // The frozen-seed law at the stager, and the supervisor forwarding ids and
   // stages only: expected values never reach the run config.
@@ -5681,12 +5703,22 @@ try {
     "the stager must read the frozen seed file");
   assert(!staging70.includes("--content-seed"),
     "the content seed is frozen in the file, never a flag");
-  assert(staging70.includes("ledgerSentencesForStage(ledger, ordinal)"),
-    "the stager must weave through the shared helper the validator re-derives");
+  // THE STAGER NO LONGER WEAVES A LEDGER AT ALL. It used to push "Audit ledger, table row
+  // 01 of 16: lv-a56807" into the instructions, and that sentence shape is what a
+  // summarizer transcribes: the sealed corpus showed a native run's table score WAS its
+  // summary's table content, as a set identity. Asserted as an absence so a revival is a
+  // failure rather than a quiet regression.
+  assert(!staging70.includes("ledgerSentencesForStage("),
+    "the stager weaves ledger sentences again");
+  assert(!staging70.includes("buildLedger("), "the stager builds a ledger again");
   const supervisor70 = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment.mjs"), "utf8");
-  assert(supervisor70.includes(
-    "ledgerTasks: plan.ledger.joins.map((join) => ({ id: join.id, stage: join.taskStage }))"),
-  "the supervisor must forward the task schedule as ids and stages only");
+  // The schedule is forwarded ONLY while a sealed-corpus plan still carries a ledger, and
+  // still as ids and stages only when it does.
+  assert(supervisor70.includes("plan.ledger === undefined ? {} : {") &&
+    supervisor70.includes(
+      "ledgerTasks: plan.ledger.joins.map((join) => ({ id: join.id, stage: join.taskStage }))"),
+  "the supervisor must forward the task schedule as ids and stages only, and only when the " +
+  "plan still carries a ledger");
   checks.theSeededLedgerWeavesThreeChannelsAndGatesProgressionOnRecords = true;
 }
 

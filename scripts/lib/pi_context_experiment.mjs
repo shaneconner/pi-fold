@@ -413,8 +413,13 @@ export const EXPERIMENT_LEDGER_TOOL_NAME = "ledger_record";
 // which is the same error as the subtraction, pointing the other way. `bash`
 // covers what they do and is the thing a real session actually has.
 export const PI_STOCK_TOOLS = Object.freeze(["read", "bash", "edit", "write"]);
+// The four stock Pi tools plus the delivery channel. `ledger_record` was the fifth until
+// 2026-08-25; it is deleted, not merely unregistered, so a run cannot be configured back
+// into carrying it. `EXPERIMENT_LEDGER_TOOL_NAME` survives as a NAME ONLY, because the
+// sealed corpus's tool-result ledgers and worker events are full of it and every reader of
+// those runs still has to recognise it.
 export const EXPERIMENT_ALLOWED_TOOLS = Object.freeze([
-  ...PI_STOCK_TOOLS, EXPERIMENT_TOOL_NAME, EXPERIMENT_LEDGER_TOOL_NAME,
+  ...PI_STOCK_TOOLS, EXPERIMENT_TOOL_NAME,
 ]);
 
 // READ CONTAINMENT (Shane 2026-08-14). Pi's read tool resolves any path against
@@ -1766,9 +1771,9 @@ export function validateStagePlan(plan) {
   // pre-ledger plans did through the v3 bump.
   assertExperiment(keysWithin(plan, [
     "version", "mode", "repo", "seed", "stageCount", "stageIntervalMs", "watchdogMs",
-    "heartbeatMs", "corpus", "stages", "chains", "ledger", "probeCount", "deliverableCount",
+    "heartbeatMs", "corpus", "stages", "chains", "probeCount", "deliverableCount",
     "planSha256",
-  ], ["staleArtifacts", "endBlockAdjacency"]), "Invalid stage plan shape");
+  ], ["ledger", "staleArtifacts", "endBlockAdjacency"]), "Invalid stage plan shape");
   assertExperiment(plan.version === EXPERIMENT_PROTOCOL_VERSION, "Stage plan protocol version drifted");
   assertExperiment(EXPERIMENT_MODES.includes(plan.mode), "Invalid stage plan mode");
   const modePlan = EXPERIMENT_MODE_PLANS[plan.mode];
@@ -2153,34 +2158,47 @@ export function validateStagePlan(plan) {
   // stage, every sentence exactly once across every instruction surface, and
   // every seeded token appearing nowhere outside its own sentences.
   // -------------------------------------------------------------------------
-  assertExperiment(plan.ledger !== null && typeof plan.ledger === "object" &&
-    typeof plan.ledger.contentSeed === "string", "Stage plan carries no ledger");
-  const rederivedLedger = buildLedger({ mode: plan.mode, contentSeed: plan.ledger.contentSeed });
-  assertExperiment(JSON.stringify(plan.ledger) === JSON.stringify(rederivedLedger),
-    "Stage plan ledger is not its own content seed's derivation");
+  // THE LEDGER IS RETIRED FROM PRODUCTION (Shane, 2026-08-25), NOT FROM READING. A v5 plan
+  // carries no ledger at all: its material is the stale artifacts, and the ledger's own
+  // shape was what let a summary transcribe the exam. Every sealed v4 plan still carries
+  // one and must keep validating, adjudicating and re-sweeping byte for byte, so the whole
+  // block below is guarded rather than deleted. The same is true of `buildLedger`,
+  // `ledgerSentencesForStage`, `endBlockPrompt` and the grading lenses: they are readers of
+  // an immutable corpus now, not producers.
   const occurrences = (haystack, needle) => haystack.split(needle).length - 1;
   const allSurfaceText = surfaces.map((surface) => surface.text).join("\n");
-  const ledgerSentences = [];
-  for (const stage of plan.stages) {
-    const sentences = ledgerSentencesForStage(plan.ledger, stage.ordinal);
-    if (stage.kind === "probe") {
-      assertExperiment(sentences.length === 0, `Probe stage ${stage.ordinal} was dealt ledger rows`);
+  if (plan.ledger !== undefined) {
+    assertExperiment(plan.ledger !== null && typeof plan.ledger === "object" &&
+      typeof plan.ledger.contentSeed === "string", "Stage plan carries a malformed ledger");
+    const rederivedLedger = buildLedger({ mode: plan.mode, contentSeed: plan.ledger.contentSeed });
+    assertExperiment(JSON.stringify(plan.ledger) === JSON.stringify(rederivedLedger),
+      "Stage plan ledger is not its own content seed's derivation");
+    const ledgerSentences = [];
+    for (const stage of plan.stages) {
+      const sentences = ledgerSentencesForStage(plan.ledger, stage.ordinal);
+      if (stage.kind === "probe") {
+        assertExperiment(sentences.length === 0, `Probe stage ${stage.ordinal} was dealt ledger rows`);
+      }
+      for (const sentence of sentences) {
+        assertExperiment(stage.instructions.includes(sentence),
+          `Stage ${stage.ordinal} does not carry its ledger sentence: ${sentence}`);
+        ledgerSentences.push(sentence);
+      }
     }
-    for (const sentence of sentences) {
-      assertExperiment(stage.instructions.includes(sentence),
-        `Stage ${stage.ordinal} does not carry its ledger sentence: ${sentence}`);
-      ledgerSentences.push(sentence);
+    for (const sentence of ledgerSentences) {
+      assertExperiment(occurrences(allSurfaceText, sentence) === 1,
+        `Ledger sentence appears ${occurrences(allSurfaceText, sentence)} times: ${sentence}`);
+    }
+    const ledgerText = ledgerSentences.join("\n");
+    for (const token of new Set(ledgerTokensOf(plan.ledger))) {
+      assertExperiment(occurrences(allSurfaceText, token) === occurrences(ledgerText, token),
+        `Ledger token ${token} appears outside its own sentences`);
     }
   }
-  for (const sentence of ledgerSentences) {
-    assertExperiment(occurrences(allSurfaceText, sentence) === 1,
-      `Ledger sentence appears ${occurrences(allSurfaceText, sentence)} times: ${sentence}`);
-  }
-  const ledgerText = ledgerSentences.join("\n");
-  for (const token of new Set(ledgerTokensOf(plan.ledger))) {
-    assertExperiment(occurrences(allSurfaceText, token) === occurrences(ledgerText, token),
-      `Ledger token ${token} appears outside its own sentences`);
-  }
+  // A plan must carry ONE graded instrument. Neither is the shape of a plan that would run
+  // and measure nothing, and it is worth refusing at staging rather than six hours later.
+  assertExperiment(plan.ledger !== undefined || plan.staleArtifacts !== undefined,
+    "Stage plan carries neither a ledger nor stale artifacts, so it grades nothing");
   assertExperiment(plan.planSha256 === stagePlanSha256(plan), "Stage plan hash does not cover its own body");
   return plan;
 }
@@ -2514,12 +2532,20 @@ export function validateExperimentRunConfig(value) {
   // channel exists to end. Ids and stages only, never expected values: grading
   // is post-hoc and the worker process hosts the model. Closed-book exclusion
   // lives with the other no-referent keys below.
-  assertExperiment(value.sessionType === EXPERIMENT_CLOSED_BOOK_LABEL ||
+  // The ledger task schedule is OPTIONAL as of 2026-08-25: the ledger is retired from
+  // production and a v5 arm config carries stale artifacts instead. A config that carries
+  // one is still validated whole, because every sealed v4 config carries one and they must
+  // keep adjudicating; what is refused is a MALFORMED schedule, not an absent one.
+  assertExperiment(value.ledgerTasks === undefined ||
     (Array.isArray(value.ledgerTasks) && value.ledgerTasks.length > 0 &&
       value.ledgerTasks.every((task) => exactKeys(task, ["id", "stage"]) &&
         typeof task.id === "string" && task.id.length > 0 &&
         Number.isSafeInteger(task.stage) && task.stage >= 1 && task.stage <= value.stageCount)),
-  "An arm run config must carry the plan's ledger task schedule");
+  "An arm run config carrying a ledger task schedule must carry it whole");
+  // But an arm run must carry ONE graded instrument, or it measures nothing for six hours.
+  assertExperiment(value.sessionType === EXPERIMENT_CLOSED_BOOK_LABEL ||
+    value.ledgerTasks !== undefined || value.staleArtifacts !== undefined,
+  "An arm run config carries neither ledger tasks nor stale artifacts, so it grades nothing");
   // The stale-artifact schedule, on the same terms. Optional while the ledger and the
   // artifacts coexist: a v4 plan carries no asks and must keep adjudicating, and a v5 plan
   // that carries them must carry them WHOLE, because a half-declared drop is an artifact
@@ -3103,6 +3129,32 @@ export function endBlockQuestions(ledger, querySeed) {
     withdrawnAnswer: null,
   });
   return questions;
+}
+
+/**
+ * The v5 end block: adjacency over the held-out passes.
+ *
+ * Asked in the same conversational register as the ledger's, and for the same reason (the
+ * exam must not announce itself), but about a relation NO in-run ask touched. Shane
+ * 2026-08-25: "they will be primed to capture something once asked about a type of thing",
+ * so holding out the SUBJECTS is not enough on its own; the relation is held out too.
+ *
+ * It asks for any two files rather than a whole pass, because passes run from two files to
+ * nine and an exact-set answer would score pass width rather than memory.
+ */
+export function endBlockAdjacencyPrompt(questions) {
+  assertExperiment(Array.isArray(questions) && questions.length > 0,
+    "The end block needs at least one adjacency question");
+  return [
+    [
+      "Before we wrap up, a few loose ends I want to get straight in my head. For each one,",
+      "name any two files if you can, on its own line as `<item-id>: <file>, <file>`. If you",
+      "cannot place one, say so rather than guessing at it.",
+    ].join(" "),
+    "",
+    ...questions.map((item) =>
+      `- ${item.id}: which files came in just ${item.side} the batch that had ${item.anchor} in it?`),
+  ].join("\n");
 }
 
 export function endBlockPrompt(ledger, querySeed) {

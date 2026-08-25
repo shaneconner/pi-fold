@@ -29,12 +29,9 @@ import {
   buildDerivationControlProbes,
   buildEchoProbes,
   buildIncludeResolver,
-  buildLedger,
   buildProbes,
   codeWordSentence,
   codeWordReissueSentence,
-  ledgerSentencesForStage,
-  ledgerTokensOf,
   plantedWordCollisions,
   stageCodeWordReissues,
   corpusManifestSha256,
@@ -231,7 +228,7 @@ function deliverableInstruction(ordinal, referencesStages) {
 }
 
 function buildPlan({
-  repo, mode, seed, facts, codeWords, reissueWords, ledger, uniqueIdentifiers, checkoutPaths,
+  repo, mode, seed, facts, codeWords, reissueWords, uniqueIdentifiers, checkoutPaths,
   contentSeed, querySeed,
 }) {
   const modePlan = EXPERIMENT_MODE_PLANS[mode];
@@ -468,14 +465,20 @@ function buildPlan({
     }
 
     // Weave order is a law: base instructions, then the audit step (task state the
-    // next step consumes), then the ledger block in ledgerSentencesForStage's own
-    // canonical order, then the code word sentence LAST with its withdrawal after
+    // next step consumes), then the code word sentence LAST with its withdrawal after
     // it, so the two code-word notes still read in the order they were issued.
+    //
+    // THE LEDGER BLOCK IS GONE (Shane, 2026-08-25). It used to sit between the audit step
+    // and the code word, weaving an enumerated "audit ledger, table row N of M" sentence
+    // into the instructions. That sentence shape is exactly what a summarizer transcribes,
+    // and the sealed corpus proved it: a native run's table score WAS its summary's table
+    // content, as a set identity. The material is the stale artifacts now.
+    //
+    // The example value that stood in this comment is deliberately NOT quoted: this file
+    // is copied into the sandbox, and the seeded-token scan caught it sitting where the
+    // model's own `grep` could reach it.
     const chainStep = chainStepByStage.get(ordinal) ?? null;
     if (chainStep !== null) instructions = `${instructions} ${auditStepSentence(chainStep)}`;
-    for (const sentence of ledgerSentencesForStage(ledger, ordinal)) {
-      instructions = `${instructions} ${sentence}`;
-    }
     if (codeWord !== null) instructions = `${instructions} ${codeWordSentence(ordinal, codeWord)}`;
     // The withdrawal rides LAST, after this stage's own code word, so the two
     // audit notes read in the order they were issued.
@@ -546,7 +549,6 @@ function buildPlan({
     },
     stages,
     chains,
-    ledger,
     // THE v5 STALE ARTIFACTS (2026-08-25). Built from the plan's own stages and chains
     // once the geometry exists, because every subject is a pass that actually happened and
     // every truth is read from what that pass delivered. Both seeds are the FROZEN ones,
@@ -583,9 +585,9 @@ try {
   const mirrorDir = join(campaignDir, "repo.git");
   cloneAtCommit(repo, mirrorDir, checkoutDir);
   const facts = collectSourceFiles(repo, checkoutDir).map((path) => fileFacts(checkoutDir, path));
-  // The ledger rides the frozen content seed, never the campaign seed: the same
-  // hidden mass appears in every campaign this checkout stages, and the seed
-  // redraw loop below can never re-roll it.
+  // The hidden mass rides the FROZEN seeds, never the campaign seed, so the same material
+  // appears in every campaign this checkout stages and the seed redraw loop below can
+  // never re-roll it.
   const hiddenMassSeeds = JSON.parse(readFileSync(HIDDEN_MASS_SEEDS_PATH, "utf8"));
   assertExperiment(/^[0-9a-f]{16,64}$/.test(hiddenMassSeeds.contentSeed ?? ""),
     `${HIDDEN_MASS_SEEDS_PATH} carries no contentSeed`);
@@ -594,7 +596,7 @@ try {
   // and no selection can be tuned to a readout.
   assertExperiment(/^[0-9a-f]{16,64}$/.test(hiddenMassSeeds.querySeed ?? ""),
     `${HIDDEN_MASS_SEEDS_PATH} carries no querySeed`);
-  const ledger = buildLedger({ mode, contentSeed: hiddenMassSeeds.contentSeed });
+
   // Chain construction and the code-word collision scan both refuse on bad seeds
   // (roughly half of smoke seeds are chain-unconstructible on the real corpus). An
   // undrawn seed is redrawn up to a bound and every refusal is recorded; a pinned
@@ -610,9 +612,9 @@ try {
       // token that already exists in the checkout is answerable from disk
       // exactly as an original code word would be.
       const checkoutDefinitions = collectCheckoutDefinitions(checkoutDir,
-        [...codeWords, ...reissueWords, ...ledgerTokensOf(ledger)]);
+        [...codeWords, ...reissueWords]);
       plan = buildPlan({
-        repo, mode, seed, facts, codeWords, reissueWords, ledger,
+        repo, mode, seed, facts, codeWords, reissueWords,
         contentSeed: hiddenMassSeeds.contentSeed,
         querySeed: hiddenMassSeeds.querySeed,
         uniqueIdentifiers: uniqueIdentifierIndex(checkoutDefinitions.entries),

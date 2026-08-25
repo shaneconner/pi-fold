@@ -33,6 +33,7 @@ import {
   armRuntimeConfiguration,
   assertExperiment,
   corpusManifestSha256,
+  endBlockAdjacencyPrompt,
   endBlockPrompt,
   stagePayloadText,
   validateExperimentRunConfig,
@@ -491,7 +492,12 @@ async function run() {
         // The ledger task schedule: ids and stages only, never expected values,
         // so the extension can gate stage progression on recorded results while
         // grading stays post-hoc against the plan the supervisor keeps.
-        ledgerTasks: plan.ledger.joins.map((join) => ({ id: join.id, stage: join.taskStage })),
+        // The ledger task schedule, only while a sealed-corpus plan still carries a
+        // ledger. A v5 plan has none: `ledger_record` is deleted and the artifacts are the
+        // graded instrument.
+        ...(plan.ledger === undefined ? {} : {
+          ledgerTasks: plan.ledger.joins.map((join) => ({ id: join.id, stage: join.taskStage })),
+        }),
         // The stale artifacts, on the same terms: the schedule and the rendered file the
         // extension plants, never the truth. The FIELD KEYS travel because the extension
         // records which fields an ask covered; the values they are graded against stay
@@ -580,9 +586,16 @@ async function run() {
   // text rather than the seed that derives it. Both are WRITTEN INTO the harness
   // copy, so the deletion that removes the harness source removes them too.
   writeJsonExclusive(join(harnessDir, "plan.json"), sandboxPlan(plan));
+  // THE END BLOCK IS THE ADJACENCY BLOCK on a v5 plan, and the ledger's on a sealed v4
+  // one. Both are composed HERE and carried as text, so the worker never holds the
+  // material that derives the questions (gate 71's law), and both read exactly as a person
+  // tidying up loose ends rather than as an exam.
+  const composedEndBlock = closedBook ? undefined
+    : plan.endBlockAdjacency !== undefined
+      ? endBlockAdjacencyPrompt(plan.endBlockAdjacency)
+      : endBlockPrompt(plan.ledger, hiddenMassSeeds.querySeed);
   writeJsonExclusive(join(harnessDir, "config.json"), sandboxConfig(
-    { ...config, sessionDir },
-    closedBook ? undefined : endBlockPrompt(plan.ledger, hiddenMassSeeds.querySeed)));
+    { ...config, sessionDir }, composedEndBlock));
 
   const stdoutFd = openSync(join(runDir, "worker.stdout.log"), "wx", 0o600);
   const stderrFd = openSync(join(runDir, "worker.stderr.log"), "wx", 0o600);
