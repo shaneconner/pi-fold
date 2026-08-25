@@ -10335,4 +10335,276 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   checks.fenceOutcomeAwaitedNotAssumed = true;
 }
 
+
+// ---------------------------------------------------------------------------
+// GATE 108 - the stale-artifact geometry, and the re-injection it exists to bound.
+//
+// The v5 graded instrument (scripts/lib/pi_context_artifacts.mjs) replaces the seeded
+// ledger because on 2026-08-25 the sealed corpus showed a native run's table score IS its
+// compaction summary's table content, as a SET identity: nativefence rep4 carried rows
+// {1..7} and scored exactly {1..7}. The ledger's shape is what the ratchet transcribes,
+// so 26 of 30 points measured transcription rather than recall.
+//
+// The replacement material is stage membership, measured on the same run's final summary
+// at 70 of 263 files (26.6 percent) against the ledger's 16 of 16, and, decisively, with
+// 14 DROPS AFTER CAPTURE against the ledger's 0: the PRESERVE rule keeps key-value content
+// permanently and re-compresses incidental work description out of existence, so the
+// ratchet law is shape-specific and this shape escapes it.
+//
+// But an artifact shows the model most of the truth in order to ask which parts are wrong,
+// so every ask RE-INJECTS its own subjects. Three bounds make that survivable and this
+// gate is all three: windows are disjoint, a non-empty held-out set is touched by no ask,
+// and no subject is asked about before the session has reached it. The fourth assertion is
+// the one the generator itself failed on its first real plan: a seeded shuffle leaves fixed
+// points, and a field planted with its own truth scores a correction for a model that never
+// touched the file. The gate drives the pre-fix shuffle and proves it is refused.
+// ---------------------------------------------------------------------------
+{
+  const artifacts = await import(pathToFileURL(join(PROJECT, "scripts", "lib", "pi_context_artifacts.mjs")));
+  const seeds = JSON.parse(readFileSync(join(PROJECT, "docs", "fold_vs_compaction", "hidden-mass-seeds.json"), "utf8"));
+
+  // A plan shaped like the real one: files on every stage but the probe ordinals, which
+  // carry none and must therefore never be anyone's subject.
+  const stages = [];
+  for (let ordinal = 1; ordinal <= 64; ordinal += 1) {
+    const probe = ordinal % 16 === 0;
+    stages.push({
+      ordinal,
+      kind: probe ? "probe" : "read",
+      files: probe ? [] : [
+        { path: `lib/f${ordinal}a.c`, lines: 10 },
+        { path: `lib/f${ordinal}b.c`, lines: 10 },
+      ],
+    });
+  }
+  const chains = [{
+    id: "trace-a",
+    links: [
+      { index: 1, stage: 3, hop: "INC", input: "lib/f3a.c", expectedAnswer: "lib/f5a.c" },
+      { index: 2, stage: 9, hop: "INC", input: "lib/f9a.c", expectedAnswer: "lib/f11a.c" },
+      { index: 3, stage: 21, hop: "INC", input: "lib/f21a.c", expectedAnswer: "lib/f23a.c" },
+      { index: 4, stage: 33, hop: "INC", input: "lib/f33a.c", expectedAnswer: "lib/f35a.c" },
+      { index: 5, stage: 45, hop: "SOF", input: "lib/f45a.c", expectedAnswer: 1 },
+    ],
+  }];
+  const inputs = {
+    stages, chains, contentSeed: seeds.contentSeed, querySeed: seeds.querySeed, fieldCount: 5,
+  };
+  const built = artifacts.buildStaleArtifacts({ ...inputs, askCount: 4 });
+  const verdict = artifacts.validateStaleArtifacts({ ...inputs, artifacts: built });
+
+  // Determinism: the same seeds regenerate the same asks byte for byte, which is what lets
+  // the validator refuse drift at all (gate 70's discipline, one instrument over).
+  assert.equal(
+    artifacts.staleArtifactsDigest(built),
+    artifacts.staleArtifactsDigest(artifacts.buildStaleArtifacts({ ...inputs, askCount: 4 })),
+    "the same seeds do not regenerate the same stale artifacts");
+
+  // Disjoint windows, and every subject already past when it is asked about.
+  const seen = new Set();
+  for (const ask of built) {
+    for (const ordinal of ask.window) {
+      assert(!seen.has(ordinal), `stage ${ordinal} is a subject of two asks, so the second scores re-injection`);
+      seen.add(ordinal);
+      assert(ordinal < ask.askStage, `ask ${ask.id} asks about stage ${ordinal} before the session reaches it`);
+      const stage = stages.find((candidate) => candidate.ordinal === ordinal);
+      assert(stage.files.length > 0, `stage ${ordinal} delivered no files and has no membership to remember`);
+    }
+  }
+
+  // The held-out set is why the end block can still measure anything.
+  assert(verdict.heldOut.length > 0, "no stages are held out, so every end-block subject was re-injected");
+  for (const ordinal of verdict.heldOut) {
+    assert(!seen.has(ordinal), `held-out stage ${ordinal} is also an artifact subject`);
+  }
+  // Held out ACROSS the run, not as a suffix: a suffix hold-out would make every end-block
+  // subject recent and measure the tail of the window instead of the whole span.
+  assert(verdict.heldOut[0] < 16 && verdict.heldOut.at(-1) > 48,
+    "the held-out subjects do not span the run, so the end block only asks about recent material");
+
+  // Schemas and paths rotate, so the ask never becomes a ritual that teaches what to hoard.
+  assert.equal(new Set(built.map((ask) => ask.schema)).size, built.length, "a schema is asked twice");
+  // THE RELATION HOLD-OUT (Shane, 2026-08-25): "they will be primed to capture something
+  // once asked about a type of thing". Rotating schemas is not enough; asking a TYPE once
+  // teaches that the type gets asked about, so no two asks may share a relation and none
+  // may share the end block's.
+  assert.equal(new Set(built.map((ask) => ask.relation)).size, built.length,
+    "two asks share a relation, so the second scores the first's priming");
+  const endRelation = artifacts.artifactSchemaRelation(artifacts.ARTIFACT_END_BLOCK_SCHEMA).relation;
+  assert(built.every((ask) => ask.relation !== endRelation),
+    "an in-run ask uses the end block's relation, so the end block scores that ask's priming");
+  assert(!artifacts.ARTIFACT_SCHEMAS.includes(artifacts.ARTIFACT_END_BLOCK_SCHEMA),
+    "the end block's schema is also an in-run schema");
+  assert.equal(new Set(built.map((ask) => ask.path)).size, built.length, "a path is used twice");
+
+  // NO FIELD IS PLANTED WITH ITS OWN TRUTH. This is the defect the validator caught on the
+  // first real plan (af-04 entry-04): a plain shuffle leaves fixed points, and a model that
+  // never opened the file would then score a correction for that entry.
+  for (const ask of built) {
+    for (const field of ask.fields) {
+      assert.notEqual(JSON.stringify(field.truth), JSON.stringify(field.stale),
+        `${ask.id} field ${field.key} is planted with its own truth`);
+    }
+  }
+  // The derangement primitive itself, driven directly, including the seed that motivated it.
+  const items = [1, 2, 3, 4, 5, 6];
+  for (const seed of ["a", "b", "c", "d", "e", "f", "g", "h"]) {
+    const deranged = artifacts.seededDerangement(items, seed);
+    assert.equal(new Set(deranged).size, items.length, "the derangement lost or duplicated an entry");
+    for (const [index, value] of deranged.entries()) {
+      assert.notEqual(value, items[index], `the derangement left ${value} in its own position under seed ${seed}`);
+    }
+  }
+  // And the pre-fix behaviour is genuinely different: at least one seed leaves a fixed point
+  // under a plain shuffle, so the gate is not asserting a property the old code already had.
+  const shuffleFixesPoint = ["a", "b", "c", "d", "e", "f", "g", "h"].some((seed) =>
+    seededShuffle(items, seed).some((value, index) => value === items[index]));
+  assert(shuffleFixesPoint, "a plain shuffle never leaves a fixed point, so the derangement is unmotivated");
+
+  checks.staleArtifactGeometryBoundsReinjection = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 109 - four outcomes per field, never two, and recall never pooled with re-derivation.
+//
+// The probe format the artifacts replace could only say right or wrong, so "did not
+// remember" and "made it up" landed in one bucket. A planted WRONG value separates them:
+// a field left as planted is no recall, a field changed to something that is neither truth
+// nor plant is confabulation, and an explicit unverified marker is an abstention rather
+// than a failure, because declining to change a value you are unsure of is honest.
+//
+// The crossref schema is the control: a model can re-open the file and resolve the include
+// itself, so its fields carry rederivable:true and a run that aces crossref while failing
+// manifest is telling us it worked rather than remembered. Pooling the two would report
+// that as recall, so the grader keeps the flag on every row.
+// ---------------------------------------------------------------------------
+{
+  const artifacts = await import(pathToFileURL(join(PROJECT, "scripts", "lib", "pi_context_artifacts.mjs")));
+  const ask = {
+    id: "af-01",
+    schema: "manifest",
+    rederivable: false,
+    fields: [
+      { key: "a", truth: ["x.c"], stale: ["y.c"], rederivable: false },
+      { key: "b", truth: ["p.c"], stale: ["q.c"], rederivable: false },
+      { key: "c", truth: ["m.c"], stale: ["n.c"], rederivable: false },
+      { key: "d", truth: ["s.c"], stale: ["t.c"], rederivable: false },
+      { key: "e", truth: ["u.c"], stale: ["v.c"], rederivable: false },
+    ],
+  };
+  const graded = artifacts.gradeStaleArtifact({
+    ask,
+    returned: {
+      a: ["x.c"],                        // corrected
+      b: ["q.c"],                        // left as planted
+      c: ["zzz.c"],                      // neither: confabulated
+      d: artifacts.ARTIFACT_UNVERIFIED,  // abstained
+      // e omitted entirely
+    },
+  });
+  assert.equal(graded.corrected, 1, "a restored value is not counted as a correction");
+  assert.equal(graded.stale, 1, "a value left as planted is not counted as stale");
+  assert.equal(graded.confabulated, 1, "a value that is neither truth nor plant is not counted as confabulation");
+  assert.equal(graded.abstained, 1, "an explicit unverified marker is not counted as an abstention");
+  assert.equal(graded.missing, 1, "a field the model never wrote is not counted as missing");
+  assert.equal(graded.corrected + graded.stale + graded.confabulated + graded.abstained + graded.missing,
+    graded.fields, "the outcomes do not partition the fields");
+
+  // Abstention is case- and space-insensitive, because the marker is written by a model.
+  assert.equal(artifacts.gradeStaleArtifact({
+    ask: { ...ask, fields: [ask.fields[0]] }, returned: { a: "  UNVERIFIED " },
+  }).abstained, 1, "an abstention written with different case or spacing is not honoured");
+
+  // Confabulation is NOT abstention: a model that writes prose instead of a value has made
+  // something up, and reading that as an honest abstention would flatter every wrong answer.
+  assert.equal(artifacts.gradeStaleArtifact({
+    ask: { ...ask, fields: [ask.fields[0]] }, returned: { a: "I think it was probably x.c" },
+  }).confabulated, 1, "free prose is read as something other than confabulation");
+
+  // The re-derivable flag survives grading, per row and per ask.
+  const control = artifacts.gradeStaleArtifact({
+    ask: { id: "af-02", schema: "crossref", rederivable: true,
+      fields: [{ key: "f.c", truth: "g.h", stale: "z.h", rederivable: true }] },
+    returned: { "f.c": "g.h" },
+  });
+  assert.equal(control.rederivable, true, "the control schema loses its flag at grading");
+  assert(control.rows.every((row) => row.rederivable === true),
+    "a re-derivable field is not marked as such on its own row, so it can be pooled with recall");
+  assert(graded.rows.every((row) => row.rederivable === false),
+    "a recall field is marked re-derivable");
+
+  // THE END BLOCK GRADES AS PRECISION, not as an exact set. Passes run from two files to
+  // nine, so an exact-set answer would be near-impossible on the wide ones and nearly free
+  // on the narrow ones, and the score would track pass width rather than memory.
+  const question = { id: "eb-01", wanted: 2, truth: ["a.c", "b.c", "c.c", "d.c", "e.c"] };
+  assert.equal(artifacts.gradeAdjacency({ question, named: ["a.c", "c.c"] }).precision, 1,
+    "two files that both belonged to the neighbour do not score a full precision");
+  assert.equal(artifacts.gradeAdjacency({ question, named: ["a.c", "zz.c"] }).precision, 0.5,
+    "one right and one wrong is not scored as half");
+  assert.equal(artifacts.gradeAdjacency({ question, named: ["yy.c", "zz.c"] }).outcome, "wrong",
+    "two wrong names are not scored wrong");
+  // A wide pass and a narrow one are the same difficulty, which is the whole point.
+  assert.equal(
+    artifacts.gradeAdjacency({ question: { ...question, truth: ["a.c", "b.c"] }, named: ["a.c", "b.c"] }).precision,
+    artifacts.gradeAdjacency({ question, named: ["a.c", "c.c"] }).precision,
+    "a narrow pass and a wide one do not grade alike, so the score tracks pass width");
+  // Volume is not rewarded: naming ten to make two stick is truncated to the ask.
+  const flooded = artifacts.gradeAdjacency({
+    question, named: ["a.c", "b.c", "q.c", "r.c", "s.c", "t.c", "u.c"],
+  });
+  assert.equal(flooded.named, 2, "an over-long answer is not truncated to what was asked for");
+  // Naming nothing is an abstention, never a zero: declining to guess is honest, and the
+  // instrument must be able to tell it from guessing wrong.
+  const silent = artifacts.gradeAdjacency({ question, named: [] });
+  assert.equal(silent.outcome, "abstained", "naming nothing is not read as an abstention");
+  assert.equal(silent.precision, null, "an abstention is scored as a zero rather than held out");
+
+  checks.staleArtifactGradingSeparatesRecallFromConfabulation = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 110 - the new surface does not announce itself.
+//
+// Gate 62 scans the system, workload, resume and stage-payload surfaces. The stale
+// artifacts are a FIFTH instruction surface, delivered to the model in its own words, and
+// they were written after gate 62's scan was fixed, so nothing was watching them. The
+// whole point of the mechanism is that no bespoke tool, question format or probe id
+// announces a test; a request that says "recall" or "you will be asked" gives back
+// everything the de-priming bought.
+// ---------------------------------------------------------------------------
+{
+  const artifacts = await import(pathToFileURL(join(PROJECT, "scripts", "lib", "pi_context_artifacts.mjs")));
+  for (const schema of artifacts.ARTIFACT_SCHEMAS) {
+    const request = artifacts.artifactRequestText(schema);
+    const leaks = testAwarenessLeaks(request);
+    assert.equal(leaks.length, 0,
+      `the ${schema} request tells the model it is being tested: ${leaks.join(", ")}`);
+    // No protocol furniture either: no stage numbers, no ids, no tool names.
+    assert(!/\bstage\b|\bprobe\b|NEXT_KEY|\bof \d+\b/i.test(request),
+      `the ${schema} request carries protocol furniture`);
+    // The request must read as work, not as an exam, and must OFFER AN OUT: an explicit
+    // instruction to leave or mark what the model cannot vouch for, which is what makes
+    // abstention available to an honest model instead of forcing a guess. Tested as the
+    // shape (leave/mark/say-so paired with a doubt clause) rather than as a word list,
+    // because the extent request offered the out in words the first list did not carry.
+    assert(/\b(?:leave|mark|say so|skip)\b[^.]{0,70}\b(?:alone|as they are|as it is|as-is|cannot|unsure|in place|rather than guess)/i
+      .test(request),
+    `the ${schema} request does not offer the model a way to decline a value it doubts`);
+  }
+  // The four requests are genuinely different wordings, not one sentence with the noun
+  // swapped, so the ask never becomes a recognisable ritual.
+  const requests = artifacts.ARTIFACT_SCHEMAS.map((schema) => artifacts.artifactRequestText(schema));
+  assert.equal(new Set(requests).size, requests.length, "two schemas share a request wording");
+  for (const [index, left] of requests.entries()) {
+    for (const right of requests.slice(index + 1)) {
+      const leftWords = new Set(left.toLowerCase().match(/[a-z]+/g));
+      const rightWords = new Set(right.toLowerCase().match(/[a-z]+/g));
+      const shared = [...leftWords].filter((word) => rightWords.has(word)).length;
+      assert(shared / Math.min(leftWords.size, rightWords.size) < 0.6,
+        "two artifact requests share most of their wording, so the ask reads as a ritual");
+    }
+  }
+  checks.staleArtifactRequestsDoNotAnnounceATest = true;
+}
+
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);
