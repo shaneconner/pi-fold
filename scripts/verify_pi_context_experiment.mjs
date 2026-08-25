@@ -43,10 +43,7 @@ import {
   REPO_PROBE_KINDS,
   armRuntimeConfiguration,
   assertBlindPacket,
-  buildConversationProbes,
   buildLedger,
-  buildProbes,
-  definitionSubject,
   codeWordSentence,
   codeWordReissueSentence,
   effectiveCodeWord,
@@ -88,7 +85,6 @@ import {
   submissionId,
   thinkTimeFromPace,
   toolResultContentSha256,
-  uniqueIdentifierIndex,
   usageSeriesFromLedger,
   outOfBandUsage,
   testAwarenessLeaks,
@@ -111,9 +107,6 @@ import {
   auditStepId,
   auditStepSentence,
   buildAuditTraces,
-  buildChainLinkProbes,
-  buildDerivationControlProbes,
-  buildEchoProbes,
   buildIncludeResolver,
   echoVerdicts,
   evaluateAuditHop,
@@ -269,60 +262,64 @@ assert.throws(() => armRuntimeConfiguration("hybrid"), /Unknown arm/);
 checks.armContractExclusive = true;
 
 // ---------------------------------------------------------------------------
-// GATE 2 - mode plans; probe stages never collide with deliverable stages
+// GATE 2 - mode plans yield deliverables and NO probe waves, and the sealed probe
+// schedule they still validate old plans against stays internally consistent.
 // ---------------------------------------------------------------------------
 for (const mode of EXPERIMENT_MODES) {
   const plan = EXPERIMENT_MODE_PLANS[mode];
   const deliverableStages = [];
   for (let ordinal = 1; ordinal <= plan.stageCount; ordinal += 1) {
-    if (ordinal % plan.deliverableEvery === 0 && !plan.probeStages.includes(ordinal)) {
-      deliverableStages.push(ordinal);
-    }
+    if (ordinal % plan.deliverableEvery === 0) deliverableStages.push(ordinal);
   }
   assert(deliverableStages.length > 0, `${mode} mode plan yields no deliverable stage`);
-  assert(plan.probeStages.length > 0, `${mode} mode plan yields no probe stage`);
   assert(plan.payloadFloorChars > 0 && plan.payloadTargetChars >= plan.payloadFloorChars);
-  // One kind schedule per wave, each wave exactly one repo-class control, and the
-  // conversation slots must be SATISFIABLE: carriers come from stages <= ceil(wave/2),
-  // are never probe stages, and are never reused across the whole plan.
-  assert.equal(plan.probeKinds.length, plan.probeStages.length,
-    `${mode} probe kind schedule does not cover its waves`);
+  // No mode plan may name a probe stage any more: the field is gone, and its absence is
+  // what makes the builder incapable of emitting a wave. Asserted by NAME so a field
+  // reintroduced under the old name fails here rather than quietly resuming the waves.
+  assert(!Object.hasOwn(plan, "probeStages") && !Object.hasOwn(plan, "probeKinds"),
+    `${mode} mode plan still carries a live probe schedule`);
+  // The sealed schedule is READ-ONLY ground truth for validating plans built before the
+  // deletion, so its own laws still have to hold or a sealed plan would validate against
+  // an incoherent contract: one kind list per wave, exactly one repo-class control each,
+  // no echo in the first wave, the derivation control last, and the conversation slots
+  // satisfiable from carriers at or below ceil(wave/2) with no carrier used twice.
+  const sealed = plan.sealedProbeSchedule;
+  assert(sealed.stages.length > 0, `${mode} sealed probe schedule places no wave`);
+  assert.equal(sealed.kinds.length, sealed.stages.length,
+    `${mode} sealed probe kind schedule does not cover its waves`);
   const usedCarriers = new Set();
-  for (const [waveIndex, ordinal] of plan.probeStages.entries()) {
-    const kinds = plan.probeKinds[waveIndex];
+  for (const [waveIndex, ordinal] of sealed.stages.entries()) {
+    const kinds = sealed.kinds[waveIndex];
     assert(kinds.every((kind) => kind === "repo" || kind === "echo" ||
       CONVERSATION_PROBE_KINDS.includes(kind) || DERIVED_PROBE_KINDS.includes(kind)),
-    `${mode} wave ${ordinal} declares an unknown probe kind`);
+    `${mode} sealed wave ${ordinal} declares an unknown probe kind`);
     assert.equal(kinds.filter((kind) => kind === "repo").length, 1,
-      `${mode} wave ${ordinal} must carry exactly one repo-class control`);
-    // An echo restates an earlier wave's answer, so the first wave cannot carry
-    // one; the derivation control calibrates the WHOLE run, so it sits last.
+      `${mode} sealed wave ${ordinal} must carry exactly one repo-class control`);
     if (waveIndex === 0) assert(!kinds.includes("echo"),
       `${mode} schedules an echo before any answer exists`);
     if (kinds.includes("derivation-control")) {
-      assert.equal(waveIndex, plan.probeStages.length - 1,
+      assert.equal(waveIndex, sealed.stages.length - 1,
         `${mode} schedules the derivation control before the last wave`);
     }
     const conversationSlots = kinds.filter((kind) => CONVERSATION_PROBE_KINDS.includes(kind)).length;
     const eligible = [];
     for (let stage = 1; stage <= Math.ceil(ordinal / 2); stage += 1) {
-      if (!plan.probeStages.includes(stage) && !usedCarriers.has(stage)) eligible.push(stage);
+      if (!sealed.stages.includes(stage) && !usedCarriers.has(stage)) eligible.push(stage);
     }
     assert(eligible.length >= conversationSlots,
-      `${mode} wave ${ordinal} has ${eligible.length} unused carrier stages for ${conversationSlots} slots`);
+      `${mode} sealed wave ${ordinal} has ${eligible.length} unused carrier stages for ${conversationSlots} slots`);
     eligible.slice(0, conversationSlots).forEach((stage) => usedCarriers.add(stage));
   }
-  const flatKinds = plan.probeKinds.flat();
+  const flatKinds = sealed.kinds.flat();
   assert(CONVERSATION_PROBE_KINDS.every((kind) => flatKinds.includes(kind)),
-    `${mode} never exercises every conversation probe kind`);
+    `${mode} sealed schedule never exercises every conversation probe kind`);
   assert(flatKinds.includes("chain-link") && flatKinds.includes("echo"),
-    `${mode} never exercises the derived channel`);
+    `${mode} sealed schedule never exercises the derived channel`);
 }
-// The declared full-mode totals are part of the instrument: one code word per
-// wave stays as the hoarding ceiling, chain-link is the workhorse class.
+// The sealed full-mode totals, unchanged: they are what a sealed plan is held to.
 {
   const totals = {};
-  for (const kind of EXPERIMENT_MODE_PLANS.full.probeKinds.flat()) {
+  for (const kind of EXPERIMENT_MODE_PLANS.full.sealedProbeSchedule.kinds.flat()) {
     totals[kind] = (totals[kind] ?? 0) + 1;
   }
   assert.deepEqual(totals, {
@@ -330,11 +327,21 @@ for (const mode of EXPERIMENT_MODES) {
     "derivation-control": 1, repo: 4,
   });
 }
+// The deliverable cadence is now the count itself, with nothing suppressing it.
+assert.equal(EXPERIMENT_MODE_PLANS.full.stageCount / EXPERIMENT_MODE_PLANS.full.deliverableEvery, 4,
+  "full mode must still stage four deliverables after the probe suppression went away");
 checks.modePlansProduceProbesAndDeliverables = true;
 checks.probeKindSchedulesAreSatisfiable = true;
 
 // ---------------------------------------------------------------------------
-// GATE 3 - mechanical probe ground truth
+// GATE 3 IS RETIRED (2026-08-25). It pinned mechanical probe ground truth: repo-class
+// probes extracted from the pinned bytes, symbol uniqueness over the whole checkout, and
+// the conversation-probe carrier draw with its plan-wide no-reuse law. The probe waves are
+// deleted, so `buildProbes`, `buildConversationProbes`, `definitionSubject` and
+// `uniqueIdentifierIndex` are gone and there is nothing left to pin. Its number stays
+// spent. What survives here is the fixture the later gates are built on, plus the two
+// primitives that still run on every stage: `extractDefinitions`, which the checkout
+// collision scan reads, and `fileFacts`, whose wc -l line semantics every payload carries.
 // ---------------------------------------------------------------------------
 const fixture = mkdtempSync(join(tmpdir(), "pi-context-experiment-fixture-"));
 let plan;
@@ -374,64 +381,9 @@ try {
   assert.equal(fileFacts(fixture, join(fixture, "wc-terminated.txt")).lines, 2);
   assert.equal(fileFacts(fixture, join(fixture, "wc-unterminated.txt")).lines, 2);
   assert.equal(fileFacts(fixture, join(fixture, "wc-empty.txt")).lines, 0);
-  const facts = ["alpha.rs", "beta.rs"].map((name) => fileFacts(fixture, join(fixture, name)));
-  const unique = uniqueIdentifierIndex(facts);
-  assert.equal(unique.get("beta_only_helper"), "beta.rs");
-  const probes = buildProbes({ facts, seed: "fixture-seed", count: 3, uniqueIdentifiers: unique });
-  assert.equal(probes.length, 3);
-  // Repo probes are the two-kind control now: file-line-count is retired, and the
-  // wave offset rotates which kind leads.
-  assert.deepEqual(probes.map((probe) => probe.kind),
-    ["definition-line", "symbol-file", "definition-line"]);
-  assert.deepEqual(
-    buildProbes({ facts, seed: "fixture-seed", count: 2, uniqueIdentifiers: unique, rotationOffset: 1 })
-      .map((probe) => probe.kind),
-    ["symbol-file", "definition-line"]);
-  assert(probes.every((probe) => REPO_PROBE_KINDS.includes(probe.kind)));
-  // A symbol-file question names the CONSTRUCT, not the bare identifier, so a
-  // header declaring `struct X` and an implementation defining X-prefixed
-  // functions stop being two defensible answers (Shane 2026-08-14).
-  assert.equal(definitionSubject({ identifier: "gtls_shared_creds", kind: "struct" }),
-    "struct gtls_shared_creds");
-  assert.equal(definitionSubject({ identifier: "AlphaSink", kind: "trait" }), "trait AlphaSink");
-  assert.equal(definitionSubject({ identifier: "alpha_entry", kind: "fn" }),
-    "the function alpha_entry");
-  assert.throws(() => definitionSubject({ identifier: "x" }), /identifier and a kind/);
-  // Anti-vacuity: the qualifier must actually change the subject, or naming the
-  // construct is decorative and the ambiguity survives.
-  assert.notEqual(definitionSubject({ identifier: "gtls_shared_creds", kind: "struct" }),
-    "gtls_shared_creds");
-  for (const probe of probes.filter((candidate) => candidate.kind === "symbol-file")) {
-    const fact = facts.find((candidate) => candidate.path === probe.sourcePath);
-    const definition = fact.definitions.find((candidate) => candidate.line === probe.sourceLine);
-    assert(definition, `symbol-file probe ${probe.id} points at no definition`);
-    assert(probe.question.includes(`defines ${definitionSubject(definition)}?`),
-      `symbol-file probe ${probe.id} did not name its construct: ${probe.question}`);
-  }
-  // Every answer is a fact of the pinned bytes, verified here against the file itself.
-  for (const probe of probes) {
-    const fact = facts.find((candidate) => candidate.path === probe.sourcePath);
-    assert(fact, `probe ${probe.id} points at an unknown file`);
-    if (probe.kind === "definition-line") {
-      assert.equal(fact.text.split("\n")[probe.sourceLine - 1].includes(probe.expectedAnswer), true);
-    } else {
-      assert.equal(probe.expectedAnswer, fact.path);
-    }
-  }
-  // Determinism: same seed, same probes; different seed, different probes.
-  assert.deepEqual(buildProbes({ facts, seed: "fixture-seed", count: 3, uniqueIdentifiers: unique }), probes);
-  // Seed sensitivity: over a set of seeds at least one plan must differ, or the seed is
-  // decorative. (A two-file fixture can coincide on any single alternative seed.)
-  const baseline = JSON.stringify(probes.map((probe) => probe.expectedAnswer));
-  const seedVariants = ["seed-a", "seed-b", "seed-c", "seed-d"].map((seed) =>
-    JSON.stringify(buildProbes({ facts, seed, count: 3, uniqueIdentifiers: unique })
-      .map((probe) => probe.expectedAnswer)));
-  assert(seedVariants.some((variant) => variant !== baseline),
-    "probe construction ignores its seed");
-  checks.probeGroundTruthMechanicalAndDeterministic = true;
-
-  // Conversation-class machinery: code words are seeded, unique, well-formed, and the
-  // carrier draw honours the eligibility window and the plan-wide no-reuse law.
+  // The code word channel: seeded, unique, well-formed and woven the same way. The
+  // carrier-draw half of this block went with the probe waves; the words themselves are
+  // still planted in every payload stage and still read by `effectiveCodeWord`.
   const words = stageCodeWords("code-word-seed", 64);
   assert.equal(words.length, 64);
   assert(words.every((word) => CODE_WORD_PATTERN.test(word)));
@@ -440,37 +392,6 @@ try {
   assert.notDeepEqual(stageCodeWords("other-seed", 64), words);
   assert.equal(codeWordSentence(7, words[6]),
     `Audit note: the code word for stage 07 is ${words[6]}.`);
-  const carrierStages = [
-    { ordinal: 1, kind: "read", codeWord: words[0], files: [{ path: "one.rs" }] },
-    { ordinal: 2, kind: "read", codeWord: words[1], files: [{ path: "two.rs" }, { path: "extra.rs" }] },
-    { ordinal: 3, kind: "revisit", codeWord: words[2], files: [{ path: "three.rs" }] },
-    { ordinal: 4, kind: "probe", codeWord: null, files: [] },
-  ];
-  const usedStages = new Set();
-  const waveOne = buildConversationProbes({
-    stages: carrierStages, probeOrdinal: 4, seed: "wave-one", kinds: ["stage-fact"], usedStages,
-  });
-  assert.equal(waveOne.length, 1);
-  assert.equal(waveOne[0].kind, "stage-fact");
-  assert([1, 2].includes(waveOne[0].sourceStage), "wave-one carrier must be an early stage");
-  assert.equal(waveOne[0].expectedAnswer, carrierStages[waveOne[0].sourceStage - 1].codeWord);
-  assert(usedStages.has(waveOne[0].sourceStage));
-  const waveTwo = buildConversationProbes({
-    stages: carrierStages, probeOrdinal: 8, seed: "wave-two", kinds: ["stage-binding"], usedStages,
-  });
-  assert.equal(waveTwo[0].kind, "stage-binding");
-  assert.notEqual(waveTwo[0].sourceStage, waveOne[0].sourceStage, "carriers must never be reused");
-  assert.equal(waveTwo[0].expectedAnswer, carrierStages[waveTwo[0].sourceStage - 1].files[0].path);
-  // Exhaustion refuses instead of degrading: no silent second probe against a carrier.
-  assert.throws(() => buildConversationProbes({
-    stages: carrierStages, probeOrdinal: 8, seed: "wave-three",
-    kinds: ["stage-fact", "stage-binding"], usedStages,
-  }), /unused carrier stages/);
-  // Determinism from a clean slate.
-  assert.deepEqual(buildConversationProbes({
-    stages: carrierStages, probeOrdinal: 4, seed: "wave-one", kinds: ["stage-fact"], usedStages: new Set(),
-  }), waveOne);
-  checks.conversationProbesSeededCarriersNeverReused = true;
 
   // -------------------------------------------------------------------------
   // GATE 4 - stage plan hashing + ground-truth containment
@@ -566,7 +487,21 @@ try {
         expectedAnswer: fixtureWord(1),
         sourceStage: 1,
       },
-      { ...probes[0], id: "probe-04-03" },
+      {
+        // The repo-class control, written out rather than drawn from the deleted
+        // `buildProbes`: this fixture carries the SEALED probe shape, which the
+        // validator still holds sealed plans to.
+        id: "probe-04-03",
+        kind: "definition-line",
+        // Named against the fixture's OWN files, never a stage-N.rs path: the anti-leak
+        // law refuses any stage text that pairs a chain link's stage with its path, and
+        // this wave already names stage 01 in its stage-fact question.
+        question: "In the file alpha.rs, which identifier is defined on line 6? " +
+          "Answer with the identifier only.",
+        expectedAnswer: "alpha_entry",
+        sourcePath: "alpha.rs",
+        sourceLine: 6,
+      },
     ],
     8: [
       {
@@ -595,7 +530,15 @@ try {
         expectedAnswer: "stage-3.rs",
         sourceStage: 3,
       },
-      { ...probes[1], id: "probe-08-04" },
+      {
+        id: "probe-08-04",
+        kind: "symbol-file",
+        question: "Which repository-relative file defines the function beta_only_helper? " +
+          "Answer with the path only.",
+        expectedAnswer: "beta.rs",
+        sourcePath: "beta.rs",
+        sourceLine: 6,
+      },
     ],
   };
   const repo = EXPERIMENT_REPOS[EXPERIMENT_DEFAULT_REPO];
@@ -614,7 +557,7 @@ try {
     corpus: { files: 2, eligibleFiles: 2, lines: 2, chars: bulk.length * 2 },
     stages: Array.from({ length: modePlan.stageCount }, (_, index) => {
       const ordinal = index + 1;
-      if (modePlan.probeStages.includes(ordinal)) {
+      if (modePlan.sealedProbeSchedule.stages.includes(ordinal)) {
         return stageOf(ordinal, "probe", [], waveProbes[ordinal], null);
       }
       const files = [{ ...bulkFacts[ordinal % 2], path: `stage-${ordinal}.rs` }];
@@ -681,7 +624,13 @@ try {
 
   const runPlan = stagePlanForRun(plan);
   const runSerialized = JSON.stringify(runPlan);
-  for (const probe of probes) {
+  // Repo-class only, as before: a stage-fact answer appears in its carrier's own
+  // instructions BY DESIGN (asserted below), and a chain-link answer is a stage number or
+  // a delivered path the plan necessarily names.
+  const repoClassProbes = plan.stages.flatMap((stage) =>
+    stage.probes.filter((probe) => REPO_PROBE_KINDS.includes(probe.kind)));
+  assert.equal(repoClassProbes.length, 2, "the fixture must seat both repo-class controls");
+  for (const probe of repoClassProbes) {
     assert(!runSerialized.includes(probe.expectedAnswer) || probe.kind === "symbol-file",
       "run-visible plan leaked a probe answer");
   }
@@ -1126,9 +1075,11 @@ for (const [key, entry] of Object.entries(EXPERIMENT_REPOS)) {
   assert(entry.stats.sourceFiles > 0 && entry.stats.sourceLines > 0 && entry.stats.sourceChars > 0,
     `${key} lacks measured corpus stats`);
 }
-// The default must be able to carry the full mode plan's payload demand.
+// The default must be able to carry the full mode plan's payload demand. EVERY stage
+// carries payload now: the four probe waves that delivered no files are deleted, so the
+// corpus has to supply four more stages than it did before.
 const fullPlan = EXPERIMENT_MODE_PLANS.full;
-const payloadStages = fullPlan.stageCount - fullPlan.probeStages.length;
+const payloadStages = fullPlan.stageCount;
 assert(EXPERIMENT_REPOS[EXPERIMENT_DEFAULT_REPO].stats.sourceChars >=
   payloadStages * fullPlan.payloadTargetChars,
 `default repo ${EXPERIMENT_DEFAULT_REPO} cannot supply ${payloadStages} stages of unique payload`);
@@ -1274,7 +1225,7 @@ try {
 
   const displacedProbes = probeTranscripts({ entries: displaced, plan });
   assert.deepEqual(displacedProbes.map((probe) => probe.stage),
-    EXPERIMENT_MODE_PLANS.smoke.probeStages.slice());
+    EXPERIMENT_MODE_PLANS.smoke.sealedProbeSchedule.stages.slice());
   // Wave 4 was answered one message late, past a non-empty message that is not an answer.
   assert.equal(displacedProbes[0].rawText, displaced[probe4Index].message.content[0].text);
   assert.equal(displacedProbes[0].messagesSkipped, 1,
@@ -2089,17 +2040,24 @@ try {
   // The ledger-token half of the collision scan went with the ledger on 2026-08-25:
   // nothing plants `lv-` tokens any more, so scanning for them would assert over an empty
   // set. Code words are still planted and still scanned.
+  // The symbol-uniqueness half of this scan went with the repo-class probes on
+  // 2026-08-25: nothing claims THE defining file any more. The collision scan and the
+  // include resolver stay, because code words are still planted and the audit chain still
+  // resolves quoted includes over the whole checkout.
   assert(staging.includes("collectCheckoutDefinitions(checkoutDir,\n        [...codeWords, ...reissueWords])") &&
-    staging.includes("uniqueIdentifierIndex(checkoutDefinitions.entries)") &&
     staging.includes("checkoutPaths: checkoutDefinitions.paths"),
-  "symbol uniqueness, planted-word collisions, and include resolution must be judged " +
-  "over the whole checkout");
-  assert(staging.includes("const codeWord = isProbe ? null : codeWords[ordinal - 1];"),
-    "probe stages must carry no code word");
-  assert(staging.includes("usedCarrierStages"),
-    "the carrier no-reuse set must span the whole plan, not one wave");
-  assert(staging.includes("id: `probe-${String(ordinal).padStart(2, \"0\")}-${String(index + 1).padStart(2, \"0\")}`"),
-    "probe ids must be wave-scoped so the grading join is by id, never by position");
+  "planted-word collisions and include resolution must be judged over the whole checkout");
+  assert(staging.includes("codeWord: codeWords[ordinal - 1],"),
+    "every stage must carry its own seeded code word");
+  // THE PROBE WAVES ARE GONE. Asserted on the staging source so a builder that starts
+  // emitting them again fails here rather than in a five-hour run: no probe id is minted,
+  // no wave schedule is read, and the field the readers key off is written empty.
+  assert(!/id: `probe-\$\{/.test(staging),
+    "the stager mints a probe id: the waves are supposed to be deleted");
+  assert(!/probeStages|probeKinds|buildProbes|buildConversationProbes/.test(staging),
+    "the stager still reaches for the probe schedule or its builders");
+  assert(staging.includes("probes: [],"),
+    "the stager must write the probes field empty rather than dropping it");
   assert(staging.includes("...visibleStage(stage)"),
     "the stager's payload hash must strip hidden keys through the shared helper");
   assert(grader.includes('class: "conversation"') && grader.includes('class: "repository"') &&
@@ -2484,68 +2442,12 @@ try {
 }
 
 // ---------------------------------------------------------------------------
-// GATE 36 - wave selection laws. Chain-link draws spread across chains and
-// ages, echoes restate distinct earlier answers, and the derivation control
-// never rides a chain file.
-// ---------------------------------------------------------------------------
-{
-  const chains = [
-    { id: "trace-a", links: [
-      { index: 1, stage: 2, hop: "SOF", hopIndex: null, input: "a0", expectedAnswer: 1 },
-      { index: 2, stage: 3, hop: "FIN", hopIndex: 2, input: 1, expectedAnswer: "a2" },
-      { index: 3, stage: 5, hop: "INC", hopIndex: 1, input: "a2", expectedAnswer: "a3" },
-    ] },
-    { id: "trace-b", links: [
-      { index: 1, stage: 6, hop: "SOF", hopIndex: null, input: "b0", expectedAnswer: 2 },
-      { index: 2, stage: 7, hop: "FIN", hopIndex: 1, input: 2, expectedAnswer: "b2" },
-      { index: 3, stage: 9, hop: "INC", hopIndex: 2, input: "b2", expectedAnswer: "b3" },
-    ] },
-  ];
-  const probedLinks = new Set();
-  const probedChains = new Set();
-  const first = buildChainLinkProbes({
-    chains, probeOrdinal: 16, seed: "w16", count: 2, probedLinks, probedChains,
-  });
-  assert.equal(first.length, 2);
-  assert.notEqual(first[0].chainId, first[1].chainId, "one wave must not probe a chain twice");
-  // Eligible pool at wave 16: five links, oldest third = stages 2 and 3.
-  assert(first.some((probe) => probe.sourceStage <= 3), "the wave skipped the oldest third");
-  const sofDraws = first.filter((probe) => probe.linkIndex === 1);
-  assert(sofDraws.every((probe) => probe.question.includes("stage number")) &&
-    first.filter((probe) => probe.linkIndex > 1)
-      .every((probe) => probe.question.includes("repository-relative path")),
-  "the answer form must follow the hop kind");
-  assert.deepEqual(buildChainLinkProbes({
-    chains, probeOrdinal: 16, seed: "w16", count: 2,
-    probedLinks: new Set(), probedChains: new Set(),
-  }), first, "chain-link selection ignores its seed inputs");
-  // Once chain a is exhausted, the repeat-chain law cannot be satisfied and the
-  // draw refuses rather than quietly dropping the law.
-  assert.throws(() => buildChainLinkProbes({
-    chains, probeOrdinal: 32, seed: "w32", count: 1,
-    probedLinks: new Set(["trace-a:1", "trace-a:2", "trace-a:3"]),
-    probedChains: new Set(["trace-a"]),
-  }), /selection laws/);
-  const echoedTargets = new Set();
-  const earlierWaves = [{ probes: first.map((probe, position) => ({
-    ...probe, id: `probe-16-0${position + 1}`,
-  })) }];
-  const echoes = buildEchoProbes({ earlierWaves, seed: "echo", count: 2, echoedTargets });
-  assert.equal(echoes.length, 2);
-  assert(echoes.every((probe) => !Object.hasOwn(probe, "expectedAnswer")),
-    "an echo must never carry an expected answer");
-  assert.notEqual(echoes[0].targetProbeId, echoes[1].targetProbeId);
-  assert.throws(() => buildEchoProbes({ earlierWaves, seed: "echo-2", count: 1, echoedTargets }),
-    /unechoed chain-link/);
-  const control = buildDerivationControlProbes({
-    stages: [{ ordinal: 1, kind: "read", files: [{ path: "a2" }, { path: "free.c" }] }],
-    chains, seed: "control", count: 1,
-    includeTargets: (path) => path === "free.c" ? ["inc.h"] : ["x.h"],
-  });
-  assert.equal(control[0].sourcePath, "free.c", "the control must never ride a chain file");
-  assert.equal(control[0].expectedAnswer, "inc.h");
-  checks.probeScheduleLawsSelectAcrossChainsAndAges = true;
-}
+// GATE 36 IS RETIRED (2026-08-25). It pinned wave selection: chain-link draws spread
+// across chains and ages, echoes restating distinct earlier answers, and the derivation
+// control never riding a chain file. The waves are deleted and so are the three builders
+// it drove. The audit chains themselves are untouched and still measured, one gate over:
+// gate 37 is their anti-leak law, and every step is still graded at record time against
+// truth and against the model's own previous step. Its number stays spent.
 
 // ---------------------------------------------------------------------------
 // GATE 37 - anti-leak: no instruction surface may name a link answer at or
@@ -4135,11 +4037,9 @@ try {
     const plan = EXPERIMENT_MODE_PLANS[mode];
     const share = compactionTriggerShare(mode);
     const modeDerived = compactionReserveTokens({ descriptorWindow, servingBudgetTokens, share });
-    // What the run actually accumulates, at the estimator the harness declares, counting
-    // only the stages the floor binds: a probe stage is exempt from it and guarantees
-    // nothing.
-    const reachableTokens = Math.floor(
-      ((plan.stageCount - plan.probeStages.length) * plan.payloadFloorChars) / 4);
+    // What the run actually accumulates, at the estimator the harness declares. Every
+    // stage is bound by the floor now that the exempt probe waves are gone.
+    const reachableTokens = Math.floor((plan.stageCount * plan.payloadFloorChars) / 4);
     assert(modeDerived.triggerTokens < reachableTokens,
       `mode ${mode} places its compaction trigger at ${modeDerived.triggerTokens} tokens, past ` +
       `the ${reachableTokens} its own ${plan.stageCount} stages can accumulate at the payload ` +
@@ -4369,10 +4269,14 @@ try {
   assert(readBody, "the sweep cannot read readInstruction, so it is scanning nothing");
   assert.deepEqual(testAwarenessLeaks(readBody[1]), [],
     "the read instruction still tells the model what to hoard");
-  const probeBody = /function probeInstruction\(\) \{[\s\S]*?return \[\n([\s\S]*?)\n  \]/.exec(staging);
-  assert(probeBody, "the sweep cannot read probeInstruction, so it is scanning nothing");
-  assert.deepEqual(testAwarenessLeaks(probeBody[1]), [],
-    "the probe instruction still tells the model it is being tested");
+  // THE PROBE INSTRUCTION IS GONE, not merely cleaned. It opened the four question blocks
+  // with "Put each answer on its own line as `<probe-id>: <answer>`", which no amount of
+  // conversational framing stops being a quiz. Scanned by absence: a builder that brings
+  // the function back fails here.
+  assert(!/function probeInstruction\(/.test(staging),
+    "the staging script still writes a probe instruction");
+  assert(!/<probe-id>/.test(staging),
+    "the staging script still names the probe id format the model was asked to answer in");
   // THE RENDERED PAYLOAD, not only the sources that feed it. `stagePayloadText` adds a
   // header of its own, which is how `STAGE 16 / probe` and the explicit recall frame
   // `QUESTIONS (answer each from what you already know; cite where you learned it):`
@@ -4395,8 +4299,8 @@ try {
   // A guess is not evidence of recall. Inviting one turned pi-fold's lost stage-15
   // code word into a confident cw-509a30 that exists nowhere in the plan, and the
   // run then found its own invention on a later search.
-  assert(!/even if you are not certain/.test(probeBody[1]),
-    "the probe instruction still licenses a guess over a check");
+  assert(!/even if you are not certain/.test(staging),
+    "the staging script still licenses a guess over a check");
 
   // EVERY MODEL-FACING SURFACE THE WORKER BUILDS, not just the plan's. The system
   // prompt reaches more requests than any stage instruction and was never scanned,
@@ -4577,33 +4481,32 @@ try {
   assert(withdrawal.includes(replacements[0]) && !withdrawal.includes(words[0]),
     "the correction does not carry the live value alone, so order stops mattering");
 
-  // Wave selection: one wave demands a withdrawn carrier, the next a standing
-  // one, and each expects the value that is LIVE for the carrier it drew.
-  const withCarriers = (requireReissued) => buildConversationProbes({
-    stages: carriers.map((stage) => ({ ...stage, files: [{ path: `f${stage.ordinal}.rs` }] })),
-    probeOrdinal: 6,
-    seed: "reissue-fixture",
-    kinds: ["stage-fact"],
-    usedStages: new Set(),
-    requireReissued,
-  })[0];
-  const trappedProbe = withCarriers(true);
-  const cleanProbe = withCarriers(false);
-  assert.equal(trappedProbe.sourceStage, 1);
-  assert.equal(trappedProbe.expectedAnswer, replacements[0]);
-  assert.notEqual(trappedProbe.expectedAnswer, words[0]);
-  // The clean carrier is whichever standing stage the shuffle drew. A stage that
-  // ANNOUNCES a withdrawal is itself untrapped: its own word still stands, which
-  // is why this reads the drawn ordinal rather than pinning one.
-  assert.equal(reissueAnnouncedAt(carriers, cleanProbe.sourceStage), null);
-  assert.equal(cleanProbe.expectedAnswer, words[cleanProbe.sourceStage - 1]);
-  assert.notEqual(cleanProbe.sourceStage, trappedProbe.sourceStage);
-  // No tell: the two questions differ only in the stage number they name.
-  const anonymised = (probe) =>
-    probe.question.replace(`stage ${String(probe.sourceStage).padStart(2, "0")}`, "stage NN");
-  assert.equal(anonymised(trappedProbe), anonymised(cleanProbe));
-  assert(!/reissu|withdraw|correct|replac|error/i.test(trappedProbe.question),
-    "the question announces that a correction exists, and would measure the announcement");
+  // WHICH VALUE IS LIVE. The wave-selection half of this gate drove
+  // `buildConversationProbes`, which was deleted with the probe waves on 2026-08-25; the
+  // trap it protected is untouched, because what the run is held to is `effectiveCodeWord`,
+  // and that is the function the plan validator reads on every carrier. Driven directly:
+  // a withdrawn carrier resolves to the REPLACEMENT and never to the word it replaced, a
+  // standing carrier resolves to its own word, and a stage that merely ANNOUNCES someone
+  // else's withdrawal is itself untrapped.
+  const trappedStage = 1;
+  assert.equal(reissueAnnouncedAt(carriers, trappedStage) !== null, true,
+    "stage 01 must be the withdrawn carrier, or the trap half of this gate is vacuous");
+  assert.equal(effectiveCodeWord(carriers, trappedStage), replacements[0]);
+  assert.notEqual(effectiveCodeWord(carriers, trappedStage), words[0]);
+  const standing = carriers.filter((stage) =>
+    stage.codeWord !== null && reissueAnnouncedAt(carriers, stage.ordinal) === null);
+  assert(standing.length > 0, "every carrier was withdrawn, so the standing cell is unmeasured");
+  for (const stage of standing) {
+    assert.equal(effectiveCodeWord(carriers, stage.ordinal), words[stage.ordinal - 1],
+      `stage ${stage.ordinal} stands, so its own word is the live one`);
+  }
+  // The announcer carries someone else's correction and its OWN word still stands: this is
+  // the case a naive "any stage mentioned in a reissue sentence is trapped" reading gets
+  // wrong, and it is why the withdrawal is read from the announcement's SUBJECT.
+  const announcer = carriers.find((stage) => stage.codeWordReissue !== null);
+  assert(announcer, "no carrier announces a withdrawal, so the announcer cell is unmeasured");
+  assert.notEqual(announcer.ordinal, trappedStage);
+  assert.equal(effectiveCodeWord(carriers, announcer.ordinal), words[announcer.ordinal - 1]);
 
   // Plan laws. Every mutation below was run against the unmutated plan first, so
   // none of these assertions passes by accident of an unrelated failure.
@@ -5159,7 +5062,7 @@ try {
   // the mode's gap, corrections original-early correction-late.
   const fullModePlan = EXPERIMENT_MODE_PLANS.full;
   const firstHalfPayload = (stage) => stage >= 1 && stage <= fullModePlan.stageCount / 2 &&
-    !fullModePlan.probeStages.includes(stage);
+    !fullModePlan.sealedProbeSchedule.stages.includes(stage);
   const everyStageOf = (ledger) => [
     ...ledger.table.map((entry) => entry.stage),
     ...ledger.singles.map((single) => single.stage),
@@ -10821,6 +10724,130 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   }
 
   checks.aStageIsFoundByOrdinalUnderBothDeliveryShapes = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 118 - the in-run probe waves are deleted from every plan this builder makes, and a
+// plan that carries SOME of the sealed schedule is refused by name.
+//
+// Shane 2026-08-25. The waves were four labelled question blocks at ordinals 16/32/48/64,
+// six questions each, ids `probe-NN-NN`, asking for recorded trace values, audit code words
+// and file positions. They rehearsed the run's own collection classes four times before
+// half the material was delivered, which is a hoarding instruction aimed squarely at the
+// mechanism under test: Pi's compaction summary decides what survives, and a model that
+// knows it will be quizzed writes a summary that keeps quiz-shaped facts. v3 measured that
+// shape from the other direction when sol's summarizer carried 20, 38 and 54 code words
+// verbatim through successive summaries because it could tell they mattered.
+//
+// THE CUT LINE IS BUILDERS OUT, READERS IN. Every sealed campaign's plan carries its waves
+// and must keep adjudicating under this code, so the transcript lenses, the verdicts and
+// the payload renderer's probe branch all stay live: a sealed plan's `payloadSha256` is
+// computed from those exact bytes and would stop matching if the branch went. What is gone
+// is the ability to MAKE one. Asserted against the module namespace rather than the source
+// text, so the gate states the cut line itself and fails on the pre-deletion contract,
+// which exported all five builders.
+//
+// Echo does not survive: recall of a recall needs an earlier answer to point at, and Shane
+// took the loss rather than keep a question block to host it. The audit chains are
+// untouched and still graded at record time, against truth and against the model's own
+// previous step, which is where the unfakeable faithful-to-wrong cell now lives alone.
+// ---------------------------------------------------------------------------
+{
+  const contract = await import("./lib/pi_context_experiment.mjs");
+  for (const gone of ["buildProbes", "buildConversationProbes", "buildChainLinkProbes",
+    "buildEchoProbes", "buildDerivationControlProbes"]) {
+    assert.equal(contract[gone], undefined, `${gone} still exists: a wave can still be built`);
+  }
+  for (const kept of ["probeTranscripts", "probeMechanicalVerdicts", "echoVerdicts",
+    "probeWaveRecovery", "probeProvenance", "probeAnswerPattern", "probeClassOf"]) {
+    assert.equal(typeof contract[kept], "function",
+      `${kept} was deleted with the builders, so no sealed campaign can be read any more`);
+  }
+
+  // ANTI-VACUITY: the fixture really is the sealed shape, both waves, every slot filled.
+  const sealedSchedule = EXPERIMENT_MODE_PLANS.smoke.sealedProbeSchedule;
+  const waveOrdinals = plan.stages.filter((stage) => stage.kind === "probe").map((stage) => stage.ordinal);
+  assert.deepEqual(waveOrdinals, sealedSchedule.stages.slice(),
+    "the fixture is not the sealed shape, so every refusal below would pass for the wrong reason");
+  validateStagePlan(plan);
+
+  const reseal118 = (mutated) => {
+    mutated.planSha256 = stagePlanSha256(mutated);
+    return mutated;
+  };
+  // A wave emptied but still CALLED a wave: the plan disagrees with itself.
+  const hollowWave = structuredClone(plan);
+  hollowWave.stages[3].probes = [];
+  hollowWave.probeCount = hollowWave.stages.reduce((total, stage) => total + stage.probes.length, 0);
+  assert.throws(() => validateStagePlan(reseal118(hollowWave)),
+    /disagrees with itself about being a probe wave/);
+  // A wave removed outright, leaving the OTHER one standing. This is the shape a
+  // half-finished deletion produces, and it is neither instrument: not the sealed one the
+  // corpus is read against, not the current one that carries none. The replaced stage is
+  // built as a LEGITIMATE payload stage, its own fresh code word woven in and its payload
+  // rehashed, because a half-built one trips the per-stage laws first and the partial
+  // schedule would never be reached: the first attempt at this fixture died on "Stage 4
+  // code word is missing, malformed, unwoven, or repeated" and proved nothing.
+  const partial = structuredClone(plan);
+  const template = partial.stages.find((stage) =>
+    stage.kind === "read" && stage.files.length > 0 && stage.chainStep === null &&
+    stage.deliverable === null && stage.codeWord !== null);
+  assert(template, "the fixture offers no plain payload stage to model a replacement on");
+  const freshWord = stageCodeWords("gate-118-replacement", 1)[0];
+  assert(!partial.stages.some((stage) => stage.codeWord === freshWord),
+    "the replacement code word collides, so this fixture would fail on uniqueness instead");
+  const replaced = {
+    ...structuredClone(template),
+    ordinal: 4,
+    kind: "read",
+    probes: [],
+    deliverable: null,
+    chainStep: null,
+    codeWord: freshWord,
+    instructions: template.instructions.replace(
+      codeWordSentence(template.ordinal, template.codeWord),
+      codeWordSentence(4, freshWord)),
+  };
+  // The stored stage carries file METADATA only; the payload it attests to was hashed at
+  // staging time over the full file bodies, which this fixture no longer holds. So the
+  // attestation is carried across from the template (it already clears the fold-eligibility
+  // floor) with a distinct hash, which is all the payload-uniqueness law reads.
+  replaced.payloadSha256 = sha256Text(`${replaced.instructions}:gate-118`);
+  partial.stages[3] = replaced;
+  partial.probeCount = partial.stages.reduce((total, stage) => total + stage.probes.length, 0);
+  assert.throws(() => validateStagePlan(reseal118(partial)), /partial probe schedule/);
+  // A wave placed where the sealed schedule never put one.
+  const misplaced = structuredClone(plan);
+  misplaced.stages[5].kind = "probe";
+  misplaced.stages[5].probes = structuredClone(plan.stages[3].probes)
+    .map((probe, index) => ({ ...probe, id: `probe-06-0${index + 1}` }));
+  misplaced.probeCount = misplaced.stages.reduce((total, stage) => total + stage.probes.length, 0);
+  assert.throws(() => validateStagePlan(reseal118(misplaced)),
+    /probe wave the sealed schedule does not place there/);
+
+  // THE RENDERER: silent for a stage with no probes, and still faithful for a sealed one,
+  // which is the half a deletion of the branch would have broken.
+  const sealedStage = plan.stages.find((stage) => stage.kind === "probe");
+  const plainStage = plan.stages.find((stage) => stage.kind !== "probe");
+  const sealedText = stagePayloadText(visibleStage(sealedStage));
+  const plainText = stagePayloadText(visibleStage(plainStage));
+  for (const probe of sealedStage.probes) {
+    assert(sealedText.includes(`- ${probe.id}: `),
+      "the renderer dropped a sealed plan's probe, so its payload hash can no longer match");
+  }
+  assert(!/^- probe-/m.test(plainText),
+    "the renderer emits a probe block for a stage that carries none");
+  // And the whole current-shape plan renders no question block anywhere: proved over every
+  // stage, not just the one sampled above.
+  const currentShape = structuredClone(plan);
+  for (const stage of currentShape.stages) stage.probes = [];
+  for (const stage of currentShape.stages) {
+    const rendered = stagePayloadText(visibleStage(stage));
+    assert(!/probe-\d\d-\d\d|<probe-id>/.test(rendered),
+      `stage ${stage.ordinal} still renders a probe surface with no probes to render`);
+  }
+
+  checks.theInRunProbeWavesAreDeletedAndAPartialScheduleIsRefused = true;
 }
 
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);

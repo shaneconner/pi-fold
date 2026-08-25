@@ -186,8 +186,11 @@ export function artifactWindows({ eligible, askCount, holdOutShare = 0.25 }) {
   assertExperiment(holdOutShare > 0 && holdOutShare < 1,
     "Artifact hold-out share must sit strictly between 0 and 1");
 
-  // ELIGIBLE, not every ordinal: a stage that delivered no files (today, the probe
-  // stages) has no membership to remember and cannot be anyone's subject.
+  // ELIGIBLE, not every ordinal: a stage that delivered no files has no membership to
+  // remember and cannot be anyone's subject. The probe waves were the only stages that
+  // ever delivered none, and they were deleted on 2026-08-25, so today every ordinal
+  // inside the bounds below is eligible. The filter stays because it states the rule the
+  // windows depend on rather than the shape the plan happens to have.
   const ordered = [...eligible].sort((left, right) => left - right);
   const heldOutCount = Math.max(1, Math.round(ordered.length * holdOutShare));
   assertExperiment(ordered.length - heldOutCount >= askCount,
@@ -404,8 +407,9 @@ export function buildStaleArtifacts({
   // Collection happens on the NEXT stage fetch, so an ask at the last stage is never
   // collected and its file survives the run in the checkout, which is the disk-memory
   // channel these bounds exist to close. The run config refuses that by name, and a smoke
-  // plan hit it: eight stages, probe ordinals at 4 and 8, last window ending at 7 and its
-  // ask landing on 8. So subjects stop two stages short of the end and the ask is clamped
+  // plan hit it: eight stages, the last window ending at 7 and its ask landing on 8 (the
+  // ordinals were 4 and 8 then, the probe waves). So subjects stop two stages short of
+  // the end and the ask is clamped
   // one short, rather than staging a plan the runtime would refuse at startup.
   const stageCount = stages.length;
   const eligible = stages

@@ -18,18 +18,12 @@ import {
   EXPERIMENT_MODE_PLANS,
   EXPERIMENT_PROTOCOL_VERSION,
   EXPERIMENT_REPOS,
-  CONVERSATION_PROBE_KINDS,
   assertExperiment,
   auditDelivery,
   auditStepId,
   auditStepSentence,
   buildAuditTraces,
-  buildChainLinkProbes,
-  buildConversationProbes,
-  buildDerivationControlProbes,
-  buildEchoProbes,
   buildIncludeResolver,
-  buildProbes,
   codeWordSentence,
   codeWordReissueSentence,
   plantedWordCollisions,
@@ -42,7 +36,6 @@ import {
   stageCodeWords,
   stagePayloadText,
   stagePlanSha256,
-  uniqueIdentifierIndex,
   validateStagePlan,
   visibleStage,
 } from "./lib/pi_context_experiment.mjs";
@@ -195,19 +188,6 @@ function revisitInstruction(stage, files, earlier) {
   ].join(" ");
 }
 
-function probeInstruction() {
-  // ASKED AS A COLLEAGUE WOULD ASK, not as a quiz (Shane 2026-08-14). We obviously have to
-  // ask, but the framing is a variable and it was set against us: telling a model its recall
-  // is about to be scored is an instruction to hoard, and v3 already measured that shape
-  // once when sol's summarizer carried 20, 38 and 54 code words verbatim through successive
-  // summaries. The format line stays because the grading is mechanical; the premise goes.
-  return [
-    "Before we carry on, can you tell me a few things about the work so far?",
-    "Put each answer on its own line as `<probe-id>: <answer>`, then say in one sentence where",
-    "each one came from. If you are not sure of one, say so rather than guessing.",
-  ].join(" ");
-}
-
 function deliverableInstruction(ordinal, referencesStages) {
   return [
     // IN THE REPLY, not on disk (Shane 2026-08-21: "We're asking for deliverables
@@ -228,7 +208,7 @@ function deliverableInstruction(ordinal, referencesStages) {
 }
 
 function buildPlan({
-  repo, mode, seed, facts, codeWords, reissueWords, uniqueIdentifiers, checkoutPaths,
+  repo, mode, seed, facts, codeWords, reissueWords, checkoutPaths,
   contentSeed, querySeed,
 }) {
   const modePlan = EXPERIMENT_MODE_PLANS[mode];
@@ -261,16 +241,14 @@ function buildPlan({
   // unchanged; chains need the FINISHED map before any instruction is written.
   const skeletons = [];
   for (let ordinal = 1; ordinal <= modePlan.stageCount; ordinal += 1) {
-    const isProbe = modePlan.probeStages.includes(ordinal);
-    const isRevisit = !isProbe && ordinal > modePlan.revisitEvery && ordinal % modePlan.revisitEvery === 0;
+    const isRevisit = ordinal > modePlan.revisitEvery && ordinal % modePlan.revisitEvery === 0;
     // The code word rides inside the instructions exactly once; the field is the
     // ground-truth copy the run-visible plan keeps only via that woven sentence.
-    const codeWord = isProbe ? null : codeWords[ordinal - 1];
     skeletons.push({
       ordinal,
-      kind: isProbe ? "probe" : isRevisit ? "revisit" : "read",
-      files: isProbe ? [] : takeFiles(modePlan.payloadTargetChars),
-      codeWord,
+      kind: isRevisit ? "revisit" : "read",
+      files: takeFiles(modePlan.payloadTargetChars),
+      codeWord: codeWords[ordinal - 1],
       codeWordReissue: null,
     });
   }
@@ -345,7 +323,6 @@ function buildPlan({
     }
   }
   for (const skeleton of skeletons) {
-    if (skeleton.kind === "probe") continue;
     if (skeleton.ordinal % modePlan.reissueEvery !== 0) continue;
     // Excluding every chain-resolved stage is SUFFICIENT rather than merely
     // careful: the only text a withdrawal adds is a mention of stage S, so the
@@ -355,7 +332,7 @@ function buildPlan({
     // failed: a chain step names its ANCHOR path in its own step sentence, not
     // just the files that stage delivered.
     if (chainResolvedStages.has(skeleton.ordinal)) continue;
-    const announcer = skeletons.find((candidate) => candidate.kind !== "probe" &&
+    const announcer = skeletons.find((candidate) =>
       candidate.ordinal >= skeleton.ordinal + modePlan.reissueGap &&
       candidate.codeWordReissue === null);
     if (announcer === undefined) continue;
@@ -365,15 +342,10 @@ function buildPlan({
     };
   }
 
-  // Pass 3: instructions, probes, payload hashes.
-  const usedCarrierStages = new Set();
-  const probedLinks = new Set();
-  const probedChains = new Set();
-  const echoedTargets = new Set();
+  // Pass 3: instructions and payload hashes.
   const stages = [];
   for (const { ordinal, kind, files: takenFacts, codeWord, codeWordReissue } of skeletons) {
-    const isProbe = kind === "probe";
-    const deliverable = ordinal % modePlan.deliverableEvery === 0 && !isProbe
+    const deliverable = ordinal % modePlan.deliverableEvery === 0
       ? {
         id: `deliverable-${String(ordinal).padStart(2, "0")}`,
         instructions: "",
@@ -389,68 +361,7 @@ function buildPlan({
 
     const files = takenFacts;
     let instructions;
-    let probes = [];
-    if (isProbe) {
-      // Each wave follows the mode plan's kind schedule slot by slot: chain-link
-      // probes target recorded audit-trace values, an echo restates an earlier
-      // answer, conversation probes ask for facts that exist only in the earlier
-      // transcript, the wave-64 derivation control prices the hop with nothing
-      // to recall, and one repo-class control keeps the corpus baseline.
-      const waveIndex = modePlan.probeStages.indexOf(ordinal);
-      const waveKinds = modePlan.probeKinds[waveIndex];
-      const countOf = (kind) => waveKinds.filter((candidate) => candidate === kind).length;
-      const queues = {
-        "chain-link": buildChainLinkProbes({
-          chains, probeOrdinal: ordinal, seed: `${seed}:probe:${ordinal}`,
-          count: countOf("chain-link"), probedLinks, probedChains,
-        }),
-        echo: buildEchoProbes({
-          earlierWaves: stages.filter((stage) => stage.kind === "probe"),
-          seed: `${seed}:probe:${ordinal}`,
-          count: countOf("echo"), echoedTargets,
-        }),
-        "derivation-control": buildDerivationControlProbes({
-          stages, chains, seed: `${seed}:probe:${ordinal}`,
-          count: countOf("derivation-control"), includeTargets,
-        }),
-        conversation: buildConversationProbes({
-          stages,
-          probeOrdinal: ordinal,
-          seed: `${seed}:probe:${ordinal}`,
-          kinds: waveKinds.filter((kind) => CONVERSATION_PROBE_KINDS.includes(kind)),
-          usedStages: usedCarrierStages,
-          excludedBindingStages: chainStageNodes,
-          // Waves alternate between demanding a carrier whose code word was
-          // withdrawn and one whose word still stands, wherever the mode's
-          // carrier horizon can supply both.
-          requireReissued: modePlan.reissueAlternates ? waveIndex % 2 === 0 : null,
-        }),
-      };
-      const earlierFacts = stages.flatMap((stage) =>
-        stage.ordinal <= Math.ceil(ordinal / 2)
-          ? stage.files.map((file) => byPath.get(file.path)).filter(Boolean)
-          : []);
-      assertExperiment(earlierFacts.length > 0, `Probe stage ${ordinal} has no early corpus`);
-      queues.repo = buildProbes({
-        facts: earlierFacts,
-        seed: `${seed}:probe:${ordinal}`,
-        count: countOf("repo"),
-        uniqueIdentifiers,
-        rotationOffset: waveIndex,
-      });
-      // Ids carry the wave ordinal so they are unique across the WHOLE plan: the
-      // grading packet flattens every wave, and a repeated id would leave the
-      // grader joining answers to ground truth by position.
-      probes = waveKinds.map((kind) => {
-        if (kind === "repo") return queues.repo.shift();
-        if (CONVERSATION_PROBE_KINDS.includes(kind)) return queues.conversation.shift();
-        return queues[kind].shift();
-      }).map((probe, index) => ({
-        ...probe,
-        id: `probe-${String(ordinal).padStart(2, "0")}-${String(index + 1).padStart(2, "0")}`,
-      }));
-      instructions = probeInstruction();
-    } else if (kind === "revisit") {
+    if (kind === "revisit") {
       const earlierStage = stages.find((stage) => stage.files.length > 0 &&
         stage.ordinal >= Math.max(1, Math.floor(ordinal / 3)) && stage.ordinal < ordinal &&
         !revisitExcludedStages.has(stage.ordinal)) ??
@@ -497,7 +408,9 @@ function buildPlan({
       files: files.map((fact) => ({
         path: fact.path, sha256: fact.sha256, lines: fact.lines, chars: fact.chars, bytes: fact.bytes,
       })),
-      probes,
+      // Always empty. The field stays because a sealed plan carries its waves here and
+      // every reader still keys off it; nothing this builder makes ever fills it.
+      probes: [],
       deliverable,
       payloadChars: 0,
       payloadSha256: "0".repeat(64),
@@ -617,7 +530,6 @@ try {
         repo, mode, seed, facts, codeWords, reissueWords,
         contentSeed: hiddenMassSeeds.contentSeed,
         querySeed: hiddenMassSeeds.querySeed,
-        uniqueIdentifiers: uniqueIdentifierIndex(checkoutDefinitions.entries),
         checkoutPaths: checkoutDefinitions.paths,
       });
       break;

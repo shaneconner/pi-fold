@@ -468,22 +468,26 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
     heartbeatMs: 30_000,
     payloadTargetChars: 48_000,
     payloadFloorChars: 24_000,
-    probeStages: Object.freeze([16, 32, 48, 64]),
-    // One kind list PER WAVE (probeKinds[i] belongs to probeStages[i]), six fixed
-    // slots. Chain-link probes target audit-trace values (derived class); wave 16
-    // takes a third chain-link because no earlier wave exists to echo; wave 64
-    // trades stage-binding for the one derivation control (same hop, anchor
-    // supplied, nothing to recall). One stage-fact code word per wave stays as
-    // the declared hoarding ceiling, and the one repo-class control keeps
-    // continuity with iterations 1-5. Scored separately by class: a combined
-    // total would let the re-derivable answers mask the ones that matter.
-    probeKinds: Object.freeze([
-      Object.freeze(["chain-link", "chain-link", "chain-link", "stage-fact", "stage-binding", "repo"]),
-      Object.freeze(["chain-link", "chain-link", "echo", "stage-fact", "stage-binding", "repo"]),
-      Object.freeze(["chain-link", "chain-link", "echo", "stage-fact", "stage-binding", "repo"]),
-      Object.freeze(["chain-link", "chain-link", "echo", "stage-fact", "derivation-control", "repo"]),
-    ]),
-    deliverableEvery: 8,
+    // READING ONLY. The probe waves are DELETED from every plan this builder makes;
+    // this is the schedule the sealed campaigns were built to, kept so their plans
+    // still validate here rather than only from a pre-bump checkout. See THE PROBE
+    // WAVES ARE DELETED below for why they went.
+    sealedProbeSchedule: Object.freeze({
+      stages: Object.freeze([16, 32, 48, 64]),
+      kinds: Object.freeze([
+        Object.freeze(["chain-link", "chain-link", "chain-link", "stage-fact", "stage-binding", "repo"]),
+        Object.freeze(["chain-link", "chain-link", "echo", "stage-fact", "stage-binding", "repo"]),
+        Object.freeze(["chain-link", "chain-link", "echo", "stage-fact", "stage-binding", "repo"]),
+        Object.freeze(["chain-link", "chain-link", "echo", "stage-fact", "derivation-control", "repo"]),
+      ]),
+    }),
+    // Sixteen, not eight. It was eight AND suppressed on the four probe ordinals, so a
+    // full run carried four deliverables; with the waves gone, plain "every eight" would
+    // silently double that. The deliverable's own text is a retention directive ("it MUST
+    // cite concrete facts first seen in stage N"), so doubling it while deleting the
+    // probes would trade one instruction surface for another. The constant now states
+    // the count it always produced.
+    deliverableEvery: 16,
     revisitEvery: 3,
     // How far after a stage its code word is reissued. See CODE WORD REISSUES.
     // Three keeps the original and its correction in different fold spans on the
@@ -533,17 +537,17 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
     // far side of it.
     payloadTargetChars: 48_000,
     payloadFloorChars: 24_000,
-    // Deliverable cadence must not collide with the probe stages, or a mode plan silently
-    // produces zero deliverables and the blind grading leg has nothing to grade.
-    probeStages: Object.freeze([4, 8]),
-    // Smoke has only three carrier stages under the <= ceil(ordinal/2) eligibility rule
-    // (1 and 2 by wave one, 3 by wave two), so each wave carries ONE conversation kind;
-    // both kinds still get exercised across the run, as do chain-link and echo,
-    // so a broken builder or grader path cannot first appear in a 5-hour run.
-    probeKinds: Object.freeze([
-      Object.freeze(["chain-link", "stage-fact", "repo"]),
-      Object.freeze(["chain-link", "echo", "stage-binding", "repo"]),
-    ]),
+    // READING ONLY, as in full mode: the schedule the sealed smoke campaigns were built
+    // to, kept so their plans still validate here.
+    sealedProbeSchedule: Object.freeze({
+      stages: Object.freeze([4, 8]),
+      kinds: Object.freeze([
+        Object.freeze(["chain-link", "stage-fact", "repo"]),
+        Object.freeze(["chain-link", "echo", "stage-binding", "repo"]),
+      ]),
+    }),
+    // Three still lands on 3 and 6 with nothing suppressed, so smoke's deliverable count
+    // is unchanged by the deletion and full mode's is the only cadence that moved.
     deliverableEvery: 3,
     revisitEvery: 2,
     // Smoke's ONE stage-fact probe sits at wave 4, whose carrier horizon is
@@ -770,93 +774,6 @@ export function fileFacts(repoRoot, absolutePath) {
     definitions: extractDefinitions(text),
     text,
   };
-}
-
-// Repo-class control probes, extracted mechanically from the pinned bytes. These are
-// re-derivable by rereading the checkout, which is exactly why they are only the
-// CONTROL now: conversation-class probes (below) are the discriminating instrument.
-// file-line-count is retired: its truth semantics were ambiguous, it was noise, and
-// it invited extra file reads that moved the token comparison.
-export function buildProbes({ facts, seed, count, uniqueIdentifiers, rotationOffset = 0 }) {
-  assertExperiment(Array.isArray(facts) && facts.length > 0, "Probe construction requires staged files");
-  assertExperiment(Number.isSafeInteger(count) && count > 0, "Probe construction requires a count");
-  const probes = [];
-  const ordered = seededShuffle(facts.map((fact) => fact.path), `${seed}:probe-files`);
-  const draws = seededSequence(`${seed}:probe-draws`, count * 4);
-  let drawIndex = 0;
-  for (let index = 0; probes.length < count && index < ordered.length * 3; index += 1) {
-    const fact = facts.find((candidate) => candidate.path === ordered[index % ordered.length]);
-    if (!fact) continue;
-    const rotation = (probes.length + rotationOffset) % 2;
-    if (rotation === 0 && fact.definitions.length > 0) {
-      const definition = fact.definitions[draws[drawIndex++] % fact.definitions.length];
-      probes.push({
-        id: `probe-${String(probes.length + 1).padStart(2, "0")}`,
-        kind: "definition-line",
-        question: `In the file ${fact.path}, which identifier is defined on line ${definition.line}? Answer with the identifier only.`,
-        expectedAnswer: definition.identifier,
-        sourcePath: fact.path,
-        sourceLine: definition.line,
-      });
-      continue;
-    }
-    const unique = fact.definitions.find((definition) =>
-      uniqueIdentifiers.get(definition.identifier) === fact.path);
-    if (!unique) continue;
-    probes.push({
-      id: `probe-${String(probes.length + 1).padStart(2, "0")}`,
-      kind: "symbol-file",
-      question: `Which repository-relative file defines ${definitionSubject(unique)}? ` +
-        "Answer with the path only.",
-      expectedAnswer: fact.path,
-      sourcePath: fact.path,
-      sourceLine: unique.line,
-    });
-  }
-  assertExperiment(probes.length === count,
-    `Pinned corpus yielded ${probes.length} mechanical probes, needed ${count}`);
-  return probes;
-}
-
-// A symbol-file probe claims THE defining file, so the question has to name the
-// CONSTRUCT and not just the identifier (Shane 2026-08-14). The uniqueness index
-// only sees the constructs DEFINITION_PATTERNS matches, and it carries no C
-// function pattern, so "which file defines gtls_shared_creds" passed uniqueness
-// while `lib/vtls/gtls.c` defined Curl_gtls_shared_creds_create, _up_ref, _free,
-// _expired and _different: a coin flip between the header that declares the
-// struct and the implementation that carries the functions, and the two arms
-// called it opposite ways. Naming the construct settles it from data already on
-// the definition, without widening the pattern set, which would put unverified C
-// prototypes into definition-line ground truth. The decoy file is left standing:
-// knowing where `struct X` is declared rather than merely where the token occurs
-// is the thing being asked.
-export function definitionSubject(definition) {
-  assertExperiment(typeof definition?.identifier === "string" && typeof definition?.kind === "string",
-    "A definition subject needs an identifier and a kind");
-  switch (definition.kind) {
-    case "struct": case "enum": case "trait": case "class": case "type":
-      return `${definition.kind} ${definition.identifier}`;
-    case "fn": case "func": case "def":
-      return `the function ${definition.identifier}`;
-    default:
-      return definition.identifier;
-  }
-}
-
-export function uniqueIdentifierIndex(facts) {
-  const seen = new Map();
-  const ambiguous = new Set();
-  for (const fact of facts) {
-    for (const definition of fact.definitions) {
-      if (seen.has(definition.identifier) && seen.get(definition.identifier) !== fact.path) {
-        ambiguous.add(definition.identifier);
-      } else {
-        seen.set(definition.identifier, fact.path);
-      }
-    }
-  }
-  for (const identifier of ambiguous) seen.delete(identifier);
-  return seen;
 }
 
 // ---------------------------------------------------------------------------
@@ -1089,7 +1006,7 @@ export function buildLedger({ mode, contentSeed }) {
   const firstHalf = modePlan.stageCount / 2;
   const payloadStages = [];
   for (let ordinal = 1; ordinal <= firstHalf; ordinal += 1) {
-    if (!modePlan.probeStages.includes(ordinal)) payloadStages.push(ordinal);
+    if (!modePlan.sealedProbeSchedule.stages.includes(ordinal)) payloadStages.push(ordinal);
   }
   const width = payloadStages.length;
   const need = geometry.tableSize + geometry.singles * 2 +
@@ -1205,77 +1122,6 @@ export function ledgerSentencesForStage(ledger, ordinal) {
     if (join.taskStage === ordinal) sentences.push(ledgerTaskSentence(join));
   }
   return sentences;
-}
-
-// One carrier stage per probe, never reused across the whole plan: a probed span,
-// once peeked or answered, is refreshed at the tail, and a second probe against it
-// would measure that refresh instead of recall.
-export function buildConversationProbes({
-  stages, probeOrdinal, seed, kinds, usedStages, excludedBindingStages = new Set(),
-  requireReissued = null,
-}) {
-  assertExperiment(Array.isArray(stages) && Number.isSafeInteger(probeOrdinal),
-    "Conversation probes require the stages built so far");
-  assertExperiment(Array.isArray(kinds) && kinds.every((kind) => CONVERSATION_PROBE_KINDS.includes(kind)),
-    "Conversation probe kinds must be stage-fact or stage-binding");
-  const horizon = Math.ceil(probeOrdinal / 2);
-  const eligible = stages.filter((stage) => stage.kind !== "probe" &&
-    stage.ordinal <= horizon && !usedStages.has(stage.ordinal));
-  assertExperiment(eligible.length >= kinds.length,
-    `Probe stage ${probeOrdinal} has ${eligible.length} unused carrier stages, needs ${kinds.length}`);
-  const order = seededShuffle(eligible.map((stage) => stage.ordinal), `${seed}:carriers`);
-  // A carrier is TRAPPED when its code word has been withdrawn and the
-  // withdrawal was DELIVERED before this wave asks. That is the wave ordinal,
-  // not the carrier horizon: the horizon bounds how old a carrier must be, while
-  // what makes the answer a trap is only whether the agent has been told yet.
-  // Reading the horizon here silently mislabelled the cell, and wave 64 drew a
-  // carrier withdrawn at stage 33 while the alternation believed it was clean.
-  const trapped = (ordinal) => {
-    const announcedAt = reissueAnnouncedAt(stages, ordinal);
-    return announcedAt !== null && announcedAt < probeOrdinal;
-  };
-  const probes = [];
-  for (const kind of kinds) {
-    // A stage-binding answer is the carrier's FIRST file, which a chain stage
-    // node would also expose through its FIN link, so those stages never carry
-    // a binding probe. Code words collide with nothing.
-    const ordinal = order.find((candidate) => !usedStages.has(candidate) &&
-      (kind !== "stage-binding" || !excludedBindingStages.has(candidate)) &&
-      (kind !== "stage-fact" || requireReissued === null || trapped(candidate) === requireReissued));
-    assertExperiment(ordinal !== undefined,
-      `Probe stage ${probeOrdinal} has no legal carrier for ${kind}` +
-      (kind === "stage-fact" && requireReissued !== null
-        ? ` with reissued=${requireReissued}` : ""));
-    const carrier = stages.find((stage) => stage.ordinal === ordinal);
-    usedStages.add(ordinal);
-    const label = String(ordinal).padStart(2, "0");
-    if (kind === "stage-fact") {
-      assertExperiment(typeof carrier.codeWord === "string" && CODE_WORD_PATTERN.test(carrier.codeWord),
-        `Carrier stage ${ordinal} has no code word`);
-      // ONE wording for trapped and untrapped carriers alike. A question that
-      // asked about a correction only where one existed would announce the trap
-      // in the asking, and measure the announcement.
-      probes.push({
-        id: "",
-        kind,
-        question: `What is the audit code word for stage ${label}? ` +
-          "Answer with the code word only.",
-        expectedAnswer: effectiveCodeWord(stages, ordinal),
-        sourceStage: ordinal,
-      });
-    } else {
-      assertExperiment(carrier.files.length > 0, `Carrier stage ${ordinal} delivered no files`);
-      probes.push({
-        id: "",
-        kind,
-        question: `Which repository-relative file was the FIRST file delivered in stage ${label}? ` +
-          "Answer with the path only.",
-        expectedAnswer: carrier.files[0].path,
-        sourceStage: ordinal,
-      });
-    }
-  }
-  return probes;
 }
 
 // ---------------------------------------------------------------------------
@@ -1510,121 +1356,6 @@ export function buildAuditTraces({ stages, seed, chainLength, startAfters, early
   return chains;
 }
 
-// Chain-link probes ask for a value the agent RECORDED earlier. Selection laws:
-// eligible links are unprobed steps aged past the carrier horizon; at least one
-// draw comes from the oldest third of the pool so no wave tests only the newest
-// link; once any chain has been probed, every later wave revisits a probed
-// chain at least once (recall of a previous recall, structurally); no link is
-// probed twice and no chain contributes two links to one wave. Exhaustion
-// refuses and the stager redraws its seed.
-export function buildChainLinkProbes({ chains, probeOrdinal, seed, count, probedLinks, probedChains }) {
-  if (count === 0) return [];
-  const keyOf = (chainId, index) => `${chainId}:${index}`;
-  const horizon = Math.ceil(probeOrdinal / 2);
-  const eligible = chains.flatMap((chain) => chain.links
-    .filter((link) => link.stage <= horizon && !probedLinks.has(keyOf(chain.id, link.index)))
-    .map((link) => ({ chain, link })));
-  eligible.sort((left, right) => left.link.stage - right.link.stage);
-  const oldestThird = new Set(eligible.slice(0, Math.ceil(eligible.length / 3))
-    .map((entry) => keyOf(entry.chain.id, entry.link.index)));
-  const requireRepeat = probedChains.size > 0;
-  const ranked = seededShuffle(eligible, `${seed}:chain-links`);
-  // count is at most 3 and the pool is small: exhaustive search over ranked
-  // combinations, first fully legal draw wins, so selection is deterministic.
-  const chosen = [];
-  const search = (start) => {
-    if (chosen.length === count) {
-      return (!requireRepeat || chosen.some((entry) => probedChains.has(entry.chain.id))) &&
-        chosen.some((entry) => oldestThird.has(keyOf(entry.chain.id, entry.link.index)));
-    }
-    for (let index = start; index < ranked.length; index += 1) {
-      const entry = ranked[index];
-      if (chosen.some((picked) => picked.chain.id === entry.chain.id)) continue;
-      chosen.push(entry);
-      if (search(index + 1)) return true;
-      chosen.pop();
-    }
-    return false;
-  };
-  assertExperiment(search(0),
-    `Probe stage ${probeOrdinal} cannot fill ${count} chain-link slots under the ` +
-    "selection laws; stage the campaign with a different seed");
-  return chosen.map(({ chain, link }) => {
-    probedLinks.add(keyOf(chain.id, link.index));
-    probedChains.add(chain.id);
-    const stepId = auditStepId(chain.id, link.index);
-    const answerForm = link.hop === "SOF" ? "stage number" : "repository-relative path";
-    return {
-      id: "",
-      kind: "chain-link",
-      question: "The dependency appendix lists each audit trace in order and its " +
-        `${chain.id} step ${String(link.index).padStart(2, "0")} row is blank. ` +
-        `What value did you record for ${stepId}? Answer with the ${answerForm} only.`,
-      expectedAnswer: String(link.expectedAnswer),
-      chainId: chain.id,
-      linkIndex: link.index,
-      sourceStage: link.stage,
-    };
-  });
-}
-
-// An echo probe restates the agent's own earlier ANSWER, so its truth is
-// per-run: it carries no expected answer by construction and is graded only by
-// the adjudicator, never in the blind packet. Targets are distinct chain-link
-// probes from strictly earlier waves: a recall of a recall of a derived fact.
-export function buildEchoProbes({ earlierWaves, seed, count, echoedTargets }) {
-  if (count === 0) return [];
-  const candidates = earlierWaves.flatMap((wave) => wave.probes
-    .filter((probe) => probe.kind === "chain-link" && !echoedTargets.has(probe.id)));
-  assertExperiment(candidates.length >= count,
-    "Echo probes need unechoed chain-link probes from earlier waves");
-  return seededShuffle(candidates, `${seed}:echo`).slice(0, count).map((target) => {
-    echoedTargets.add(target.id);
-    return {
-      id: "",
-      kind: "echo",
-      question: `Audit trail: restate the answer you gave for ${target.id}, exactly ` +
-        "as you gave it. Answer with that value only.",
-      targetProbeId: target.id,
-    };
-  });
-}
-
-// The derivation control prices the INC hop with the anchor SUPPLIED: work
-// competence with nothing to recall, calibrating every chain number in the run.
-// The anchor is a delivered file on no chain, so the control never refreshes
-// trace material.
-export function buildDerivationControlProbes({ stages, chains, seed, count, includeTargets }) {
-  if (count === 0) return [];
-  const chainFiles = new Set(chains.flatMap((chain) => [
-    chain.links[0].input,
-    ...chain.links.map((link) => link.expectedAnswer)
-      .filter((value) => typeof value === "string"),
-  ]));
-  const delivered = stages.flatMap((stage) => stage.files.map((file) => file.path))
-    .filter((path) => !chainFiles.has(path));
-  for (const path of seededShuffle(delivered, `${seed}:derivation-control`)) {
-    const targets = includeTargets(path);
-    const positions = targets
-      .map((target, position) => typeof target === "string" ? position + 1 : null)
-      .filter((position) => position !== null && position <= AUDIT_INCLUDE_MAX_INDEX);
-    if (positions.length === 0) continue;
-    const hopIndex = positions[seededSequence(`${seed}:derivation-control:${path}`, 1)[0] % positions.length];
-    return [{
-      id: "",
-      kind: "derivation-control",
-      question: `Control question, nothing to recall: starting from ${path}, name the ` +
-        `target of its ${ordinalWord(hopIndex)} quoted include, using the same counting ` +
-        "and resolution rules as the audit traces. Answer with the repository-relative path only.",
-      expectedAnswer: targets[hopIndex - 1],
-      sourcePath: path,
-    }];
-  }
-  assertExperiment(false,
-    "No delivered file can host the derivation control; stage the campaign with a different seed");
-  return [];
-}
-
 // ---------------------------------------------------------------------------
 // Stage plan: DATA, hashed. The hash is pinned into every run manifest.
 // ---------------------------------------------------------------------------
@@ -1784,6 +1515,26 @@ export function validateStagePlan(plan) {
   "Stage plan repo pin is invalid or unregistered");
   assertExperiment(Array.isArray(plan.stages) && plan.stages.length === plan.stageCount,
     "Stage plan stage count drifted");
+  // THE PROBE WAVES ARE DELETED (Shane, 2026-08-25). Four labelled question blocks at
+  // ordinals 16/32/48/64, six questions each, ids `probe-NN-NN`, asking for recorded trace
+  // values, audit code words and file positions: the same classes the run's own collection
+  // asks about, rehearsed four times before half the material is delivered. It taught the
+  // model that recall was scored, and the arm that had to be told least is the one under
+  // test, because Pi's compaction summary decides what survives and a model that knows it
+  // will be quizzed writes a summary that keeps quiz-shaped facts. v3 measured that shape
+  // already, when sol's summarizer carried 20, 38 and 54 code words verbatim through
+  // successive summaries because it could tell they mattered. The stale artifacts collect
+  // the same material with no question format and no ids, and the audit chain still grades
+  // every step at record time (verdictAbsolute against truth, verdictSelf against the
+  // model's own earlier step), so the unfakeable faithful-to-wrong cell survives the
+  // deletion. Echo does not: recall of a recall needs an earlier answer to point at, and
+  // Shane took the loss rather than keep a question block for it.
+  //
+  // The readers all stay. A sealed campaign's plan carries its waves and must keep
+  // adjudicating under this code, so `probeTranscripts` and everything downstream of it
+  // are live, and the payload renderer still renders a probe stage because a sealed
+  // plan's `payloadSha256` is computed from those bytes.
+  const sealedProbeShape = plan.stages.some((stage) => stage.kind === "probe");
   let probeCount = 0;
   let deliverableCount = 0;
   const carrierStages = new Set();
@@ -1808,13 +1559,24 @@ export function validateStagePlan(plan) {
       assertExperiment(leaks.length === 0,
         `Stage ${index + 1} ${surface} tells the model it is being tested: ${leaks.join(", ")}`);
     }
-    assertExperiment((stage.kind === "probe") === modePlan.probeStages.includes(stage.ordinal) &&
-      (stage.kind === "probe") === (stage.probes.length > 0),
-    `Stage ${index + 1} disagrees with the mode plan about being a probe wave`);
+    // A plan this builder made carries no probe wave at all, and one built before the
+    // deletion carries the sealed schedule exactly. Which contract a plan is held to is
+    // read from the plan's OWN shape rather than from a version field, the same way
+    // `composeEndBlockPrompt` reads whether a plan asks a ledger or an adjacency block:
+    // a sealed plan must still match the schedule it was built to, byte for byte, and a
+    // new one must carry nothing.
+    assertExperiment((stage.kind === "probe") === (stage.probes.length > 0),
+      `Stage ${index + 1} disagrees with itself about being a probe wave`);
+    assertExperiment(!sealedProbeShape || stage.probes.length === 0 ||
+      modePlan.sealedProbeSchedule.stages.includes(stage.ordinal),
+    `Stage ${index + 1} is a probe wave the sealed schedule does not place there`);
     if (stage.kind === "probe") {
       // The kind schedule is the contract: a wave whose slots drifted from the
       // mode plan is a different instrument.
-      const waveKinds = modePlan.probeKinds[modePlan.probeStages.indexOf(stage.ordinal)];
+      const waveKinds = modePlan.sealedProbeSchedule.kinds[
+        modePlan.sealedProbeSchedule.stages.indexOf(stage.ordinal)];
+      assertExperiment(waveKinds !== undefined,
+        `Stage ${index + 1} is a probe wave the sealed schedule does not place there`);
       assertExperiment(stage.probes.length === waveKinds.length &&
         stage.probes.every((probe, position) => (waveKinds[position] === "repo"
           ? REPO_PROBE_KINDS.includes(probe.kind)
@@ -1931,7 +1693,14 @@ export function validateStagePlan(plan) {
     }
   }
   assertExperiment(plan.probeCount === probeCount && plan.deliverableCount === deliverableCount &&
-    probeCount > 0 && deliverableCount > 0, "Stage plan probe/deliverable counts drifted");
+    deliverableCount > 0, "Stage plan probe/deliverable counts drifted");
+  // Zero is the only count a plan built now may carry, and a sealed plan must still carry
+  // every wave its schedule places: "some of them" is neither instrument.
+  const sealedWaves = plan.stages.filter((stage) => stage.kind === "probe").map((stage) => stage.ordinal);
+  assertExperiment(sealedProbeShape
+    ? sealedWaves.join(",") === modePlan.sealedProbeSchedule.stages.join(",")
+    : probeCount === 0,
+  "Stage plan carries a partial probe schedule: it is neither the sealed instrument nor the current one");
   // Every stage payload is unique bytes. A harness-induced repeat would land in the reread
   // tax as if the model had re-read it, so revisit stages carry instructions, never resent
   // file bodies: the only way a payload hash can repeat is a model-initiated read.
