@@ -820,3 +820,84 @@ export function collectArtifact({ repoDir, ask }) {
     chars: returned === null ? 0 : returned.length,
   };
 }
+
+// ---------------------------------------------------------------------------
+// The grading lens: sealed run directory to verdicts.
+//
+// Reads `stale-artifacts.jsonl`, which the extension wrote at collection time, and joins
+// each record to the plan's ask by id. The record holds the file EXACTLY as the model left
+// it, snapshotted at the instant it was collected, so this is a post-hoc read of a fixed
+// artifact rather than anything the run could influence.
+//
+// A run that predates the instrument has no such file and reports nothing, exactly as a
+// pre-ledger run reports no ledger.
+// ---------------------------------------------------------------------------
+
+export function staleArtifactVerdicts({ records, artifacts }) {
+  const byId = new Map((artifacts ?? []).map((ask) => [ask.id, ask]));
+  const rows = [];
+  for (const record of records ?? []) {
+    const ask = byId.get(record.id);
+    // A record naming an ask the plan does not carry is not skipped quietly: the two came
+    // from the same staging, so a mismatch means the run and the plan disagree about what
+    // was asked, and reporting it as absent would hide that.
+    if (!ask) {
+      rows.push({ id: record.id, schema: record.schema, unmatched: true });
+      continue;
+    }
+    if (record.missing || record.returned === null) {
+      rows.push({
+        id: ask.id, schema: ask.schema, rederivable: ask.rederivable,
+        deleted: true, fields: ask.fields.length,
+        corrected: 0, stale: 0, confabulated: 0, abstained: 0, missing: ask.fields.length,
+      });
+      continue;
+    }
+    const graded = gradeStaleArtifact({
+      ask,
+      returned: parseStaleArtifact({ schema: ask.schema, text: record.returned }),
+    });
+    rows.push({
+      ...graded,
+      // UNTOUCHED IS REPORTED, not folded into "stale". A note returned byte-identical to
+      // what was planted is a model that never opened it, which is a different finding
+      // from one that read it, judged every field and changed nothing.
+      untouched: record.untouched === true,
+      plantedAtStage: record.plantedAtStage,
+      collectedAtStage: record.collectedAtStage,
+    });
+  }
+  const graded = rows.filter((row) => !row.unmatched && !row.deleted);
+  const sum = (key) => graded.reduce((total, row) => total + (row[key] ?? 0), 0);
+  // RECALL AND RE-DERIVATION ARE NEVER POOLED. crossref can be answered by re-opening the
+  // file, so a run that aces it while failing the rest worked rather than remembered.
+  const bucket = (rederivable) => {
+    const subset = graded.filter((row) => row.rederivable === rederivable);
+    const take = (key) => subset.reduce((total, row) => total + (row[key] ?? 0), 0);
+    const fields = take("fields");
+    return {
+      asks: subset.length,
+      fields,
+      corrected: take("corrected"),
+      stale: take("stale"),
+      confabulated: take("confabulated"),
+      abstained: take("abstained"),
+      missing: take("missing"),
+      // Scored over what the model actually committed to, so an honest abstention neither
+      // helps nor hurts; `fields` is reported beside it so the denominator is never hidden.
+      accuracy: fields - take("abstained") - take("missing") > 0
+        ? take("corrected") / (fields - take("abstained") - take("missing"))
+        : null,
+    };
+  };
+  return {
+    asks: rows.length,
+    unmatched: rows.filter((row) => row.unmatched).length,
+    deleted: rows.filter((row) => row.deleted).length,
+    untouched: rows.filter((row) => row.untouched).length,
+    fields: sum("fields"),
+    recall: bucket(false),
+    rederivable: bucket(true),
+    rows,
+  };
+}

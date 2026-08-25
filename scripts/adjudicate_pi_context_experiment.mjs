@@ -63,6 +63,7 @@ import {
   validateExperimentRunConfig,
   validateStagePlan,
 } from "./lib/pi_context_experiment.mjs";
+import { staleArtifactVerdicts } from "./lib/pi_context_artifacts.mjs";
 import { hostSessionFile } from "./lib/pi_context_sandbox.mjs";
 import { PI_FOLD_ACTIVE_CONTEXT_REGISTRATION } from "./lib/pi_fold_identity.mjs";
 import {
@@ -595,6 +596,15 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     entries: runEntries, ledger: plan.ledger, querySeed: config.querySeed, events: workerEvents,
   });
 
+  // The v5 stale artifacts, graded post-hoc from the snapshots the extension took at
+  // collection time. A run staged before the instrument carries neither the file nor the
+  // plan's asks and reports null, exactly as a pre-ledger run reports no ledger.
+  const staleArtifacts = plan.staleArtifacts === undefined ? null
+    : staleArtifactVerdicts({
+      records: readJsonLines(join(runDir, "stale-artifacts.jsonl")),
+      artifacts: plan.staleArtifacts,
+    });
+
   // Audit traces: every chain step graded absolutely (against the harness walk)
   // and against the agent's own predecessor. INC self-evaluation reads the run's
   // pinned worktree; a pruned worktree reports not-evaluated rather than guessing.
@@ -765,6 +775,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
     waveRecovery,
     echoes,
     endBlock,
+    staleArtifacts,
     auditTraces,
     provenance,
     probes,

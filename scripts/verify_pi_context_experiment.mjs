@@ -10826,4 +10826,107 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   checks.aStaleArtifactNeverBecomesADiskMemory = true;
 }
 
+
+// ---------------------------------------------------------------------------
+// GATE 112 - the artifact verdicts never pool recall with re-derivation, and never
+// silently drop a run and a plan that disagree.
+//
+// `crossref` can be answered by re-opening the file, which is why it exists: it measures
+// re-derivation where the other schemas measure recall, and a run that aces it while
+// failing `manifest` is telling us it worked rather than remembered. Pooling the two into
+// one accuracy would report that as recall and the control would have been wasted.
+//
+// The lens also has to distinguish four things a cruder reading collapses: a note returned
+// byte-identical to what was planted (never opened), a note read and left alone field by
+// field, a note deleted outright, and a record naming an ask the plan does not carry. That
+// last one is not an absence: both came from the same staging, so a mismatch means the run
+// and the plan disagree about what was asked, and reporting it as missing would hide it.
+// ---------------------------------------------------------------------------
+{
+  const artifacts = await import(
+    pathToFileURL(join(PROJECT, "scripts", "lib", "pi_context_artifacts.mjs")));
+
+  const recallAsk = {
+    id: "af-01", schema: "manifest", rederivable: false,
+    fields: [
+      { key: "pass-01", truth: ["a.c"], stale: ["z.c"], rederivable: false },
+      { key: "pass-02", truth: ["b.c"], stale: ["y.c"], rederivable: false },
+    ],
+  };
+  const controlAsk = {
+    id: "af-02", schema: "crossref", rederivable: true,
+    fields: [
+      { key: "p.c", truth: "q.h", stale: "r.h", rederivable: true },
+      { key: "s.c", truth: "t.h", stale: "u.h", rederivable: true },
+    ],
+  };
+  const note = (ask, values) => artifacts.renderStaleArtifact({
+    ...ask, fields: ask.fields.map((field) => ({ ...field, stale: values[field.key] ?? field.stale })),
+  });
+
+  // The shape that motivates the split: every recall field missed, every control field hit.
+  const split = artifacts.staleArtifactVerdicts({
+    artifacts: [recallAsk, controlAsk],
+    records: [
+      { id: "af-01", schema: "manifest", missing: false, untouched: true, returned: note(recallAsk, {}) },
+      { id: "af-02", schema: "crossref", missing: false, untouched: false,
+        returned: note(controlAsk, { "p.c": "q.h", "s.c": "t.h" }) },
+    ],
+  });
+  assert.equal(split.recall.accuracy, 0, "a run that corrected no recall field scores above zero");
+  assert.equal(split.rederivable.accuracy, 1, "a run that corrected every control field scores below one");
+  assert.equal(split.recall.asks, 1, "the control ask was counted as recall");
+  assert.equal(split.rederivable.asks, 1, "the recall ask was counted as re-derivation");
+  // UNTOUCHED IS ITS OWN FINDING. A note returned byte-identical to what was planted is a
+  // model that never opened it, which is not the same as one that read it and changed
+  // nothing.
+  assert.equal(split.untouched, 1, "a note returned exactly as planted is not reported untouched");
+
+  // ABSTENTION LEAVES THE DENOMINATOR, so declining to guess neither helps nor hurts, and
+  // `fields` is reported beside it so the denominator is never hidden.
+  const abstained = artifacts.staleArtifactVerdicts({
+    artifacts: [recallAsk],
+    records: [{ id: "af-01", schema: "manifest", missing: false, untouched: false,
+      returned: note(recallAsk, { "pass-01": ["a.c"], "pass-02": [artifacts.ARTIFACT_UNVERIFIED] }) }],
+  });
+  assert.equal(abstained.recall.accuracy, 1,
+    "an abstention is scored against the model rather than held out");
+  assert.equal(abstained.recall.abstained, 1, "the abstention was not counted");
+  assert.equal(abstained.recall.fields, 2, "the denominator hides how many fields were asked");
+
+  // A DELETED note is not a wrong answer: it is reported as such, with its fields owed.
+  const deleted = artifacts.staleArtifactVerdicts({
+    artifacts: [recallAsk],
+    records: [{ id: "af-01", schema: "manifest", missing: true, returned: null }],
+  });
+  assert.equal(deleted.deleted, 1, "a deleted note is not reported deleted");
+  assert.equal(deleted.rows[0].missing, recallAsk.fields.length,
+    "a deleted note does not owe its fields");
+  assert.equal(deleted.recall.asks, 0, "a deleted note was graded as if it had been answered");
+
+  // A RECORD NAMING AN ASK THE PLAN DOES NOT CARRY is surfaced, never dropped: run and
+  // plan came from one staging, so disagreement is a finding.
+  const stray = artifacts.staleArtifactVerdicts({
+    artifacts: [recallAsk],
+    records: [{ id: "af-99", schema: "manifest", missing: false, untouched: false, returned: "# x\\n" }],
+  });
+  assert.equal(stray.unmatched, 1, "a record naming an unknown ask is silently dropped");
+
+  // A run staged before the instrument reports nothing rather than an empty score.
+  assert.equal(artifacts.staleArtifactVerdicts({ records: [], artifacts: [] }).asks, 0,
+    "a pre-instrument run invents artifact verdicts");
+
+  // And the adjudicator actually reads it, keyed off the PLAN so a v4 run reports null.
+  const adjudicator = readFileSync(
+    join(PROJECT, "scripts", "adjudicate_pi_context_experiment.mjs"), "utf8");
+  assert(adjudicator.includes("staleArtifactVerdicts({"),
+    "the adjudicator does not grade the stale artifacts");
+  assert(adjudicator.includes("plan.staleArtifacts === undefined ? null"),
+    "the adjudicator does not report null for a run staged before the instrument");
+  assert(adjudicator.includes('join(runDir, "stale-artifacts.jsonl")'),
+    "the adjudicator does not read the collection snapshots");
+
+  checks.artifactVerdictsSeparateRecallFromRederivation = true;
+}
+
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);
