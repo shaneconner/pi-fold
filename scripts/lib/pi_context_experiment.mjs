@@ -1653,12 +1653,16 @@ export function stagePayloadText(stage) {
   assertExperiment(stage.chainStep == null ||
     exactKeys(stage.chainStep, ["id", "chainId", "index", "hop", "hopIndex", "anchor"]),
   `Stage ${stage.ordinal} chain step carries keys beyond the visible surface`);
-  const header = [
-    `STAGE ${String(stage.ordinal).padStart(2, "0")} / ${stage.kind}`,
-    stage.instructions,
-  ];
+  // NO PROTOCOL FURNITURE IN THE PAYLOAD (Shane, 2026-08-24). The header used to open
+  // `STAGE 16 / probe` and, on a probe stage, `QUESTIONS (answer each from what you already
+  // know; cite where you learned it):`. Between them they announced a numbered protocol, a
+  // stage KIND, and an explicit recall frame, at ordinals 16/32/48/64, i.e. before half the
+  // ledger is delivered; the withheld end block then asks the same classes, so the run
+  // contained four rehearsals of its own exam. The plan's own probe sentence is already
+  // conversational and stands on its own. The ids stay, because grading joins on them.
+  const header = [stage.instructions];
   if (stage.kind === "probe") {
-    header.push("", "QUESTIONS (answer each from what you already know; cite where you learned it):");
+    header.push("");
     for (const probe of stage.probes) header.push(`- ${probe.id}: ${probe.question}`);
   }
   if (stage.deliverable) header.push("", `DELIVERABLE ${stage.deliverable.id}: ${stage.deliverable.instructions}`);
@@ -1732,6 +1736,9 @@ export const TEST_AWARENESS_PATTERNS = Object.freeze([
   // CROSS-REFERENCING IS THE TASK UNDER TEST, so instructing it is instructing the answer.
   /cross-reference .{0,40}against earlier/i,
   /comprehension assignment/i,
+  // AN EXPLICIT RECALL FRAME, which is what the probe payload header was.
+  /from what you already know/i,
+  /cite where you learned/i,
 ]);
 
 export function testAwarenessLeaks(text) {
