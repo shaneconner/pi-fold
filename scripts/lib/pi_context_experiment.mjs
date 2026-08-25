@@ -1716,6 +1716,22 @@ export const TEST_AWARENESS_PATTERNS = Object.freeze([
   /take notes/i,
   /write (them|this|these|it) down/i,
   /save (them|these|it) (to|in) a file/i,
+  // AN OWED REPORT IS A RETENTION DIRECTIVE (Shane, 2026-08-24). Telling the model a
+  // synthesis is due at the end tells it to carry material forward for that synthesis,
+  // which is the hoarding leak in its most respectable clothes. Both live phrasings were
+  // found in the model's own compaction summaries as "preserve the answer for final
+  // reporting", which is the model saying out loud what the instruction surface taught it.
+  /closing synthesis/i,
+  /final (synthesis|report|reporting)/i,
+  // PROGRESS ACCOUNTING. "stage 7 of 64" hands over a total, a position and the fact that
+  // something is being tracked. It rode the resume prompt, so its DOSE scaled with how
+  // often an arm compacted: 5 to 10 per native run against exactly 0 for every pifold run,
+  // which made the priming a cross-arm asymmetry rather than a constant.
+  /stage \d+ of \d+/i,
+  /has not been delivered/i,
+  // CROSS-REFERENCING IS THE TASK UNDER TEST, so instructing it is instructing the answer.
+  /cross-reference .{0,40}against earlier/i,
+  /comprehension assignment/i,
 ]);
 
 export function testAwarenessLeaks(text) {

@@ -179,10 +179,9 @@ assertExperiment(harnessSourceRemains().length === 0,
 // of what the run measures rather than something to supply.
 function workloadSystemPrompt() {
   return [
-    "You are a careful software analyst carrying out one continuous repository comprehension",
-    "assignment. Read what you are given accurately, cross-reference new material against",
-    "earlier material, and write the deliverables you are asked for. Work in one continuous run",
-    "and finish only after the assignment ends.",
+    "You are a careful software analyst working through a repository.",
+    "Read what you are given accurately and write the deliverables you are asked for.",
+    "Work in one continuous run and finish only after the work ends.",
   ].join(" ");
 }
 
@@ -191,16 +190,24 @@ function workloadPrompt(firstChallenge) {
     `Begin the staged repository assignment with key ${firstChallenge}.`,
     `Call ${EXPERIMENT_TOOL_NAME} with the current key to receive each stage, carry out that`,
     "stage's instructions in full, and follow each NEXT_KEY until END.",
-    "Do not skip, guess, duplicate, or combine stages. Finish with a short closing synthesis.",
+    "Do not skip, guess, duplicate, or combine stages.",
     "Complete this as one continuous run.",
   ].join(" ");
 }
 
-function resumePrompt(stage, stageCount) {
+// AN ORDINARY RESUME (Shane, 2026-08-24: "word it like a normal resume prompt"). It used to
+// say "The assignment is not finished: stage N of 64 has not been delivered. Recover the
+// NEXT_KEY ... Do not write the closing synthesis until a stage returns END", which handed
+// over a total, a position, the fact that progress was being tracked, and an owed final
+// report. It fires once per fence compaction, so its DOSE scaled with how often an arm
+// compacted: 5 to 10 per native run against exactly 0 for every pifold run, which made the
+// priming a cross-arm asymmetry rather than a constant. It says nothing about the work now,
+// so a resumed agent is told only that it was interrupted; gate 56's law is unchanged and
+// strengthened, because withholding the key was always the point.
+function resumePrompt() {
   return [
-    `The assignment is not finished: stage ${stage} of ${stageCount} has not been delivered.`,
-    `Recover the NEXT_KEY issued by the most recent completed stage and call`,
-    `${EXPERIMENT_TOOL_NAME} with it. Do not write the closing synthesis until a stage returns END.`,
+    "You are resuming after a context handoff.",
+    "Continue the work you were doing.",
   ].join(" ");
 }
 
@@ -587,7 +594,7 @@ try {
           afterStage: delivered, reason,
           wallMs: Date.now(), monotonicMs: monotonicMs(),
         });
-        await session.prompt(resumePrompt(delivered + 1, plan.stageCount),
+        await session.prompt(resumePrompt(),
           { expandPromptTemplates: false });
         terminalState = await waitForDurableTerminalQuiescence(manager, session);
         await awaitFenceOutcome();

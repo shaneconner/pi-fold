@@ -4075,8 +4075,15 @@ try {
     "the resume loop is not bounded by the deadline, the plan count and the resume guards together");
   const resume = worker.slice(worker.indexOf("function resumePrompt("), worker.indexOf("function lastConversationalMessage("));
   assert(resume.length > 0, "the resume prompt was not found where it is pinned");
-  assert(/Recover the NEXT_KEY/.test(resume) && !/challenge/i.test(resume),
+  // THE LAW IS THAT THE PROMPT HANDS OVER NO KEY, so a run whose agent has lost one is
+  // measuring recovery. It used to be checked through one specific sentence ("Recover the
+  // NEXT_KEY"), which the 2026-08-24 de-priming rewrite deleted along with the stage
+  // accounting and the owed synthesis that rode beside it. Checked directly now, so a
+  // prompt that starts handing anything over fails whatever words it uses.
+  assert(!/NEXT_KEY|challenge|\bkeys?\b/i.test(resume),
     "the resume prompt hands the agent a key instead of making it recover one");
+  assert(!/\bstages?\b|\bof \d+|\bdeliver/i.test(resume),
+    "the resume prompt carries progress accounting, which is a retention directive");
   assert(/stagesDelivered\(\) === plan\.stageCount/.test(worker),
     "a run that ends with stages undelivered does not fail by that name");
   assert(/stageNudges,/.test(worker) && /stagesDelivered: closedBook \? null : stagesDelivered\(\)/.test(worker),
@@ -4692,7 +4699,7 @@ try {
   for (const [name, pattern] of [
     ["workloadSystemPrompt", /function workloadSystemPrompt\(\) \{\n  return \[\n([\s\S]*?)\n  \]/],
     ["workloadPrompt", /function workloadPrompt\(firstChallenge\) \{\n  return \[\n([\s\S]*?)\n  \]/],
-    ["resumePrompt", /function resumePrompt\(stage, stageCount\) \{\n  return \[\n([\s\S]*?)\n  \]/],
+    ["resumePrompt", /function resumePrompt\(\) \{\n  return \[\n([\s\S]*?)\n  \]/],
   ]) {
     const found = pattern.exec(worker);
     assert(found, `the sweep cannot read ${name}, so it is scanning nothing`);
