@@ -647,7 +647,11 @@ async function run() {
     assertExperiment(workerReady.workerPid === SANDBOX_WORKER_PID,
       `Worker readiness came from namespace pid ${workerReady.workerPid}, not the namespace's own child`);
     assertExperiment(workerReady.runId === runId &&
-      workerReady.arm === arm &&
+      // The worker no longer writes `arm` (it lands inside the namespace and naming the arm
+      // there is the priming), so a run that predates that change is still checked against
+      // its own value and a current one is checked against the supervisor's, which is the
+      // authority either way.
+      (workerReady.arm === undefined || workerReady.arm === arm) &&
       workerReady.checkoutSha256 === (closedBook ? null : plannedFingerprint) &&
       workerReady.sessionFile.startsWith(`${SANDBOX_PATHS.session}/`),
     "Worker readiness identity drifted");

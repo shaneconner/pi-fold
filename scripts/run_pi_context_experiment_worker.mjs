@@ -44,6 +44,7 @@ import {
 } from "./lib/pi_context_sandbox.mjs";
 import {
   assertSanitizedRuntimeEnvironment,
+  SOAK_SANITIZED_ENV_MARKER,
   directoryTreeSha256,
   fileSha256,
   monotonicMs,
@@ -66,6 +67,13 @@ const config = validateExperimentRunConfig(JSON.parse(readFileSync(configPath, "
 // exact bytes this run was configured with; it just cannot re-read them.
 const configSha256 = fileSha256(configPath);
 assertSanitizedRuntimeEnvironment(process.env);
+// AND THEN IT GOES (2026-08-25). `PI_FOLD_SANITIZED` is the eighth variable in an environment
+// of eight, and it names the project under test and asserts that something was cleaned, which
+// is two facts the model has no ordinary way to learn. Its only reader in the namespace is the
+// assertion on the line above, so it is deleted the moment that assertion has passed, before
+// any session exists and long before the model's first turn. The supervisor still SETS it, so
+// a worker that starts without it still fails by name.
+delete process.env[SOAK_SANITIZED_ENV_MARKER];
 // INSIDE ITS OWN MOUNT NAMESPACE (Shane 2026-08-21). This used to assert the
 // worker was a direct child of the attested supervisor by pid and start ticks.
 // Inside a PID namespace there is no host pid to compare: the worker is a child
@@ -336,11 +344,15 @@ try {
   // graded answer, which is the chain five sealed runs walked. An agent looking
   // for its own history now finds its own history and nothing else.
   manager = SessionManager.create(config.repoDir, config.sessionDir);
+  // THE MARKER'S PAYLOAD NAMES NOTHING (2026-08-25). It carried runId, campaignId and arm,
+  // written into the one file the comment above invites the model toward, so opening its own
+  // history told it there was a campaign, that arms were being compared, and which one it was
+  // in (the run id embeds the arm and the repetition). No reader ever used those three fields:
+  // the adjudicator matches on `worker.markerId` and `customType`, and the extension finds the
+  // entry by customType alone. The two hashes stay because they are opaque and are what the
+  // seal is built on. The customType STRING is a separate leak and is handled where it lives.
   const markerId = manager.appendCustomEntry(EXPERIMENT_MARKER_ENTRY, {
     version: 1,
-    runId: config.runId,
-    campaignId: config.campaignId,
-    arm: config.arm,
     configSha256,
     planSha256: config.planSha256,
     createdWallMs: Date.now(),
@@ -437,10 +449,13 @@ try {
   // in the loop below and pinned by the plan's own payload hash. Only a closed-book session
   // still opens with a prompt of its own, and the adjudicator checks exactly that one.
   const prompt = closedBook ? closedBookPrompt(plan) : null;
+  // `arm` is NOT written here (2026-08-25): this file lands inside the namespace, and naming
+  // the arm in it is the asymmetry itself, since a model reading "pifold" knows it has a fold
+  // tool the comparison arm does not. The supervisor knows the arm from its own run config and
+  // checks against that instead of against a value the namespace could have written.
   writeJsonExclusive(readyPath, {
     version: 1,
     runId: config.runId,
-    arm: config.arm,
     workerPid,
     workerStartTicks,
     sessionId: manager.getSessionId(),

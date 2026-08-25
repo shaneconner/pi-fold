@@ -350,7 +350,22 @@ export const EXPERIMENT_DEPENDENCY_KEYS = Object.freeze([
 ]);
 
 export const EXPERIMENT_TOOL_NAME = "repo_stage";
-export const EXPERIMENT_MARKER_ENTRY = "pi-fold-context-experiment-marker-v1";
+// THE NAME THE MODEL COULD READ (2026-08-25). This string sits as the `customType` of a custom
+// entry in the session file, which is the one file the worker's own comment invites the model
+// toward ("An agent looking for its own history now finds its own history and nothing else").
+// It says "context-experiment" outright, so opening that history told the model it was inside
+// one. New runs stamp a name that reads as ordinary session bookkeeping; every sealed run
+// carries the old one and must keep adjudicating, so both are named and readers take the SET.
+// Same discipline as AUDIT_STEP_ERAS and sealedWatchdogMs: admit the values we shipped, and
+// nothing else.
+export const EXPERIMENT_MARKER_ENTRY_SEALED = "pi-fold-context-experiment-marker-v1";
+export const EXPERIMENT_MARKER_ENTRY = "session-origin-v1";
+export const EXPERIMENT_MARKER_ENTRIES = Object.freeze([
+  EXPERIMENT_MARKER_ENTRY, EXPERIMENT_MARKER_ENTRY_SEALED,
+]);
+export function isExperimentMarkerEntry(customType) {
+  return EXPERIMENT_MARKER_ENTRIES.includes(customType);
+}
 export const EXPERIMENT_RUNNER_MODE = "systemd-supervised-single-session";
 export const EXPERIMENT_BEHAVIORAL_MODE = "staged-repo-comprehension-marathon";
 export const EXPERIMENT_TERMINAL_STABILIZATION_MS = 2 * 60 * 1_000;

@@ -20,6 +20,7 @@ import {
   EXPERIMENT_ARMS,
   EXPERIMENT_CLOSED_BOOK_LABEL,
   EXPERIMENT_MARKER_ENTRY,
+  isExperimentMarkerEntry,
   EXPERIMENT_TOOL_NAME,
   FOLD_RECORD_SUFFIX,
   sessionLedgerLens,
@@ -364,7 +365,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   const entries = readJsonLines(sessionFile);
   const markerIndex = entries.findIndex((entry) => entry?.id === worker.markerId);
   assertExperiment(markerIndex >= 0, "Session does not carry this run's marker");
-  assertExperiment(entries[markerIndex]?.customType === EXPERIMENT_MARKER_ENTRY,
+  assertExperiment(isExperimentMarkerEntry(entries[markerIndex]?.customType),
     "Run marker has the wrong entry type");
   const runEntries = entries.slice(markerIndex + 1);
   const userMessages = runEntries.filter((entry) => entry?.type === "message" &&

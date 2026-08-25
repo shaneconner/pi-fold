@@ -34,6 +34,7 @@ import {
 import {
   EXPERIMENT_ALLOWED_TOOLS,
   EXPERIMENT_MARKER_ENTRY,
+  isExperimentMarkerEntry,
   EXPERIMENT_PIFOLD_EXTRA_TOOLS,
   readEscapesCheckout,
   PI_OUTPUT_BUDGET,
@@ -105,7 +106,7 @@ function responseIdentity(response) {
 function readMarkerIndex(ctx) {
   const branch = ctx.sessionManager.getBranch();
   for (let index = branch.length - 1; index >= 0; index -= 1) {
-    if (branch[index]?.type === "custom" && branch[index]?.customType === EXPERIMENT_MARKER_ENTRY) return index;
+    if (branch[index]?.type === "custom" && isExperimentMarkerEntry(branch[index]?.customType)) return index;
   }
   return -1;
 }
@@ -504,10 +505,19 @@ export function createPiContextExperimentExtension(config) {
       // sealed run ever carried one without the other and the confound cannot be separated
       // out of the v4 corpus after the fact.
 
+      // The tools whose containment can be judged from their own arguments.
+      const PATH_FENCED_TOOLS = new Set(["read", "edit", "write"]);
+
       pi.on("tool_call", (event) => {
         if (!allowedTools.has(event.toolName)) {
           appendFailure(config, "forbidden-tool", `${event.toolName}:${event.toolCallId}`);
-          return { block: true, reason: "This run permits only repository reading and stage progression." };
+          // NEUTRAL, AND NAMING NOTHING (Shane, 2026-08-25). This said "This run permits only
+          // repository reading and stage progression", which described a delivery protocol that
+          // was deleted and told the model, in a refusal it could trigger deliberately, that it
+          // was inside a managed run advancing through numbered units. A refusal is a
+          // model-visible surface like any other. Currently unreachable, since the exposed and
+          // allowed sets are identical, and live the moment they diverge.
+          return { block: true, reason: `The ${event.toolName} tool is not available here.` };
         }
         // READ IS CONFINED TO THE CHECKOUT (Shane 2026-08-14). Pi's read tool
         // resolves any relative or absolute path against cwd with no containment,
@@ -522,7 +532,14 @@ export function createPiContextExperimentExtension(config) {
         // the run: it leaked nothing, and the model can continue inside the
         // checkout. It is recorded as its own event so a run that probes the
         // boundary is visible in the artifacts.
-        if (event.toolName === "read") {
+        // EVERY TOOL THAT TAKES A PATH, not just `read` (2026-08-25). The fence was
+        // `event.toolName === "read"` against an allowed set of read, bash, edit and write,
+        // so `edit` and `write` could name any path in the namespace and were never checked.
+        // `bash` takes a command rather than a path and cannot be fenced this way at all,
+        // which is the finding the audit reported and which the mount is the real answer to;
+        // this closes the two that CAN be checked rather than leaving them open because the
+        // third is hard.
+        if (PATH_FENCED_TOOLS.has(event.toolName)) {
           const requested = typeof event.input?.path === "string" ? event.input.path
             : typeof event.input?.file_path === "string" ? event.input.file_path : null;
           const { escapes, resolved, cause } = readEscapesCheckout(config.repoDir, requested);
@@ -534,9 +551,9 @@ export function createPiContextExperimentExtension(config) {
               cause,
             });
             return { block: true, reason: cause === "missing-path"
-              ? "This read named no path. Give one path relative to the checkout root."
-              : "This run reads only files inside the repository checkout. " +
-                "Give a path relative to the checkout root." };
+              ? "No path was given. Give one path relative to the current directory."
+              : "That path is outside the current directory. " +
+                "Give a path relative to the current directory." };
           }
         }
         appendEvent("tool-call", {
