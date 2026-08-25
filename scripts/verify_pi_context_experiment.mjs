@@ -5876,8 +5876,11 @@ try {
   // supervisor composes it from the same two inputs on its own side and the worker
   // carries only the finished text, which rides in the self-deleting config.
   const supervisorEndBlock = source("scripts/run_pi_context_experiment.mjs");
-  assert(supervisorEndBlock.includes("endBlockPrompt(plan.ledger, hiddenMassSeeds.querySeed)"),
-    "the supervisor must build the end block from the plan's ledger and the frozen seed");
+  // WHICH end block the plan asks is gate 115's business (a v4 plan's ledger, a v5 plan's
+  // adjacency questions). What this gate pins is unchanged: the supervisor composes it on
+  // ITS OWN SIDE from the plan and the frozen seed, so neither ever enters the namespace.
+  assert(supervisorEndBlock.includes("composeEndBlockPrompt(plan, hiddenMassSeeds.querySeed)"),
+    "the supervisor must build the end block from the plan and the frozen seed");
   assert(!worker.includes("plan.ledger"),
     "the worker still reaches for the ledger the sandboxed plan does not carry");
   assert(worker.includes("endBlockSha256: sha256Text(config.endBlockPrompt ?? \"\")"),
@@ -5885,10 +5888,11 @@ try {
   assert(/stagesDelivered\(\) === plan\.stageCount &&\n\s*modelEndedItsTurn\(terminalState\)\) \{\n\s*await session\.prompt\(config\.endBlockPrompt/.test(worker),
     "the end block is asked only after the whole workload was delivered cleanly");
   assert(adjudicator.includes(
-    "manifest.endBlockSha256 === sha256Text(endBlockPrompt(plan.ledger, config.querySeed))"),
+    "manifest.endBlockSha256 === sha256Text(composeEndBlockPrompt(plan, config.querySeed))"),
   "the adjudicator must recompute the end-block pin rather than trust it");
-  assert(adjudicator.includes("endBlockVerdicts({"),
-    "the adjudicator must grade the end block through the shared lens");
+  assert(adjudicator.includes("endBlockVerdicts({") &&
+    adjudicator.includes("endBlockAdjacencyTranscript({"),
+  "the adjudicator must grade the end block through the shared lens, of either kind");
   assert(adjudicator.includes("userMessages === 1 + recordedResumes + endBlockDelivered"),
     "the one-user-message contract must count the identified end block, and only it");
   const supervisor71 = source("scripts/run_pi_context_experiment.mjs");
@@ -11188,6 +11192,94 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   }
 
   checks.oneWritableDirectoryInsideAReadOnlyCheckout = true;
+}
+
+
+// ---------------------------------------------------------------------------
+// GATE 115 - one definition of which end block a plan asks, and a reader for the v5 one.
+//
+// The supervisor composes the end block to SEND it; the adjudicator recomputes it to CHECK
+// the manifest pin. Those were two inline branches, and only the supervisor learned about
+// v5, so the adjudicator demanded a ledger from a plan that has none and died with "End
+// block requires the plan's ledger" AFTER both arms of sol-20260825-v5smoke3 had run and
+// sealed. A sealed run that cannot be graded is the failure a corpus cannot afford, which is
+// gate 76's lesson (one definition, every reader through it) on a different asset.
+// ---------------------------------------------------------------------------
+{
+  const {
+    composeEndBlockPrompt, endBlockAdjacencyPrompt, endBlockAdjacencyTranscript, endBlockPrompt,
+  } = await import(pathToFileURL(join(PROJECT, "scripts", "lib", "pi_context_experiment.mjs")));
+  const { gradeAdjacency } = await import(
+    pathToFileURL(join(PROJECT, "scripts", "lib", "pi_context_artifacts.mjs")));
+
+  const questions = [{
+    id: "eb-01", schema: "adjacency", relation: "pass-to-neighbour", rederivable: false,
+    subjectStage: 1, anchor: "src/tool_writeout.h", side: "after", wanted: 2,
+    truth: ["lib/curlx/strparse.c", "lib/curlx/strparse.h", "lib/easygetopt.c"],
+  }];
+  const gateSeed = "b".repeat(32);
+  const ledgerPlan = { ledger: buildLedger({ mode: "full", contentSeed: "c".repeat(32) }) };
+  const adjacencyPlan = { endBlockAdjacency: questions };
+
+  // THE PLAN DECIDES, and neither caller gets a vote.
+  assert.equal(composeEndBlockPrompt(adjacencyPlan, gateSeed), endBlockAdjacencyPrompt(questions),
+    "a v5 plan does not compose the adjacency end block");
+  assert.equal(composeEndBlockPrompt(ledgerPlan, gateSeed), endBlockPrompt(ledgerPlan.ledger, gateSeed),
+    "a v4 plan no longer composes its ledger end block, so sealed campaigns stop grading");
+  assert.throws(() => composeEndBlockPrompt({}, gateSeed), /carries neither/,
+    "a plan with no end block of either kind composes something rather than being refused");
+
+  // BOTH CALLERS THROUGH IT, and no second inline branch left behind.
+  const supervisor = readFileSync(join(PROJECT, "scripts", "run_pi_context_experiment.mjs"), "utf8");
+  const adjudicator = readFileSync(
+    join(PROJECT, "scripts", "adjudicate_pi_context_experiment.mjs"), "utf8");
+  for (const [name, source] of [["supervisor", supervisor], ["adjudicator", adjudicator]]) {
+    assert(source.includes("composeEndBlockPrompt("),
+      `the ${name} does not compose the end block through the shared definition`);
+    assert(!/endBlockPrompt\(plan\.ledger/.test(source),
+      `the ${name} still branches on the ledger inline, which is how v5 broke grading`);
+  }
+
+  // THE READER. Exact prompt bytes or not delivered, never a fuzzy match.
+  const prompt = endBlockAdjacencyPrompt(questions);
+  const session = (promptText, reply) => [
+    { type: "message", message: { role: "user", content: promptText } },
+    { type: "message", message: { role: "assistant", content: reply } },
+  ];
+  const answered = endBlockAdjacencyTranscript({
+    entries: session(prompt, "eb-01: lib/curlx/strparse.c, lib/easygetopt.c"), questions });
+  assert.equal(answered.delivered, true, "the exact end-block prompt reads as undelivered");
+  assert.deepEqual(answered.answers[0].named, ["lib/curlx/strparse.c", "lib/easygetopt.c"],
+    "a two-file answer line does not parse to its two files");
+  assert.equal(gradeAdjacency({ question: questions[0], named: answered.answers[0].named }).outcome,
+    "correct", "two named files both in the truth do not grade correct");
+
+  const drifted = endBlockAdjacencyTranscript({
+    entries: session(`${prompt} and one more thing`, "eb-01: lib/easygetopt.c"), questions });
+  assert.equal(drifted.delivered, false,
+    "a drifted end-block prompt is fuzzily matched instead of reading as undelivered");
+
+  // AN ABSTENTION IS NOT A WRONG ANSWER. The ask says to say so rather than guess, so the
+  // sentence that says so must reach the grader as zero names.
+  const declined = endBlockAdjacencyTranscript({
+    entries: session(prompt, "eb-01: I cannot place that one."), questions });
+  assert.deepEqual(declined.answers[0].named, [],
+    "a declined answer parses as names, so honest abstention grades as guessing");
+  assert.equal(gradeAdjacency({ question: questions[0], named: declined.answers[0].named }).outcome,
+    "abstained", "an abstention does not grade as one");
+
+  // A wrong answer still grades wrong, so the abstention path is not swallowing failures.
+  const wrong = endBlockAdjacencyTranscript({
+    entries: session(prompt, "eb-01: lib/vauth/cleartext.c, lib/headers.c"), questions });
+  assert.equal(gradeAdjacency({ question: questions[0], named: wrong.answers[0].named }).outcome,
+    "wrong", "two named files, neither in the truth, do not grade wrong");
+
+  // THE SEAL MUST NOT LAG THE CODE. The v5 instrument module was hand-missed from the
+  // pinned list while every runtime file joins by directory walk.
+  assert(/"scripts\/lib\/pi_context_artifacts\.mjs"/.test(supervisor),
+    "the stale-artifact instrument is not pinned, so a run does not seal the code that graded it");
+
+  checks.oneDefinitionOfWhichEndBlockAPlanAsks = true;
 }
 
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);

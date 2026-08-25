@@ -3157,6 +3157,79 @@ export function endBlockAdjacencyPrompt(questions) {
   ].join("\n");
 }
 
+/**
+ * ONE DEFINITION of which end block a plan asks. The supervisor composes it to SEND and the
+ * adjudicator recomputes it to CHECK the manifest pin, and two inline copies is exactly how
+ * the v5 adjudicator came to demand a ledger from a plan that has none, failing with "End
+ * block requires the plan's ledger" only after both arms of sol-20260825-v5smoke3 had
+ * already run and been sealed. A v4 plan carries `ledger` and no `endBlockAdjacency`, a v5
+ * plan the reverse, so the plan itself decides and neither caller gets a vote.
+ */
+export function composeEndBlockPrompt(plan, querySeed) {
+  assertExperiment(plan !== null && typeof plan === "object",
+    "Composing an end block requires the stage plan");
+  assertExperiment(plan.endBlockAdjacency !== undefined || plan.ledger !== undefined,
+    "A stage plan carries either an adjacency end block or a ledger, and this one carries neither");
+  return plan.endBlockAdjacency !== undefined
+    ? endBlockAdjacencyPrompt(plan.endBlockAdjacency)
+    : endBlockPrompt(plan.ledger, querySeed);
+}
+
+// The adjacency end block's answer surface. Same law as `endBlockTranscript`: the exact
+// prompt bytes or not delivered, never a fuzzy match, because the manifest pins the same
+// bytes and a drifted prompt is a sealed contradiction rather than a parse miss.
+//
+// An answer is a line `<item-id>: <file>, <file>`. NAMING NOTHING IS AN ABSTENTION, which
+// is why the parser keeps only comma-separated values that look like repository paths: the
+// ask says "if you cannot place one, say so rather than guessing at it", so the sentence
+// that says so must parse to zero names and reach `gradeAdjacency` as an abstention rather
+// than as a wrong answer. Grading itself stays in the artifacts module; this reads.
+export function endBlockAdjacencyTranscript({ entries, questions }) {
+  assertExperiment(Array.isArray(entries), "An adjacency transcript requires the session branch");
+  assertExperiment(Array.isArray(questions) && questions.length > 0,
+    "An adjacency transcript requires the plan's questions");
+  const prompt = endBlockAdjacencyPrompt(questions);
+  const promptEntryIndex = entries.findIndex((entry) =>
+    entryUserText(entry).trim() === prompt.trim());
+  if (promptEntryIndex < 0) {
+    return {
+      delivered: false, promptEntryIndex: null, answerEntryIndex: null, rawText: "",
+      answers: questions.map((item) => ({ id: item.id, answerText: null, named: [], parsed: false })),
+    };
+  }
+  const found = scanAssistantMessages(entries, promptEntryIndex + 1, entries.length, (text) =>
+    questions.some((item) => adjacencyAnswerPattern(item.id).test(text)));
+  const rawText = found.text;
+  return {
+    delivered: true,
+    promptEntryIndex,
+    answerEntryIndex: found.index >= 0 ? found.index : null,
+    rawText,
+    answers: questions.map((item) => {
+      const match = adjacencyAnswerPattern(item.id).exec(rawText);
+      const answerText = match ? match[1].trim() : null;
+      return {
+        id: item.id,
+        answerText,
+        named: answerText === null ? [] : adjacencyNames(answerText),
+        parsed: Boolean(match),
+      };
+    }),
+  };
+}
+
+function adjacencyAnswerPattern(id) {
+  const escaped = String(id).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^\\s*[-*]?\\s*(?:\`\\s*)?${escaped}\\s*[:\\-]\\s*(.+)$`, "im");
+}
+
+// A repository path carries a separator or an extension. Prose does not, so "I cannot place
+// this one" yields no names and reads as the abstention it is.
+function adjacencyNames(answerText) {
+  return answerText.split(",").map((part) => part.trim().replace(/^`|`$/g, "").trim())
+    .filter((part) => part.length > 0 && /[/.]/.test(part) && !/\s/.test(part));
+}
+
 export function endBlockPrompt(ledger, querySeed) {
   const questions = endBlockQuestions(ledger, querySeed);
   return [

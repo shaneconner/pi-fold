@@ -28,7 +28,8 @@ import {
   buildIncludeResolver,
   closedBookPrompt,
   closedBookQuestions,
-  endBlockPrompt,
+  composeEndBlockPrompt,
+  endBlockAdjacencyTranscript,
   endBlockTranscript,
   endBlockVerdicts,
   closedBookTranscript,
@@ -63,7 +64,11 @@ import {
   validateExperimentRunConfig,
   validateStagePlan,
 } from "./lib/pi_context_experiment.mjs";
-import { staleArtifactVerdicts } from "./lib/pi_context_artifacts.mjs";
+import {
+  ARTIFACT_END_BLOCK_SCHEMA,
+  gradeAdjacency,
+  staleArtifactVerdicts,
+} from "./lib/pi_context_artifacts.mjs";
 import { hostSessionFile } from "./lib/pi_context_sandbox.mjs";
 import { PI_FOLD_ACTIVE_CONTEXT_REGISTRATION } from "./lib/pi_fold_identity.mjs";
 import {
@@ -344,7 +349,7 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
       manifest.questionsSha256 === sha256Json(closedBookQuestions(plan))
     : manifest.guidance === config.guidance &&
       manifest.target.checkoutSha256 === config.targetTreeSha256 &&
-      manifest.endBlockSha256 === sha256Text(endBlockPrompt(plan.ledger, config.querySeed)),
+      manifest.endBlockSha256 === sha256Text(composeEndBlockPrompt(plan, config.querySeed)),
   closedBook
     ? "Closed-book manifest does not pin this plan's question list"
     : "Run manifest guidance/checkout/end-block pins drifted from the run config");
@@ -385,9 +390,11 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   // BYTE-IDENTICAL to the recomputed prompt, so an extra message no resume and
   // no end block accounts for still breaks the contract.
   const endBlockDelivered = closedBook ? 0
-    : endBlockTranscript({
-      entries: runEntries, ledger: plan.ledger, querySeed: config.querySeed,
-    }).delivered ? 1 : 0;
+    : (plan.endBlockAdjacency !== undefined
+      ? endBlockAdjacencyTranscript({ entries: runEntries, questions: plan.endBlockAdjacency })
+      : endBlockTranscript({
+        entries: runEntries, ledger: plan.ledger, querySeed: config.querySeed,
+      })).delivered ? 1 : 0;
   assertExperiment(userMessages === 1 + recordedResumes + endBlockDelivered,
     `One-user-message contract broken: ${userMessages} user messages in the run span ` +
     `against ${recordedResumes} recorded resume(s) and ${endBlockDelivered} end block(s)`);
@@ -592,9 +599,29 @@ function adjudicate(runDir, { reAdjudicate = false } = {}) {
   // against the agent's OWN record, and what the answers cost in recovery,
   // with the reconstruction table row-exact and the withdrawn-value trap cell
   // stated beside the verdict.
-  const endBlock = endBlockVerdicts({
-    entries: runEntries, ledger: plan.ledger, querySeed: config.querySeed, events: workerEvents,
-  });
+  // A v5 plan grades ADJACENCY and a v4 plan the ledger, on the plan's own say-so. The
+  // adjacency block has no record half to compare against (`ledger_record` was deleted with
+  // the ledger), so what it reports is the read plus one verdict per question: correct,
+  // partial, wrong, or abstained, an abstention being the honest decline the ask invites
+  // rather than a zero.
+  const endBlock = plan.endBlockAdjacency !== undefined
+    ? (() => {
+      const transcript = endBlockAdjacencyTranscript({
+        entries: runEntries, questions: plan.endBlockAdjacency,
+      });
+      const byId = new Map(plan.endBlockAdjacency.map((question) => [question.id, question]));
+      return {
+        schema: ARTIFACT_END_BLOCK_SCHEMA,
+        delivered: transcript.delivered,
+        answers: transcript.answers.map((answer) => ({
+          ...answer,
+          verdict: gradeAdjacency({ question: byId.get(answer.id), named: answer.named }),
+        })),
+      };
+    })()
+    : endBlockVerdicts({
+      entries: runEntries, ledger: plan.ledger, querySeed: config.querySeed, events: workerEvents,
+    });
 
   // The v5 stale artifacts, graded post-hoc from the snapshots the extension took at
   // collection time. A run staged before the instrument carries neither the file nor the

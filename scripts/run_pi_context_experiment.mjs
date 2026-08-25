@@ -33,8 +33,7 @@ import {
   armRuntimeConfiguration,
   assertExperiment,
   corpusManifestSha256,
-  endBlockAdjacencyPrompt,
-  endBlockPrompt,
+  composeEndBlockPrompt,
   stagePayloadText,
   validateExperimentRunConfig,
   validateStagePlan,
@@ -90,6 +89,7 @@ const argumentValue = (name, fallback = null) => {
 
 // The experiment's own runtime surface, pinned the way the soak pins its own.
 const EXPERIMENT_SOURCE_PATHS = Object.freeze([
+  "scripts/lib/pi_context_artifacts.mjs",
   "scripts/lib/pi_context_experiment.mjs",
   "scripts/lib/pi_context_soak_attestation.mjs",
   "scripts/lib/pi_fold_identity.mjs",
@@ -608,9 +608,7 @@ async function run() {
   // material that derives the questions (gate 71's law), and both read exactly as a person
   // tidying up loose ends rather than as an exam.
   const composedEndBlock = closedBook ? undefined
-    : plan.endBlockAdjacency !== undefined
-      ? endBlockAdjacencyPrompt(plan.endBlockAdjacency)
-      : endBlockPrompt(plan.ledger, hiddenMassSeeds.querySeed);
+    : composeEndBlockPrompt(plan, hiddenMassSeeds.querySeed);
   writeJsonExclusive(join(harnessDir, "config.json"), sandboxConfig(
     { ...config, sessionDir }, composedEndBlock));
 
