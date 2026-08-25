@@ -39,6 +39,7 @@ const curationModule = await jiti.import(join(projectRoot, "extensions", "lib", 
 const piFold = await jiti.import(join(projectRoot, "extensions", "index.js"));
 const evidenceModule = await jiti.import(join(projectRoot, "extensions", "evidence.js"));
 const settingsModule = await jiti.import(join(projectRoot, "extensions", "settings.ts"));
+const measurementModule = await jiti.import(join(projectRoot, "extensions", "lib", "measurement.ts"));
 
 // One synthetic deployment identity, written out in full, so every brand-derived string
 // the runtime renders is asserted against a literal rather than another derivation of
@@ -13673,6 +13674,92 @@ async function gateOccupancyAnchor() {
  *   132: Canonicalization is memoized per message object
  *   133: A projection fingerprint is computed on demand
  */
+/**
+ * ROOT INTERVALS ARE DERIVED ONCE PER (STATE, SNAPSHOT) PAIR (2026-08-24).
+ *
+ * `partsForRange` opens with `orderedRoots`, and `selectAutomaticChapter` calls
+ * `partsForRange` from a walk that is quadratic in units, so the cost was
+ * O(units^2 x roots x folds) for an answer that cannot change inside a pass. The
+ * derivation is O(roots x folds) on its own, because `foldInterval` calls
+ * `flattenFoldRefs`, which rebuilds `foldMap` for every root it walks.
+ *
+ * Replaying sealed sol-20260823-live rep 3 at 125 folds, ONE frontier walk made 12,333
+ * calls and spent 22.5 seconds, and 12,328 returned null without reading a single root,
+ * because the automatic chapter passes an EMPTY allowed-child set and any overlap refuses.
+ * At 140 folds the walk was 98.8 percent of the runtime's whole per-request cost, and the
+ * gap between a response and the next projection ran 3s at zero folds to 164s past 150.
+ * Across one run of this suite the memo turns 1,751,726 calls into 6,412 derivations.
+ *
+ * Fails on the pre-fix runtime at its FIRST assertion: an underived call builds a fresh
+ * array every time, so identity cannot hold.
+ */
+async function gateOrderedRootsDerivedOncePerPair() {
+  const { orderedRoots } = measurementModule;
+  const built = await chapterForest(4);
+  const { snapshot, state } = built;
+  const roots = orderedRoots(state, snapshot);
+  // Anti-vacuity: an empty forest would make every assertion below trivially true, and a
+  // single root would not prove the sort survives the memo.
+  assert(roots.length >= 4, `The fixture offered only ${roots.length} roots`);
+  assert(state.folds.length >= 4, `The fixture committed only ${state.folds.length} folds`);
+
+  // THE MEMO ITSELF: one pair derives once and every later reading is handed that array.
+  assert.equal(orderedRoots(state, snapshot), roots,
+    "orderedRoots derived twice for one (state, snapshot) pair");
+
+  // KEYED ON THE OBJECTS, NEVER ON CONTENT. A replaced state MISSES and derives its own
+  // answer, which is what stops a stale serve after any change: state is replaced rather
+  // than mutated on every write, so identity keying is what makes the memo safe at all.
+  const replacedState = { ...state, folds: state.folds.map((fold) => ({ ...fold })) };
+  const replacedRoots = orderedRoots(replacedState, snapshot);
+  assert.notEqual(replacedRoots, roots, "A replaced state was served the previous array");
+  assert.deepEqual(replacedRoots.map(({ fold }) => fold.id), roots.map(({ fold }) => fold.id),
+    "A replaced state with identical content derived a different forest");
+  // And the same on the other key, because the pair is what the answer depends on.
+  const replacedSnapshot = { ...snapshot };
+  assert.notEqual(orderedRoots(state, replacedSnapshot), roots,
+    "A replaced snapshot was served the previous array");
+
+  // SPAN ORDER SURVIVES: the memo hands back the SORTED array, not insertion order.
+  assert.deepEqual(roots.map(({ start }) => start),
+    [...roots.map(({ start }) => start)].sort((left, right) => left - right),
+    "The memoized roots are not in span order");
+
+  // NO READING MUTATES WHAT THE MEMO HANDS OUT. The array is shared by every caller, so a
+  // reading that sorts, pushes or splices it would poison every later reading. Gate 120
+  // proved this for the mark accessor; the same hazard arrives here the moment the copy
+  // stops being made, so the real call sites are driven against a FROZEN array and a
+  // reading that starts mutating throws instead of quietly corrupting the forest.
+  Object.freeze(roots);
+  assert.equal(orderedRoots(state, snapshot), roots, "The frozen array is no longer the memoized one");
+  const stale = context.unpinnedStaleFolds(snapshot, state);
+  assert(Array.isArray(stale), "unpinnedStaleFolds did not read the frozen roots");
+  const span = context.selectAutomaticSpan(snapshot, state);
+  assert(span === null || typeof span === "object", "selectAutomaticSpan did not read the frozen roots");
+  assert.equal(context.visibleCollapsedRoots(state, snapshot).length,
+    roots.filter(({ fold }) => !state.expanded.includes(fold.id)).length,
+    "visibleCollapsedRoots disagreed with the memoized forest");
+
+  // THE ONE COST, ASSERTED RATHER THAN LEFT TO BE FOUND (gate 121's rule): a state mutated
+  // IN PLACE keeps its first derivation. Nothing in the runtime mutates a committed state,
+  // and this is the decision that makes that a requirement rather than a habit.
+  const mutated = { ...state, folds: [...state.folds] };
+  const firstOfMutated = orderedRoots(mutated, snapshot);
+  mutated.folds.pop();
+  assert.equal(orderedRoots(mutated, snapshot), firstOfMutated,
+    "The forest is not kept against the state object, so the memo is not in effect");
+
+  return {
+    roots: roots.length,
+    folds: state.folds.length,
+    memoizedPerPair: true,
+    replacedStateMisses: true,
+    replacedSnapshotMisses: true,
+    keptAgainstTheObject: true,
+    readingsDoNotMutate: true,
+  };
+}
+
 async function gateDerivationMemos() {
   return {
     incrementalEvidenceMap: await claim("gateIncrementalEvidenceMap", gateIncrementalEvidenceMap),
@@ -13680,6 +13767,7 @@ async function gateDerivationMemos() {
     evidenceDigestDerivedOncePerObject: await claim("gateEvidenceDigestDerivedOncePerObject", gateEvidenceDigestDerivedOncePerObject),
     canonicalizationIsMemoizedPerMessageObject: await claim("gateCanonicalizationIsMemoizedPerMessageObject", gateCanonicalizationIsMemoizedPerMessageObject),
     projectionFingerprintsAreComputedOnDemand: await claim("gateProjectionFingerprintsAreComputedOnDemand", gateProjectionFingerprintsAreComputedOnDemand),
+    orderedRootsDerivedOncePerPair: await claim("gateOrderedRootsDerivedOncePerPair", gateOrderedRootsDerivedOncePerPair),
   };
 }
 

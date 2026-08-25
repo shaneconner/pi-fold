@@ -270,11 +270,42 @@ export function foldInterval(fold: ActiveFold, state: ActiveContextState, snapsh
   return indices ? { start: indices[0], end: indices.at(-1)! } : null;
 }
 
-export function orderedRoots(state: ActiveContextState, snapshot: ActiveContextSnapshot): Array<{ fold: ActiveFold; start: number; end: number }> {
-  return rootFolds(state).flatMap((fold) => {
+export type OrderedRoot = { fold: ActiveFold; start: number; end: number };
+
+// ROOT INTERVALS ARE DERIVED ONCE PER (STATE, SNAPSHOT) PAIR (2026-08-24). This derivation
+// is O(roots x folds) on its own, because `foldInterval` calls `flattenFoldRefs`, which
+// rebuilds `foldMap` for every root it walks. `partsForRange` opens with it, and
+// `selectAutomaticChapter` calls `partsForRange` from a walk that is quadratic in units,
+// so the cost was O(units^2 x roots x folds) for an answer that cannot change inside a
+// pass. Replaying sealed sol-20260823-live rep 3 at 125 folds, ONE frontier walk made
+// 12,333 calls and spent 22.5 seconds, and 12,328 of them returned null without reading a
+// root, because the automatic chapter passes an EMPTY allowed-child set and any overlap
+// refuses. At 140 folds the walk was 98.8 percent of the runtime's whole per-request cost;
+// the per-turn gap between a response and the next projection ran 3s at zero folds to 164s
+// past 150, and five per-turn call sites each pay a walk.
+//
+// The memo is gate 113's rule and gate 121's rule at a third address: kept against the
+// state and snapshot OBJECTS rather than their contents, because both are REPLACED on
+// every change rather than mutated, so a replaced one misses and derives again instead of
+// serving something stale. It hands every caller the SAME array, which is safe only while
+// no reading mutates it; gate 149 drives every call site against a frozen one so a reading
+// that starts mutating throws rather than quietly poisoning the memo.
+export const ORDERED_ROOTS = new WeakMap<ActiveContextState, WeakMap<ActiveContextSnapshot, OrderedRoot[]>>();
+
+export function orderedRoots(state: ActiveContextState, snapshot: ActiveContextSnapshot): OrderedRoot[] {
+  let bySnapshot = ORDERED_ROOTS.get(state);
+  if (!bySnapshot) {
+    bySnapshot = new WeakMap<ActiveContextSnapshot, OrderedRoot[]>();
+    ORDERED_ROOTS.set(state, bySnapshot);
+  }
+  const memoized = bySnapshot.get(snapshot);
+  if (memoized) return memoized;
+  const roots = rootFolds(state).flatMap((fold) => {
     const interval = foldInterval(fold, state, snapshot);
     return interval ? [{ fold, ...interval }] : [];
   }).sort((left, right) => left.start - right.start);
+  bySnapshot.set(snapshot, roots);
+  return roots;
 }
 
 export function visibleCollapsedRoots(state: ActiveContextState, snapshot: ActiveContextSnapshot) {
