@@ -15,8 +15,7 @@
 //     measurement;
 //   - every tool result is hashed into a ledger so the reread tax is measurable.
 
-import { existsSync, readFileSync, truncateSync, watch } from "node:fs";
-import { join } from "node:path";
+import { Socket } from "node:net";
 import { Type } from "typebox";
 // The measured runtime is this repo's own package, not a consumer's deployed copy: the
 // bytes under test are tracked, so the run seal pins exactly what executed.
@@ -47,14 +46,13 @@ import {
   toolResultText,
 } from "./lib/pi_context_experiment.mjs";
 import {
-  appendJsonLineFsync,
   exactKeys,
   monotonicMs,
   processStartTicks,
   sha256Json,
   sha256Text,
-  writeJsonPublished,
 } from "./lib/pi_context_soak_attestation.mjs";
+import { DELIVERY_FD, appendRunChannel } from "./lib/pi_context_sandbox.mjs";
 
 function allStrings(value, result = []) {
   if (typeof value === "string") result.push(value);
@@ -66,7 +64,7 @@ function allStrings(value, result = []) {
 }
 
 function appendFailure(config, phase, detail) {
-  appendJsonLineFsync(join(config.runDir, "failure-latch.jsonl"), {
+  appendRunChannel("failure-latch.jsonl", {
     version: 1,
     runId: config.runId,
     phase,
@@ -76,26 +74,51 @@ function appendFailure(config, phase, detail) {
   });
 }
 
-function waitForFile(path, directory, signal, deadlineMs) {
-  if (existsSync(path)) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      watcher.close();
-      signal?.removeEventListener("abort", abort);
-      if (error) reject(error); else resolve();
-    };
-    const abort = () => finish(new Error("Experiment stage wait was aborted"));
-    const watcher = watch(directory, (_event, filename) => {
-      if (filename && join(directory, String(filename)) === path && existsSync(path)) finish();
-    });
-    const timeout = setTimeout(() => finish(new Error("Experiment stage response deadline expired")), deadlineMs);
-    signal?.addEventListener("abort", abort, { once: true });
-    if (existsSync(path)) finish();
+// THE DELIVERY CHANNEL (2026-08-25). This used to be two directories the model shared,
+// `ipc/requests` and `ipc/responses`, watched for a file to appear. It is one duplex socket
+// on an inherited descriptor now, so the round-trip that paces the run leaves no trace in any
+// namespace the model can reach and the response is consumed by definition rather than by a
+// truncate the next reader has to be trusted to perform. Line-delimited JSON, strictly one
+// request in flight, because the worker asks for exactly one stage at a time and waits.
+function openDeliveryChannel(fd) {
+  const socket = new Socket({ fd, readable: true, writable: true });
+  socket.setEncoding("utf8");
+  let buffered = "";
+  let waiting = null;
+  const settle = (error, value) => {
+    if (!waiting) return;
+    const pending = waiting;
+    waiting = null;
+    clearTimeout(pending.timer);
+    if (error) pending.reject(error); else pending.resolve(value);
+  };
+  socket.on("data", (chunk) => {
+    buffered += chunk;
+    let index;
+    while ((index = buffered.indexOf("\n")) >= 0) {
+      const line = buffered.slice(0, index);
+      buffered = buffered.slice(index + 1);
+      if (line.trim().length > 0) settle(null, JSON.parse(line));
+    }
   });
+  socket.on("error", (error) => settle(error));
+  // A closed channel with a request in flight is a supervisor that went away, which is a
+  // failure of the run rather than a stage that is merely slow: say so instead of waiting
+  // out the watchdog.
+  socket.on("close", () => settle(new Error("The supervisor closed the delivery channel")));
+  return (request, deadlineMs) => {
+    if (waiting) throw new Error("The delivery channel already has a request in flight");
+    const answered = new Promise((resolve, reject) => {
+      waiting = {
+        resolve,
+        reject,
+        timer: setTimeout(
+          () => settle(new Error("Experiment stage response deadline expired")), deadlineMs),
+      };
+    });
+    socket.write(`${JSON.stringify(request)}\n`);
+    return answered;
+  };
 }
 
 function responseIdentity(response) {
@@ -156,12 +179,17 @@ export function createPiContextExperimentExtension(config) {
   let inFlightProviderRequest = null;
   let pendingStopTheWorld = null;
   let contextToolDefinition = null;
-  const requestsDir = join(config.runDir, "ipc", "requests");
-  const responsesDir = join(config.runDir, "ipc", "responses");
-  const projectionLog = join(config.runDir, "provider-requests.jsonl");
-  const eventLog = join(config.runDir, "worker-events.jsonl");
-  const toolResultLog = join(config.runDir, "tool-results.jsonl");
-  const stopTheWorldLog = join(config.runDir, "stop-the-world.jsonl");
+  // THE RUN DIRECTORY IS NOT IN THE NAMESPACE ANY MORE (2026-08-25). These were paths under
+  // a directory the model shared; they are channel NAMES now, written to descriptors the
+  // supervisor opened on the host, and the files land exactly where they always did. Only the
+  // writer changed.
+  // OPENED ON FIRST USE. A closed-book session delivers no stages and never opens it at all,
+  // and the gate suite constructs this extension in processes that hold no such descriptor.
+  let requestStage = null;
+  const projectionLog = "provider-requests.jsonl";
+  const eventLog = "worker-events.jsonl";
+  const toolResultLog = "tool-results.jsonl";
+  const stopTheWorldLog = "stop-the-world.jsonl";
 
   // ---------------------------------------------------------------------------
   // THE STALE-ARTIFACT BOUNDS (Shane 2026-08-25).
@@ -184,7 +212,7 @@ export function createPiContextExperimentExtension(config) {
   // on the model being blocked inside its own stage tool call: there is no turn in which the
   // file exists unexpectedly and the model can run.
   const staleArtifacts = new Map((config.staleArtifacts ?? []).map((ask) => [ask.askStage, ask]));
-  const artifactLog = join(config.runDir, "stale-artifacts.jsonl");
+  const artifactLog = "stale-artifacts.jsonl";
   let plantedArtifact = null;
 
   const plantStaleArtifact = (stage) => {
@@ -227,7 +255,7 @@ export function createPiContextExperimentExtension(config) {
       wallMs: Date.now(),
       monotonicMs: monotonicMs(),
     };
-    appendJsonLineFsync(artifactLog, { ...identity, recordSha256: sha256Json(identity) });
+    appendRunChannel(artifactLog, { ...identity, recordSha256: sha256Json(identity) });
     appendEvent("stale-artifact-collected", {
       id: ask.id, schema: ask.schema, path: ask.path,
       untouched: identity.untouched, missing: identity.missing, chars: identity.chars,
@@ -252,7 +280,7 @@ export function createPiContextExperimentExtension(config) {
       priorRecordSha256: priorEventRecordSha256,
     };
     const record = { ...identity, recordSha256: sha256Json(identity) };
-    appendJsonLineFsync(eventLog, record);
+    appendRunChannel(eventLog, record);
     priorEventRecordSha256 = record.recordSha256;
   };
 
@@ -274,7 +302,7 @@ export function createPiContextExperimentExtension(config) {
       priorRecordSha256: priorToolResultSha256,
     };
     const record = { ...identity, recordSha256: sha256Json(identity) };
-    appendJsonLineFsync(toolResultLog, record);
+    appendRunChannel(toolResultLog, record);
     priorToolResultSha256 = record.recordSha256;
   };
 
@@ -298,7 +326,7 @@ export function createPiContextExperimentExtension(config) {
       closedMonotonicMs: monotonicMs(),
     };
     record.timeToFirstProductiveRequestMs = record.closedMonotonicMs - record.openedMonotonicMs;
-    appendJsonLineFsync(stopTheWorldLog, record);
+    appendRunChannel(stopTheWorldLog, record);
     pendingStopTheWorld = null;
   };
 
@@ -342,13 +370,10 @@ export function createPiContextExperimentExtension(config) {
       requestedMonotonicMs: monotonicMs(),
     };
     const request = { ...requestIdentity, requestSha256: sha256Json(requestIdentity) };
-    const requestPath = join(requestsDir, `stage-${String(stage).padStart(2, "0")}.json`);
-    const responsePath = join(responsesDir, `stage-${String(stage).padStart(2, "0")}.json`);
     try {
-      writeJsonPublished(requestPath, request);
+      requestStage = requestStage ?? openDeliveryChannel(DELIVERY_FD);
       appendEvent("stage-request", { stage, requestSha256: request.requestSha256 });
-      await waitForFile(responsePath, responsesDir, null, config.watchdogMs);
-      const response = JSON.parse(readFileSync(responsePath, "utf8"));
+      const response = await requestStage(request, config.watchdogMs);
       assertExperiment(exactKeys(response, [
         "version", "runId", "stage", "requestSha256", "content",
         "contentSha256", "payloadSha256",
@@ -359,12 +384,12 @@ export function createPiContextExperimentExtension(config) {
         response.contentSha256 === sha256Text(response.content) &&
         response.responseSha256 === responseIdentity(response),
       "Supervisor response identity drifted");
-      // CONSUMED ON READ (gate 74). This file holds the stage's rendered text and used to
-      // survive the whole run: in sealed native rep 5, 27 of 64 responses carried seeded
-      // values, so an arm that lost a stage could re-read it verbatim off disk. Truncated
-      // rather than unlinked, because an empty file is not a recovery channel and is still
-      // a receipt.
-      truncateSync(responsePath, 0);
+      // CONSUMED BY CONSTRUCTION (gate 74, closed at the root). The stage's rendered text
+      // used to arrive as a FILE and survive the whole run: in sealed native rep 5, 27 of 64
+      // responses carried seeded values, so an arm that lost a stage could re-read it
+      // verbatim off disk. It was truncated on read to close that, which worked but left the
+      // recovery channel one missed truncate away from reopening. It arrives on a socket now
+      // and is never written down at all.
       expectedStage += 1;
       const projectionIdentity = {
         version: 1,
@@ -381,7 +406,7 @@ export function createPiContextExperimentExtension(config) {
         priorRecordSha256: priorRequestRecordSha256,
       };
       const projectionRecord = { ...projectionIdentity, recordSha256: sha256Json(projectionIdentity) };
-      appendJsonLineFsync(projectionLog, projectionRecord);
+      appendRunChannel(projectionLog, projectionRecord);
       priorRequestRecordSha256 = projectionRecord.recordSha256;
       appendEvent("stage-result", { stage, responseSha256: response.responseSha256 });
       // DROP LATE: the artifact appears only now, as the stage that asks about it is
@@ -609,7 +634,7 @@ export function createPiContextExperimentExtension(config) {
           priorRecordSha256: priorRequestRecordSha256,
         };
         const record = { ...identity, recordSha256: sha256Json(identity) };
-        appendJsonLineFsync(projectionLog, record);
+        appendRunChannel(projectionLog, record);
         priorRequestRecordSha256 = record.recordSha256;
         // A FENCED COMPACTION IS AN ABORT BY CONSTRUCTION, so this arm records one rather
         // than latching it. Pi's `compact` runs `_disconnectFromAgent()` and `await
@@ -679,7 +704,7 @@ export function createPiContextExperimentExtension(config) {
           priorRecordSha256: priorRequestRecordSha256,
         };
         const record = { ...identity, recordSha256: sha256Json(identity) };
-        appendJsonLineFsync(projectionLog, record);
+        appendRunChannel(projectionLog, record);
         priorRequestRecordSha256 = record.recordSha256;
         // A managed arm that starves its own output budget is misconfigured, and the failure
         // it produces looks like the provider's fault. The unmanaged arm is exempt because
@@ -749,7 +774,7 @@ export function createPiContextExperimentExtension(config) {
             priorRecordSha256: priorRequestRecordSha256,
           };
           const record = { ...identity, recordSha256: sha256Json(identity) };
-          appendJsonLineFsync(projectionLog, record);
+          appendRunChannel(projectionLog, record);
           priorRequestRecordSha256 = record.recordSha256;
           inFlightProviderRequest = null;
         }
@@ -830,7 +855,7 @@ export function createPiContextExperimentExtension(config) {
         if (pendingStopTheWorld) {
           // An event that never saw another productive request still gets a record, with an
           // explicit null duration rather than a fabricated one.
-          appendJsonLineFsync(stopTheWorldLog, {
+          appendRunChannel(stopTheWorldLog, {
             ...pendingStopTheWorld,
             closedWallMs: null,
             closedMonotonicMs: null,

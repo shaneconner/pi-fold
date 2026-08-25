@@ -6,8 +6,7 @@
 // machinery is unchanged and
 // the archive stages are replaced by the staged repo-comprehension workload.
 
-import { closeSync, existsSync, fsyncSync, openSync, readFileSync, writeFileSync, writeSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -38,9 +37,12 @@ import {
 } from "./lib/pi_context_experiment.mjs";
 import {
   SANDBOX_PATHS,
+  appendRunChannel,
   deleteHarnessSource,
   harnessSourceRemains,
+  runChannelAppendCount,
   validateSandboxPlan,
+  writeRunChannelDocument,
 } from "./lib/pi_context_sandbox.mjs";
 import {
   assertSanitizedRuntimeEnvironment,
@@ -54,7 +56,6 @@ import {
   sha256Json,
   sha256Text,
   verifySourceHashes,
-  writeJsonExclusive,
 } from "./lib/pi_context_soak_attestation.mjs";
 
 const PROJECT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -82,7 +83,7 @@ delete process.env[SOAK_SANITIZED_ENV_MARKER];
 // What is worth asserting HERE is the property the run depends on, that the
 // filesystem this process sees is the one the sandbox builder laid out. A worker
 // that somehow started outside it would see host paths in its own config.
-assertExperiment(process.ppid === 1 && config.runDir === SANDBOX_PATHS.run &&
+assertExperiment(process.ppid === 1 && config.runDir === undefined &&
   config.repoDir === SANDBOX_PATHS.work && config.sessionDir === SANDBOX_PATHS.session,
 "Experiment worker is not running inside its own mount namespace");
 
@@ -241,9 +242,13 @@ const workerStartedWallMs = Date.now();
 const workerStartedMonotonicMs = monotonicMs();
 const workerPid = process.pid;
 const workerStartTicks = processStartTicks(workerPid);
-const readyPath = join(config.runDir, "worker-ready.json");
-const reportPath = join(config.runDir, "worker-report.json");
-const failurePath = join(config.runDir, "failure-latch.jsonl");
+// NAMES, NOT PATHS (2026-08-25). The run directory is not in the namespace any more: the
+// supervisor opens each of these on the HOST and hands the descriptor down, so the files land
+// exactly where every reader has always found them and the worker no longer needs a directory
+// it shares with the model in order to write them.
+const READY_CHANNEL = "worker-ready.json";
+const REPORT_CHANNEL = "worker-report.json";
+const FAILURE_CHANNEL = "failure-latch.jsonl";
 let manager;
 let session;
 let report;
@@ -256,9 +261,12 @@ let overflow = null;
 // survive as receipts, and a smoke run that deleted them once read zero all session.
 let stagesDeliveredCount = 0;
 const stagesDelivered = () => stagesDeliveredCount;
-const latchedFailures = () => (existsSync(failurePath)
-  ? readFileSync(failurePath, "utf8").split("\n").filter((line) => line.trim().length > 0).length
-  : 0);
+// COUNTED, NOT RE-READ. This used to read the latch file back and count its lines, which was
+// only ever used to render a number inside an assertion message, and reading a file the worker
+// itself wrote is exactly the shape the descriptor change exists to remove. The count is kept
+// by the channel every writer inside the namespace goes through, so the extension's own
+// latches are included exactly as the line count included them.
+const latchedFailures = () => runChannelAppendCount(FAILURE_CHANNEL);
 // THE FENCE, THE RESUME AND THE RESUME BOUND ARE ALL GONE (2026-08-25), and they were one
 // chain. `compact` aborts the live turn as its first act, so every fence crossing ended the
 // turn mid-tool-call and the fenced arm had to be prompted again or stop there; that resume
@@ -288,7 +296,7 @@ const latchedFailures = () => (existsSync(failurePath)
 // six hours of provider spend actually bought.
 const writeSignalReport = (signal) => {
   try {
-    writeFileSync(reportPath, `${JSON.stringify({
+    writeRunChannelDocument(REPORT_CHANNEL, `${JSON.stringify({
       ok: false,
       requiresIndependentAdjudication: true,
       version: 1,
@@ -310,8 +318,8 @@ const writeSignalReport = (signal) => {
       // was ended from outside rather than by anything the session did.
       terminatedBySignal: signal,
       error: { message: `Experiment worker terminated by ${signal}` },
-    }, null, 2)}\n`, { flag: "wx", mode: 0o600 });
-  } catch { /* Already written by the ordinary path, or the directory is gone. */ }
+    }, null, 2)}\n`);
+  } catch { /* Already written by the ordinary path, or the channel is gone. */ }
   process.exit(1);
 };
 for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => writeSignalReport(signal));
@@ -453,7 +461,7 @@ try {
   // the arm in it is the asymmetry itself, since a model reading "pifold" knows it has a fold
   // tool the comparison arm does not. The supervisor knows the arm from its own run config and
   // checks against that instead of against a value the namespace could have written.
-  writeJsonExclusive(readyPath, {
+  writeRunChannelDocument(READY_CHANNEL, `${JSON.stringify({
     version: 1,
     runId: config.runId,
     workerPid,
@@ -469,19 +477,15 @@ try {
     checkoutSha256,
     readyWallMs: Date.now(),
     readyMonotonicMs: monotonicMs(),
-  });
+  }, null, 2)}\n`);
 
   const deadline = setTimeout(() => {
     deadlineFired = true;
     try {
-      const fd = openSync(failurePath, "a", 0o600);
-      try {
-        writeSync(fd, `${JSON.stringify({
-          version: 1, runId: config.runId, phase: "worker-deadline", detail: config.watchdogMs,
-          wallMs: Date.now(), monotonicMs: monotonicMs(),
-        })}\n`);
-        fsyncSync(fd);
-      } finally { closeSync(fd); }
+      appendRunChannel(FAILURE_CHANNEL, {
+        version: 1, runId: config.runId, phase: "worker-deadline", detail: config.watchdogMs,
+        wallMs: Date.now(), monotonicMs: monotonicMs(),
+      });
     } catch { /* The supervisor also records the deadline. */ }
     void session.abort();
   }, config.watchdogMs);
@@ -742,7 +746,7 @@ try {
     endBlockSha256: sha256Text(config.endBlockPrompt ?? ""),
     createdWallMs: config.createdWallMs,
   });
-  writeJsonExclusive(join(config.runDir, "run-manifest.json"), manifest);
+  writeRunChannelDocument("run-manifest.json", `${JSON.stringify(manifest, null, 2)}\n`);
 
   report = {
     ok: true,
@@ -803,14 +807,13 @@ try {
   process.exitCode = 1;
 } finally {
   session?.dispose();
-  await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+  writeRunChannelDocument(REPORT_CHANNEL, `${JSON.stringify(report, null, 2)}\n`);
 }
 
 process.stdout.write(`${JSON.stringify({
   ok: report.ok,
   runId: config.runId,
   arm: config.arm,
-  reportPath,
   sessionFile: report.sessionFile,
   overflow: report.overflow,
 })}\n`);

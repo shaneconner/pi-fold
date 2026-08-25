@@ -13,7 +13,7 @@
 //        [--model-provider openai-codex] [--model-id gpt-5.6-sol] [--effort xhigh]
 
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -42,6 +42,8 @@ import {
 import { renderStaleArtifact } from "./lib/pi_context_artifacts.mjs";
 import {
   HARNESS_SOURCE,
+  RUN_CHANNEL_DOCUMENTS,
+  RUN_CHANNEL_FILES,
   SANDBOX_PATHS,
   hostSessionFile,
   SANDBOX_WORKER_PID,
@@ -285,8 +287,7 @@ async function supervisedWait({ state, worker, sessionFile, predicate, label, ab
 // `worker` used to supply the host pid and its start ticks. Inside the namespace the
 // worker reads both from its OWN /proc, so the comparison is against what it
 // reported at readiness: same process, same reading, taken twice.
-function parseRequest(path, config, stage, workerIdentity) {
-  const request = readJson(path);
+function parseRequest(request, config, stage, workerIdentity) {
   assertExperiment(exactKeys(request, [
     "version", "runId", "stage",
     "workerPid", "workerStartTicks", "requestedWallMs", "requestedMonotonicMs", "requestSha256",
@@ -433,9 +434,6 @@ async function run() {
   const slotPath = claimSlot(resolve(campaignDir), arm, repetition, runId);
 
   mkdirSync(runDir, { recursive: false, mode: 0o700 });
-  for (const relative of ["ipc", "ipc/requests", "ipc/responses"]) {
-    mkdirSync(join(runDir, relative), { mode: 0o700 });
-  }
   // Every arm run reads its OWN detached worktree at the pinned commit. A closed-book
   // session gets an EMPTY directory in the same position: no checkout bytes exist to
   // leak, and the run-config law that the repo path lives inside the run dir holds.
@@ -597,8 +595,20 @@ async function run() {
 
   const stdoutFd = openSync(join(runDir, "worker.stdout.log"), "wx", 0o600);
   const stderrFd = openSync(join(runDir, "worker.stderr.log"), "wx", 0o600);
+  // THE RUN DIRECTORY IS NOT MOUNTED (Shane 2026-08-25). Every file the worker writes is
+  // opened HERE, on the host, and handed down as an inherited descriptor; bubblewrap passes
+  // descriptors above 2 through to the process it execs. The files land exactly where they
+  // always did, byte for byte, so nothing downstream of this run changed at all: what changed
+  // is that the namespace no longer contains a directory holding the run config, the
+  // checkout by a second writable path, and a ledger narrating the harness to itself.
+  // Order is the contract, and it is RUN_CHANNEL_FILES' order, not this loop's.
+  const channelFds = RUN_CHANNEL_FILES.map((name) => openSync(join(runDir, name),
+    // The latch already exists: the supervisor creates it before the worker starts and
+    // appends to it from this side too, so this is the one channel that opens onto a file
+    // rather than creating one.
+    name === "failure-latch.jsonl" ? "a" : "ax", 0o600));
   const sandbox = sandboxArgv({
-    checkoutDir: repoDir, sessionDir, runDir, harnessDir,
+    checkoutDir: repoDir, sessionDir, harnessDir,
     piRoot: PI_INSTALL_ROOT, nodeExecutable: process.execPath,
     homeDir, identityDir, agentDir, authPath, scratchDir, notesDir,
   });
@@ -606,10 +616,39 @@ async function run() {
     cwd: PROJECT,
     env: sanitizedChildEnvironment({ PI_FOLD_EXPERIMENT_RUN_ID: runId }),
     detached: false,
-    stdio: ["ignore", stdoutFd, stderrFd],
+    // Index 3 is the delivery socket and indices 4 upward are the run channels, which is
+    // what DELIVERY_FD and RUN_CHANNEL_FIRST_FD name on the other side. "pipe" above index 2
+    // yields a duplex socket on BOTH sides, which is what makes a request/response round trip
+    // possible without a shared directory.
+    stdio: ["ignore", stdoutFd, stderrFd, "pipe", ...channelFds],
   });
   closeSync(stdoutFd);
   closeSync(stderrFd);
+  for (const fd of channelFds) closeSync(fd);
+  // THE DELIVERY SERVER. One line of JSON per message, one request in flight, because the
+  // worker asks for exactly one stage at a time and waits for it. A parse failure or a socket
+  // error is held rather than thrown, because it arrives on an event handler with no run
+  // context: the release loop raises it at its next wait, where the failure latch is watching.
+  const delivery = worker.stdio[3];
+  delivery.setEncoding("utf8");
+  const deliveryInbox = [];
+  let deliveryBuffer = "";
+  let deliveryFault = null;
+  delivery.on("data", (chunk) => {
+    deliveryBuffer += chunk;
+    let index;
+    while ((index = deliveryBuffer.indexOf("\n")) >= 0) {
+      const line = deliveryBuffer.slice(0, index);
+      deliveryBuffer = deliveryBuffer.slice(index + 1);
+      if (line.trim().length === 0) continue;
+      try {
+        deliveryInbox.push(JSON.parse(line));
+      } catch (error) {
+        deliveryFault = deliveryFault ?? error;
+      }
+    }
+  });
+  delivery.on("error", (error) => { deliveryFault = deliveryFault ?? error; });
   const completion = childCompletion(worker);
   const state = {
     config,
@@ -628,10 +667,12 @@ async function run() {
   let stagesReleased = 0;
   let earlyExit = false;
   try {
+    // WRITTEN, not merely present: the supervisor opened this file itself before the worker
+    // started, so it exists from the beginning and only its size says the worker got there.
     const readyPath = join(runDir, "worker-ready.json");
     await supervisedWait({
       state, worker, sessionFile: null,
-      predicate: () => existsSync(readyPath),
+      predicate: () => statSync(readyPath).size > 0,
       label: "worker readiness",
       absoluteDeadline: config.createdMonotonicMs + 5 * 60 * 1_000,
     });
@@ -668,18 +709,18 @@ async function run() {
     // A closed-book session has no stages to release: the loop body never runs and the
     // supervisor drops straight to awaiting the worker's single-turn completion.
     for (let stage = 1; !closedBook && stage <= config.stageCount; stage += 1) {
-      const requestPath = join(runDir, "ipc", "requests", `stage-${String(stage).padStart(2, "0")}.json`);
       // The unmanaged arm is expected to die at the window wall mid-plan; that exit is its
       // measurement, so the release loop stops instead of failing the run.
       const waited = await supervisedWait({
         state, worker, sessionFile: workerReady.sessionFile,
-        predicate: () => existsSync(requestPath),
+        predicate: () => deliveryInbox.length > 0 || deliveryFault !== null,
         label: `stage ${stage} request`,
         absoluteDeadline: config.createdMonotonicMs + config.watchdogMs,
         tolerateExit: armRuntime.toleratesOverflow,
       });
       if (waited.workerExited) { earlyExit = true; break; }
-      const request = parseRequest(requestPath, config, stage, workerReady);
+      if (deliveryFault) throw deliveryFault;
+      const request = parseRequest(deliveryInbox.shift(), config, stage, workerReady);
       const releaseAt = previousRelease + config.stageIntervalMs;
       const gated = await supervisedWait({
         state, worker, sessionFile: workerReady.sessionFile,
@@ -723,10 +764,7 @@ async function run() {
       state.priorPaceSha256 = pace.recordSha256;
       const response = { ...responseBase, paceRecordSha256: pace.recordSha256, responseSha256 };
       assertExperiment(responseIdentity(response) === responseSha256, "Internal response identity drifted");
-      writeJsonPublished(
-        join(runDir, "ipc", "responses", `stage-${String(stage).padStart(2, "0")}.json`),
-        response,
-      );
+      delivery.write(`${JSON.stringify(response)}\n`);
       previousRelease = pace.releasedMonotonicMs;
       stagesReleased = stage;
       appendHeartbeat(state, worker, workerReady.sessionFile);
@@ -754,7 +792,22 @@ async function run() {
     workerExit = await endWorker(worker, completion);
   }
 
+  // The worker is gone either way by here, so the socket has nothing left to carry and an
+  // open one would hold the supervisor's own event loop past its seal.
+  delivery.destroy();
   await waitTick(2);
+  // AN UNWRITTEN DOCUMENT IS AN ABSENT ONE. These files exist from the moment the supervisor
+  // opened them, but every reader downstream, this one and `adjudicate` both, has always
+  // distinguished "the worker never wrote a report" by the file not being there ("Run is
+  // incomplete: missing worker-report.json"). Removing the ones left at zero bytes keeps that
+  // exactly as it was rather than turning a missing report into a parse error. The latch is
+  // not a document and is deliberately kept at zero bytes on a clean run.
+  for (const name of RUN_CHANNEL_DOCUMENTS) {
+    const path = join(runDir, name);
+    try {
+      if (statSync(path).size === 0) unlinkSync(path);
+    } catch { /* Never opened, or already gone. */ }
+  }
   const finalHeartbeat = appendHeartbeat(state, worker, workerReady?.sessionFile ?? null);
   const gitEnd = gitAttestation({ requireClean: false });
   // The pin is the experiment FILE SET (verifySourceHashes, byte-for-byte) and the
@@ -776,15 +829,12 @@ async function run() {
     "run-config.json", "run-manifest.json", "worker-ready.json", "worker-report.json",
     "pace.jsonl", "heartbeats.jsonl", "provider-requests.jsonl", "worker-events.jsonl",
     "tool-results.jsonl", "stop-the-world.jsonl", "worker.stdout.log", "worker.stderr.log",
-    // Responses stay listed even though the worker empties each one on read (see
-    // the stage tool): the seal then records that every delivered stage was in
-    // fact consumed, and a payload that survived would show up here as a hash
-    // rather than going unnoticed. Delivery itself is proved by pace.jsonl, which
-    // carries each response's responseSha256 and contentSha256 on this side.
-    ...Array.from({ length: config.stageCount }, (_, index) => [
-      `ipc/requests/stage-${String(index + 1).padStart(2, "0")}.json`,
-      `ipc/responses/stage-${String(index + 1).padStart(2, "0")}.json`,
-    ]).flat(),
+    // The per-stage request and response files are gone (2026-08-25). They were listed here
+    // so the seal would record that every delivered payload had in fact been consumed, which
+    // was worth proving while a delivered stage was a file on disk that a truncate had to
+    // remove. Delivery arrives on a socket now and is never written down, so there is nothing
+    // left to prove consumed. Delivery itself is still proved by pace.jsonl, which carries
+    // each response's responseSha256 and contentSha256 on this side.
   ].filter((relative) => existsSync(join(runDir, relative)));
   if (sessionFile && existsSync(sessionFile)) artifactPaths.push(sessionFile.slice(runDir.length + 1));
   artifactPaths.push("failure-latch.jsonl");

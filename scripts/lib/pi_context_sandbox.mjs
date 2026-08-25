@@ -33,7 +33,7 @@
 // machine.
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, readdirSync, rmSync, writeSync } from "node:fs";
 import { basename, join } from "node:path";
 
 // Where each bound resource lands inside the namespace. These are constants rather
@@ -58,14 +58,11 @@ const SANDBOX_HOME = ["", "home", "agent"].join("/");
 export const SANDBOX_PATHS = Object.freeze({
   work: "/work",
   session: "/session",
-  // Where a run directory lands WHEN one is mounted at all. The experiment no longer mounts
-  // one; `run_steer_session` still does, because the tree it grades is the tree the agent
-  // edits and it has no ledger channel of its own. Two callers, two needs, one builder.
+  // Where a run directory lands WHEN one is mounted at all, which for the experiment is
+  // never: nothing of its run crosses as a path any more. `run_steer_session` still mounts
+  // one, because the tree it grades IS the tree the agent edits, so the directory is the
+  // subject rather than the bookkeeping. Two callers, two needs, one builder.
   run: "/run",
-  // The only part of the experiment's run directory that still crosses, because a
-  // request/response round-trip needs a shared directory in a way an append-only ledger does
-  // not. It carries opaque names and nothing else.
-  ipc: "/ipc",
   harness: "/opt/harness",
   node: "/opt/node",
   home: SANDBOX_HOME,
@@ -185,12 +182,12 @@ export function sandboxArgv(layout) {
     bwrap = "/usr/bin/bwrap",
     checkoutDir, sessionDir, harnessDir,
     piRoot, nodeExecutable, homeDir, identityDir, agentDir, authPath, scratchDir,
-    // OPTIONAL AND EXCLUSIVE IN PRACTICE. The experiment passes `ipcDir` and no `runDir`, so
-    // its run directory never enters the namespace at all; the steer tool passes `runDir` and
-    // no `ipcDir`, exactly as it always has, because the tree it grades is the tree the agent
-    // edits and it has no ledger channel. Same precedent as `notesDir`: a parameter that
-    // exists because two callers genuinely differ, not a knob.
-    runDir = null, ipcDir = null,
+    // OPTIONAL (2026-08-25). The experiment passes none: its worker reaches its supervisor
+    // over inherited descriptors, so the run directory never enters the namespace at all.
+    // `run_steer_session` passes one, exactly as it always has, because the tree it grades is
+    // the tree the agent edits. Same precedent as `notesDir`: a parameter that exists because
+    // two callers genuinely differ, not a knob.
+    runDir = null,
     // Optional: a v4 campaign has no notes and must keep running exactly as it ran.
     notesDir = null,
     // The steer protocol grades the tree the agent LEAVES BEHIND, so its checkout has
@@ -207,16 +204,8 @@ export function sandboxArgv(layout) {
       throw new Error(`Sandbox layout needs an absolute ${name}`);
     }
   }
-  // Exactly one channel out of the namespace, never both and never neither: a layout that
-  // mounts the whole run directory AND the ipc channel has not decided which it is, and one
-  // that mounts neither has no way to reach its supervisor at all.
-  if ((runDir === null) === (ipcDir === null)) {
-    throw new Error("Sandbox layout needs exactly one of runDir or ipcDir");
-  }
-  for (const [name, value] of Object.entries({ runDir, ipcDir })) {
-    if (value !== null && (typeof value !== "string" || !value.startsWith("/"))) {
-      throw new Error(`Sandbox layout needs an absolute ${name}`);
-    }
+  if (runDir !== null && (typeof runDir !== "string" || !runDir.startsWith("/"))) {
+    throw new Error("Sandbox layout needs an absolute runDir");
   }
   return [
     bwrap,
@@ -295,10 +284,9 @@ export function sandboxArgv(layout) {
     // was ever in there: it is harness plumbing, and a filesystem was simply the easiest IPC to
     // write. The ledgers now travel as inherited descriptors the supervisor opens on the HOST
     // (see RUN_CHANNEL_LEDGERS), so every file lands exactly where every reader has always
-    // found it and only the writer changed. The delivery round-trip keeps a directory, because
-    // it is a round-trip, and it is bound at /ipc holding nothing but opaque request names.
+    // found it and only the writer changed. The delivery round-trip travels on DELIVERY_FD, a
+    // duplex socket, so it does not need a directory either and there is nothing left to mount.
     ...(runDir === null ? [] : ["--bind", runDir, SANDBOX_PATHS.run]),
-    ...(ipcDir === null ? [] : ["--bind", ipcDir, SANDBOX_PATHS.ipc]),
     "--bind", harnessDir, SANDBOX_PATHS.harness,
     "--bind", homeDir, SANDBOX_PATHS.home,
     // AFTER the home bind, so these layer inside it rather than being swallowed.
@@ -383,13 +371,96 @@ export const RUN_CHANNEL_LEDGERS = Object.freeze([
   "stale-artifacts.jsonl",
   "failure-latch.jsonl",
 ]);
-// 0, 1 and 2 are the worker's own stdio; the ledgers start after them.
-export const RUN_CHANNEL_FIRST_FD = 3;
+// The WRITE-ONCE documents, after the ledgers in the same descriptor run. The supervisor opens
+// these with "wx", so exclusivity is the supervisor's guarantee rather than the worker's: a
+// second write to one of them is a bug, not a race, and gate 55's rescued report must not be
+// able to overwrite a real one. The worker tracks in memory which it has written.
+export const RUN_CHANNEL_DOCUMENTS = Object.freeze([
+  "worker-ready.json",
+  "run-manifest.json",
+  "worker-report.json",
+]);
+// Everything the worker writes out, ledgers first, in descriptor order.
+export const RUN_CHANNEL_FILES = Object.freeze([...RUN_CHANNEL_LEDGERS, ...RUN_CHANNEL_DOCUMENTS]);
+// THE DELIVERY SOCKET (2026-08-25). Stage delivery is a round trip and the ledgers are not,
+// so it gets its own descriptor rather than a shared directory: node's `stdio` entry "pipe"
+// above index 2 yields a duplex socket on BOTH sides, and bubblewrap passes it through
+// (verified against a real bwrap, both directions, not assumed). This is what retired
+// `/run/ipc`. Line-delimited JSON, one object per line, request out and response back.
+export const DELIVERY_FD = 3;
+// 0, 1 and 2 are the worker's own stdio and 3 is the delivery socket; the ledgers start after.
+export const RUN_CHANNEL_FIRST_FD = 4;
 
 export function runChannelFd(name) {
-  const index = RUN_CHANNEL_LEDGERS.indexOf(name);
+  const index = RUN_CHANNEL_FILES.indexOf(name);
   if (index < 0) throw new Error(`No run channel is defined for ${name}`);
   return RUN_CHANNEL_FIRST_FD + index;
+}
+
+// The worker's side of the channel: the same bytes `appendJsonLineFsync` wrote to a path,
+// written to the descriptor the supervisor opened on the host instead. No framing and no
+// routing, because there is nothing to route: one file, one descriptor, decided by position.
+const runChannelAppends = new Map();
+let runChannelDirectory = null;
+
+// A DIRECTORY INSTEAD OF THE DESCRIPTORS, for callers that have no namespace around them.
+// Inside a run the channel IS the inherited descriptor and there is nothing to configure; the
+// gate suite drives this same extension in its own process, where fd 4 upward belong to the
+// verifier and writing to them would corrupt whatever they are. Same seam and same reason as
+// `deleteHarnessSource(harnessRoot = SANDBOX_PATHS.harness)`: a default production uses and a
+// test overrides, not an option anything chooses between.
+export function useRunChannelDirectory(directory) {
+  runChannelDirectory = directory;
+}
+
+function writeRunChannel(name, text) {
+  if (runChannelDirectory === null) {
+    const fd = runChannelFd(name);
+    writeSync(fd, text);
+    fsyncSync(fd);
+    return;
+  }
+  runChannelFd(name);
+  const fd = openSync(join(runChannelDirectory, name), "a", 0o600);
+  try {
+    writeSync(fd, text);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+export function appendRunChannel(name, value) {
+  writeRunChannel(name, `${JSON.stringify(value)}\n`);
+  runChannelAppends.set(name, (runChannelAppends.get(name) ?? 0) + 1);
+}
+
+// How many records THIS PROCESS has appended to a ledger. The worker used to answer that by
+// reading the latch file back and counting its lines, which is the one thing a descriptor
+// cannot do and, more to the point, is a process reading a file it wrote itself. Everything
+// inside the namespace appends through the call above, worker and extension alike, so the
+// count is complete on this side of the boundary; the supervisor appends to the same latch
+// from the host and is not counted, exactly as it never was.
+export function runChannelAppendCount(name) {
+  runChannelFd(name);
+  return runChannelAppends.get(name) ?? 0;
+}
+
+const writtenRunChannelDocuments = new Set();
+
+// WRITE-ONCE, ENFORCED HERE. `flag: "wx"` used to carry this and a descriptor cannot: the
+// supervisor's own open is what makes the FILE exclusive, so the second write has to be
+// refused in the writer. It matters in exactly one place, gate 55's signal-rescued report,
+// whose whole contract is that it can never overwrite a real one; it returns false rather
+// than throwing because that caller is a signal handler on its way to exit.
+export function writeRunChannelDocument(name, text) {
+  if (!RUN_CHANNEL_DOCUMENTS.includes(name)) {
+    throw new Error(`${name} is not a write-once run channel document`);
+  }
+  if (writtenRunChannelDocuments.has(name)) return false;
+  writtenRunChannelDocuments.add(name);
+  writeRunChannel(name, text);
+  return true;
 }
 
 export const SANDBOX_CONFIG_WITHHELD = Object.freeze([
@@ -403,13 +474,10 @@ export function sandboxConfig(config, endBlockPrompt) {
   return {
     ...carried,
     planPath: SANDBOX_PATHS.plan,
-    // STILL runDir, and the switch has not been thrown. The mount is now optional in
-    // `sandboxArgv` and the ledger channel is defined, but the worker and the extension still
-    // write through `join(config.runDir, ...)`, so the supervisor still binds the directory
-    // and still names it here. Flipping this line is the LAST step of the migration, not the
-    // first: a config naming /ipc against a worker that writes to /run is a run that dies at
-    // its first append.
-    runDir: SANDBOX_PATHS.run,
+    // NO runDir. The worker's run directory is not a place any more, it is a set of
+    // descriptors, and a config naming a path the namespace does not have would be a lie the
+    // first reader believed. `validateExperimentRunConfig` reads the sandboxed shape off
+    // `repoDir` for exactly that reason and refuses a sandboxed config that names one.
     repoDir: SANDBOX_PATHS.work,
     sessionDir: SANDBOX_PATHS.session,
     // The TEXT, not the seed. The supervisor composes the end block from the

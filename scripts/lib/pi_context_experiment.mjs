@@ -2348,7 +2348,7 @@ export function validateExperimentManifest(manifest) {
 // Run config: the supervisor -> worker contract, revalidated on both sides.
 // ---------------------------------------------------------------------------
 export const EXPERIMENT_RUN_CONFIG_KEYS = Object.freeze([
-  "version", "runId", "runDir", "campaignId", "arm", "mode", "repetition",
+  "version", "runId", "campaignId", "arm", "mode", "repetition",
   "ordinal", "seed", "unit", "invocationId", "supervisorPid", "supervisorStartTicks",
   "bootId", "codeCommit", "codeTree", "stageCount", "stageIntervalMs",
   "watchdogMs", "heartbeatMs", "createdWallMs", "createdMonotonicMs", "sourceHashes",
@@ -2365,6 +2365,14 @@ export const EXPERIMENT_RUN_CONFIG_OPTIONAL_KEYS = Object.freeze([
   "sessionType", "guidance", "foldScheduling", "foldPeekResults", "guidedCuration",
   "providerTotalWindow", "providerInputBudget", "briefGenerator", "transport", "reliabilityLevers",
   "ledgerTasks", "querySeed",
+  // THE RUN DIRECTORY, HOST-SIDE ONLY (2026-08-25). The supervisor's own config still names
+  // it, because on the host it is where every artifact lands and the seal addresses it. The
+  // WORKER's copy no longer carries it at all: the run directory stopped crossing into the
+  // namespace when the ledgers became inherited descriptors, and a config naming a path the
+  // namespace does not have would be a lie the first reader believed. Optional rather than
+  // required for exactly that reason, and `validateExperimentRunConfig` refuses a sandboxed
+  // config that carries one.
+  "runDir",
   // THE DELIVERY KEY, TOLERATED ON READ AND EMITTED BY NOTHING (2026-08-25). Every sealed
   // run carries one, and the adjudicator revalidates run configs, so dropping it outright
   // would un-adjudicate the whole corpus. No new run writes it: stages arrive as user
@@ -2584,10 +2592,17 @@ export function validateExperimentRunConfig(value) {
   // namespace there are no host paths to name. The sandboxed branch is the
   // stricter of the two: it pins exact values rather than a prefix relationship,
   // so a config claiming to be sandboxed cannot point anywhere else.
-  const sandboxed = value.runDir === SANDBOX_PATHS.run;
-  assertExperiment(!sandboxed || (value.repoDir === SANDBOX_PATHS.work &&
-    value.sessionDir === SANDBOX_PATHS.session),
-  "A sandboxed run config does not name the namespace it runs in");
+  //
+  // READ OFF THE CHECKOUT, not the run directory (2026-08-25). The run directory stopped
+  // crossing the boundary when the ledgers became inherited descriptors, so the field the
+  // shape used to be read from no longer exists inside the namespace, and its ABSENCE is now
+  // the thing worth asserting: a sandboxed config naming a run directory is either a stale
+  // build or a mount that came back.
+  const sandboxed = value.repoDir === SANDBOX_PATHS.work;
+  assertExperiment(!sandboxed || value.sessionDir === SANDBOX_PATHS.session,
+    "A sandboxed run config does not name the namespace it runs in");
+  assertExperiment(!sandboxed || value.runDir === undefined,
+    "A sandboxed run config names a run directory the namespace does not have");
   assertExperiment(sandboxed ||
     (typeof value.runDir === "string" && value.runDir.endsWith(`/${value.runId}`)),
   "Run directory does not carry its run id");

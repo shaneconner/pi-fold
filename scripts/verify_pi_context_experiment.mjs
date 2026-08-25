@@ -209,7 +209,12 @@ import {
 } from "./probe_retrieval_rank.mjs";
 
 import {
+  DELIVERY_FD,
   HARNESS_SOURCE,
+  RUN_CHANNEL_DOCUMENTS,
+  RUN_CHANNEL_FILES,
+  RUN_CHANNEL_FIRST_FD,
+  RUN_CHANNEL_LEDGERS,
   SANDBOX_PATHS,
   deleteHarnessSource,
   hostSessionFile,
@@ -218,7 +223,10 @@ import {
   SANDBOX_PLAN_KEYS,
   modelWrittenFiles,
   sandboxPlan,
+  runChannelFd,
   seededTokenCarriers,
+  writeRunChannelDocument,
+  useRunChannelDirectory,
   validateSandboxPlan,
 } from "./lib/pi_context_sandbox.mjs";
 
@@ -2928,6 +2936,7 @@ try {
   // live pifold session would return, which is exactly the outcome being modelled here.
   const drive = (arm, { complete = false, branch = [] } = {}) => {
     const runDir = mkdtempSync(join(tmpdir(), `pi-fold-compaction-${arm}-`));
+    useRunChannelDirectory(runDir);
     const handlers = new Map();
     const pi = {
       on(name, handler) {
@@ -3272,14 +3281,14 @@ try {
     }),
     /briefGenerator is deleted: the runtime briefs deterministically as of 2026-08-14/,
     "a config carrying the deleted generator was not refused by name at extension creation");
-  // The accept path stops at a LATER complaint, never this one: the same call minus the
-  // descriptor must get past the refusal (the run-directory fields other gates supply are
-  // absent here, so construction fails downstream, and that failure naming the generator
-  // would mean the refusal fires on configs that ask for nothing).
-  assert.throws(
+  // The accept path gets past the refusal: the same call minus the descriptor constructs.
+  // It used to fail downstream instead, on `join(config.runDir, ...)` with no run directory
+  // supplied, and the assertion was that whatever it died of did not name the generator. The
+  // run directory left the namespace on 2026-08-25 and construction touches no path at all
+  // now, so the weaker statement can be the plain one.
+  assert.doesNotThrow(
     () => createPiContextExperimentExtension({ arm: "pifold" }),
-    (error) => !/briefGenerator/.test(String(error)),
-    "a generator-free config was refused as though it carried the deleted generator");
+    "a generator-free config was refused at extension creation");
   checks.briefGeneratorRefusedAtRegistration = true;
 }
 
@@ -3322,6 +3331,7 @@ try {
   // a message_end with no request in flight is its own latch and would mask this one.
   const driveStops = (arm, stops) => {
     const runDir = mkdtempSync(join(tmpdir(), `pi-fold-weather-${arm}-`));
+    useRunChannelDirectory(runDir);
     const handlers = new Map();
     const pi = {
       on(name, handler) {
@@ -3905,12 +3915,23 @@ try {
   assert(/\["SIGTERM", "SIGINT"\]/.test(worker),
     "the worker does not preserve its report on both the supervisor's signal and an operator's");
   // Synchronous, because a signal handler that awaits does not finish before the process ends.
-  assert(/writeFileSync\(reportPath,/.test(handler) && !/await /.test(handler),
+  assert(/writeRunChannelDocument\(REPORT_CHANNEL,/.test(handler) && !/await /.test(handler),
     "the signal report is written asynchronously, so the process can end before it lands");
   // Exclusive, so a worker that already wrote a real report cannot have it overwritten by
-  // the signal that follows a normal exit.
-  assert(/flag: "wx"/.test(handler),
-    "the signal report can overwrite a report the ordinary path already wrote");
+  // the signal that follows a normal exit. `flag: "wx"` used to carry that and a descriptor
+  // cannot, so the write-once rule moved into the channel and is DRIVEN here rather than
+  // matched: a second write is refused and the first report's bytes are still on disk.
+  {
+    const onceDir = mkdtempSync(join(tmpdir(), "pi-fold-report-once-"));
+    useRunChannelDirectory(onceDir);
+    assert.equal(writeRunChannelDocument("worker-report.json", "{\"ok\":true}\n"), true,
+      "the first write of a run channel document was refused");
+    assert.equal(writeRunChannelDocument("worker-report.json", "{\"ok\":false}\n"), false,
+      "the signal report can overwrite a report the ordinary path already wrote");
+    assert.equal(readFileSync(join(onceDir, "worker-report.json"), "utf8"), "{\"ok\":true}\n",
+      "a refused second write still reached the file");
+    rmSync(onceDir, { recursive: true, force: true });
+  }
   // It must NOT read as a pass. A rescued report that said ok true would turn a killed run
   // into a clean one, which is worse than losing it.
   assert(/ok: false/.test(handler) && /requiresIndependentAdjudication: true/.test(handler),
@@ -5362,8 +5383,7 @@ try {
     alias: { typebox: typeboxPath70 },
   }).import(join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"));
   const runDir = mkdtempSync(join(tmpdir(), "pi-fold-ledger-gate-"));
-  mkdirSync(join(runDir, "ipc", "requests"), { recursive: true });
-  mkdirSync(join(runDir, "ipc", "responses"), { recursive: true });
+  useRunChannelDirectory(runDir);
   const keyOne = "1".repeat(64);
   const keyTwo = "2".repeat(64);
   const tools = new Map();
@@ -9421,10 +9441,17 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
   const sandboxed = sandboxConfig(hostConfig, "the exam text");
   assert.doesNotThrow(() => validateExperimentRunConfig(sandboxed),
     "the config the supervisor writes for the worker is one the worker will refuse");
-  // The sandboxed branch is the STRICTER one: it pins values rather than prefixes.
-  assert.throws(() => validateExperimentRunConfig({ ...sandboxed, repoDir: "/elsewhere" }),
+  // The sandboxed branch is the STRICTER one: it pins values rather than prefixes. The
+  // discriminator is the CHECKOUT as of 2026-08-25, because the run directory stopped
+  // crossing into the namespace, so the field it pins beside that is the session directory.
+  assert.throws(() => validateExperimentRunConfig({ ...sandboxed, sessionDir: "/elsewhere" }),
     /does not name the namespace it runs in/,
-    "a config claiming to be sandboxed pointed its checkout elsewhere");
+    "a config claiming to be sandboxed pointed its session elsewhere");
+  // And a config that names NEITHER shape is not quietly read as the lenient one: moving the
+  // checkout off /work makes it a host config, which owes a run directory carrying its id.
+  assert.throws(() => validateExperimentRunConfig({ ...sandboxed, repoDir: "/elsewhere" }),
+    /Run directory does not carry its run id/,
+    "a config that is neither shape was accepted as one of them");
   assert(!("querySeed" in carried), "the query seed reached the sandbox");
   assert(!JSON.stringify(carried).includes("seed-must-not-travel"),
     "the query seed reached the sandbox under another key");
@@ -9555,38 +9582,37 @@ checks.aZeroUsageAbortMarkerIsExcludedAndReportedSpendNever = true;
 // ---------------------------------------------------------------------------
 // GATE 74 - a delivered stage does not survive its own delivery.
 //
-// The supervisor renders each stage and drops it at ipc/responses/stage-NN.json,
-// and those files used to sit there for the whole run. In sealed native rep 5, 27
-// of the 64 carried seeded ledger values, so an arm that lost a stage to
-// compaction could re-read that stage verbatim off disk. That is a recovery
-// channel the harness invented: neither compaction nor folding puts it there, and
-// with the tool surface restored to stock Pi the model has `grep` to find it with.
+// The supervisor used to render each stage and drop it at ipc/responses/stage-NN.json, and
+// those files sat there for the whole run. In sealed native rep 5, 27 of the 64 carried
+// seeded ledger values, so an arm that lost a stage to compaction could re-read that stage
+// verbatim off disk. That is a recovery channel the harness invented: neither compaction nor
+// folding puts it there, and with the tool surface restored to stock Pi the model has `grep`
+// to find it with.
 //
-// The worker consumes the file the moment it validates it. The window is not a race, and as
-// of 2026-08-25 it is airtight for a stronger reason than before: the model is not merely
-// blocked inside its own tool call, it has ENDED ITS TURN and is not running at all. What
-// the deletion must not cost is the proof that the stage was delivered, and that proof was
-// never in the file: it is in pace.jsonl, on the supervisor's side.
+// It was closed by consuming the file on read, which worked and left the channel one missed
+// truncate away from reopening. It is closed at the root as of 2026-08-25: a delivered stage
+// is a line on a socket and is never written down anywhere the model can reach. What the
+// deletion must not cost is the proof that the stage was delivered, and that proof was never
+// in the file: it is in pace.jsonl, on the supervisor's side.
 // ---------------------------------------------------------------------------
 {
   const extension = source("scripts/pi_context_experiment_extension.mjs");
-  assert(/truncateSync\(responsePath, 0\);/.test(extension),
-    "the stage response is not consumed on read");
-  assert(/Supervisor response identity drifted[\s\S]{0,900}truncateSync\(responsePath, 0\);/.test(extension),
-    "the response is consumed somewhere other than after its identity is validated");
-  // STILL EMPTIED RATHER THAN UNLINKED, for a narrower reason than before. The old reason
-  // was that the worker's delivery counter WALKED these paths to learn how far the run had
-  // got, and a smoke run that deleted them read zero all session. The worker drives delivery
-  // now and simply counts, so that coupling is gone; an empty file is kept because it is
-  // still a receipt, and because a path that vanishes where a stage response used to be is
-  // its own tell. The seal keeps listing them so a payload that survived would show up as a
-  // hash rather than going unnoticed.
+  // NOT WRITTEN DOWN AT ALL. The old assertions pinned the truncate that emptied the response
+  // file; there is no response file, so what is pinned is the absence of one. `responsePath`
+  // is the name the whole mechanism hung off, and the delivery arriving as a return value
+  // from the socket is what replaced it.
+  assert(!/responsePath/.test(extension),
+    "the stage response is a path again, so it is a file the model can find");
+  assert(/const response = await requestStage\(request, config\.watchdogMs\);/.test(extension),
+    "the stage response no longer arrives on the delivery channel");
   const worker74 = source("scripts/run_pi_context_experiment_worker.mjs");
   assert(/const stagesDelivered = \(\) => stagesDeliveredCount;/.test(worker74),
     "the delivery counter is inferred again rather than being what the worker itself did");
   const runner = source("scripts/run_pi_context_experiment.mjs");
-  assert(/ipc\/responses\/stage-/.test(runner) && /ipc\/requests\/stage-/.test(runner),
-    "the seal stopped covering the stage channel");
+  assert(!/ipc\//.test(runner),
+    "the supervisor writes the stage channel to a directory again");
+  assert(/delivery\.write\(`\$\{JSON\.stringify\(response\)\}/.test(runner),
+    "the supervisor no longer answers on the delivery socket");
 
   // THE EVIDENCE THE DELETION MUST NOT COST. What the file held has to stay
   // provable without the file, and it is: the supervisor stamps the response's own
@@ -10239,15 +10265,19 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   "the extension does not call the bounds this gate drives");
   assert(!/utimesSync|mkdirSync/.test(extensionSource),
     "the extension still reimplements a bound instead of composing it");
-  assert(extensionSource.includes('const artifactLog = join(config.runDir, "stale-artifacts.jsonl")'),
-    "the artifact snapshot does not land outside the checkout");
+  // The snapshot lands OUTSIDE the checkout, which since 2026-08-25 means outside every
+  // namespace the model has: it is written to an inherited descriptor the supervisor opened
+  // on the host, and the file it lands in is not reachable from inside the run at all.
+  assert(extensionSource.includes('const artifactLog = "stale-artifacts.jsonl"') &&
+    extensionSource.includes("appendRunChannel(artifactLog,"),
+  "the artifact snapshot does not land outside the checkout");
 
   // COLLECT BEFORE SERVE, PLANT AFTER. Serving first would let the model see the next
   // stage with the old artifact still on disk; planting before the result is returned
   // would put the file in the checkout during a turn nobody asked about it.
   const deliverAt = extensionSource.indexOf("const deliverStage = async () => {");
   const collectAt = extensionSource.indexOf("collectStaleArtifact();", deliverAt);
-  const waitAt = extensionSource.indexOf("await waitForFile(responsePath", deliverAt);
+  const waitAt = extensionSource.indexOf("await requestStage(request", deliverAt);
   const plantAt = extensionSource.indexOf("plantStaleArtifact(stage)", deliverAt);
   assert(deliverAt >= 0 && collectAt > deliverAt && waitAt > collectAt,
     "the previous artifact is not collected before the next stage is requested");
@@ -11129,6 +11159,96 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   // bytes the harness no longer sends.
 
   checks.theHarnessNamesFilesAndNeverPastesThem = true;
+}
+
+// ---------------------------------------------------------------------------
+// GATE 120 - the run directory is not in the namespace, and the descriptors that
+// replaced it are pinned by position.
+//
+// The bind put run-config.json at /run, and `cat /run/run-config.json` returned the arm, the
+// campaign, the stage count, the frozen querySeed and EVERY stale-artifact ask with its
+// stage, its wording and the full text of the note about to be planted. One command was the
+// exam. Beside it: stale-artifacts.jsonl kept plantedSha256 and returnedSha256, which undoes
+// the consume-on-write bound the instrument depends on; worker-events.jsonl narrated the
+// harness to itself; ipc/requests/stage-NN.json restored the numbering by filename; and
+// /run/repo was a second, WRITABLE path to a checkout that is read-only on purpose. The
+// fence that stops this is `read`, `edit` and `write` only, because `bash` cannot be fenced,
+// so every one of those was reachable. 134 sealed runs and zero touches: latent, not
+// realised, which is the only reason the corpus survives it.
+//
+// Nothing the MODEL needs was ever in there. It was harness plumbing, and a filesystem was
+// simply the easiest IPC to write. The worker's ledgers travel as descriptors the supervisor
+// opens on the HOST, so every file lands exactly where every reader has always found it, and
+// the delivery round-trip travels on a duplex socket, so a stage is never a file at all.
+//
+// ORDER IS THE CONTRACT. The fd a channel writes to is its index in RUN_CHANNEL_FILES plus
+// RUN_CHANNEL_FIRST_FD, and the supervisor's `stdio` array is what makes that true on the
+// other side. Appending to the list is safe; reordering it silently sends a ledger's bytes
+// into another ledger's file. So the map is pinned BY VALUE here rather than derived, which
+// is the only form that fails when someone reorders the list.
+// ---------------------------------------------------------------------------
+{
+  // The map, by value. A derived assertion would agree with any order.
+  assert.equal(DELIVERY_FD, 3, "the delivery socket moved off the descriptor the worker opens");
+  assert.equal(RUN_CHANNEL_FIRST_FD, 4, "the ledgers no longer start after the delivery socket");
+  assert.deepEqual(RUN_CHANNEL_FILES.map((name) => [name, runChannelFd(name)]), [
+    ["worker-events.jsonl", 4],
+    ["tool-results.jsonl", 5],
+    ["provider-requests.jsonl", 6],
+    ["stop-the-world.jsonl", 7],
+    ["stale-artifacts.jsonl", 8],
+    ["failure-latch.jsonl", 9],
+    ["worker-ready.json", 10],
+    ["run-manifest.json", 11],
+    ["worker-report.json", 12],
+  ], "the run channel map moved; a reorder sends one ledger's bytes into another's file");
+  assert.deepEqual([...RUN_CHANNEL_FILES],
+    [...RUN_CHANNEL_LEDGERS, ...RUN_CHANNEL_DOCUMENTS],
+    "the ledgers and the documents no longer make up the channel");
+  assert.throws(() => runChannelFd("pace.jsonl"), /No run channel is defined for pace.jsonl/,
+    "a name with no channel resolves to a descriptor anyway");
+
+  // THE MOUNT IS GONE from the experiment's own namespace, and still there for the steer
+  // tool, whose subject IS the tree the agent edits. Driven through the builder both ways
+  // rather than read off the source, because the argv is what bubblewrap acts on.
+  const layout120 = {
+    checkoutDir: "/host/run/repo", sessionDir: "/host/run/session",
+    harnessDir: "/host/run.sandbox/harness", piRoot: "/host/pi",
+    nodeExecutable: "/host/node", homeDir: "/host/run.sandbox/home",
+    identityDir: "/host/run.sandbox/identity", agentDir: "/host/run.sandbox/agent",
+    authPath: "/host/auth.json", scratchDir: "/host/run.sandbox/scratch",
+  };
+  const experimentArgv = sandboxArgv(layout120);
+  assert(!experimentArgv.includes(SANDBOX_PATHS.run),
+    "the experiment's namespace mounts a run directory again, and one cat is the exam");
+  assert(!experimentArgv.some((argument) => /(^|\/)ipc(\/|$)/.test(String(argument))),
+    "the experiment's namespace mounts a delivery directory again");
+  const steerArgv = sandboxArgv({ ...layout120, runDir: "/host/run", workWritable: true,
+    workerScript: "run_steer_session_worker.mjs" });
+  const runBind = steerArgv.indexOf(SANDBOX_PATHS.run);
+  assert(runBind > 0 && steerArgv[runBind - 1] === "/host/run" &&
+    steerArgv[runBind - 2] === "--bind",
+  "the steer tool lost the run directory its whole protocol is addressed to");
+
+  // The config the worker reads names no run directory either, and one that does is refused
+  // by name. Both halves matter: emitting it would put the path back in the namespace, and
+  // tolerating it on read would let a stale build put it back without anything noticing.
+  const sandboxed120 = sandboxConfig({
+    version: 1, runId: "run-1", runDir: "/host/run", repoDir: "/host/run/repo",
+    sessionDir: "/host/run/session", querySeed: "seed", planPath: "/host/plan.json",
+  });
+  assert.equal(sandboxed120.runDir, undefined,
+    "the worker's config names a run directory the namespace does not have");
+  assert.equal(sandboxed120.repoDir, SANDBOX_PATHS.work);
+  assert.equal(sandboxed120.sessionDir, SANDBOX_PATHS.session);
+  assert.throws(
+    () => validateExperimentRunConfig({ ...runConfig,
+      runDir: SANDBOX_PATHS.run, repoDir: SANDBOX_PATHS.work,
+      sessionDir: SANDBOX_PATHS.session }),
+    /A sandboxed run config names a run directory the namespace does not have/,
+    "a sandboxed config carrying a run directory was accepted");
+
+  checks.theRunDirectoryIsNotInTheNamespace = true;
 }
 
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);
