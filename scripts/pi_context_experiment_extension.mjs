@@ -23,6 +23,10 @@ import { Type } from "typebox";
 import { registerActiveContext } from "../extensions/active-context.ts";
 import { registerEvidenceIngestion } from "../extensions/evidence.js";
 import {
+  collectArtifact,
+  plantArtifact,
+} from "./lib/pi_context_artifacts.mjs";
+import {
   PI_FOLD_ACTIVE_CONTEXT_REGISTRATION,
   PI_FOLD_NATIVE_COMPACTION_DECISION_ENTRY,
   PI_FOLD_NATIVE_COMPACTION_RECEIPT_ENTRY,
@@ -214,6 +218,77 @@ export function createPiContextExperimentExtension(config) {
   const toolResultLog = join(config.runDir, "tool-results.jsonl");
   const stopTheWorldLog = join(config.runDir, "stop-the-world.jsonl");
 
+  // ---------------------------------------------------------------------------
+  // THE STALE-ARTIFACT BOUNDS (Shane 2026-08-25).
+  //
+  // A file the model populates is a disk-based memory the harness invented, which is gate
+  // 74's lesson one artifact over: `ipc/responses/stage-NN.json` used to survive the run,
+  // 27 of 64 carried seeded ledger values, and an arm that lost a stage could grep it back.
+  // Left in place, a model writes correct values early and re-reads its own file late
+  // instead of recalling anything, and BOTH arms score near-perfect while we measure the
+  // filesystem. Three bounds, all required, all here:
+  //
+  //   1. DROP LATE     the artifact does not exist until the stage that asks about it
+  //   2. CONSUME       truncated to zero the moment the next stage is requested, after
+  //                    its contents are snapshotted where the model cannot reach
+  //   3. BACKDATE      a "stale report from an earlier pass" whose mtime is thirty seconds
+  //                    old is a tell, and `stat` is natural analyst behaviour
+  //
+  // Both the drop and the consume happen INSIDE a stage tool call, with the model blocked
+  // for the whole window, which is the same airtight argument the response truncate rests
+  // on: there is no turn in which the file exists unexpectedly and the model can run.
+  const staleArtifacts = new Map((config.staleArtifacts ?? []).map((ask) => [ask.askStage, ask]));
+  const artifactLog = join(config.runDir, "stale-artifacts.jsonl");
+  let plantedArtifact = null;
+
+  const plantStaleArtifact = (stage) => {
+    const ask = staleArtifacts.get(stage);
+    if (!ask) return null;
+    const planted = plantArtifact({ repoDir: config.repoDir, ask, referencePath: "README" });
+    plantedArtifact = { ...ask, plantedAtStage: stage };
+    appendEvent("stale-artifact-planted", {
+      id: ask.id, schema: ask.schema, stage, path: ask.path,
+      chars: planted.chars, sha256: sha256Text(ask.text), backdatedTo: planted.backdatedTo,
+    });
+    return ask;
+  };
+
+  // Snapshot then truncate. The snapshot is the whole measurement: it fixes what the model
+  // wrote AT THIS INSTANT, which is what makes a later comparison unfakeable and is why
+  // `ledger_record` is not needed to get that property. It lands in the run directory,
+  // outside the checkout, where the model was never able to reach.
+  const collectStaleArtifact = () => {
+    if (!plantedArtifact) return null;
+    const ask = plantedArtifact;
+    plantedArtifact = null;
+    const collected = collectArtifact({ repoDir: config.repoDir, ask });
+    // The snapshot lands in the RUN directory, outside the checkout, where the model was
+    // never able to reach.
+    const identity = {
+      version: 1,
+      runId: config.runId,
+      id: ask.id,
+      schema: ask.schema,
+      path: ask.path,
+      plantedAtStage: ask.plantedAtStage,
+      collectedAtStage: expectedStage,
+      untouched: collected.untouched,
+      missing: collected.missing,
+      chars: collected.chars,
+      returnedSha256: collected.returned === null ? null : sha256Text(collected.returned),
+      plantedSha256: sha256Text(ask.text),
+      returned: collected.returned,
+      wallMs: Date.now(),
+      monotonicMs: monotonicMs(),
+    };
+    appendJsonLineFsync(artifactLog, { ...identity, recordSha256: sha256Json(identity) });
+    appendEvent("stale-artifact-collected", {
+      id: ask.id, schema: ask.schema, path: ask.path,
+      untouched: identity.untouched, missing: identity.missing, chars: identity.chars,
+    });
+    return identity;
+  };
+
   const safeArgumentsJson = (input) => {
     try { return JSON.stringify(input ?? null).slice(0, 2_048); }
     catch { return null; }
@@ -403,6 +478,11 @@ export function createPiContextExperimentExtension(config) {
             // The plan is complete. A trailing call after the last stage is a finished
             // assignment being tidy, NOT a capability breach: latching it voided a
             // completed 64/64 native run that made exactly one such call.
+            // Collect here too. The validator already refuses an ask at the last stage,
+            // so a clean run always has a later fetch to collect on, but a plan that ends
+            // on a trailing call must not leave a populated artifact standing in the
+            // checkout: that is precisely the disk-memory channel these bounds close.
+            collectStaleArtifact();
             appendEvent("post-plan-stage-call", { toolCallId, stage: expectedStage });
             return { content: [{ type: "text", text: disposition.text }] };
           }
@@ -468,6 +548,10 @@ export function createPiContextExperimentExtension(config) {
             requestedWallMs: Date.now(),
             requestedMonotonicMs: monotonicMs(),
           };
+          // COLLECT BEFORE SERVING. Whatever the model did to the last artifact is fixed
+          // here, before it can see anything new, and the file is consumed in the same
+          // breath so it can never be re-read later in place of remembering.
+          collectStaleArtifact();
           const request = { ...requestIdentity, requestSha256: sha256Json(requestIdentity) };
           const requestPath = join(requestsDir, `stage-${String(expectedStage).padStart(2, "0")}.json`);
           const responsePath = join(responsesDir, `stage-${String(expectedStage).padStart(2, "0")}.json`);
@@ -533,8 +617,14 @@ export function createPiContextExperimentExtension(config) {
             appendJsonLineFsync(projectionLog, projectionRecord);
             priorRequestRecordSha256 = projectionRecord.recordSha256;
             appendEvent("stage-result", { stage, responseSha256: response.responseSha256 });
+            // DROP LATE: the artifact appears only now, as the stage that asks about it is
+            // served, so it never sits in the checkout waiting to be found.
+            const planted = plantStaleArtifact(stage);
+            const text = planted
+              ? `${response.content}\n\n${planted.request}\nThe file is at ${planted.path}.\n`
+              : response.content;
             return {
-              content: [{ type: "text", text: response.content }],
+              content: [{ type: "text", text }],
               details: {
                 version: 1,
                 runId: config.runId,

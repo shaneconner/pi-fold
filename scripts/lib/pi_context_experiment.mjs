@@ -2390,6 +2390,11 @@ export const EXPERIMENT_RUN_CONFIG_OPTIONAL_KEYS = Object.freeze([
   "sessionType", "guidance", "foldScheduling", "foldPeekResults", "guidedCuration",
   "providerTotalWindow", "providerInputBudget", "briefGenerator", "transport", "reliabilityLevers",
   "ledgerTasks", "querySeed",
+  // THE v5 STALE ARTIFACTS (Shane 2026-08-25). Carried as the schedule the extension
+  // enforces: which ask drops where, at what path, with what text, and which field keys
+  // it will be graded on. The TRUTH never travels, for the same reason the ledger's never
+  // did: grading is post-hoc and the worker process hosts the model.
+  "staleArtifacts",
   // SANDBOX CARRIAGE (Shane 2026-08-21). `sessionDir` names where the session
   // file lands, which used to be the run directory itself: the transcript sat
   // beside the run config that named the plan holding every answer. It gets its
@@ -2500,6 +2505,42 @@ export function validateExperimentRunConfig(value) {
         typeof task.id === "string" && task.id.length > 0 &&
         Number.isSafeInteger(task.stage) && task.stage >= 1 && task.stage <= value.stageCount)),
   "An arm run config must carry the plan's ledger task schedule");
+  // The stale-artifact schedule, on the same terms. Optional while the ledger and the
+  // artifacts coexist: a v4 plan carries no asks and must keep adjudicating, and a v5 plan
+  // that carries them must carry them WHOLE, because a half-declared drop is an artifact
+  // the extension will plant and never consume.
+  // Shape only. Whether a closed-book run may carry asks at all is the no-referent rule's
+  // job below, so a closed-book config with a well-formed ask is refused by NAME there
+  // rather than being told its shape is wrong.
+  assertExperiment(value.staleArtifacts === undefined ||
+    (Array.isArray(value.staleArtifacts) && value.staleArtifacts.length > 0 &&
+      value.staleArtifacts.every((ask) =>
+        exactKeys(ask, ["id", "schema", "askStage", "path", "request", "text", "fieldKeys"]) &&
+        typeof ask.id === "string" && ask.id.length > 0 &&
+        typeof ask.schema === "string" && ask.schema.length > 0 &&
+        Number.isSafeInteger(ask.askStage) && ask.askStage >= 1 && ask.askStage <= value.stageCount &&
+        typeof ask.path === "string" && ask.path.length > 0 &&
+        !ask.path.startsWith("/") && !ask.path.split("/").includes("..") &&
+        typeof ask.request === "string" && ask.request.length > 0 &&
+        typeof ask.text === "string" && ask.text.length > 0 &&
+        Array.isArray(ask.fieldKeys) && ask.fieldKeys.length > 0 &&
+        ask.fieldKeys.every((key) => typeof key === "string" && key.length > 0))),
+  "An arm run config carrying stale artifacts must carry them whole, with relative paths");
+  // One drop per stage and one path per run: two asks landing at the same stage would
+  // race their own consume, and two sharing a path would overwrite each other's evidence.
+  if (Array.isArray(value.staleArtifacts)) {
+    const stages = value.staleArtifacts.map((ask) => ask.askStage);
+    const paths = value.staleArtifacts.map((ask) => ask.path);
+    assertExperiment(new Set(stages).size === stages.length,
+      "Two stale artifacts drop at the same stage");
+    assertExperiment(new Set(paths).size === paths.length,
+      "Two stale artifacts claim the same path");
+    // NEVER AT THE LAST STAGE. The consume happens on the NEXT delivery, so an ask
+    // dropped at the final stage would never be collected and its file would survive the
+    // run in the checkout, which is the disk-memory channel gate 74 exists to close.
+    assertExperiment(stages.every((stage) => stage < value.stageCount),
+      "A stale artifact drops at the last stage, where nothing will ever collect it");
+  }
   // The withheld end block, carried EITHER as the frozen seed that composes it or
   // as the composed text itself, and never as both.
   //
@@ -2531,7 +2572,7 @@ export function validateExperimentRunConfig(value) {
     (value.foldScheduling === undefined && value.foldPeekResults === undefined &&
       value.guidance === undefined && value.guidedCuration === undefined &&
       value.briefGenerator === undefined && value.ledgerTasks === undefined &&
-      value.querySeed === undefined),
+      value.staleArtifacts === undefined && value.querySeed === undefined),
   "Closed-book run config carries arm-condition keys with no referent");
   // A generator belongs to the arm that registers the runtime and writes briefs; on any
   // other arm the descriptor would be a fact about nothing.

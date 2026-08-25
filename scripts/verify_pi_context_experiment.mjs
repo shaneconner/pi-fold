@@ -8,7 +8,7 @@
 //   node scripts/verify_pi_context_experiment.mjs
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -10510,6 +10510,26 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   assert.equal(graded.corrected + graded.stale + graded.confabulated + graded.abstained + graded.missing,
     graded.fields, "the outcomes do not partition the fields");
 
+  // ABSTENTION MUST BE EXPRESSIBLE IN EVERY SCHEMA. The first end-to-end run showed the
+  // cost of assuming it is always a bare string: a manifest field holds a LIST and a
+  // worklog field holds a POSITION, neither of which has an obvious place for a marker, so
+  // an honest "I do not remember this pass" landed in the confabulation bucket beside a
+  // fabricated one. A single-element list holding only the marker counts, and the worklog
+  // parser lifts a marker annotated onto a line.
+  assert.equal(artifacts.isAbstention(["unverified"]), true,
+    "a list-valued field cannot express an abstention");
+  assert.equal(artifacts.isAbstention(["unverified", "b.c"]), false,
+    "a marker beside real values is read as an abstention");
+  assert.equal(artifacts.isAbstention(["a.c"]), false, "an ordinary one-file list is read as an abstention");
+  assert.equal(artifacts.isAbstention(3), false, "a number is read as an abstention");
+  const marked = artifacts.parseStaleArtifact({
+    schema: "worklog", text: "# Worklog\n\n1. lib/a.c\n2. lib/b.c (unverified)\n3. lib/c.c\n",
+  });
+  assert.equal(marked["lib/b.c"], artifacts.ARTIFACT_UNVERIFIED,
+    "a worklog entry the model could not place is scored as a position rather than an abstention");
+  assert.equal(marked["lib/a.c"], 1, "annotating one entry shifted another's position");
+  assert.equal(marked["lib/c.c"], 3, "a marked entry stopped occupying its own position");
+
   // Abstention is case- and space-insensitive, because the marker is written by a model.
   assert.equal(artifacts.gradeStaleArtifact({
     ask: { ...ask, fields: [ask.fields[0]] }, returned: { a: "  UNVERIFIED " },
@@ -10605,6 +10625,175 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     }
   }
   checks.staleArtifactRequestsDoNotAnnounceATest = true;
+}
+
+
+// ---------------------------------------------------------------------------
+// GATE 111 - the stale artifact never becomes a memory the harness invented.
+//
+// This is gate 74's lesson one artifact over. `ipc/responses/stage-NN.json` used to
+// survive the whole run; in sealed native rep 5 of sol-20260820-steward, 27 of 64 carried
+// seeded ledger values, so an arm that lost a stage to compaction could grep it back. A
+// file the model POPULATES is worse, because it is a place to write things down on
+// purpose: left standing, a model writes correct values early and re-reads its own file
+// late instead of recalling anything, and both arms score near-perfect while we measure
+// the filesystem.
+//
+// Three bounds, and this gate drives all three: the artifact does not exist before the
+// stage that asks about it, it is truncated the moment the next stage is requested and
+// only after its contents are snapshotted where the model cannot reach, and its mtime is
+// matched to the checkout's own timestamps because a note modified thirty seconds ago is
+// a tell and `stat` is natural analyst behaviour.
+// ---------------------------------------------------------------------------
+{
+  const extensionSource = readFileSync(
+    join(PROJECT, "scripts", "pi_context_experiment_extension.mjs"), "utf8");
+
+  // The consume is TRUNCATE, never unlink, for gate 74's reason: an empty file is not a
+  // recovery channel and is still a receipt, and a path that vanishes is a different tell.
+  const artifactModule = await import(
+    pathToFileURL(join(PROJECT, "scripts", "lib", "pi_context_artifacts.mjs")));
+
+  // DRIVEN AGAINST A REAL CHECKOUT, not matched against source lines. The bounds live in
+  // scripts/lib/pi_context_artifacts.mjs precisely so this can exercise them.
+  const checkout = mkdtempSync(join(tmpdir(), "pi-fold-artifact-"));
+  try {
+    // A reference file standing in for the worktree's own timestamps, backdated so the
+    // test does not depend on how long ago the temp directory was made.
+    const reference = join(checkout, "README");
+    writeFileSync(reference, "curl\n");
+    const referenceStamp = new Date(Date.now() - 86_400_000 * 30);
+    utimesSync(reference, referenceStamp, referenceStamp);
+
+    const ask = {
+      id: "af-01", schema: "manifest", path: "notes/review-passes.md",
+      text: "# Review passes\n\n## pass-01\n\n- lib/wrong.c\n",
+    };
+    const planted = join(checkout, ask.path);
+
+    // 1. DROP LATE: nothing exists until the stage that asks about it.
+    assert(!existsSync(planted), "the artifact exists before it was planted");
+    const plantRecord = artifactModule.plantArtifact({
+      repoDir: checkout, ask, referencePath: "README",
+    });
+    assert(existsSync(planted), "planting did not create the artifact");
+    assert.equal(readFileSync(planted, "utf8"), ask.text, "the planted artifact is not what was staged");
+
+    // 2. BACKDATE: matched to the checkout's own timestamps, never to now. A note modified
+    //    thirty seconds ago is a tell, and `stat` is natural analyst behaviour.
+    const plantedMtime = statSync(planted).mtimeMs;
+    assert(plantedMtime < referenceStamp.getTime(),
+      "the planted artifact is not older than the checkout it claims to belong to");
+    assert(Date.now() - plantedMtime > 86_400_000,
+      "the planted artifact still carries a fresh mtime");
+    assert(plantRecord.backdatedTo !== null, "the backdate was not reported");
+
+    // A missing reference is a weaker disguise, never a dead run.
+    const undated = artifactModule.plantArtifact({
+      repoDir: checkout, ask: { ...ask, path: "notes/other.md" }, referencePath: "NO-SUCH-FILE",
+    });
+    assert.equal(undated.backdatedTo, null, "a missing reference did not report an absent backdate");
+    assert(existsSync(join(checkout, "notes/other.md")), "a missing reference stopped the plant");
+
+    // 3. CONSUME ON WRITE: the model's edit is snapshotted, THEN the file is emptied.
+    writeFileSync(planted, "# Review passes\n\n## pass-01\n\n- lib/right.c\n");
+    const collected = artifactModule.collectArtifact({ repoDir: checkout, ask });
+    assert(collected.returned.includes("lib/right.c"),
+      "the model's edit was not captured before the file was consumed");
+    assert.equal(collected.untouched, false, "an edited artifact is reported untouched");
+    assert(existsSync(planted), "the artifact was unlinked rather than truncated");
+    assert.equal(readFileSync(planted, "utf8"), "",
+      "the artifact still holds content the model could read back instead of remembering");
+    assert.equal(statSync(planted).size, 0, "the consumed artifact is not empty");
+
+    // An artifact the model never touched is reported as such, which is the "left stale"
+    // outcome the whole instrument rests on.
+    artifactModule.plantArtifact({ repoDir: checkout, ask, referencePath: "README" });
+    assert.equal(artifactModule.collectArtifact({ repoDir: checkout, ask }).untouched, true,
+      "an artifact returned exactly as planted is not reported untouched");
+
+    // A file the model deleted outright is missing, not silently empty: deleting a note is
+    // a different claim from leaving it alone, and grading must be able to tell them apart.
+    artifactModule.plantArtifact({ repoDir: checkout, ask, referencePath: "README" });
+    rmSync(planted);
+    const gone = artifactModule.collectArtifact({ repoDir: checkout, ask });
+    assert.equal(gone.missing, true, "a deleted artifact is not reported missing");
+    assert.equal(gone.returned, null, "a deleted artifact returned content");
+  } finally {
+    rmSync(checkout, { recursive: true, force: true });
+  }
+
+  // The extension COMPOSES those bounds rather than reimplementing them, so the gate above
+  // is testing the code that actually runs.
+  assert(extensionSource.includes('from "./lib/pi_context_artifacts.mjs"'),
+    "the extension does not import the bounds this gate drives");
+  assert(extensionSource.includes("plantArtifact({ repoDir: config.repoDir") &&
+    extensionSource.includes("collectArtifact({ repoDir: config.repoDir"),
+  "the extension does not call the bounds this gate drives");
+  assert(!/utimesSync|mkdirSync/.test(extensionSource),
+    "the extension still reimplements a bound instead of composing it");
+  assert(extensionSource.includes('const artifactLog = join(config.runDir, "stale-artifacts.jsonl")'),
+    "the artifact snapshot does not land outside the checkout");
+
+  // COLLECT BEFORE SERVE, PLANT AFTER. Serving first would let the model see the next
+  // stage with the old artifact still on disk; planting before the result is returned
+  // would put the file in the checkout during a turn nobody asked about it.
+  const fetchAt = extensionSource.indexOf("const requestIdentity = {");
+  const collectAt = extensionSource.indexOf("collectStaleArtifact();", fetchAt);
+  const waitAt = extensionSource.indexOf("await waitForFile(responsePath", fetchAt);
+  const plantAt = extensionSource.indexOf("plantStaleArtifact(stage)", fetchAt);
+  assert(fetchAt >= 0 && collectAt > fetchAt && waitAt > collectAt,
+    "the previous artifact is not collected before the next stage is requested");
+  assert(plantAt > waitAt, "the artifact is planted before its own stage has been served");
+  // The run-end path collects too, so a plan ending on a trailing call leaves nothing.
+  assert(extensionSource.slice(
+    extensionSource.indexOf('if (disposition.kind === "post-plan")'),
+    extensionSource.indexOf("if (params.key !== expectedChallenge)"),
+  ).includes("collectStaleArtifact();"),
+  "a run ending on a trailing stage call leaves its artifact standing in the checkout");
+
+  // THE RUN CONFIG CONTRACT, driven against the suite's own fixture so it cannot drift
+  // from what the rest of this file already pins.
+  const artifactAsk = {
+    id: "af-01", schema: "manifest", askStage: 4, path: "notes/review-passes.md",
+    request: "please bring this up to date", text: "# Review passes\n", fieldKeys: ["pass-01"],
+  };
+  const withArtifacts = (asks) => ({ ...runConfig, staleArtifacts: asks });
+  validateExperimentRunConfig(withArtifacts([artifactAsk]));
+  // A v4 plan carries none and must keep validating.
+  validateExperimentRunConfig(runConfig);
+  // An ask at the LAST stage is never collected, because collection happens on the next
+  // fetch: its file would survive the run in the checkout.
+  assert.throws(() => validateExperimentRunConfig(withArtifacts([
+    { ...artifactAsk, askStage: EXPERIMENT_MODE_PLANS.smoke.stageCount },
+  ])), /drops at the last stage/);
+  assert.throws(() => validateExperimentRunConfig(withArtifacts([
+    artifactAsk, { ...artifactAsk, id: "af-02", path: "notes/other.md" },
+  ])), /same stage/);
+  assert.throws(() => validateExperimentRunConfig(withArtifacts([
+    artifactAsk, { ...artifactAsk, id: "af-02", askStage: 5 },
+  ])), /same path/);
+  // The path is where the harness writes into the checkout, so it is relative or refused.
+  for (const path of ["/etc/passwd", "../escape.md", "notes/../../escape.md"]) {
+    assert.throws(() => validateExperimentRunConfig(withArtifacts([{ ...artifactAsk, path }])),
+      /relative paths/, `the path ${path} was accepted`);
+  }
+  // A half-declared drop is an artifact that gets planted and never graded.
+  assert.throws(() => validateExperimentRunConfig(withArtifacts([{ ...artifactAsk, fieldKeys: [] }])),
+    /carry them whole/);
+  // AND THE TRUTH NEVER TRAVELS, for the same reason the ledger's never did: grading is
+  // post-hoc and the worker process hosts the model.
+  assert.throws(() => validateExperimentRunConfig(withArtifacts([
+    { ...artifactAsk, fields: [{ key: "pass-01", truth: ["a.c"] }] },
+  ])), /carry them whole/);
+  // Closed-book has no checkout to plant into and no stages to drop at.
+  assert.throws(() => validateExperimentRunConfig({
+    ...runConfig, arm: EXPERIMENT_CLOSED_BOOK_LABEL, sessionType: EXPERIMENT_CLOSED_BOOK_LABEL,
+    guidance: undefined, ledgerTasks: undefined, querySeed: undefined,
+    staleArtifacts: [artifactAsk],
+  }), /no referent/);
+
+  checks.aStaleArtifactNeverBecomesADiskMemory = true;
 }
 
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);
