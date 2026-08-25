@@ -39,6 +39,7 @@ import {
   validateStagePlan,
   visibleStage,
 } from "./lib/pi_context_experiment.mjs";
+import { renderStaleArtifact } from "./lib/pi_context_artifacts.mjs";
 import {
   HARNESS_SOURCE,
   SANDBOX_PATHS,
@@ -491,6 +492,21 @@ async function run() {
         // so the extension can gate stage progression on recorded results while
         // grading stays post-hoc against the plan the supervisor keeps.
         ledgerTasks: plan.ledger.joins.map((join) => ({ id: join.id, stage: join.taskStage })),
+        // The stale artifacts, on the same terms: the schedule and the rendered file the
+        // extension plants, never the truth. The FIELD KEYS travel because the extension
+        // records which fields an ask covered; the values they are graded against stay
+        // here in the plan, which the worker process never reads.
+        ...(plan.staleArtifacts === undefined ? {} : {
+          staleArtifacts: plan.staleArtifacts.map((ask) => ({
+            id: ask.id,
+            schema: ask.schema,
+            askStage: ask.askStage,
+            path: ask.path,
+            request: ask.request,
+            text: renderStaleArtifact(ask),
+            fieldKeys: ask.fields.map((field) => field.key),
+          })),
+        }),
         querySeed: hiddenMassSeeds.querySeed,
       }),
     transport: EXPERIMENT_TRANSPORT,

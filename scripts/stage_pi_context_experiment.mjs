@@ -49,6 +49,11 @@ import {
   validateStagePlan,
   visibleStage,
 } from "./lib/pi_context_experiment.mjs";
+import {
+  buildEndBlockAdjacency,
+  buildStaleArtifacts,
+  validateStaleArtifacts,
+} from "./lib/pi_context_artifacts.mjs";
 import { freshChallenge, sha256Text, writeJsonExclusive } from "./lib/pi_context_soak_attestation.mjs";
 
 const MIN_FILE_LINES = 60;
@@ -227,6 +232,7 @@ function deliverableInstruction(ordinal, referencesStages) {
 
 function buildPlan({
   repo, mode, seed, facts, codeWords, reissueWords, ledger, uniqueIdentifiers, checkoutPaths,
+  contentSeed, querySeed,
 }) {
   const modePlan = EXPERIMENT_MODE_PLANS[mode];
   assertExperiment(codeWords.length === modePlan.stageCount,
@@ -504,6 +510,18 @@ function buildPlan({
     stages.push(stage);
   }
 
+  // The asks are built and validated BEFORE the plan literal, so a geometry that cannot
+  // seat them (too few delivered stages, an ask with an empty window, a field planted with
+  // its own truth) refuses staging rather than shipping a plan the runtime cannot honour.
+  const staleArtifacts = buildStaleArtifacts({
+    stages, chains, contentSeed, querySeed,
+    schemas: modePlan.artifacts.schemas, fieldCount: modePlan.artifacts.fields,
+  });
+  const artifactVerdict = validateStaleArtifacts({
+    artifacts: staleArtifacts, stages, chains, contentSeed, querySeed,
+    fieldCount: modePlan.artifacts.fields,
+  });
+
   const plan = {
     version: EXPERIMENT_PROTOCOL_VERSION,
     mode,
@@ -529,6 +547,16 @@ function buildPlan({
     stages,
     chains,
     ledger,
+    // THE v5 STALE ARTIFACTS (2026-08-25). Built from the plan's own stages and chains
+    // once the geometry exists, because every subject is a pass that actually happened and
+    // every truth is read from what that pass delivered. Both seeds are the FROZEN ones,
+    // never the campaign seed: the material must not be re-rollable by restaging, exactly
+    // as the ledger's is not. The end block's adjacency questions ride the query seed
+    // alone, since which subject is asked in what order has always been selection.
+    staleArtifacts,
+    endBlockAdjacency: buildEndBlockAdjacency({
+      stages, heldOut: artifactVerdict.heldOut, querySeed,
+    }),
     probeCount: stages.reduce((total, stage) => total + stage.probes.length, 0),
     deliverableCount: stages.filter((stage) => stage.deliverable).length,
     planSha256: "0".repeat(64),
@@ -561,6 +589,11 @@ try {
   const hiddenMassSeeds = JSON.parse(readFileSync(HIDDEN_MASS_SEEDS_PATH, "utf8"));
   assertExperiment(/^[0-9a-f]{16,64}$/.test(hiddenMassSeeds.contentSeed ?? ""),
     `${HIDDEN_MASS_SEEDS_PATH} carries no contentSeed`);
+  // The stale artifacts need the query seed too, and for the same reason the ledger needs
+  // the content seed: both were drawn and committed before any rep existed, so no material
+  // and no selection can be tuned to a readout.
+  assertExperiment(/^[0-9a-f]{16,64}$/.test(hiddenMassSeeds.querySeed ?? ""),
+    `${HIDDEN_MASS_SEEDS_PATH} carries no querySeed`);
   const ledger = buildLedger({ mode, contentSeed: hiddenMassSeeds.contentSeed });
   // Chain construction and the code-word collision scan both refuse on bad seeds
   // (roughly half of smoke seeds are chain-unconstructible on the real corpus). An
@@ -580,6 +613,8 @@ try {
         [...codeWords, ...reissueWords, ...ledgerTokensOf(ledger)]);
       plan = buildPlan({
         repo, mode, seed, facts, codeWords, reissueWords, ledger,
+        contentSeed: hiddenMassSeeds.contentSeed,
+        querySeed: hiddenMassSeeds.querySeed,
         uniqueIdentifiers: uniqueIdentifierIndex(checkoutDefinitions.entries),
         checkoutPaths: checkoutDefinitions.paths,
       });

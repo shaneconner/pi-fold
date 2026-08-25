@@ -518,6 +518,11 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
     ledger: Object.freeze({
       tableSize: 16, singles: 6, joins: 4, joinLength: 3, corrections: 4, minGap: 3,
     }),
+    // THE v5 STALE ARTIFACTS: every schema, six fields each. Enough that one lucky guess
+    // cannot carry a schema, few enough that the note reads as a note and not as a form.
+    artifacts: Object.freeze({
+      schemas: Object.freeze(["manifest", "worklog", "extent", "crossref"]), fields: 6,
+    }),
     // Where the retired thermostat committed. See compactionReserveTokens.
     compactionTriggerShare: 0.80,
   }),
@@ -576,6 +581,13 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
     ledger: Object.freeze({
       tableSize: 3, singles: 1, joins: 1, joinLength: 2, corrections: 1, minGap: 1,
     }),
+    // THE v5 STALE ARTIFACTS. Geometry lives with the rest of the mode's, and smoke NAMES
+    // ITS SCHEMAS rather than taking a count, because it cannot exercise all four: it has
+    // six delivered stages after its probe ordinals, and one short chain whose single
+    // include hop can seat exactly one crossref field, below the two-field floor. Naming
+    // them states what a smoke run does and does not cover instead of silently seating a
+    // thinner ask. Smoke is a plumbing run; full is the measurement.
+    artifacts: Object.freeze({ schemas: Object.freeze(["manifest", "worklog"]), fields: 2 }),
     // REACHABLE WITHIN THE SMOKE'S OWN MASS, which is the only reason the share is a mode
     // plan field rather than one constant: the full mode's 0.80 line sits further out than
     // eight stages can ever reach, and a smoke on that share crosses no boundary, folds
@@ -1749,11 +1761,14 @@ export function testAwarenessLeaks(text) {
 }
 
 export function validateStagePlan(plan) {
-  assertExperiment(exactKeys(plan, [
+  // `staleArtifacts` and `endBlockAdjacency` are the v5 instrument and are OPTIONAL on
+  // read: every sealed v4 plan predates them and must keep adjudicating, exactly as the
+  // pre-ledger plans did through the v3 bump.
+  assertExperiment(keysWithin(plan, [
     "version", "mode", "repo", "seed", "stageCount", "stageIntervalMs", "watchdogMs",
     "heartbeatMs", "corpus", "stages", "chains", "ledger", "probeCount", "deliverableCount",
     "planSha256",
-  ]), "Invalid stage plan shape");
+  ], ["staleArtifacts", "endBlockAdjacency"]), "Invalid stage plan shape");
   assertExperiment(plan.version === EXPERIMENT_PROTOCOL_VERSION, "Stage plan protocol version drifted");
   assertExperiment(EXPERIMENT_MODES.includes(plan.mode), "Invalid stage plan mode");
   const modePlan = EXPERIMENT_MODE_PLANS[plan.mode];

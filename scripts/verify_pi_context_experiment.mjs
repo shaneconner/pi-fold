@@ -10387,18 +10387,29 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
       { index: 5, stage: 45, hop: "SOF", input: "lib/f45a.c", expectedAnswer: 1 },
     ],
   }];
+  const schemas = [...artifacts.ARTIFACT_SCHEMAS];
   const inputs = {
     stages, chains, contentSeed: seeds.contentSeed, querySeed: seeds.querySeed, fieldCount: 5,
   };
-  const built = artifacts.buildStaleArtifacts({ ...inputs, askCount: 4 });
+  const built = artifacts.buildStaleArtifacts({ ...inputs, schemas });
   const verdict = artifacts.validateStaleArtifacts({ ...inputs, artifacts: built });
 
   // Determinism: the same seeds regenerate the same asks byte for byte, which is what lets
   // the validator refuse drift at all (gate 70's discipline, one instrument over).
   assert.equal(
     artifacts.staleArtifactsDigest(built),
-    artifacts.staleArtifactsDigest(artifacts.buildStaleArtifacts({ ...inputs, askCount: 4 })),
+    artifacts.staleArtifactsDigest(artifacts.buildStaleArtifacts({ ...inputs, schemas })),
     "the same seeds do not regenerate the same stale artifacts");
+  // AND THE BUILD IS A FUNCTION OF THE SCHEMA SET, NOT OF ITS ORDER. The validator
+  // regenerates from the BUILT asks' own schema list, which is already shuffled, so a
+  // build that shuffled whatever order it was handed applied the shuffle twice and refused
+  // every full-mode plan as drift against itself.
+  for (const permuted of [[...schemas].reverse(), [...schemas].sort()]) {
+    assert.equal(
+      artifacts.staleArtifactsDigest(artifacts.buildStaleArtifacts({ ...inputs, schemas: permuted })),
+      artifacts.staleArtifactsDigest(built),
+      "the schema list's ORDER changes the asks, so validation refuses a plan against itself");
+  }
 
   // Disjoint windows, and every subject already past when it is asked about.
   const seen = new Set();
@@ -10436,6 +10447,25 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   assert(!artifacts.ARTIFACT_SCHEMAS.includes(artifacts.ARTIFACT_END_BLOCK_SCHEMA),
     "the end block's schema is also an in-run schema");
   assert.equal(new Set(built.map((ask) => ask.path)).size, built.length, "a path is used twice");
+
+  // THE CORRECTION IS NEVER READABLE OFF THE NOTE IT APPEARS IN. Every file is delivered
+  // exactly once, so a substituted path taken from a pass the same note lists would show
+  // one file under two headings: a visible inconsistency a careful reader resolves without
+  // remembering anything, which would then score as recall. Measured at 1 of 6 fields
+  // before the wrong-pick pool was narrowed to paths outside the note.
+  for (const ask of built.filter((candidate) => candidate.schema === "manifest")) {
+    const note = artifacts.renderStaleArtifact(ask);
+    for (const field of ask.fields) {
+      for (const missing of field.truth.filter((path) => !field.stale.includes(path))) {
+        assert(!note.includes(missing),
+          `${ask.id} field ${field.key} can be corrected by reading the note it appears in`);
+      }
+      for (const planted of field.stale.filter((path) => !field.truth.includes(path))) {
+        assert(!ask.fields.some((other) => other !== field && other.truth.includes(planted)),
+          `${ask.id} plants ${planted} under one heading while listing it truthfully under another`);
+      }
+    }
+  }
 
   // NO FIELD IS PLANTED WITH ITS OWN TRUTH. This is the defect the validator caught on the
   // first real plan (af-04 entry-04): a plain shuffle leaves fixed points, and a model that

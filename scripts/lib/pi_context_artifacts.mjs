@@ -82,6 +82,12 @@ export const ARTIFACT_END_BLOCK_SCHEMA = "adjacency";
 
 export const ARTIFACT_UNVERIFIED = "unverified";
 
+// `fieldCount` is a MAXIMUM, not a promise. A smoke plan runs eight stages and one short
+// chain, so a schema's material can seat fewer fields than a full plan's; the ask takes
+// what exists and the floor below is what refuses a geometry too thin to measure anything.
+// Two is the floor because a single-field ask is one coin flip.
+export const ARTIFACT_MIN_FIELDS = 2;
+
 // A relation each schema asks about, and what makes it hard.
 //   manifest   pass -> files            grouping     (transcript-only)
 //   worklog    subsystem -> order       sequence     (transcript-only)
@@ -239,7 +245,14 @@ function wrongPick(candidates, truth, draw) {
 function manifestFields({ stages, window, seed, fieldCount }) {
   const subjects = seededShuffle(window, `${seed}:manifest:subjects`).slice(0, fieldCount);
   const draws = seededSequence(`${seed}:manifest:values`, subjects.length);
-  const allPaths = stages.flatMap((stage) => stage.files.map((file) => file.path));
+  // The substituted path is drawn from OUTSIDE this note. Every file is delivered exactly
+  // once, so a wrong path taken from a pass the note also lists shows the same file under
+  // two headings: a visible inconsistency a careful reader resolves without remembering
+  // anything, which would score as recall. Measured at 1 of 6 fields before this.
+  const seated = new Set(subjects.flatMap((ordinal) =>
+    (stages.find((candidate) => candidate.ordinal === ordinal)?.files ?? []).map((file) => file.path)));
+  const allPaths = stages.flatMap((stage) => stage.files.map((file) => file.path))
+    .filter((path) => !seated.has(path));
   return subjects.sort((left, right) => left - right).map((ordinal, index) => {
     const stage = stages.find((candidate) => candidate.ordinal === ordinal);
     assertExperiment(stage !== undefined, `Artifact subject names no stage ${ordinal}`);
@@ -319,7 +332,7 @@ function extentFields({ stages, window, seed, fieldCount }) {
   });
 }
 
-function crossrefFields({ chains, seed, fieldCount }) {
+function crossrefFields({ chains, stages, seed, fieldCount }) {
   // The include hops of the audit trace chains: "this file's include of X resolves to Y".
   // A relationship between two earlier items, and the one schema a model can answer by
   // re-opening the file, which is why its fields are marked rederivable.
@@ -330,7 +343,16 @@ function crossrefFields({ chains, seed, fieldCount }) {
   assertExperiment(hops.length > 0, "No include hops exist to build a cross-reference index");
   const chosen = seededShuffle(hops, `${seed}:crossref:subjects`).slice(0, fieldCount);
   const draws = seededSequence(`${seed}:crossref:values`, chosen.length);
-  const targets = hops.map((hop) => hop.truth);
+  // A broken link is drawn from EVERY delivered path, not only from the other include
+  // targets. Smoke mode runs one short chain, so the target pool can hold a single entry
+  // and `wrongPick` had nothing to draw: staging died with "a stale value needs at least
+  // one alternative to draw". A link pointing at some other file in the tree is exactly as
+  // plausible as one pointing at another chain's target, and the wider pool exists at every
+  // mode.
+  const targets = [
+    ...hops.map((hop) => hop.truth),
+    ...(stages ?? []).flatMap((stage) => (stage.files ?? []).map((file) => file.path)),
+  ];
   return chosen.map((hop, index) => ({
     key: String(hop.input),
     truth: String(hop.truth),
@@ -348,26 +370,37 @@ function crossrefFields({ chains, seed, fieldCount }) {
  * contentSeed, querySeed): the same inputs regenerate the same asks byte for byte,
  * which is what lets the validator re-derive the whole set and refuse any drift.
  */
-export function buildStaleArtifacts({ stages, chains, contentSeed, querySeed, askCount, fieldCount }) {
+export function buildStaleArtifacts({
+  stages, chains, contentSeed, querySeed, schemas: allowed, fieldCount,
+}) {
   assertExperiment(Array.isArray(stages) && stages.length > 0,
     "Stale artifacts require the plan's stages");
   assertExperiment(typeof contentSeed === "string" && /^[0-9a-f]{16,64}$/.test(contentSeed),
     "Stale artifacts require the frozen content seed");
   assertExperiment(typeof querySeed === "string" && /^[0-9a-f]{16,64}$/.test(querySeed),
     "Stale artifacts require the frozen query seed");
-  assertExperiment(Number.isSafeInteger(askCount) && askCount > 0 && askCount <= ARTIFACT_SCHEMAS.length,
-    `Stale artifacts seat at most ${ARTIFACT_SCHEMAS.length} asks`);
-  assertExperiment(Number.isSafeInteger(fieldCount) && fieldCount > 0,
-    "Stale artifacts require a positive field count");
+  // The MODE names its schemas, because not every mode can exercise every one: smoke's
+  // single short chain seats one crossref field, below the floor. Naming them states the
+  // coverage instead of silently seating a thinner ask.
+  assertExperiment(Array.isArray(allowed) && allowed.length > 0 &&
+    allowed.every((schema) => ARTIFACT_SCHEMAS.includes(schema)) &&
+    new Set(allowed).size === allowed.length,
+  `Stale artifacts require a distinct subset of ${ARTIFACT_SCHEMAS.join(", ")}`);
+  assertExperiment(Number.isSafeInteger(fieldCount) && fieldCount >= ARTIFACT_MIN_FIELDS,
+    `Stale artifacts require at least ${ARTIFACT_MIN_FIELDS} fields per ask`);
 
   const eligible = stages.filter((stage) => (stage.files ?? []).length > 0).map((stage) => stage.ordinal);
   const stageCount = stages.length;
-  const { heldOut, windows } = artifactWindows({ eligible, askCount });
+  const { heldOut, windows } = artifactWindows({ eligible, askCount: allowed.length });
   const seed = `${contentSeed}:${querySeed}:artifacts`;
 
   // Schema order is drawn from the QUERY seed, not the content seed: what is asked and in
   // what order is selection, and selection has always been the query seed's job.
-  const schemas = seededShuffle(ARTIFACT_SCHEMAS, `${querySeed}:artifact-schemas`).slice(0, askCount);
+  // Shuffled from a CANONICAL ORDER, so the result is a function of the schema SET rather
+  // than of the order it arrived in. The validator regenerates from the built asks' own
+  // schema list, which is already shuffled, and without this the shuffle applied twice and
+  // every full-mode plan was refused as drift against itself.
+  const schemas = seededShuffle([...allowed].sort(), `${querySeed}:artifact-schemas`);
 
   return schemas.map((schema, index) => {
     const window = windows[index];
@@ -379,8 +412,10 @@ export function buildStaleArtifacts({ stages, chains, contentSeed, querySeed, as
     const fields = schema === "manifest" ? manifestFields({ stages, window, seed: askSeed, fieldCount })
       : schema === "worklog" ? worklogFields({ stages, window, seed: askSeed, fieldCount })
         : schema === "extent" ? extentFields({ stages, window, seed: askSeed, fieldCount })
-          : crossrefFields({ chains: chains ?? [], seed: askSeed, fieldCount });
-    assertExperiment(fields.length > 0, `Artifact ask ${index + 1} produced no fields`);
+          : crossrefFields({ chains: chains ?? [], stages, seed: askSeed, fieldCount });
+    assertExperiment(fields.length >= ARTIFACT_MIN_FIELDS,
+      `Artifact ask ${index + 1} (${schema}) seats ${fields.length} fields, below the ` +
+      `floor of ${ARTIFACT_MIN_FIELDS}: this mode's geometry cannot measure it`);
     return {
       id: `af-${String(index + 1).padStart(2, "0")}`,
       schema,
@@ -493,7 +528,8 @@ export function validateStaleArtifacts({ artifacts, stages, chains, contentSeed,
     "A plan carrying stale artifacts must carry at least one ask");
 
   const regenerated = buildStaleArtifacts({
-    stages, chains, contentSeed, querySeed, askCount: artifacts.length, fieldCount,
+    stages, chains, contentSeed, querySeed, fieldCount,
+    schemas: artifacts.map((ask) => ask.schema),
   });
   assertExperiment(staleArtifactsDigest(artifacts) === staleArtifactsDigest(regenerated),
     "Recorded stale artifacts do not match what the plan's own seeds regenerate");
