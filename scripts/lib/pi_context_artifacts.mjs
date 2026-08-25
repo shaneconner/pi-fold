@@ -389,8 +389,17 @@ export function buildStaleArtifacts({
   assertExperiment(Number.isSafeInteger(fieldCount) && fieldCount >= ARTIFACT_MIN_FIELDS,
     `Stale artifacts require at least ${ARTIFACT_MIN_FIELDS} fields per ask`);
 
-  const eligible = stages.filter((stage) => (stage.files ?? []).length > 0).map((stage) => stage.ordinal);
+  // A SUBJECT MUST LEAVE ROOM FOR ITS OWN ASK, AND THE ASK FOR ITS OWN COLLECTION.
+  // Collection happens on the NEXT stage fetch, so an ask at the last stage is never
+  // collected and its file survives the run in the checkout, which is the disk-memory
+  // channel these bounds exist to close. The run config refuses that by name, and a smoke
+  // plan hit it: eight stages, probe ordinals at 4 and 8, last window ending at 7 and its
+  // ask landing on 8. So subjects stop two stages short of the end and the ask is clamped
+  // one short, rather than staging a plan the runtime would refuse at startup.
   const stageCount = stages.length;
+  const eligible = stages
+    .filter((stage) => (stage.files ?? []).length > 0 && stage.ordinal <= stageCount - 2)
+    .map((stage) => stage.ordinal);
   const { heldOut, windows } = artifactWindows({ eligible, askCount: allowed.length });
   const seed = `${contentSeed}:${querySeed}:artifacts`;
 
@@ -407,7 +416,9 @@ export function buildStaleArtifacts({
     assertExperiment(window.length > 0, `Artifact ask ${index + 1} has an empty subject window`);
     // The ask fires one stage after its window closes, so every subject is already past
     // and the model is never asked about material it has not been given.
-    const askStage = Math.min(stageCount, window[window.length - 1] + 1);
+    const askStage = Math.min(stageCount - 1, window[window.length - 1] + 1);
+    assertExperiment(window[window.length - 1] < askStage,
+      `Artifact ask ${index + 1} would fire at or before its own last subject`);
     const askSeed = `${seed}:${index}`;
     const fields = schema === "manifest" ? manifestFields({ stages, window, seed: askSeed, fieldCount })
       : schema === "worklog" ? worklogFields({ stages, window, seed: askSeed, fieldCount })
@@ -582,7 +593,9 @@ export function validateStaleArtifacts({ artifacts, stages, chains, contentSeed,
     "Two stale artifacts ask the same relation, so the second scores the first's priming");
 
   const { heldOut } = artifactWindows({
-    eligible: stages.filter((stage) => (stage.files ?? []).length > 0).map((stage) => stage.ordinal),
+    eligible: stages
+      .filter((stage) => (stage.files ?? []).length > 0 && stage.ordinal <= stages.length - 2)
+      .map((stage) => stage.ordinal),
     askCount: artifacts.length,
   });
   assertExperiment(heldOut.length > 0,

@@ -10450,6 +10450,11 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
       assert(!seen.has(ordinal), `stage ${ordinal} is a subject of two asks, so the second scores re-injection`);
       seen.add(ordinal);
       assert(ordinal < ask.askStage, `ask ${ask.id} asks about stage ${ordinal} before the session reaches it`);
+      // AND THE ASK LEAVES ROOM FOR ITS OWN COLLECTION, which happens on the NEXT fetch.
+      // A smoke plan staged an ask at stage 8 of 8 and the run config would have refused
+      // it at startup, so the geometry has to know what the runtime knows.
+      assert(ask.askStage < stages.length,
+        `ask ${ask.id} fires at the last stage, where nothing will ever collect it`);
       const stage = stages.find((candidate) => candidate.ordinal === ordinal);
       assert(stage.files.length > 0, `stage ${ordinal} delivered no files and has no membership to remember`);
     }
