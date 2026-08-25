@@ -110,6 +110,14 @@ WATCHDOG_MS=$(/usr/bin/node -e 'const p=require(process.argv[1]);const v=p.watch
 # Five minutes past the watchdog, the margin the 300-minute era used, so a supervisor
 # that is still shutting down cleanly is never killed out from under its own seal.
 RUNTIME_MAX_SEC=$(( WATCHDOG_MS / 1000 + 300 ))
+# TimeoutStartSec IS A SECOND CEILING AND MUST FOLLOW TOO (2026-08-25). The unit is Type=
+# oneshot with RemainAfterExit, so the whole run IS the start operation and TimeoutStartSec
+# bounds it exactly as RuntimeMaxSec does; the smaller of the two wins. It sat at a literal
+# 6h beside the derived RuntimeMaxSec, which was harmless only while the watchdog was 360
+# minutes. Raising the watchdog to 600 would have capped every full run at six hours anyway,
+# with the supervisor killed mid-run and no seal written: the 2026-08-11 bug verbatim, one
+# property over. Derived from the same number so it cannot lag again.
+TIMEOUT_START_SEC=$RUNTIME_MAX_SEC
 
 UNITS=
 OLD_IFS=$IFS
@@ -141,7 +149,7 @@ for ARM in $ARMS; do
     --setenv=LANG=C.UTF-8 \
     --property="UnsetEnvironment=NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS LD_PRELOAD LD_LIBRARY_PATH BASH_ENV ENV NODE_TLS_REJECT_UNAUTHORIZED PI_CODING_AGENT_DIR OPENAI_BASE_URL OPENAI_API_BASE HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR DBUS_SESSION_BUS_ADDRESS GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_CEILING_DIRECTORIES GIT_NAMESPACE" \
     --property="WorkingDirectory=$ROOT" \
-    --property="TimeoutStartSec=6h" \
+    --property="TimeoutStartSec=${TIMEOUT_START_SEC}s" \
     --property="RuntimeMaxSec=${RUNTIME_MAX_SEC}s" \
     --property="KillMode=mixed" \
     --property="StandardOutput=append:$LOG" \

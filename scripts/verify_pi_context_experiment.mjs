@@ -1056,6 +1056,18 @@ assert(/WATCHDOG_MS=.*watchdogMs/.test(launcher) &&
   launcher.includes("RUNTIME_MAX_SEC=$(( WATCHDOG_MS / 1000 + 300 ))") &&
   launcher.includes('RuntimeMaxSec=${RUNTIME_MAX_SEC}s'),
 "the launcher must derive its unit deadline from the plan's own watchdog, above that watchdog");
+// AND SO MUST TimeoutStartSec (2026-08-25). It sat at a literal 6h beside the derived
+// RuntimeMaxSec and is a SECOND ceiling, not a startup grace period: the unit is Type=
+// oneshot with RemainAfterExit, so the whole run is the start operation and the smaller of
+// the two bounds wins. It was harmless only while the watchdog was 360 minutes; raising it
+// to 600 would have capped every full run at six hours with no seal written, which is the
+// 2026-08-11 defect verbatim one property over. Found by reading the unit properties when
+// the watchdog moved, not by a run dying.
+assert(!/TimeoutStartSec=[0-9]+(h|m|s|min)"/.test(launcher),
+  "the launcher writes a literal TimeoutStartSec again, a second ceiling that cannot follow the watchdog");
+assert(launcher.includes("TIMEOUT_START_SEC=$RUNTIME_MAX_SEC") &&
+  launcher.includes('TimeoutStartSec=${TIMEOUT_START_SEC}s'),
+"the launcher must derive TimeoutStartSec from the same number as its unit deadline");
 for (const [name, plan] of Object.entries(EXPERIMENT_MODE_PLANS)) {
   assert(Number.isFinite(plan.watchdogMs) && plan.watchdogMs > 0,
     `mode ${name} declares no usable watchdogMs for the launcher to derive a deadline from`);
@@ -10847,7 +10859,37 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
       `stage ${stage.ordinal} still renders a probe surface with no probes to render`);
   }
 
+  // THE WATCHDOG IS THE ONE CONSTANT A SEALED PLAN MAY DISAGREE WITH (2026-08-25). It is a
+  // liveness bound on a hung run, not a property of the instrument, so raising it must not
+  // cost the corpus the way raising stageCount or the payload floor would. The tolerance
+  // NAMES the shipped values rather than admitting any number, so a plan carrying a watchdog
+  // this harness never shipped is still refused. Every other pacing constant still binds
+  // exactly, proven one at a time below.
+  const currentWatchdog = EXPERIMENT_MODE_PLANS.smoke.watchdogMs;
+  const sealedWatchdog = EXPERIMENT_MODE_PLANS.smoke.sealedWatchdogMs;
+  assert(sealedWatchdog.length > 0 && !sealedWatchdog.includes(currentWatchdog),
+    "the sealed watchdog list is empty or restates the current bound, so this gate is vacuous");
+  const atWatchdog = (value) => {
+    const mutated = structuredClone(plan);
+    mutated.watchdogMs = value;
+    return reseal118(mutated);
+  };
+  validateStagePlan(atWatchdog(currentWatchdog));
+  for (const shipped of sealedWatchdog) validateStagePlan(atWatchdog(shipped));
+  assert.throws(() => validateStagePlan(atWatchdog(7 * 60 * 1_000)),
+    /watchdog is neither the current bound nor one this harness ever shipped/);
+  // And the tolerance is scoped to the watchdog ALONE: the three constants beside it still
+  // refuse any drift, or "raise the bound" would have quietly become "accept any pacing".
+  for (const [key, value] of [["stageCount", 9], ["stageIntervalMs", 1_000], ["heartbeatMs", 1_000]]) {
+    const mutated = structuredClone(plan);
+    mutated[key] = value;
+    assert.throws(() => validateStagePlan(reseal118(mutated)),
+      key === "stageCount" ? /stage count drifted|constants drifted/ : /constants drifted from its mode plan/,
+    `${key} stopped binding when the watchdog tolerance landed`);
+  }
+
   checks.theInRunProbeWavesAreDeletedAndAPartialScheduleIsRefused = true;
+  checks.theWatchdogIsTheOneConstantASealedPlanMayDisagreeWith = true;
 }
 
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);

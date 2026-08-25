@@ -457,14 +457,30 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
   full: Object.freeze({
     stageCount: 64,
     stageIntervalMs: 15_000,
-    // Six hours, raised from five (2026-08-11). The watchdog is a liveness bound on a hung
-    // run, not a budget a healthy one should be racing: rep 2 of sol-20260811 ran 303
-    // minutes and was cut two stages short of its 64, having spent about 31 minutes
-    // recovering from errors and 16.5 more asleep in retry backoff. Both of those causes
-    // are fixed in this build, but the margin they consumed was never really there. A
-    // healthy run finishing an hour early costs nothing; one cut short at stage 62 costs
-    // the whole repetition.
-    watchdogMs: 360 * 60 * 1_000,
+    // Ten hours, raised from six (2026-08-25), which was raised from five (2026-08-11).
+    // The watchdog is a liveness bound on a hung run, not a budget a healthy one should be
+    // racing: rep 2 of sol-20260811 ran 303 minutes and was cut two stages short of its 64,
+    // having spent about 31 minutes recovering from errors and 16.5 more asleep in retry
+    // backoff. A healthy run finishing hours early costs nothing; one cut short at stage 62
+    // costs the whole repetition.
+    //
+    // WHY IT MOVED AGAIN: deleting the probe waves changed what NATIVE does with a turn.
+    // On the sol-20260825-noprobe smoke, both arms saw the identical plan and pifold made
+    // 61 tool calls with 5 reads in 18.4 minutes while native made 273 with 146 reads,
+    // pulled 1,095,827 chars of tool results against 201,267 the run before, and was killed
+    // by smoke's own 45-minute bound at stage 8 of 8. pifold has a retrieval verb over its
+    // own history (`pi_fold_context`, 7 peeks that run); native has none, so when the window
+    // tightens it goes to the FILESYSTEM. That is the behaviour `crossref` exists as the
+    // re-derivable control for and it must not be designed away, so the bound moves instead.
+    // 6.4 min/stage x 64 is 410 minutes, past the old six hours; ten leaves real headroom
+    // for an arm whose pace at full mode's own compaction share (0.80, against smoke's 0.10)
+    // nobody has measured yet.
+    watchdogMs: 600 * 60 * 1_000,
+    // READING ONLY, the same shape as `sealedProbeSchedule`: the watchdogs sealed plans of
+    // THIS protocol version carry, so raising the bound does not cost the corpus. Only
+    // 21,600,000 is listed because the 300-minute era (18,000,000) is v1 to v3, which the
+    // protocol pin refuses before this assertion is ever reached.
+    sealedWatchdogMs: Object.freeze([360 * 60 * 1_000]),
     heartbeatMs: 30_000,
     payloadTargetChars: 48_000,
     payloadFloorChars: 24_000,
@@ -523,7 +539,12 @@ export const EXPERIMENT_MODE_PLANS = Object.freeze({
   smoke: Object.freeze({
     stageCount: 8,
     stageIntervalMs: 5_000,
-    watchdogMs: 45 * 60 * 1_000,
+    // Ninety minutes, raised from forty-five (2026-08-25). Smoke is what proves the harness
+    // before a ten-hour run, and it stopped being able to: native was killed at stage 8 of 8
+    // on sol-20260825-noprobe, having done 273 tool calls against pifold's 61 on the same
+    // plan. A smoke bound that the slow arm cannot clear validates nothing.
+    watchdogMs: 90 * 60 * 1_000,
+    sealedWatchdogMs: Object.freeze([45 * 60 * 1_000]),
     heartbeatMs: 5_000,
     // FULL-SIZED PAYLOADS, raised from 12,000/6,000 (2026-08-13). Pi refuses to compact a
     // session that fits inside its own recent-keep window: `prepareCompaction` cuts at
@@ -1503,10 +1524,18 @@ export function validateStagePlan(plan) {
   assertExperiment(plan.version === EXPERIMENT_PROTOCOL_VERSION, "Stage plan protocol version drifted");
   assertExperiment(EXPERIMENT_MODES.includes(plan.mode), "Invalid stage plan mode");
   const modePlan = EXPERIMENT_MODE_PLANS[plan.mode];
+  // The watchdog is the ONE mode-plan constant a sealed plan may disagree with, because it
+  // is a liveness bound rather than a property of the instrument: raising it changes what a
+  // hung run costs and nothing a run measures. Every other constant here still binds
+  // exactly, and a plan carrying a watchdog that was never shipped is still refused, so the
+  // tolerance names the shipped values rather than admitting any number.
   assertExperiment(plan.stageCount === modePlan.stageCount &&
     plan.stageIntervalMs === modePlan.stageIntervalMs &&
-    plan.watchdogMs === modePlan.watchdogMs && plan.heartbeatMs === modePlan.heartbeatMs,
+    plan.heartbeatMs === modePlan.heartbeatMs,
   "Stage plan constants drifted from its mode plan");
+  assertExperiment(plan.watchdogMs === modePlan.watchdogMs ||
+    modePlan.sealedWatchdogMs.includes(plan.watchdogMs),
+  "Stage plan watchdog is neither the current bound nor one this harness ever shipped");
   assertExperiment(exactKeys(plan.repo, ["key", "url", "commit", "license", "language", "treeSha256"]) &&
     Object.hasOwn(EXPERIMENT_REPOS, plan.repo.key) &&
     plan.repo.commit === EXPERIMENT_REPOS[plan.repo.key].commit &&
@@ -2159,7 +2188,8 @@ export function validateExperimentManifest(manifest) {
   "Manifest stage-plan pin is incomplete");
   assertExperiment(exactKeys(manifest.pacing, ["stageIntervalMs", "watchdogMs", "heartbeatMs"]) &&
     manifest.pacing.stageIntervalMs === EXPERIMENT_MODE_PLANS[manifest.mode].stageIntervalMs &&
-    manifest.pacing.watchdogMs === EXPERIMENT_MODE_PLANS[manifest.mode].watchdogMs,
+    (manifest.pacing.watchdogMs === EXPERIMENT_MODE_PLANS[manifest.mode].watchdogMs ||
+      EXPERIMENT_MODE_PLANS[manifest.mode].sealedWatchdogMs.includes(manifest.pacing.watchdogMs)),
   "Manifest pacing drifted from its mode plan");
   assertExperiment(Number.isSafeInteger(manifest.createdWallMs) && manifest.createdWallMs > 0,
     "Manifest creation clock is invalid");
@@ -2397,7 +2427,9 @@ export function validateExperimentRunConfig(value) {
   const modePlan = EXPERIMENT_MODE_PLANS[value.mode];
   assertExperiment(value.stageCount === modePlan.stageCount &&
     value.stageIntervalMs === modePlan.stageIntervalMs &&
-    value.watchdogMs === modePlan.watchdogMs && value.heartbeatMs === modePlan.heartbeatMs,
+    (value.watchdogMs === modePlan.watchdogMs ||
+      modePlan.sealedWatchdogMs.includes(value.watchdogMs)) &&
+    value.heartbeatMs === modePlan.heartbeatMs,
   "Run config pacing drifted from its mode plan");
   // TWO SHAPES, ONE VALIDATOR (Shane 2026-08-21). The supervisor's config names
   // host paths; the worker's names the sandbox's own constants, because inside the
