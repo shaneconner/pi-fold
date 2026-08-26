@@ -42,6 +42,7 @@ import {
   chapterSegments,
   scanTurnToolBatches,
   structurallyClosedChapterUnits,
+  deadAssistant,
   terminalAssistant,
 } from "./transcript.ts";
 import type { ChapterUnit } from "./transcript.ts";
@@ -102,7 +103,14 @@ export function resultCallIndex(snapshot: ActiveContextSnapshot, allowConsumedIn
           const message = snapshot.messages[index];
           if (messageRole(message) !== "assistant") continue;
           if (ownValue(message, "stopReason") === "toolUse") laterGenerations += 1;
-          else if (complete && terminalAssistant(message)) laterGenerations = Math.max(laterGenerations, 1);
+          // A dead turn's own terminal grants the point a finished turn's does: the turn
+          // is only in completeTurns because a user message already stands after it, so
+          // no later response will ever consume this batch, and demanding one anyway is
+          // the hold that deadlocked sol-20260826-full2 (the 423KB peek copy behind an
+          // errored assistant, ineligible for thirty-five aborting passes).
+          else if (complete && (terminalAssistant(message) || deadAssistant(message))) {
+            laterGenerations = Math.max(laterGenerations, 1);
+          }
         }
         if ((complete && laterGenerations < 1) || (!complete && laterGenerations < 2)) continue;
       }

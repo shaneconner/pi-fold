@@ -37,6 +37,17 @@ export function terminalAssistant(message: unknown): boolean {
   return stop === "stop" || stop === "length";
 }
 
+/**
+ * An assistant stop that ends a turn by dying rather than by finishing. It is never
+ * terminal on its own: while it is the last message the turn may still be retried in
+ * place, so only a FOLLOWING user message proves the turn is over.
+ */
+export function deadAssistant(message: unknown): boolean {
+  if (messageRole(message) !== "assistant") return false;
+  const stop = ownValue(message, "stopReason");
+  return stop === "error" || stop === "aborted";
+}
+
 export function completeTurns(messages: unknown[]): CompleteTurn[] {
   const starts: number[] = [];
   for (let index = 0; index < messages.length; index += 1) if (messageRole(messages[index]) === "user") starts.push(index);
@@ -47,7 +58,22 @@ export function completeTurns(messages: unknown[]): CompleteTurn[] {
     let end = limit;
     while (end > start && (messageRole(messages[end - 1]) === "custom" ||
         messageRole(messages[end - 1]) === "bashExecution")) end -= 1;
-    if (end > start && terminalAssistant(messages[end - 1])) turns.push({ start, end });
+    if (end <= start) continue;
+    // A DEAD TURN IS A CLOSED TURN (sol-20260826-full2, pifold rep 1). A turn whose last
+    // word is an errored or aborted assistant, with a user message already standing after
+    // it, is over: no response for its material is ever coming, so holding its spans for
+    // a consumption proof holds them forever. That hold is what deadlocked a live run:
+    // the projection-budget fence aborted a request that would not fit, the abort put an
+    // errored assistant at the end of the turn holding the 423KB that made it not fit,
+    // the errored turn was invisible to every fold lane, and the next thirty-four
+    // requests aborted identically with the reclaimer finding nothing it was allowed to
+    // touch. The live tail keeps the strict rule: while the errored assistant is the
+    // last message the turn may still be retried in place, so death alone closes
+    // nothing.
+    if (terminalAssistant(messages[end - 1]) ||
+        (starts[cursor + 1] !== undefined && deadAssistant(messages[end - 1]))) {
+      turns.push({ start, end });
+    }
   }
   return turns;
 }
@@ -353,7 +379,16 @@ export function staleSpanMatureEnd(messages: unknown[]): number {
       generations.push(index);
     }
   }
-  return generations.length < 2 ? 0 : generations[generations.length - 2];
+  const generationFloor = generations.length < 2 ? 0 : generations[generations.length - 2];
+  // MATURITY REACHES THROUGH EVERY CLOSED TURN; the generation floor governs only the
+  // live one. A closed turn's material has had every chance it will ever get: a finished
+  // turn was consumed by its own terminal, and a dead one (completeTurns' rule) can never
+  // be consumed at all, which is exactly the state that wedged sol-20260826-full2. The
+  // generation count alone under-reads both, because it keeps demanding two responses
+  // AFTER material that no response will ever follow.
+  const turns = completeTurns(messages);
+  const closedEnd = turns.length ? turns[turns.length - 1].end : 0;
+  return Math.max(generationFloor, closedEnd);
 }
 
 export function freshBoundary(messages: unknown[], turns: CompleteTurn[]): number {

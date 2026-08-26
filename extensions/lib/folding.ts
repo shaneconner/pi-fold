@@ -1383,11 +1383,26 @@ export function peekFoldSource(input: {
   const source = stableStringify(messages);
   const sourceBytes = bytes(source);
   const offset = Math.min(Math.max(0, input.offset ?? 0), sourceBytes);
-  const budget = input.maximumBytes ?? PEEK_DEFAULT_MAX_BYTES;
+  // The widest read anyone may ask for is the policy's own source cap, the same ceiling
+  // the `wider` hint has always offered; an unclamped `bytes` was the one door left to a
+  // single result larger than any fold the runtime would cut.
+  const budget = Math.min(
+    input.maximumBytes ?? PEEK_DEFAULT_MAX_BYTES,
+    ACTIVE_CONTEXT_POLICY.maxSourceChars,
+  );
+  // ONE BUDGET GOVERNS THE WHOLE RESULT (sol-20260826-full2, pifold rep 1). The byte
+  // bound used to govern `source` alone while the descendant index rode free, so peeking
+  // the root of a deep consolidation tree returned 320 nested briefs, 423KB against a
+  // stated 16KB bound, durably into a window already near its budget; that one result is
+  // what the projection fence then aborted thirty-five requests over. The index seats
+  // first, into at most half the budget, because a parent's index is the point read; the
+  // source view takes everything the seated rows leave.
+  const catalog = boundedDescendantIndex(fold, input.state, Math.floor(budget / 2));
+  const sourceBudget = budget - catalog.seatedBytes;
   const window = offset > 0 ? utf8Slice(source, offset) : source;
   const view = offset > 0
-    ? { text: boundedUtf8(window, budget), omittedBytes: 0, contiguous: true }
-    : boundedHeadTail(window, budget);
+    ? { text: boundedUtf8(window, sourceBudget), omittedBytes: 0, contiguous: true }
+    : boundedHeadTail(window, sourceBudget);
   const returned = view.text;
   const returnedBytes = bytes(returned) - bytes(headTailMarker(view.omittedBytes));
   const nextOffset = view.contiguous && offset + returnedBytes < sourceBytes
@@ -1395,7 +1410,7 @@ export function peekFoldSource(input: {
     : null;
   const truncated = view.omittedBytes > 0 || nextOffset !== null;
   const children = childFoldIds(fold);
-  const index = descendantIndexRows(fold, input.state);
+  const index = catalog.rows;
   return {
     version: 1,
     action: "peek",
@@ -1414,25 +1429,31 @@ export function peekFoldSource(input: {
     truncated,
     view: offset > 0 ? "slice" : (view.omittedBytes > 0 ? "index" : "complete"),
     ...(index.length ? { index } : {}),
+    ...(catalog.omitted ? { indexOmitted: catalog.omitted } : {}),
     children,
     narrower: {
       ...(nextOffset === null ? {} : { slice: { action: "peek", id: fold.id, offset: nextOffset, bytes: returnedBytes } }),
       ...(children.length ? { child: { action: "peek", id: children[0] } } : {}),
     },
-    ...(truncated
+    ...(truncated || catalog.omitted
       ? { wider: { action: "peek", id: fold.id, bytes: Math.min(sourceBytes, ACTIVE_CONTEXT_POLICY.maxSourceChars) } }
       : {}),
     lifetime: "these bytes stay in the window exactly as returned, like any other tool result, and " +
       `nothing rewrites this result in place. It is a COPY of fold ${fold.id}'s stored source, so the ` +
       `next commit reclaims it behind a placeholder naming ${fold.id}; peek ${fold.id} again for the ` +
       "same verbatim bytes, or pin this result to keep the copy raw.",
-    note: truncated
+    note: (truncated
       ? `Bounded read: ${returnedBytes} of ${sourceBytes} exact source bytes, ${view.omittedBytes} omitted ` +
         `from the middle. Widen with bytes, page with offset, or expand ${fold.id} to restore it in place.`
       : children.length
         ? `Complete stored span, one level: raw entries exactly, and ${children.length} child fold(s) still ` +
           "placeheld. Peek a child id to read its own span; the fold stayed collapsed and no projection changed."
-        : "Complete exact source; the fold stayed collapsed and no projection changed.",
+        : "Complete exact source; the fold stayed collapsed and no projection changed.") +
+      (catalog.omitted
+        ? ` The nested index seats the shallowest ${index.length} of ${index.length + catalog.omitted} ` +
+          "descendant briefs inside the byte budget; the deeper rows are one hop away by peeking a child id, " +
+          "or widen with bytes."
+        : ""),
     source: returned,
     ...(truncated
       ? {
@@ -1470,6 +1491,38 @@ export function boundedHeadTail(
     omittedBytes,
     contiguous: false,
   };
+}
+
+/**
+ * The descendant index, seated inside a byte budget: shallowest rows first, whole rows
+ * only, the omitted counted rather than dropped. Depth order is the navigational order,
+ * because a row's own children are reachable by peeking it, so the rows worth seating
+ * first are the ones every deeper row is reachable THROUGH. Walk order breaks depth
+ * ties, which keeps siblings in span order. The seating stops at the first row that
+ * does not fit, so what is omitted is always a contiguous deep tail of the depth order
+ * and the note can state it as one count.
+ */
+export function boundedDescendantIndex(
+  fold: ActiveFold,
+  state: ActiveContextState,
+  budget: number,
+): { rows: Array<Record<string, unknown>>; omitted: number; seatedBytes: number } {
+  const walked = descendantIndexRows(fold, state)
+    .map((row, walk) => ({ row, walk }))
+    .sort((left, right) =>
+      Number(left.row.depth) - Number(right.row.depth) || left.walk - right.walk);
+  const rows: Array<Record<string, unknown>> = [];
+  // Counted as the array actually serializes, brackets and joining commas included, so
+  // "seated bytes" is the bytes the result carries and not an under-read of them.
+  let seatedBytes = 2;
+  for (const { row } of walked) {
+    const cost = bytes(stableStringify(row)) + (rows.length ? 1 : 0);
+    if (seatedBytes + cost > budget) break;
+    seatedBytes += cost;
+    rows.push(row);
+  }
+  if (!rows.length) seatedBytes = 0;
+  return { rows, omitted: walked.length - rows.length, seatedBytes };
 }
 
 export function descendantIndexRows(

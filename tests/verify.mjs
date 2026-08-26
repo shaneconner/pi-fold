@@ -2442,6 +2442,14 @@ async function gatePeekAndFoldIndex() {
   assert.equal(peek.details.wider, undefined);
   assert.equal(peek.details.truncationReminder, undefined);
 
+  // AN EXPLICIT WIDENING STILL HAS A CEILING: the policy's own source cap, the same
+  // number the `wider` hint has always offered. An unclamped `bytes` was the one door
+  // left to a single result larger than any fold the runtime would cut.
+  const widened = context.peekFoldSource({ ...peekArguments, maximumBytes: 10_000_000 });
+  assert(widened.returnedBytes <= context.ACTIVE_CONTEXT_POLICY.maxSourceChars,
+    `an explicit bytes=10M read returned ${widened.returnedBytes} bytes past the source cap`);
+  assert.equal(widened.truncated, bounded.sourceBytes > context.ACTIVE_CONTEXT_POLICY.maxSourceChars);
+
   const tree = (await toolStatus(runtime, "pi_fold_context", "tree")).details.tree;
   assert.deepEqual(tree.map((row) => [row.id, row.depth, row.parentId, row.state, row.peekable]), [
     [consolidationId, 0, null, "folded", true],
@@ -2477,6 +2485,136 @@ async function gatePeekAndFoldIndex() {
     treeDepths: tree.map((row) => row.depth),
     visibleRoots: 1,
     unknownIdRejected: true,
+  };
+}
+
+/**
+ * THE DESCENDANT INDEX COUNTS AGAINST THE PEEK BUDGET (sol-20260826-full2, pifold rep 1).
+ *
+ * The byte bound used to govern `source` alone while the index rode free, so peeking the
+ * root of a depth-18 consolidation tree returned 320 nested briefs, 423KB against a
+ * stated 16KB bound, durably into a window already near its serving budget; the
+ * projection fence then aborted every request for the rest of the run over that one tool
+ * result. The law now: ONE budget governs the whole result. The index seats first, into
+ * at most half the budget, shallowest rows first with walk order breaking ties, rows
+ * whole, and the omitted counted in `indexOmitted` and stated in the note (gate 136's
+ * rule); the source view takes what the seated rows leave. A leaf fold's read is
+ * byte-identical to what it always was, which the oversized-fixture claim above pins.
+ *
+ * ANTI-VACUITY: the raw descendant rows are asserted to exceed the whole budget, so on
+ * the pre-fix runtime, where the index is returned in full, the seated-bytes assertion
+ * fails rather than passing emptily.
+ */
+async function gatePeekIndexIsBounded() {
+  const built = makeFixture({
+    turns: 28,
+    tools: false,
+    chapterChars: 3_500,
+    thresholds: TINY_FOLD_FLOOR,
+    contextWindow: 200_000,
+  });
+  let state = context.emptyActiveContextState(built.sessionId);
+  const chapterIds = [];
+  for (let turn = 0; turn < 24; turn += 1) {
+    const candidate = context.manualFoldCandidate(
+      built.snapshot,
+      state,
+      [built.turnEntries[turn][0], built.turnEntries[turn].at(-1)],
+    );
+    const landmark = `Chapter ${turn} recorded the full parse trail of file-${turn}.txt: ` +
+      Array.from({ length: 24 }, (_, step) => `step-${turn}-${step} held v${turn * 100 + step}`).join("; ");
+    const committed = await commitCandidate(state, built.snapshot, candidate, {
+      brief: landmark, now: turn + 1,
+    });
+    state = committed.state;
+    chapterIds.push(committed.prepared.id);
+  }
+  const innerA = await commitCandidate(
+    state,
+    built.snapshot,
+    context.manualFoldCandidate(built.snapshot, state, chapterIds.slice(0, 10)),
+    { brief: "Grouped the first ten chapters whose exact parse trails stay recoverable at depth.", now: 30 },
+  );
+  state = innerA.state;
+  const innerB = await commitCandidate(
+    state,
+    built.snapshot,
+    context.manualFoldCandidate(built.snapshot, state, chapterIds.slice(10, 20)),
+    { brief: "Grouped the second ten chapters whose exact parse trails stay recoverable at depth.", now: 31 },
+  );
+  state = innerB.state;
+  const root = await commitCandidate(
+    state,
+    built.snapshot,
+    context.manualFoldCandidate(built.snapshot, state,
+      [innerA.prepared.id, innerB.prepared.id, ...chapterIds.slice(20)]),
+    { brief: "Grouped both chapter archives with the four closing chapters for one collapsed root.", now: 32 },
+  );
+  state = root.state;
+  const rootFold = state.folds.find((fold) => fold.id === root.prepared.id);
+
+  const raw = context.descendantIndexRows(rootFold, state);
+  assert.equal(raw.length, 26, `the deep fixture built ${raw.length} descendants, not 26`);
+  const rawBytes = Buffer.byteLength(json.stableStringify(raw), "utf8");
+  assert(rawBytes > context.PEEK_DEFAULT_MAX_BYTES,
+    `the raw index is ${rawBytes} bytes, too small to prove the bound matters`);
+
+  const peek = context.peekFoldSource({
+    foldId: rootFold.id,
+    state,
+    entries: built.entries,
+    sessionId: built.sessionId,
+  });
+  const indexBudget = Math.floor(context.PEEK_DEFAULT_MAX_BYTES / 2);
+  const seatedBytes = Buffer.byteLength(json.stableStringify(peek.index), "utf8");
+  assert(seatedBytes <= indexBudget,
+    `the seated index is ${seatedBytes} bytes against a ${indexBudget}-byte share`);
+  assert(peek.indexOmitted > 0, "the over-budget index reported nothing omitted");
+  assert.equal(peek.index.length + peek.indexOmitted, raw.length,
+    "seated plus omitted does not account for every descendant");
+  assert(peek.returnedBytes + seatedBytes <= context.PEEK_DEFAULT_MAX_BYTES,
+    `source (${peek.returnedBytes}) plus index (${seatedBytes}) exceeds the one stated budget`);
+  // Shallowest first, whole rows: the seated set is exactly the leading prefix of the
+  // depth-ascending order (walk order breaking ties), so nothing deeper ever displaces
+  // anything shallower and what is omitted is one contiguous deep tail. All-children
+  // seating is NOT promised: a wide root whose child briefs run to the policy cap can
+  // outgrow the index share, and then the cut lands inside depth 1 itself, stated the
+  // same way (gate 115's rule for a group too wide to seat).
+  const depthOrder = raw
+    .map((row, walk) => ({ row, walk }))
+    .sort((left, right) => Number(left.row.depth) - Number(right.row.depth) || left.walk - right.walk)
+    .map(({ row }) => row.id);
+  assert.deepEqual(
+    peek.index.map((row) => row.id),
+    depthOrder.slice(0, peek.index.length),
+    "the seated index is not the shallowest-first prefix of the descendant order",
+  );
+  assert(peek.index.length > 0, "the bounded index seated nothing at all");
+  assert(peek.note.includes(`seats the shallowest ${peek.index.length} of ${raw.length}`),
+    "the note does not state the index cut");
+  assert.deepEqual(peek.wider, {
+    action: "peek",
+    id: rootFold.id,
+    bytes: Math.min(peek.sourceBytes, context.ACTIVE_CONTEXT_POLICY.maxSourceChars),
+  }, "an index cut did not offer the wider read");
+  // Widening buys the index back: at the source cap every descendant seats and the cut
+  // vanishes from the note along with the field.
+  const widened = context.peekFoldSource({
+    foldId: rootFold.id,
+    state,
+    entries: built.entries,
+    sessionId: built.sessionId,
+    maximumBytes: context.ACTIVE_CONTEXT_POLICY.maxSourceChars,
+  });
+  assert.equal(widened.indexOmitted, undefined, "a widened read still cut the index");
+  assert.equal(widened.index.length, raw.length);
+  return {
+    descendants: raw.length,
+    rawIndexBytes: rawBytes,
+    seatedRows: peek.index.length,
+    seatedBytes,
+    indexOmitted: peek.indexOmitted,
+    widenedSeatsAll: widened.index.length === raw.length,
   };
 }
 
@@ -13274,6 +13412,7 @@ async function gateEvidenceArtifacts() {
 async function gatePeekSurface() {
   return {
     peekAndFoldIndex: await claim("gatePeekAndFoldIndex", gatePeekAndFoldIndex),
+    peekIndexIsBounded: await claim("gatePeekIndexIsBounded", gatePeekIndexIsBounded),
     ephemeralPeekMark: await claim("gateEphemeralPeekMark", gateEphemeralPeekMark),
     peekIsAppendOnly: await claim("gatePeekIsAppendOnly", gatePeekIsAppendOnly),
     peekReclaimWithIdentity: await claim("gatePeekReclaimWithIdentity", gatePeekReclaimWithIdentity),
@@ -13942,6 +14081,10 @@ async function gateFoldEditor() {
  * The gate drives the LIVE cadence: frontier passes as the transcript grows, pending
  * marks carried forward. On the pre-floor runtime every one of these cuts comes out a
  * chapter and the population assertion fails.
+ *
+ * THE FLOOR'S OTHER EDGE (2026-08-26): a consumption proof that waits for a response
+ * that can never come holds material forever. The dead-turn claim below carries that
+ * half; the doc for the wedge that forced it lives on the claim itself.
  */
 async function gateFrontierWaitsForTheBatch() {
   const built = makeFixture({ pull: true, turns: 14, resultChars: 30_000 });
@@ -14007,6 +14150,99 @@ async function gateFrontierWaitsForTheBatch() {
     identifiedToolFolds: toolCuts.length,
     chapterCuts: cuts.length - toolCuts.length,
     closedTailCuts: more.length,
+    deadTurnCloses: await claim("gateDeadTurnIsAClosedTurn", gateDeadTurnIsAClosedTurn),
+  };
+}
+
+/**
+ * A DEAD TURN IS A CLOSED TURN (sol-20260826-full2, pifold rep 1).
+ *
+ * The consumption proof demands a response AFTER a batch before its material may fold,
+ * and a turn that ends in an errored assistant will never produce one: the projection
+ * fence aborted a request that would not fit, the abort put an errored assistant at the
+ * end of the turn holding the 423KB peek copy that made it not fit, the errored turn was
+ * invisible to completeTurns, resultCallIndex and staleSpanMatureEnd alike, and the next
+ * thirty-four requests aborted identically with the reclaimer finding nothing it was
+ * allowed to touch. The session deadlocked by construction: folding waited for a
+ * response, and the response waited for folding.
+ *
+ * The law now: a turn whose last word is an errored or aborted assistant, WITH A USER
+ * MESSAGE ALREADY STANDING AFTER IT, is closed. Its own dead terminal grants the
+ * consumption point a finished turn's terminal does, and maturity reaches through it.
+ * The live tail keeps the strict rule, driven first: while the errored assistant is the
+ * last message the turn may still be retried in place, so death alone closes nothing.
+ *
+ * On the pre-fix runtime the closed-half assertions fail: resultCall stays null, the
+ * floor stays at zero, and the frontier cuts nothing.
+ */
+async function gateDeadTurnIsAClosedTurn() {
+  const sessionId = "dead-turn-fixture";
+  const payload = Array.from({ length: 900 }, (_, line) =>
+    `payload line ${line}: the stage facts sit here and nowhere else`).join("\n");
+  const messages = [
+    { role: "user", content: [{ type: "text", text: "Read the payload files for this stage." }], timestamp: 1 },
+    { role: "assistant", content: [
+      { type: "toolCall", id: "c-read", name: "bash", arguments: { command: "cat payload.txt" } },
+    ], stopReason: "toolUse", timestamp: 2 },
+    { role: "toolResult", toolCallId: "c-read", toolName: "bash", isError: false,
+      content: [{ type: "text", text: payload }], timestamp: 3 },
+    { role: "assistant", content: [], stopReason: "error", timestamp: 4 },
+    { role: "user", content: [{ type: "text", text: "Next stage: keep going." }], timestamp: 5 },
+  ];
+  const entries = messages.map((message, index) => ({
+    type: "message",
+    id: `${sessionId}-entry-${index}`,
+    parentId: index ? `${sessionId}-entry-${index - 1}` : null,
+    message,
+  }));
+  const snapshotOver = (count) => context.mapActiveContext({
+    sessionId,
+    eventMessages: messages.slice(0, count),
+    contextEntries: entries.slice(0, count),
+    contextWindow: 272_000,
+    readOnlyContextActions: context.PEEK_READ_ONLY_CONTEXT_ACTIONS,
+  });
+
+  // THE LIVE TAIL, STRICT: the errored assistant is the last message, the turn may
+  // still be retried in place, and nothing about it is closed, consumed or mature.
+  assert.equal(context.deadAssistant(messages[3]), true);
+  assert.equal(context.deadAssistant(messages[0]), false, "a user message read as a dead assistant");
+  assert.equal(context.terminalAssistant(messages[3]), false, "an errored stop read as a finished turn");
+  const live = snapshotOver(4);
+  assert.deepEqual(context.completeTurns(messages.slice(0, 4)), [],
+    "a dead turn closed while it was still the live tail");
+  assert.equal(context.staleSpanMatureEnd(messages.slice(0, 4)), 0,
+    "maturity reached into a turn that may still be retried");
+  assert.equal(context.resultCall(live, 2, true), null,
+    "a live dead turn's batch became eligible before a user message stood after it");
+
+  // THE CLOSED HALF: a user message stands after the dead turn, so it is over. The
+  // turn is complete, its batch is eligible through its own dead terminal, maturity
+  // reaches its end, and the frontier cuts the very material the wedge could not.
+  const closed = snapshotOver(5);
+  assert.deepEqual(context.completeTurns(messages), [{ start: 0, end: 4 }],
+    "a dead turn with a user message after it did not close");
+  assert.equal(context.staleSpanMatureEnd(messages), 4,
+    "maturity did not reach through the closed dead turn");
+  const call = context.resultCall(closed, 2, true);
+  assert(call && call.id === "c-read",
+    "the dead turn's batch is still ineligible with the turn closed");
+  const cuts = context.frontierMarks({
+    snapshot: closed,
+    state: context.emptyActiveContextState(sessionId),
+    ordinal: 1,
+  });
+  const cutIndices = cuts.flatMap((mark) => mark.parts
+    .filter((part) => part.kind === "raw")
+    .map((part) => context.exactMapped(closed, part.ref)?.index));
+  assert(cutIndices.includes(2),
+    `the frontier still cannot reach the dead turn's result; it cut ${JSON.stringify(cutIndices)}`);
+  return {
+    liveTailHeld: true,
+    closedTurn: { start: 0, end: 4 },
+    matureEnd: context.staleSpanMatureEnd(messages),
+    eligibleCall: call.id,
+    frontierCutIndices: cutIndices,
   };
 }
 
