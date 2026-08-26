@@ -768,9 +768,15 @@ export function gradeStaleArtifact({ ask, returned }) {
 // markdown back leniently: the model is editing prose with `edit`, not filling in a form,
 // and a parser that only accepts its own byte-exact output would score formatting.
 //
-// LENIENT ON SHAPE, STRICT ON VALUE. Whitespace, list markers, backticks and heading depth
-// are all forgiven. The VALUE is compared exactly, because a path that is almost right is
-// wrong and softening that would flatter every near miss.
+// LENIENT ON SHAPE, STRICT ON VALUE. Whitespace, list markers, backticks, heading depth
+// and inline markdown decoration (links, emphasis wrapping a whole token) are all
+// forgiven. The VALUE is compared exactly, because a path that is almost right is wrong
+// and softening that would flatter every near miss.
+//
+// The decoration rule was paid for by sol-20260826-full2 rep 3: it rewrote every
+// cross-reference row as [`path`](../path) and graded missing x6 on values it had
+// answered, because the link syntax became part of the key. Unwrapping decoration is
+// shape forgiveness; the path inside is still compared byte-exactly.
 // ---------------------------------------------------------------------------
 
 const ARTIFACT_TITLES = Object.freeze({
@@ -780,7 +786,11 @@ const ARTIFACT_TITLES = Object.freeze({
   crossref: "Cross-reference index",
 });
 
-const clean = (text) => text.replace(/`/g, "").trim();
+const clean = (text) => text
+  .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+  .replace(/`/g, "")
+  .replace(/^\s*([*_]{1,2})(\S.*?\S|\S)\1\s*$/, "$2")
+  .trim();
 
 export function renderStaleArtifact(ask) {
   assertExperiment(ask && typeof ask === "object", "Rendering requires an ask");
@@ -852,6 +862,14 @@ export function parseStaleArtifact({ schema, text }) {
       const marked = label.match(/^(.*?)[\s(\[]*\b(unverified)\b[)\]]*$/i);
       const abstained = marked !== null && marked[1].trim().length > 0;
       if (abstained) label = marked[1].trim().replace(/[\s\-–—:,(]+$/, "");
+      // An annotated entry is still a placement claim about ONE path. sol-20260826-full2
+      // rep 3 rewrote every line as "path: why it sits here", kept the true order, and
+      // graded missing x6 because the whole sentence became the key. The label reduces to
+      // its leading token when annotation follows, and the token is compared exactly:
+      // lenient on shape, strict on value. A prose-first line still misses, because its
+      // leading token names no planted entry.
+      const token = label.match(/^(\S+?)[:;,]?(?:\s|$)/);
+      if (token && token[1] && token[1] !== label) label = clean(token[1]);
       if (!Object.hasOwn(answers, label)) answers[label] = abstained ? ARTIFACT_UNVERIFIED : position;
     }
   } else if (schema === "extent") {

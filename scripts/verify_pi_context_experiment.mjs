@@ -11705,4 +11705,109 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   checks.aCrossReferenceAskIsDrawnFromTheCorpus = true;
 }
 
+// ---------------------------------------------------------------------------
+// GATE 124 - a decorated answer is graded on its value, not its markdown.
+//
+// The parser's contract is LENIENT ON SHAPE, STRICT ON VALUE, and sol-20260826-full2
+// rep 3 found two shapes the leniency did not cover. It wrote every cross-reference row
+// as [`path`](../path) -> [`path`](../path), so the link syntax became part of the key
+// and six answered values graded missing; and it rewrote every worklog line as
+// "path: why it sits here" in the TRUE order, so the whole sentence became the key and a
+// substantively perfect reordering graded missing x6. Both are formatting, and the
+// grade's job is memory. The fix unwraps inline markdown decoration (links, emphasis
+// around a whole token) in clean(), and reduces an annotated worklog entry to its
+// leading token after the abstention marker is lifted.
+//
+// What the leniency must NOT do is soften values: a crossref value carrying trailing
+// prose is still a wrong value, a prose-first worklog line still names no planted entry,
+// and an abstention annotated onto an annotated entry still grades abstained.
+// ---------------------------------------------------------------------------
+{
+  const artifacts = await import(pathToFileURL(join(PROJECT, "scripts", "lib", "pi_context_artifacts.mjs")));
+
+  // The exact crossref shape rep 3 wrote: linked, backticked, one value annotated.
+  const xref = artifacts.parseStaleArtifact({
+    schema: "crossref",
+    text: [
+      "# Cross-reference index", "",
+      "- [`lib/a.c`](../lib/a.c) → [`lib/a.h`](../lib/a.h)",
+      "- [`lib/b.c`](../lib/b.c) -> [`lib/z.h`](../lib/z.h)",
+      "- [`lib/c.c`](../lib/c.c) -> [`lib/c.h`](../lib/c.h) (annotated; the note rides the value)",
+      "",
+    ].join("\n"),
+  });
+  assert.equal(xref["lib/a.c"], "lib/a.h", "a markdown-linked key or value is graded on its markdown");
+  assert.equal(xref["lib/b.c"], "lib/z.h", "unwrapping decoration bent the value itself");
+  const xrefGrade = artifacts.gradeStaleArtifact({
+    ask: {
+      id: "af-x", schema: "crossref", rederivable: true,
+      fields: [
+        { key: "lib/a.c", truth: "lib/a.h", stale: "lib/q.h", rederivable: true },
+        { key: "lib/b.c", truth: "lib/b.h", stale: "lib/z.h", rederivable: true },
+        { key: "lib/c.c", truth: "lib/c.h", stale: "lib/y.h", rederivable: true },
+      ],
+    },
+    returned: xref,
+  });
+  assert.equal(xrefGrade.corrected, 1, "a linked answer restoring the truth is not counted as a correction");
+  assert.equal(xrefGrade.stale, 1, "a linked answer left as planted is not counted as stale");
+  assert.equal(xrefGrade.confabulated, 1,
+    "a value carrying trailing prose is forgiven, so shape leniency has softened values");
+  assert.equal(xrefGrade.missing, 0, "a decorated key still grades missing");
+
+  // The exact worklog shape rep 3 wrote: annotated entries, true order, prose after a
+  // colon. One entry additionally carries the abstention marker inside its annotation,
+  // and one line is prose-first, which must keep missing its planted entry.
+  const wlog = artifacts.parseStaleArtifact({
+    schema: "worklog",
+    text: [
+      "# Worklog", "",
+      "- `lib/a.c`: reviewed first as the portability contract.",
+      "- `lib/b.c`: reviewed next; mapped the option table.",
+      "- `lib/c.c`: could not place this one (unverified)",
+      "- **lib/d.c** reviewed with the socket group.",
+      "- reviewed the vauth group at some point too.",
+      "",
+    ].join("\n"),
+  });
+  assert.equal(wlog["lib/a.c"], 1, "an annotated entry is graded on its whole sentence");
+  assert.equal(wlog["lib/b.c"], 2, "reducing one annotated entry shifted another's position");
+  assert.equal(wlog["lib/c.c"], artifacts.ARTIFACT_UNVERIFIED,
+    "an abstention marker inside an annotation is read as a position");
+  assert.equal(wlog["lib/d.c"], 4, "an emphasis-wrapped entry is graded on its asterisks");
+  assert.equal(Object.hasOwn(wlog, "lib/a.c: reviewed first as the portability contract."), false,
+    "the sentence key survives beside the reduced one");
+  const wlogGrade = artifacts.gradeStaleArtifact({
+    ask: {
+      id: "af-w", schema: "worklog", rederivable: false,
+      fields: [
+        { key: "lib/a.c", truth: 1, stale: 3, rederivable: false },
+        { key: "lib/b.c", truth: 2, stale: 1, rederivable: false },
+        { key: "lib/e.c", truth: 5, stale: 2, rederivable: false },
+      ],
+    },
+    returned: wlog,
+  });
+  assert.equal(wlogGrade.corrected, 2, "an annotated entry in the true order is not counted as a correction");
+  assert.equal(wlogGrade.missing, 1,
+    "a prose-first line was matched to a planted entry, so the reduction is guessing");
+
+  // A bare, undecorated artifact parses exactly as it always did: the planted rendering
+  // round-trips byte-for-byte through the lenient parser, so the leniency cost nothing.
+  const ask = {
+    id: "af-r", schema: "worklog", rederivable: false,
+    fields: [
+      { key: "lib/a.c", truth: 2, stale: 1, rederivable: false },
+      { key: "lib/b.c", truth: 1, stale: 2, rederivable: false },
+    ],
+  };
+  const untouched = artifacts.parseStaleArtifact({
+    schema: "worklog", text: artifacts.renderStaleArtifact(ask),
+  });
+  assert.deepEqual(untouched, { "lib/a.c": 1, "lib/b.c": 2 },
+    "the planted rendering no longer parses back to the planted order");
+
+  checks.aDecoratedAnswerIsGradedOnItsValues = true;
+}
+
 process.stdout.write(`PASS pi-context-experiment verification: ${Object.keys(checks).length} gates\n`);
