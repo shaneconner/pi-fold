@@ -846,6 +846,28 @@ for (const outside of [0, 1, -0.25, 1.5, "0.5", Number.NaN]) {
 }
 checks.toolFoldThresholdConditionPinned = true;
 
+// THE WORKING-MEMORY CONDITION (Shane 2026-08-26): workingMemory on the pifold arm alone,
+// a boolean, refused by name everywhere else. The runtime revalidates at registration
+// (package gate 149); this layer pins what a sealed config may claim to have run under,
+// and the extension passes the seam verbatim so the arm IS the config.
+validateExperimentRunConfig({ ...runConfig, arm: "pifold", workingMemory: true });
+validateExperimentRunConfig({ ...runConfig, arm: "pifold", workingMemory: false });
+assert.throws(() => validateExperimentRunConfig({ ...runConfig, workingMemory: true }),
+  /belongs to the pifold arm alone/, "a native arm accepted a working-memory condition");
+assert.throws(() => validateExperimentRunConfig({ ...runConfig, arm: "nativefence", workingMemory: true }),
+  /belongs to the pifold arm alone/, "the fence arm accepted a working-memory condition");
+for (const outside of [1, "true", null]) {
+  assert.throws(() => validateExperimentRunConfig({ ...runConfig, arm: "pifold", workingMemory: outside }),
+    /must be a boolean/, `workingMemory ${String(outside)} was accepted`);
+}
+{
+  const extensionSource = source("scripts/pi_context_experiment_extension.mjs");
+  assert(extensionSource.includes(
+    'config.workingMemory === undefined ? {} : { workingMemory: config.workingMemory }'),
+  "the extension does not pass the working-memory seam to the runtime registration");
+}
+checks.workingMemoryConditionPinned = true;
+
 // THE FENCE POINT (Shane 2026-08-24): --fence-share moves the nativefence compact point
 // off its matched default; the config layer pins the arm rule and the proportion law.
 validateExperimentRunConfig({ ...runConfig, arm: "nativefence", fenceShare: 0.5 });

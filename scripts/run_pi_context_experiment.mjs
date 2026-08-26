@@ -401,6 +401,12 @@ async function run() {
     assertExperiment(Number.isFinite(toolFoldThreshold) && toolFoldThreshold > 0 && toolFoldThreshold < 1,
       "--tool-fold-threshold takes a share strictly between 0 and 1");
   }
+  // `--working-memory` runs the pifold arm with the session-scoped digest channel: the
+  // remember/recall dictionary and its per-commit table of contents (package gate 149).
+  const workingMemory = process.argv.includes("--working-memory");
+  if (workingMemory) {
+    assertExperiment(arm === "pifold", "--working-memory belongs to the pifold arm alone");
+  }
   const providerInputBudget = requestedBudget === "none"
     ? null
     : EXPERIMENT_PROVIDER_INPUT_BUDGETS[`${modelProvider}/${modelId}`] ?? null;
@@ -518,6 +524,7 @@ async function run() {
         ...(requestedNotice === "off" ? { postFoldNotice: false } : {}),
         ...(thresholds === null ? {} : { thresholds }),
         ...(toolFoldThreshold === null ? {} : { toolFoldThreshold }),
+        ...(workingMemory ? { workingMemory: true } : {}),
         // No brief generator: the deterministic brief carries the opening prose
         // now (package gate 134), and this run measures the no-generator condition
         // the reviews recommend making permanent. See EXPERIMENT_BRIEF_GENERATOR's

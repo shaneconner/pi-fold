@@ -508,6 +508,9 @@ export function createPiContextExperimentExtension(config) {
             // The tool-call diet: the share point travels verbatim; the runtime's own
             // registration validation refuses anything outside the open interval.
             ...(config.toolFoldThreshold === undefined ? {} : { toolFoldThreshold: config.toolFoldThreshold }),
+            // The digest channel: the working-memory seam travels verbatim; the
+            // runtime's own registration validation refuses a non-boolean.
+            ...(config.workingMemory === undefined ? {} : { workingMemory: config.workingMemory }),
           });
         } finally {
           pi.registerTool = registerTool;
