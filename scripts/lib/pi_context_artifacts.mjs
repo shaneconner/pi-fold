@@ -348,21 +348,43 @@ function extentFields({ stages, window, seed, fieldCount }) {
 
 /**
  * The one hop a file contributes to the cross-reference relation, given every include of
- * its own that resolves inside the checkout. THE HOP IS THE FILE'S MOST SPECIFIC
- * DEPENDENCY, not its first: a C file opens with the project's setup header, so taking
- * the first resolvable include seated `lib/curl_setup.h` as the truth of five of six
- * fields, and an ask whose answer is the same path six times over is answerable by
- * noticing the pattern rather than by either recall or re-derivation, which is exactly the
- * discrimination crossref exists to provide. Rarest target across the staged set wins,
- * ties broken by the order the file itself states them in. Pure on purpose: the stager
- * reads the checkout and this states the rule, so the rule can be driven without one.
+ * its own that resolves inside the checkout.
+ *
+ * TWO WAYS THIS GOES WRONG, AND IT WENT WRONG BOTH WAYS BEFORE IT WENT RIGHT. The rule has
+ * one job beyond being true: the answer must not be derivable from the SUBJECT'S NAME,
+ * because an ask answerable without opening anything measures neither recall nor
+ * re-derivation, which is the whole discrimination crossref exists to provide.
+ *
+ *   1. FIRST RESOLVABLE INCLUDE. A C file opens with the project's setup header, so this
+ *      seated `lib/curl_setup.h` as the truth of five fields out of six. Answerable by
+ *      noticing the constant.
+ *   2. RAREST TARGET. A file's OWN header is included by almost nothing else, so rarest
+ *      systematically selects the same-stem twin: 39.5% of hops on curl, and sol-20260826
+ *      rep 1 proved it live at stage 16, where BOTH arms returned byte-identical notes
+ *      answering `X.c -> X.h` on all six fields and scored exactly the two the twin rule
+ *      predicts, residual zero. Answerable by editing the extension.
+ *
+ * So: rarest target across the staged set, EXCLUDING any target sharing the subject's own
+ * stem, ties broken by the order the file itself states them in. A file whose only
+ * resolvable includes are its own twin contributes no hop at all, which costs coverage and
+ * buys the one property the ask cannot do without. Pure on purpose: the stager reads the
+ * checkout and this states the rule, so the rule can be driven without one.
  */
+const includeStem = (path) => String(path).replace(/^.*\//, "").replace(/\.[^.]+$/, "");
+
 export function rarestIncludeHops(resolved) {
+  // Frequency is counted over EVERY resolvable target, before the twin exclusion, because
+  // it measures how ordinary a header is across the corpus rather than across what
+  // survives the filter.
   const frequency = new Map();
   for (const file of resolved) {
     for (const target of file.targets) frequency.set(target, (frequency.get(target) ?? 0) + 1);
   }
   return resolved
+    .map((file) => ({
+      ...file,
+      targets: file.targets.filter((target) => includeStem(target) !== includeStem(file.input)),
+    }))
     .filter((file) => file.targets.length > 0)
     .map((file) => ({
       stage: file.stage,
@@ -401,7 +423,23 @@ function crossrefFields({ hops, stages, seed, fieldCount }) {
   // A relationship between two earlier items, and the one schema a model can answer by
   // re-opening the file, which is why its fields are marked rederivable.
   assertExperiment(hops.length > 0, "No include hops exist to build a cross-reference index");
-  const chosen = seededShuffle(hops, `${seed}:crossref:subjects`).slice(0, fieldCount);
+  // DISTINCT TRUTHS, ENFORCED AT SEATING. Excluding same-stem twins in `rarestIncludeHops`
+  // removes the answer derivable from the subject's NAME; it does nothing about the answer
+  // derivable from the CORPUS, and on curl it made things worse: with the twin gone, many
+  // files have `lib/curl_setup.h` as their only remaining resolvable include, so it became
+  // modal (57 of 278 hops) and a note answering it six times scored 3 of 6. Two derivation
+  // rules have now failed the same way, so the guarantee belongs here rather than there:
+  // seat each truth at most once and the best constant answer is capped at 1 by
+  // construction, whatever the derivation hands over. Order still comes from the shuffle,
+  // so which subjects are asked stays a function of the seed alone.
+  const chosen = [];
+  const seatedTruths = new Set();
+  for (const hop of seededShuffle(hops, `${seed}:crossref:subjects`)) {
+    if (chosen.length >= fieldCount) break;
+    if (seatedTruths.has(hop.truth)) continue;
+    seatedTruths.add(hop.truth);
+    chosen.push(hop);
+  }
   const draws = seededSequence(`${seed}:crossref:values`, chosen.length);
   // A broken link is drawn from EVERY delivered path, not only from the other include
   // targets. A narrow pool can hold a single entry and leave `wrongPick` nothing to draw,

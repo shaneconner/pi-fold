@@ -11545,15 +11545,18 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 
   // THE RULE, driven on its own. Every file includes the shared setup header and one header
   // of its own, and the shared one is what a first-resolvable rule would seat every time.
+  // The specific dependency wins over the ubiquitous one. The specific header deliberately
+  // does NOT share the subject's stem, because a twin is excluded outright (see below) and
+  // a fixture built on one would prove the wrong thing.
   const resolved123 = ["a", "b", "c", "d"].map((name, index) => ({
     stage: index + 2,
     input: `lib/${name}.c`,
-    targets: ["lib/setup.h", `lib/${name}.h`],
+    targets: ["lib/setup.h", `lib/spec_${name}.h`],
   }));
   const hops123 = artifacts123.rarestIncludeHops(resolved123);
   assert.deepEqual(hops123.map((hop) => hop.truth),
-    ["lib/a.h", "lib/b.h", "lib/c.h", "lib/d.h"],
-    "the hop is the file's first include rather than its most specific dependency");
+    ["lib/spec_a.h", "lib/spec_b.h", "lib/spec_c.h", "lib/spec_d.h"],
+    "the hop is the file's ubiquitous include rather than its most specific dependency");
   assert.deepEqual(artifacts123.rarestIncludeHops([{ stage: 1, input: "lib/x.c", targets: [] }]), [],
     "a file with no resolvable include still contributes a hop, whose truth is undefined");
   // Ties break on the order the file states them in, so the rule is total rather than
@@ -11561,6 +11564,9 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   assert.equal(artifacts123.rarestIncludeHops(
     [{ stage: 1, input: "lib/t.c", targets: ["lib/first.h", "lib/second.h"] }])[0].truth,
   "lib/first.h", "equally rare targets do not break on the order the file states them in");
+  assert.deepEqual(artifacts123.rarestIncludeHops(
+    [{ stage: 1, input: "lib/only.c", targets: ["lib/only.h"] }]), [],
+  "a file whose only resolvable include is its own twin still contributes a hop");
 
   const stages123 = [];
   for (let ordinal = 1; ordinal <= 24; ordinal += 1) {
@@ -11570,9 +11576,14 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
       files: [{ path: `lib/g${ordinal}a.c`, lines: 10 }, { path: `lib/g${ordinal}b.c`, lines: 10 }],
     });
   }
+  // Each subject carries the ubiquitous header plus ONE dependency of its own that does not
+  // share its stem, which is the shape a healthy corpus has: the twin is excluded outright
+  // and the shared header loses to the specific one, so every subject seats a distinct truth.
   const includeHops123 = artifacts123.rarestIncludeHops(stages123.flatMap((stage) =>
     stage.files.map((file) => ({
-      stage: stage.ordinal, input: file.path, targets: ["lib/shared.h", `${file.path.slice(0, -2)}.h`],
+      stage: stage.ordinal,
+      input: file.path,
+      targets: ["lib/shared.h", `lib/dep_${file.path.slice(4, -2)}.h`],
     }))));
   const inputs123 = {
     stages: stages123, chains: [], includeHops: includeHops123,
@@ -11636,6 +11647,52 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     "a sealed plan's cross-reference ask no longer comes off its own chain links");
   assert(sealed123.fields.every((field) => field.truth !== undefined),
     "a sealed chain hop lost the expected answer it was sealed with");
+
+  // THE ASK MUST NOT BE ANSWERABLE WITHOUT CONSULTING THE MATERIAL (2026-08-26). Two
+  // derivation rules failed this in a row and the second was caught LIVE, at stage 16 of a
+  // paid 64-stage run: "first resolvable include" seated `lib/curl_setup.h` five times of
+  // six, and "rarest target" seated the subject's own same-stem twin 39.5% of the time, so
+  // BOTH arms returned byte-identical notes answering `X.c -> X.h` on every field and
+  // scored exactly the two the twin rule predicts, residual ZERO. Neither arm opened
+  // anything. A third rule would fail a third way, so the gate pins the PROPERTY and not
+  // the mechanism: whatever the derivation hands over, a seated ask must defeat both blind
+  // strategies. Same-stem twin scores 0 because twins never become hops; any single
+  // constant scores at most 1 because truths are seated at most once.
+  const stem123 = (path) => String(path).replace(/^.*\//, "").replace(/\.[^.]+$/, "");
+  assert.equal(ask123.fields.filter((field) => stem123(field.key) === stem123(field.truth)).length, 0,
+    "a cross-reference answer is derivable from the subject's own filename");
+  const truths123 = ask123.fields.map((field) => String(field.truth));
+  assert.equal(new Set(truths123).size, truths123.length,
+    "a cross-reference truth is seated twice, so one constant answer scores more than one field");
+
+  // ANTI-VACUITY FOR BOTH HALVES, driven against the exact corpus shapes that broke it.
+  // Every file here includes a ubiquitous setup header AND its own twin, which is what curl
+  // looks like, so a derivation that keeps either would be caught.
+  const shaped123 = ["a", "b", "c", "d", "e", "f", "g", "h"].map((name, index) => ({
+    stage: index + 2,
+    input: `lib/${name}.c`,
+    targets: ["lib/curl_setup.h", `lib/${name}.h`, `lib/spec_${name}.h`],
+  }));
+  const shapedHops123 = artifacts123.rarestIncludeHops(shaped123);
+  assert.equal(shapedHops123.filter((hop) => stem123(hop.input) === stem123(hop.truth)).length, 0,
+    "the hop rule still seats a subject's own twin as its answer");
+  assert.equal(shapedHops123.filter((hop) => hop.truth === "lib/curl_setup.h").length, 0,
+    "the hop rule still seats the corpus's ubiquitous header over a specific dependency");
+  // And a derivation that DID hand over one repeated truth cannot ship at all. Eight
+  // subjects resolving to the same header seat exactly one field once truths are distinct,
+  // which is below ARTIFACT_MIN_FIELDS, so staging REFUSES BY NAME rather than shipping an
+  // ask a constant answer would ace. That is the stronger outcome: the degenerate corpus
+  // stops the campaign instead of quietly producing a measurement worth nothing.
+  assert.throws(
+    () => artifacts123.buildStaleArtifacts({
+      ...inputs123, fieldCount: 6,
+      includeHops: ["a", "b", "c", "d", "e", "f", "g", "h"].map((name, index) => ({
+        stage: index + 2, input: `lib/g${index + 2}a.c`, truth: "lib/one.h",
+      })),
+      schemas: ["crossref"],
+    }),
+    /seats 1 fields, below the floor of 2/,
+    "eight subjects sharing one truth shipped an ask instead of refusing to stage");
 
   // The plan shape carries the field, and a plan without it is still a plan: every sealed
   // campaign predates it and must keep validating, which is the same law `ledger`,
