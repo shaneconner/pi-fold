@@ -26,6 +26,8 @@ EFFORT=xhigh
 NOTICE_ARGS=
 THRESHOLD_ARGS=
 TOOL_FOLD_ARGS=
+WORKING_MEMORY_ARGS=
+CANON_ARGS=
 # Basis, not a dial: "none" declares no serving budget, which is what lets native
 # drift past the provider's long-context tier the way a deployment actually does.
 # See run_pi_context_experiment.mjs for what each basis measures.
@@ -53,7 +55,11 @@ while [ "$#" -gt 0 ]; do
     --tool-fold-threshold)
       case "$2" in "") echo "--tool-fold-threshold takes a share strictly between 0 and 1" >&2; exit 2;; *) TOOL_FOLD_ARGS="--tool-fold-threshold $2";; esac
       shift 2;;
-    *) echo "usage: $0 --campaign <id> --mode smoke|full [--rep N] [--arms a,b,c] [--repo r] [--provider-input-budget none] [--post-fold-notice off] [--thresholds max,min] [--tool-fold-threshold x]" >&2; exit 2;;
+    --working-memory) WORKING_MEMORY_ARGS="--working-memory"; shift 1;;
+    --canon-memory)
+      case "$2" in "") echo "--canon-memory takes the pi-canon checkout path" >&2; exit 2;; *) CANON_ARGS="--canon-memory $2";; esac
+      shift 2;;
+    *) echo "usage: $0 --campaign <id> --mode smoke|full [--rep N] [--arms a,b,c] [--repo r] [--provider-input-budget none] [--post-fold-notice off] [--thresholds max,min] [--tool-fold-threshold x] [--working-memory] [--canon-memory <pi-canon checkout>]" >&2; exit 2;;
   esac
 done
 [ -n "$CAMPAIGN" ] || { echo "--campaign is required" >&2; exit 2; }
@@ -159,7 +165,7 @@ for ARM in $ARMS; do
       $ARM_ARGS \
       --repetition "$REP" --ordinal "$REP" \
       --model-provider "$MODEL_PROVIDER" --model-id "$MODEL_ID" --effort "$EFFORT" \
-      $BUDGET_ARGS $NOTICE_ARGS $THRESHOLD_ARGS $TOOL_FOLD_ARGS >/dev/null
+      $BUDGET_ARGS $NOTICE_ARGS $THRESHOLD_ARGS $TOOL_FOLD_ARGS $WORKING_MEMORY_ARGS $CANON_ARGS >/dev/null
   UNITS="$UNITS $UNIT"
   IFS=,
 done
