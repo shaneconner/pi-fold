@@ -32,6 +32,7 @@ import {
 } from "./lib/pi_fold_identity.mjs";
 import {
   EXPERIMENT_ALLOWED_TOOLS,
+  EXPERIMENT_CANON_EXTRA_TOOLS,
   EXPERIMENT_MARKER_ENTRY,
   isExperimentMarkerEntry,
   EXPERIMENT_PIFOLD_EXTRA_TOOLS,
@@ -168,6 +169,7 @@ export function createPiContextExperimentExtension(config) {
   const allowedTools = new Set([
     ...EXPERIMENT_ALLOWED_TOOLS,
     ...(pifold ? EXPERIMENT_PIFOLD_EXTRA_TOOLS : []),
+    ...(config.canonMemory === true ? EXPERIMENT_CANON_EXTRA_TOOLS : []),
   ]);
   let expectedStage = 1;
   let requestOrdinal = 0;

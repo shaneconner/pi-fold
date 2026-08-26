@@ -462,6 +462,8 @@ export function readEscapesCheckout(repoDir, requestedPath) {
 }
 
 export const EXPERIMENT_PIFOLD_EXTRA_TOOLS = Object.freeze(["pi_fold_context"]);
+// The canon condition's tool, on whichever arm carries the condition.
+export const EXPERIMENT_CANON_EXTRA_TOOLS = Object.freeze(["pi_canon"]);
 
 // Pacing exists to keep stage RELEASE external (soak integrity), not to burn wall-clock:
 // wall-clock is a measured variable here, so the gate is a floor, not a stretcher.
@@ -2421,6 +2423,13 @@ export const EXPERIMENT_RUN_CONFIG_OPTIONAL_KEYS = Object.freeze([
   // remember/recall dictionary and its per-commit table of contents (package gate 149).
   // The runtime revalidates at registration; here the config layer pins the arm rule.
   "workingMemory",
+  // THE CANON CONDITION (Shane 2026-08-26): the run carries the pi-canon Pi extension
+  // beside its arm's own mechanism, registered against a blank store under the sandbox
+  // home, with the staged copy's tree hash pinned beside it. Arm-independent by design:
+  // the A/B pairs it with the pifold arm, and the 2x2 that pairs it with native needs no
+  // new contract when it comes.
+  "canonMemory",
+  "canonTreeSha256",
 ]);
 
 export function validateExperimentRunConfig(value) {
@@ -2483,6 +2492,17 @@ export function validateExperimentRunConfig(value) {
       armRuntimeConfiguration(value.arm).activeContextEnabled,
     "Run config workingMemory condition belongs to the pifold arm alone");
   }
+  if (value.canonMemory !== undefined) {
+    assertExperiment(typeof value.canonMemory === "boolean",
+      "Run config canonMemory must be a boolean");
+    assertExperiment(value.sessionType !== EXPERIMENT_CLOSED_BOOK_LABEL,
+      "Run config canonMemory belongs to the arm sessions");
+  }
+  assertExperiment(value.canonTreeSha256 === undefined ||
+    (value.canonMemory === true && HEX_64.test(value.canonTreeSha256)),
+  "Run config canon tree pin requires the canon condition and a sha256");
+  assertExperiment(value.canonMemory !== true || typeof value.canonTreeSha256 === "string",
+    "Run config canon condition requires the staged tree pin");
   if (value.fenceShare !== undefined) {
     assertExperiment(typeof value.fenceShare === "number" &&
       value.fenceShare > 0 && value.fenceShare < 1,

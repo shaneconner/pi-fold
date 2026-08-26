@@ -143,6 +143,36 @@ export const STEER_HARNESS_SOURCE = Object.freeze([
   "scripts/lib/steer_session.mjs",
 ]);
 
+// THE PI-CANON EXTENSION SOURCE (Shane 2026-08-26), staged only when the run's config
+// carries the canon condition. Traced from canon.ts's own import graph, exactly as
+// HARNESS_SOURCE is traced from the worker's: `index.js` and `settings.ts` stay out
+// because they pull the settings TUI and the user-level settings file, neither of which
+// belongs inside a sealed run. The copy rides the same lifecycle as the harness source:
+// staged under canon/, imported before the deletion, gone before the first turn.
+export const CANON_HARNESS_FILES = Object.freeze([
+  "canon.ts",
+  "lib/lint.ts",
+  "lib/retrieval.ts",
+  "lib/schema.ts",
+  "lib/store.ts",
+  "lib/surfacing.ts",
+  "lib/tool.ts",
+]);
+
+// One hash over exactly the files the run stages, in list order, so the config's pin is
+// a statement about the bytes that executed rather than about a directory that may hold
+// more. Shared by the supervisor (pin at launch, re-check after the copy) and the gates.
+export function canonHarnessTreeSha256(extensionsDir) {
+  const hash = createHash("sha256");
+  for (const relative of CANON_HARNESS_FILES) {
+    hash.update(relative);
+    hash.update("\0");
+    hash.update(readFileSync(join(extensionsDir, relative)));
+    hash.update("\0");
+  }
+  return hash.digest("hex");
+}
+
 // A seeded ledger value is `lv-` and hex; a code word is `cw-` and hex. Any file
 // carrying one has no business inside the namespace, whoever wrote it.
 const SEEDED_TOKEN = /\b(lv|cw)-[0-9a-f]{4,}/;

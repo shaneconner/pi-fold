@@ -17,6 +17,7 @@ import {
   closedBookPrompt,
   closedBookQuestions,
   closedBookSystemPrompt,
+  EXPERIMENT_CANON_EXTRA_TOOLS,
   EXPERIMENT_PIFOLD_EXTRA_TOOLS,
   EXPERIMENT_PROTOCOL_VERSION,
   EXPERIMENT_PROVIDER_RETRY,
@@ -135,6 +136,14 @@ const { materializeActiveContextState, recoverFoldMessages } = await jiti.import
 const { PI_FOLD_STATE_ENTRY, PI_FOLD_FOLD_RECORD_ENTRY } = await jiti.import(
   join(PROJECT, "scripts", "lib", "pi_fold_identity.mjs"),
 );
+// THE CANON CONDITION (Shane 2026-08-26): the pi-canon extension is imported from the
+// harness copy, so it is resident before the deletion and gone from disk before the first
+// turn, exactly like the rest of the graph. Its store root sits under the sandbox home:
+// writable, model-reachable only through its own tool or ordinary shellwork, and captured
+// byte for byte by the home seal either way.
+const registerPiCanon = config.canonMemory === true
+  ? (await jiti.import(join(PROJECT, "canon", "canon.ts"))).registerPiCanon
+  : null;
 verifySourceHashes(PROJECT, config.sourceHashes);
 
 // A closed-book session runs the SAME worker scaffolding (readiness, watchdog,
@@ -405,7 +414,13 @@ try {
     noContextFiles: true,
     systemPrompt,
     appendSystemPrompt: [],
-    extensionFactories: closedBook ? [] : [experiment],
+    extensionFactories: closedBook ? [] : [
+      experiment,
+      ...(registerPiCanon === null ? [] : [{
+        name: "pi-canon",
+        factory: (pi) => registerPiCanon(pi, { root: join(SANDBOX_PATHS.home, ".canon") }),
+      }]),
+    ],
   });
   await loader.reload();
   assertExperiment(loader.getAppendSystemPrompt().length === 0,
@@ -439,6 +454,7 @@ try {
   const requiredTools = closedBook ? [] : [
     ...EXPERIMENT_ALLOWED_TOOLS,
     ...(armRuntime.activeContextEnabled ? EXPERIMENT_PIFOLD_EXTRA_TOOLS : []),
+    ...(registerPiCanon === null ? [] : EXPERIMENT_CANON_EXTRA_TOOLS),
   ];
   assertExperiment(requiredTools.every((name) => discoveredToolNames.includes(name)),
     `Arm ${config.arm} is missing a required tool: ${discoveredToolNames.join(",")}`);

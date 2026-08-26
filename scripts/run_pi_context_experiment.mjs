@@ -41,6 +41,8 @@ import {
 } from "./lib/pi_context_experiment.mjs";
 import { renderStaleArtifact } from "./lib/pi_context_artifacts.mjs";
 import {
+  CANON_HARNESS_FILES,
+  canonHarnessTreeSha256,
   HARNESS_SOURCE,
   RUN_CHANNEL_DOCUMENTS,
   RUN_CHANNEL_FILES,
@@ -407,6 +409,24 @@ async function run() {
   if (workingMemory) {
     assertExperiment(arm === "pifold", "--working-memory belongs to the pifold arm alone");
   }
+  // `--canon-memory <pi-canon checkout>` runs the arm beside a blank pi-canon store: the
+  // plugin's own Pi extension is staged into the harness copy (CANON_HARNESS_FILES, same
+  // copy-then-delete lifecycle as the harness source), registered with a store root under
+  // the sandbox home, and the model maintains memory through the pi_canon tool while the
+  // home seal captures every byte the store ever holds. The flag names the pi-canon
+  // checkout on this machine; nothing of that path is recorded, only the staged tree hash.
+  const canonCheckout = argumentValue("--canon-memory", null);
+  let canonExtensionsDir = null;
+  let canonTreeSha256 = null;
+  if (canonCheckout !== null) {
+    assertExperiment(!closedBook, "--canon-memory belongs to the arm sessions");
+    canonExtensionsDir = join(resolve(canonCheckout), "extensions");
+    for (const relative of CANON_HARNESS_FILES) {
+      assertExperiment(existsSync(join(canonExtensionsDir, relative)),
+        `--canon-memory checkout is missing extensions/${relative}`);
+    }
+    canonTreeSha256 = canonHarnessTreeSha256(canonExtensionsDir);
+  }
   const providerInputBudget = requestedBudget === "none"
     ? null
     : EXPERIMENT_PROVIDER_INPUT_BUDGETS[`${modelProvider}/${modelId}`] ?? null;
@@ -525,6 +545,7 @@ async function run() {
         ...(thresholds === null ? {} : { thresholds }),
         ...(toolFoldThreshold === null ? {} : { toolFoldThreshold }),
         ...(workingMemory ? { workingMemory: true } : {}),
+        ...(canonTreeSha256 === null ? {} : { canonMemory: true, canonTreeSha256 }),
         // No brief generator: the deterministic brief carries the opening prose
         // now (package gate 134), and this run measures the no-generator condition
         // the reviews recommend making permanent. See EXPERIMENT_BRIEF_GENERATOR's
@@ -629,6 +650,18 @@ async function run() {
     const target = join(harnessDir, relative);
     mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
     copyFileSync(join(PROJECT, relative), target);
+  }
+  // The canon condition's source, staged beside the harness copy so the one deletion
+  // covers it too, and re-hashed after the copy so the config's pin is a statement about
+  // the bytes that will execute.
+  if (canonExtensionsDir !== null) {
+    for (const relative of CANON_HARNESS_FILES) {
+      const target = join(harnessDir, "canon", relative);
+      mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+      copyFileSync(join(canonExtensionsDir, relative), target);
+    }
+    assertExperiment(canonHarnessTreeSha256(join(harnessDir, "canon")) === canonTreeSha256,
+      "The staged pi-canon copy does not match the tree the config pinned");
   }
   const identity = sandboxIdentityFiles(process.getuid(), process.getgid());
   writeFileSync(join(identityDir, "passwd"), identity.passwd, { mode: 0o600 });

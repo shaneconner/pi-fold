@@ -868,6 +868,74 @@ for (const outside of [1, "true", null]) {
 }
 checks.workingMemoryConditionPinned = true;
 
+// THE CANON CONDITION (Shane 2026-08-26): a run may carry the pi-canon extension beside
+// its arm's own mechanism, against a blank store under the sandbox home, and the seam is
+// pinned at every layer it crosses. The config law: a boolean, arm sessions only,
+// arm-independent (the A/B pairs it with pifold; the 2x2 that pairs it with native needs
+// no new contract), and the condition travels WITH the staged copy's tree hash, both ways,
+// because a run that carried the extension without pinning its bytes is a condition the
+// seal cannot reproduce. The staged-tree hash is a function of exactly the listed files,
+// order and bytes, so a canon checkout that drifts cannot reuse a sealed pin. The worker
+// seam and the tool grant are pinned in source, the same idiom as the working memory's,
+// because a config field nothing forwards reads as a condition that ran.
+{
+  const treePin = "a".repeat(64);
+  validateExperimentRunConfig({ ...runConfig, arm: "pifold", canonMemory: true, canonTreeSha256: treePin });
+  validateExperimentRunConfig({ ...runConfig, canonMemory: true, canonTreeSha256: treePin });
+  validateExperimentRunConfig({ ...runConfig, arm: "pifold", canonMemory: false });
+  assert.throws(() => validateExperimentRunConfig({ ...runConfig, arm: "pifold", canonMemory: "yes" }),
+    /must be a boolean/, "a non-boolean canon condition was accepted");
+  assert.throws(() => validateExperimentRunConfig({ ...runConfig, arm: "pifold", canonTreeSha256: treePin }),
+    /requires the canon condition/, "a canon tree pin was accepted without the condition");
+  assert.throws(() => validateExperimentRunConfig({ ...runConfig, arm: "pifold", canonMemory: true }),
+    /requires the staged tree pin/, "the canon condition was accepted without its tree pin");
+  assert.throws(() => validateExperimentRunConfig({
+    ...runConfig, arm: "pifold", canonMemory: true, canonTreeSha256: "not-hex",
+  }), /requires the canon condition and a sha256/, "a malformed canon tree pin was accepted");
+  const closedCanon = (({ guidance: _g, ledgerTasks: _l, querySeed: _q, ...rest }) => rest)({
+    ...runConfig, sessionType: EXPERIMENT_CLOSED_BOOK_LABEL, arm: EXPERIMENT_CLOSED_BOOK_LABEL,
+    canonMemory: true, canonTreeSha256: treePin,
+  });
+  assert.throws(() => validateExperimentRunConfig(closedCanon),
+    /belongs to the arm sessions/, "a closed-book session accepted the canon condition");
+
+  const { CANON_HARNESS_FILES, canonHarnessTreeSha256 } = await import(
+    pathToFileURL(join(PROJECT, "scripts", "lib", "pi_context_sandbox.mjs")));
+  assert(CANON_HARNESS_FILES.includes("canon.ts") && CANON_HARNESS_FILES.includes("lib/store.ts"),
+    "the staged canon list lost its entry point or its store");
+  const canonFixture = mkdtempSync(join(tmpdir(), "pi-fold-canon-gate-"));
+  for (const relative of CANON_HARNESS_FILES) {
+    mkdirSync(join(canonFixture, dirname(relative)), { recursive: true });
+    writeFileSync(join(canonFixture, relative), `// ${relative}` + "\n");
+  }
+  const first = canonHarnessTreeSha256(canonFixture);
+  assert.match(first, /^[0-9a-f]{64}$/, "the staged tree hash is not a sha256");
+  assert.equal(canonHarnessTreeSha256(canonFixture), first, "the staged tree hash is not deterministic");
+  writeFileSync(join(canonFixture, "lib/store.ts"), "// drifted" + "\n");
+  assert.notEqual(canonHarnessTreeSha256(canonFixture), first,
+    "a drifted canon byte reuses the sealed pin");
+  rmSync(join(canonFixture, "canon.ts"));
+  assert.throws(() => canonHarnessTreeSha256(canonFixture),
+    /ENOENT/, "a missing staged file hashes instead of refusing");
+  rmSync(canonFixture, { recursive: true, force: true });
+
+  const workerSource = source("scripts/run_pi_context_experiment_worker.mjs");
+  assert(workerSource.includes('jiti.import(join(PROJECT, "canon", "canon.ts"))'),
+    "the worker does not import the canon extension from the harness copy");
+  assert(workerSource.includes('registerPiCanon(pi, { root: join(SANDBOX_PATHS.home, ".canon") })'),
+    "the worker does not register the canon store under the sandbox home");
+  assert(workerSource.includes("...(registerPiCanon === null ? [] : EXPERIMENT_CANON_EXTRA_TOOLS)"),
+    "the canon tool is not on the exposed surface under the condition");
+  const launcherSource = source("scripts/run_pi_context_experiment.mjs");
+  assert(launcherSource.includes(
+    "canonHarnessTreeSha256(join(harnessDir, \"canon\")) === canonTreeSha256"),
+  "the supervisor does not re-hash the staged copy against the pinned tree");
+  const extensionSource = source("scripts/pi_context_experiment_extension.mjs");
+  assert(extensionSource.includes("config.canonMemory === true ? EXPERIMENT_CANON_EXTRA_TOOLS : []"),
+    "the extension does not admit the canon tool under the condition");
+}
+checks.canonConditionPinned = true;
+
 // THE FENCE POINT (Shane 2026-08-24): --fence-share moves the nativefence compact point
 // off its matched default; the config layer pins the arm rule and the proportion law.
 validateExperimentRunConfig({ ...runConfig, arm: "nativefence", fenceShare: 0.5 });
