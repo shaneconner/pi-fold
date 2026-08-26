@@ -22,6 +22,9 @@ import {
   EXPAND_LEASE_GENERATIONS,
   MAX_EXPAND_LEASES,
   MAX_PENDING_MARKS,
+  MEMORY_BODY_CHARS,
+  MEMORY_KEY_CHARS,
+  MEMORY_KEYS_MAX,
 } from "./policy.ts";
 import type {
   ActiveContextCheckpointV2,
@@ -33,6 +36,7 @@ import type {
   BriefOverride,
   BriefProvenance,
   ToolClip,
+  WorkingMemoryEntry,
   FoldKind,
   FoldPart,
   FoldRecordEntry,
@@ -326,6 +330,7 @@ export function parseActiveContextState(
   const hasPinnedPeeks = recordLike && Object.prototype.hasOwnProperty.call(value, "pinnedPeeks");
   const hasBriefs = recordLike && Object.prototype.hasOwnProperty.call(value, "briefs");
   const hasClips = recordLike && Object.prototype.hasOwnProperty.call(value, "clips");
+  const hasMemory = recordLike && Object.prototype.hasOwnProperty.call(value, "memory");
   // Read and dropped, never stored: see legacyRiderStateSha256. A v1 state has no digest
   // to reproduce, so here the tolerance is the whole of it.
   const hasLegacyRider = recordLike && Object.prototype.hasOwnProperty.call(value, "rider");
@@ -339,6 +344,7 @@ export function parseActiveContextState(
     ...(hasPinnedPeeks ? ["pinnedPeeks"] : []),
     ...(hasBriefs ? ["briefs"] : []),
     ...(hasClips ? ["clips"] : []),
+    ...(hasMemory ? ["memory"] : []),
     ...(hasLegacyRider ? ["rider"] : []),
   ];
   if (!exactRecord(value, [...ACTIVE_STATE_KEYS, ...extraKeys])) throw new Error("Invalid active-context state keys");
@@ -371,6 +377,7 @@ export function parseActiveContextState(
   }
   const briefs = hasBriefs ? parseBriefOverrides(ownValue(value, "briefs"), ids) : {};
   const clips = hasClips ? parseToolClips(ownValue(value, "clips")) : [];
+  const memory = hasMemory ? parseWorkingMemory(ownValue(value, "memory")) : [];
   const source = clone(value) as unknown as ActiveContextState;
   return {
     version: 1,
@@ -386,6 +393,7 @@ export function parseActiveContextState(
     ...(marks.length ? { pendingMarks: marks } : {}),
     ...(Object.keys(briefs).length ? { briefs } : {}),
     ...(clips.length ? { clips } : {}),
+    ...(memory.length ? { memory } : {}),
     ...(hasAdvisory
       ? { advisory: clone(source.advisory!) }
       : defaultAdvisory ? { advisory: { highWater: 0, delivered: {} } } : {}),
@@ -408,6 +416,30 @@ function parseToolClips(value: unknown): ToolClip[] {
     throw new Error("Invalid active-context clips: duplicate call id");
   }
   return clips;
+}
+
+function parseWorkingMemory(value: unknown): WorkingMemoryEntry[] {
+  const entries = denseOwnArrayValues(value);
+  if (!entries) throw new Error("Invalid active-context working memory");
+  const memory = entries.map((entry) => {
+    const key = ownValue(entry, "key");
+    const body = ownValue(entry, "body");
+    const ordinal = ownValue(entry, "ordinal");
+    if (!exactRecord(entry, ["key", "body", "ordinal"]) ||
+        typeof key !== "string" || !key || key.length > MEMORY_KEY_CHARS ||
+        typeof body !== "string" || !body || body.length > MEMORY_BODY_CHARS ||
+        !Number.isSafeInteger(ordinal) || Number(ordinal) < 0) {
+      throw new Error("Invalid active-context working-memory entry");
+    }
+    return { key, body, ordinal: Number(ordinal) };
+  });
+  if (memory.length > MEMORY_KEYS_MAX) {
+    throw new Error(`Invalid active-context working memory: over ${MEMORY_KEYS_MAX} entries`);
+  }
+  if (new Set(memory.map((entry) => entry.key)).size !== memory.length) {
+    throw new Error("Invalid active-context working memory: duplicate key");
+  }
+  return memory;
 }
 
 export function clearPrepared(state: ActiveContextState): ActiveContextState {
@@ -504,6 +536,7 @@ export function sameStateProjection(left: ActiveContextState, right: ActiveConte
     if (normalizedState.pendingMarks && normalizedState.pendingMarks.length === 0) delete normalizedState.pendingMarks;
     if (normalizedState.briefs && !Object.keys(normalizedState.briefs).length) delete normalizedState.briefs;
     if (normalizedState.clips && normalizedState.clips.length === 0) delete normalizedState.clips;
+    if (normalizedState.memory && normalizedState.memory.length === 0) delete normalizedState.memory;
     return normalizedState;
   };
   return stableStringify(normalized(left)) === stableStringify(normalized(right));
@@ -616,6 +649,8 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     Object.prototype.hasOwnProperty.call(value, "clipBase"));
   const hasAddClips = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "addClips"));
+  const hasWireMemory = Boolean(value && typeof value === "object" &&
+    Object.prototype.hasOwnProperty.call(value, "memory"));
   const hasLegacyRider = Boolean(value && typeof value === "object" &&
     Object.prototype.hasOwnProperty.call(value, "rider"));
   refuseRetiredStateFields(value);
@@ -633,6 +668,7 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
     ...(hasWireClips ? ["clips"] : []),
     ...(hasClipBase ? ["clipBase"] : []),
     ...(hasAddClips ? ["addClips"] : []),
+    ...(hasWireMemory ? ["memory"] : []),
     // Carried no further than the digest check in `materializeStatePersistence`, which is
     // the only thing on a load that the rider's absence can change.
     ...(hasLegacyRider ? ["rider"] : []),
@@ -654,6 +690,7 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
   );
   if (hasWireClips) parseToolClips(ownValue(value, "clips"));
   if (hasAddClips) parseToolClips(ownValue(value, "addClips"));
+  if (hasWireMemory) parseWorkingMemory(ownValue(value, "memory"));
   if (hasClipBase) {
     const base = ownValue(value, "clipBase");
     if (!Number.isSafeInteger(base) || Number(base) < 0) throw new Error("Invalid active-context clip base");
@@ -756,7 +793,7 @@ export function stateFromFoldRefs(
   wire: Pick<
     ActiveContextCheckpointV2,
     "sessionId" | "revision" | "expanded" | "protected" | "prepared" | "advisory" |
-      "tokensSinceToolFold" | "leases" | "pendingMarks" | "briefs" | "clips"
+      "tokensSinceToolFold" | "leases" | "pendingMarks" | "briefs" | "clips" | "memory"
   >,
   refs: FoldRecordRef[],
   records: Map<string, FoldRecordEntry>,
@@ -779,6 +816,7 @@ export function stateFromFoldRefs(
     ...(wire.pendingMarks?.length ? { pendingMarks: clone(wire.pendingMarks) } : {}),
     ...(wire.briefs && Object.keys(wire.briefs).length ? { briefs: clone(wire.briefs) } : {}),
     ...(wire.clips?.length ? { clips: clone(wire.clips) } : {}),
+    ...(wire.memory?.length ? { memory: clone(wire.memory) } : {}),
     ...(wire.advisory === undefined ? {} : { advisory: clone(wire.advisory) }),
     ...(wire.prepared === null || wire.prepared === undefined ? {} : { prepared: clone(wire.prepared) }),
   };
@@ -989,6 +1027,7 @@ export function materializeStatePersistence(
           briefs: Object.keys(briefs).length ? briefs : undefined,
           pendingMarks: marks.length ? marks : undefined,
           clips: clips.length ? clips : undefined,
+          memory: wire.memory?.length ? clone(wire.memory) : undefined,
         },
         [...byId.values()],
         records,
@@ -1049,6 +1088,7 @@ export function makeStateCheckpoint(state: ActiveContextState): ActiveContextChe
     ...(state.pendingMarks?.length ? { pendingMarks: clone(state.pendingMarks) } : {}),
     ...(state.briefs && Object.keys(state.briefs).length ? { briefs: clone(state.briefs) } : {}),
     ...(state.clips?.length ? { clips: clone(state.clips) } : {}),
+    ...(state.memory?.length ? { memory: clone(state.memory) } : {}),
     ...(state.advisory ? { advisory: clone(state.advisory) } : {}),
     stateSha256: semanticStateSha256(state),
   }, state.sessionId) as ActiveContextCheckpointV2;
@@ -1139,6 +1179,9 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
     ...(Object.keys(addBriefs).length ? { addBriefs } : {}),
     ...(removeBriefIds.length ? { removeBriefIds } : {}),
     ...(clipsTravel ? { clipBase: clipBase, ...(addClips.length ? { addClips: clone(addClips) } : {}) } : {}),
+    // The memory travels whole when it exists: bounded at MEMORY_KEYS_MAX entries and
+    // edited in place, so the change encodings above have nothing to save here.
+    ...(next.memory?.length ? { memory: clone(next.memory) } : {}),
     ...(next.advisory ? { advisory: clone(next.advisory) } : {}),
     stateSha256: semanticStateSha256(next),
   }, next.sessionId) as ActiveContextDeltaV2;

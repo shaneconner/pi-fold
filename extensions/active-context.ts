@@ -113,6 +113,10 @@ import {
   RETIRED_TOOL_ACTIONS,
   AUTO_FOLD_BLACKLIST_DEFAULT,
   USER_RESCUE_MAX_SOURCE_CHARS,
+  MEMORY_BODY_CHARS,
+  MEMORY_KEY_CHARS,
+  MEMORY_KEYS_MAX,
+  WORKING_MEMORY_TOOL_ACTIONS,
 } from "./lib/policy.ts";
 import type {
   ActiveContextSnapshot,
@@ -125,6 +129,7 @@ import type {
   FoldRecordEntry,
   MarkOrigin,
   PreparedFold,
+  WorkingMemoryEntry,
 } from "./lib/policy.ts";
 import {
   absorbWedgeMarks,
@@ -133,6 +138,7 @@ import {
 import {
   contextReceipt,
   foldNoticeText,
+  memoryTocText,
   receiptBlockText,
   withReceipt,
 } from "./lib/curation.ts";
@@ -266,6 +272,13 @@ export function registerActiveContext(pi: any, options: {
    *  deployment that silences the notice has an agent that can never annotate what it
    *  is never told about. */
   postFoldNotice?: boolean;
+  /** THE WORKING MEMORY (Shane, 2026-08-26): a session-scoped ordered dictionary the
+   *  agent maintains beside the fold index. `remember` writes or removes an entry,
+   *  `recall` reads bodies on demand, and the projection carries one table of contents
+   *  that refreshes at each commit. Off when absent: the digest channel earned its
+   *  place in a measured gap (running tallies lost 0/6 against native's 6/6 while the
+   *  index won everything else), and it must stay separable from the index it is not. */
+  workingMemory?: boolean;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
 } {
@@ -275,6 +288,11 @@ export function registerActiveContext(pi: any, options: {
   const entryTypePrefix = options.entryTypePrefix ?? DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX;
   const blacklistAutoFoldTools = options.blacklistAutoFoldTools ?? AUTO_FOLD_BLACKLIST_DEFAULT;
   const postFoldNotice = options.postFoldNotice ?? true;
+  if (options.workingMemory !== undefined && typeof options.workingMemory !== "boolean") {
+    throw new Error("workingMemory must be a boolean: it enables the session-scoped " +
+      "working-memory dictionary and its two actions, remember and recall");
+  }
+  const workingMemory = options.workingMemory === true;
   const toolFoldThreshold = options.toolFoldThreshold;
   if (toolFoldThreshold !== undefined &&
       (typeof toolFoldThreshold !== "number" || !Number.isFinite(toolFoldThreshold) ||
@@ -348,6 +366,7 @@ export function registerActiveContext(pi: any, options: {
   const milestoneProjectionType = `${entryTypePrefix}-milestone`;
   const advisoryProjectionType = `${entryTypePrefix}-advisory`;
   const foldNoticeProjectionType = `${entryTypePrefix}-fold-notice`;
+  const memoryTocProjectionType = `${entryTypePrefix}-memory-toc`;
   const receiptProjectionType = `${entryTypePrefix}-receipts`;
   const curationProjectionType = `${entryTypePrefix}-curation`;
   const entryNamespace = entryTypeNamespace(entryTypePrefix);
@@ -355,7 +374,9 @@ export function registerActiveContext(pi: any, options: {
   const nativeReceiptEntryType = `${entryNamespace}-native-compaction-receipt`;
   const contextEventEntryType = `${entryNamespace}-context-event`;
   const nativeDecisionEntryType = `${entryNamespace}-native-compaction-decision`;
-  const allowedToolActions: readonly ActiveContextToolAction[] = ACTIVE_CONTEXT_TOOL_ACTIONS;
+  const allowedToolActions: readonly ActiveContextToolAction[] = workingMemory
+    ? [...ACTIVE_CONTEXT_TOOL_ACTIONS, ...WORKING_MEMORY_TOOL_ACTIONS]
+    : ACTIVE_CONTEXT_TOOL_ACTIONS;
   const allowedToolActionSet = new Set<string>(allowedToolActions);
 
   type AutomaticFailureState = {
@@ -1701,6 +1722,42 @@ export function registerActiveContext(pi: any, options: {
     return projected;
   };
 
+  /**
+   * THE TABLE OF CONTENTS IS ONE COPY PER COMMIT (Shane, 2026-08-26). It is admitted
+   * once per frozen projection, exactly as the fold notice above, and that admission
+   * rule IS the refresh law: between commits the copy stays buried at its index, so a
+   * quiet pass moves no byte and costs no occupancy anchor, and the tool result of every
+   * `remember` carries the live key list in the meantime. A commit rewrites the
+   * projection, the freeze drops, the body filter strips the old copy, and the next pass
+   * seats a fresh one at the tail with the latest keys. Nothing here re-renders in
+   * place, because a carrier that moves on a quiet pass is the exact defect the fold
+   * notice's comment records.
+   */
+  const appendMemoryToc = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
+    if (!workingMemory) return projected;
+    if (!persistence.state) return projected;
+    const held = persistence.state.memory ?? [];
+    if (!held.length) return projected;
+    if (!carrierAdmitted("memory-toc")) return projected;
+    const entries = [...held].sort((left, right) => right.ordinal - left.ordinal);
+    const text = memoryTocText({
+      entries: entries.map((entry) => ({ key: entry.key, chars: entry.body.length })),
+      toolName,
+      brandNoun,
+    });
+    projected.push({
+      role: "custom",
+      customType: memoryTocProjectionType,
+      content: text,
+      display: false,
+      details: { source: activeContextSource(entryTypePrefix), ephemeral: true },
+      timestamp: typeof ownValue(snapshot.messages.at(-1), "timestamp") === "number"
+        ? ownValue(snapshot.messages.at(-1), "timestamp")
+        : 0,
+    });
+    return projected;
+  };
+
   const enforceBandTop = async (
     snapshot: ActiveContextSnapshot,
     ctx: any,
@@ -2003,7 +2060,7 @@ export function registerActiveContext(pi: any, options: {
       const customType = ownValue(message, "customType");
       return customType !== milestoneProjectionType && customType !== advisoryProjectionType &&
         customType !== receiptProjectionType && customType !== curationProjectionType &&
-        customType !== foldNoticeProjectionType;
+        customType !== foldNoticeProjectionType && customType !== memoryTocProjectionType;
     });
     const withdrawn = withdrawConsumedEphemeralPeeks(body);
     if (withdrawn.size && freeze.body) {
@@ -2022,6 +2079,7 @@ export function registerActiveContext(pi: any, options: {
     freeze.bodyText = stableStringify(body);
     appendReceipts(projected, snapshot);
     appendFoldNotice(projected, snapshot);
+    appendMemoryToc(projected, snapshot);
     return holdFrozen(projected);
   };
   const noteProjection = (projected: unknown[]): void => {
@@ -4012,6 +4070,102 @@ export function registerActiveContext(pi: any, options: {
         activation: "durable immediately, and it costs your window nothing: this fold is " +
           "pending, so the brief you just wrote is stored outside the projection and " +
           "reaches it only when the commit folds this span. Nothing in your context moved.",
+      });
+    }
+    if (action === "remember") {
+      // THE DIGEST'S OWN CHANNEL. A working-memory write is durable state outside the
+      // projection, so like `brief` it moves no bytes and costs no prefix cache: the
+      // table of contents the projection carries refreshes at the next commit, and this
+      // result carries the live key list in the meantime.
+      const key = String(params.key ?? "").trim();
+      if (!key) throw new Error("remember needs a key");
+      if (key.length > MEMORY_KEY_CHARS) {
+        throw new Error(`Working-memory keys have a hard ${MEMORY_KEY_CHARS}-character ` +
+          "maximum: the key is a table-of-contents line, not the note. Put the detail " +
+          "in the body.");
+      }
+      const body = String(params.body ?? "").trim();
+      if (body.length > MEMORY_BODY_CHARS) {
+        throw new Error(`Working-memory bodies have a hard ${MEMORY_BODY_CHARS}-character ` +
+          `maximum and this one is ${body.length}. Split the entry, or keep the part ` +
+          "that changes and let the transcript carry the rest: folded material stays " +
+          "losslessly recoverable by peek.");
+      }
+      const held = persistence.state!.memory ?? [];
+      const existing = held.find((entry) => entry.key === key);
+      let nextMemory: WorkingMemoryEntry[];
+      if (!body) {
+        if (!existing) {
+          throw new Error(`No working-memory entry '${key}' to remove. ${held.length
+            ? `The keys are: ${held.map((entry) => entry.key).join(", ")}.`
+            : "Working memory is empty."}`);
+        }
+        nextMemory = held.filter((entry) => entry.key !== key);
+      } else {
+        if (!existing && held.length >= MEMORY_KEYS_MAX) {
+          throw new Error(`Working memory holds its maximum of ${MEMORY_KEYS_MAX} ` +
+            "entries. Merge two entries, or remove one whose facts no longer matter " +
+            `(${toolName} {"action":"remember","key":"<key>","body":""}), then write ` +
+            "this one.");
+        }
+        const ordinal = held.reduce((max, entry) => Math.max(max, entry.ordinal), 0) + 1;
+        nextMemory = existing
+          ? held.map((entry) => entry.key === key ? { key, body, ordinal } : entry)
+          : [...held, { key, body, ordinal }];
+      }
+      const nextState = {
+        ...persistence.state!,
+        revision: persistence.state!.revision + 1,
+        ...(nextMemory.length ? { memory: nextMemory } : {}),
+      };
+      if (!nextMemory.length) delete (nextState as Partial<ActiveContextState>).memory;
+      persistence.state = nextState;
+      await persistManual(nextState, action, ctx);
+      updateStatus(ctx);
+      const toc = [...nextMemory].sort((left, right) => right.ordinal - left.ordinal)
+        .map((entry) => ({ key: entry.key, chars: entry.body.length }));
+      return toolPayload({
+        version: 1,
+        action,
+        key,
+        ...(body ? { chars: body.length } : { removed: true }),
+        argumentsSha256: executionArgumentsSha256,
+        durableRevision: persistence.state!.revision,
+        entries: toc,
+        activation: body
+          ? "durable immediately, and it costs your window nothing: the body lives in " +
+            "state, this list is the live view, and the table of contents in your " +
+            "context refreshes at the next commit."
+          : "removed. The table of contents in your context refreshes at the next commit.",
+      });
+    }
+    if (action === "recall") {
+      const held = persistence.state!.memory ?? [];
+      if (!held.length) {
+        throw new Error(`Working memory is empty. Write an entry with ${toolName} ` +
+          '{"action":"remember","key":"<key>","body":"..."}.');
+      }
+      const requested = params.keys === undefined && params.key === undefined
+        ? null
+        : (denseOwnArrayValues(params.keys) ?? [params.key ?? params.keys])
+          .map((value) => String(value ?? "").trim()).filter(Boolean);
+      const entries = [...held].sort((left, right) => right.ordinal - left.ordinal);
+      const chosen = requested === null
+        ? entries
+        : entries.filter((entry) => requested.includes(entry.key));
+      if (requested !== null) {
+        const missing = requested.filter((key) => !held.some((entry) => entry.key === key));
+        if (missing.length) {
+          throw new Error(`No working-memory entr${missing.length === 1 ? "y" : "ies"} ` +
+            `${missing.join(", ")}. The keys are: ` +
+            `${entries.map((entry) => entry.key).join(", ")}.`);
+        }
+      }
+      return toolPayload({
+        version: 1,
+        action,
+        argumentsSha256: executionArgumentsSha256,
+        entries: chosen.map((entry) => ({ key: entry.key, chars: entry.body.length, body: entry.body })),
       });
     }
     throw new Error(`Unknown ${toolName} action '${action}'`);
