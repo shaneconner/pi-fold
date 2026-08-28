@@ -104,11 +104,31 @@ export function selectAutomaticChapter(
       if (endIndex > unitIndex && unit.start !== units[endIndex - 1].end) break;
       const coherentSegment = endIndex > unitIndex || first.end - first.start > 1;
       if (!coherentSegment) continue;
+      // A DISQUALIFIED RANGE DISQUALIFIES EVERY LARGER ONE, so the walk stops here rather
+      // than rediscovering the same obstruction at every remaining endIndex (issue #2,
+      // 2026-08-28). The inner loop only ever EXTENDS the range to the right, and all
+      // three conditions below are monotone under that extension: an unmapped index or an
+      // overlapping root stays inside a larger range, a claimed ref stays claimed because
+      // `claimed` is fixed for the whole walk, and a protected ref stays protected. Only
+      // `size > MAX_FOLD_SPAN_CHARS` bounded this loop, and these three `continue`s skipped
+      // the sizing that would have hit it, so an obstruction near the start of the window
+      // let the walk run to the end of `units` for every start: O(units^2) iterations doing
+      // O(span) work each. Instrumented on a 549KB window, ONE context event ran 457,986
+      // inner iterations and allocated 98,811,691 FoldPart objects, of which 456,724
+      // iterations (99.7 percent) died on the `claimed` check and only 72 ever reached the
+      // sizing. That is 42 seconds of CPU at 824KB, ungated by occupancy, on every event.
+      // With the walk stopped at the first obstruction the same event costs 377ms.
+      //
+      // This is 00dfeb3's defect one layer out. That commit memoized `orderedRoots` to kill
+      // the O(roots x folds) rebuild INSIDE each iteration and its own comment named "a walk
+      // that is quadratic in units" as the standing cost; this is that walk. Nothing about
+      // WHICH candidate is selected changes: every iteration this skips would have been
+      // skipped by the same condition.
       const parts = partsForRange(snapshot, state, first.start, unit.end - 1, allowedChildren);
-      if (!parts || parts.some((part) => part.kind === "fold" && state.expanded.includes(part.foldId))) continue;
+      if (!parts || parts.some((part) => part.kind === "fold" && state.expanded.includes(part.foldId))) break;
       const refs = candidateSourceRefs(parts, state);
-      if (claimed.size && refs.some((ref) => claimed.has(objectRefKey(ref)))) continue;
-      if (refsProtected(refs, state, snapshot)) continue;
+      if (claimed.size && refs.some((ref) => claimed.has(objectRefKey(ref)))) break;
+      if (refsProtected(refs, state, snapshot)) break;
       const size = bytes(encodedFoldSource(snapshot, state, parts, "chapter"));
       const biteSized = size <= MAX_FOLD_SPAN_CHARS || endIndex === unitIndex;
       // ACCUMULATE UNTIL OVER, never cut to hit the number. The walk grows the span one

@@ -15055,6 +15055,121 @@ async function gateRefKeyMatchesTheSerializer() {
 	return { strings, fieldShapes: shapes, format: "sessionId,entryId,role in own-property order" };
 }
 
+/**
+ * A DISQUALIFIED RANGE DISQUALIFIES EVERY LARGER ONE
+ *
+ * `selectAutomaticChapter` grows a range one unit at a time and stops at the first
+ * obstruction. That is only sound because all three of its disqualifying conditions are
+ * MONOTONE under extension to the right, and this gate pins that law rather than the
+ * `break` that rests on it: an unmapped index or an overlapping root stays inside a larger
+ * range, a claimed ref stays claimed because `claimed` is fixed for the whole walk, and a
+ * protected ref stays protected. Make any one of them non-monotone and the walk starts
+ * missing candidates, silently, in a place no fold record would show it.
+ *
+ * It was three `continue`s until 2026-08-28 (issue #2: a reporter pegged at 80 percent for
+ * forty minutes on a 467KB window). They skipped the sizing that carries the loop's only
+ * bound, so one obstruction near the start of the window ran the walk to the end of `units`
+ * for every start. Instrumented at 549KB, ONE context event ran 457,986 inner iterations
+ * and allocated 98,811,691 FoldPart objects, 456,724 of them dying on the `claimed` check
+ * and 72 reaching the sizing; 42 seconds of CPU at 824KB, on every event, ungated by
+ * occupancy. The claim here is EQUIVALENCE, so the gate also runs the pre-fix exhaustive
+ * walk beside the shipped one and requires the same candidate, and refuses to pass on a
+ * fixture that never obstructs, which would make both halves vacuous.
+ */
+async function gateGrowingRangeStopsAtTheFirstObstruction() {
+	const built = makeFixture({ turns: 24, resultChars: 3_000, tools: true });
+	const snapshot = epochSnapshot(built);
+	const state = context.emptyActiveContextState(built.sessionId);
+	const units = context.chapterUnits(snapshot);
+	const matureEnd = context.staleSpanMatureEnd(snapshot.messages);
+	assert(units.length >= 8, "The fixture must offer a walk worth bounding");
+
+	// The three conditions, read exactly as the walk reads them.
+	const disqualified = (start, end, claimed) => {
+		const parts = context.partsForRange(snapshot, state, start, end, context.NO_FOLD_KINDS);
+		if (!parts || parts.some((part) => part.kind === "fold" && state.expanded.includes(part.foldId))) {
+			return "parts";
+		}
+		const refs = context.candidateSourceRefs(parts, state);
+		if (claimed.size && refs.some((ref) => claimed.has(json.objectRefKey(ref)))) return "claimed";
+		if (context.refsProtected(refs, state, snapshot)) return "protected";
+		return null;
+	};
+
+	// THE LAW. Claim the first unit's refs so the `claimed` branch is live, which is the
+	// branch that took 99.7 percent of the iterations in the field.
+	const seedParts = context.partsForRange(snapshot, state, units[0].start, units[0].end - 1, context.NO_FOLD_KINDS);
+	const claimed = new Set((seedParts ?? []).map((part) => json.objectRefKey(part.ref)));
+	assert(claimed.size > 0, "The fixture must supply a claimed ref, or the hot branch is never driven");
+
+	let monotonePairs = 0;
+	let obstructedStarts = 0;
+	let iterationsSaved = 0;
+	for (let unitIndex = 0; unitIndex < units.length; unitIndex += 1) {
+		if (units[unitIndex].end > matureEnd) break;
+		let firstObstruction = -1;
+		for (let endIndex = unitIndex; endIndex < units.length; endIndex += 1) {
+			if (units[endIndex].end > matureEnd) break;
+			if (endIndex > unitIndex && units[endIndex].start !== units[endIndex - 1].end) break;
+			const reason = disqualified(units[unitIndex].start, units[endIndex].end - 1, claimed);
+			if (firstObstruction >= 0) {
+				// Past the first obstruction every larger range must STILL be disqualified.
+				assert(reason !== null,
+					`A range disqualified at ${firstObstruction} qualified again at ${endIndex}: ` +
+					"the growing-range walk may no longer stop at the first obstruction");
+				monotonePairs += 1;
+				iterationsSaved += 1;
+				continue;
+			}
+			if (reason !== null) { firstObstruction = endIndex; obstructedStarts += 1; }
+		}
+	}
+	// Non-vacuity: a fixture that never obstructs proves neither half.
+	assert(obstructedStarts > 0, "No range was ever disqualified, so the law was never tested");
+	assert(iterationsSaved > 0, "No range extended past an obstruction, so stopping there is unproven");
+
+	// AND THE EQUIVALENCE. The pre-fix walk, `continue` for `continue`, must choose what the
+	// shipped one chooses. This is the whole reason the change is allowed to be invisible.
+	const exhaustive = (claimedSet) => {
+		for (let unitIndex = 0; unitIndex < units.length; unitIndex += 1) {
+			const first = units[unitIndex];
+			if (first.end > matureEnd) break;
+			let best = null;
+			for (let endIndex = unitIndex; endIndex < units.length; endIndex += 1) {
+				const unit = units[endIndex];
+				if (unit.end > matureEnd) break;
+				if (endIndex > unitIndex && unit.start !== units[endIndex - 1].end) break;
+				if (!(endIndex > unitIndex || first.end - first.start > 1)) continue;
+				const parts = context.partsForRange(snapshot, state, first.start, unit.end - 1, context.NO_FOLD_KINDS);
+				if (!parts || parts.some((part) => part.kind === "fold" && state.expanded.includes(part.foldId))) continue;
+				const refs = context.candidateSourceRefs(parts, state);
+				if (claimedSet.size && refs.some((ref) => claimedSet.has(json.objectRefKey(ref)))) continue;
+				if (context.refsProtected(refs, state, snapshot)) continue;
+				// The runtime's own `bytes`, which measures a string directly; `bytesOf` would
+				// JSON-quote it and trip the size break early, comparing the walk to a fiction.
+				const size = context.bytes(context.encodedFoldSource(snapshot, state, parts, "chapter"));
+				const biteSized = size <= policyModule.MAX_FOLD_SPAN_CHARS || endIndex === unitIndex;
+				if (size >= snapshot.thresholds.minFoldChars && biteSized) best = { kind: "chapter", parts, sourceRefs: refs };
+				if (size > policyModule.MAX_FOLD_SPAN_CHARS) break;
+			}
+			if (best) return best;
+		}
+		return null;
+	};
+	// Driven with and without claims, because the two take different exits.
+	let agreements = 0;
+	for (const [note, claimedSet] of [["unclaimed", new Set()], ["claimed", claimed]]) {
+		const shipped = context.selectAutomaticChapter(snapshot, state, claimedSet);
+		const reference = exhaustive(claimedSet);
+		assert.equal(json.stableStringify(shipped), json.stableStringify(reference),
+			`The bounded walk chose a different chapter than the exhaustive one (${note})`);
+		agreements += 1;
+	}
+	assert(context.selectAutomaticChapter(snapshot, state, new Set()) !== null,
+		"The fixture must yield a chapter, or the equivalence compares null to null");
+	return { units: units.length, obstructedStarts, monotonePairs, iterationsSaved, agreements };
+}
+
 const gates = [
   [1, "Registration, parse and deployment branding", gateRegistrationAndBranding],
   [2, "The durable record: lattice, chain and rollback", gateDurableRecord],
@@ -15178,6 +15293,7 @@ const gates = [
   [148, "The tool-call diet", gateToolCallDiet],
   [149, "The working memory", gateWorkingMemory],
   [150, "The ref key matches the serializer", gateRefKeyMatchesTheSerializer],
+  [151, "A growing range stops at the first obstruction", gateGrowingRangeStopsAtTheFirstObstruction],
   // 143 is retired with the agent's `fold` verb (Shane 2026-08-23). Its subject was the
   // ANSWER a mark comes back with: the drop the next commit has to make, what the mark
   // covers of it, and what the ladder takes otherwise, all so an agent choosing spans could
