@@ -110,6 +110,16 @@ export const COMMIT_RECLAIM_FLOOR_SHARE = 0.02;
  */
 export const MAX_PINNED_SHARE = 0.25;
 
+/**
+ * THE TOOL-CALL DIET's default share (Shane 2026-08-28, on the sol-20260826-full2
+ * verdict). Every fold repetition from 3 onward ran 0.50 and the campaign's headline
+ * results are all from that shape, so the shipped default is the measured value rather
+ * than the absence of one. A deployment turns the diet off with an explicit 0, which is
+ * why the option's range is [0, 1) instead of the open interval it shipped with: one
+ * meaning per value, and no absent-means-off special case.
+ */
+export const DEFAULT_TOOL_FOLD_THRESHOLD = 0.50;
+
 export interface ActiveContextThresholds {
   maxTarget: number;
   minTarget: number;
@@ -143,9 +153,10 @@ export const MINIMUM_FOLD_CHARS_FLOOR = 2_000;
 
 export const DEFAULT_THRESHOLDS: Readonly<ActiveContextThresholds> = Object.freeze({
   maxTarget: 0.80,
-  // 0.40, up from 0.20 (Shane 2026-08-23: "we change the thresholds to what hits that
-  // 100k/250k or so"). This is the only threshold that moved, because the corpus says
-  // the top of the band was already where he wants it and only the floor was wrong.
+  // 0.20 (Shane 2026-08-28, on the sol-20260826-full2 verdict). This number went 0.20 ->
+  // 0.40 on 2026-08-23 and came back on the campaign that was still running when it
+  // moved, so both readings are recorded here rather than one quietly replacing the
+  // other. The top of the band is not in question and never was.
   //
   // Read against the 19 mature sealed pifold runs that share a 251,520-token budget,
   // where the trigger sat at 0.80 of it, 201,216 tokens. Peak occupancy per run came in
@@ -155,26 +166,28 @@ export const DEFAULT_THRESHOLDS: Readonly<ActiveContextThresholds> = Object.free
   // So 0.80 already delivers a 250k top, and raising it toward 250k directly would put
   // the median peak over the budget and into the fence.
   //
-  // The floor was the miss. Across 206 commit landings the session came to rest at a
-  // median 79,034 tokens, and 153 of the 206 landed below 100,000. Landings sit ABOVE
-  // the aim rather than at it, since the class law and the available material both
-  // outrank it, so moving the aim to 0.40 sets a floor near where it lands rather than
-  // far under it: 102,246 tokens against a default 272,000-token descriptor, 100,608
-  // against the harness budget.
+  // The 2026-08-23 case for 0.40 was that it seats the floor near where commits actually
+  // land: across 206 commit landings the session came to rest at a median 79,034 tokens,
+  // 153 of the 206 below 100,000, and landings sit ABOVE the aim rather than at it, since
+  // the class law and the available material both outrank it. That was bought knowing the
+  // price, about a fifth more epochs and so a fifth more full-prefix rewrites, to hold
+  // 100k of raw context across the whole cycle.
   //
-  // 0.40 also makes the aim reachable for the first time. MAX_PINNED_SHARE is 0.25, so a
-  // fully pinned session legally holds more than a 0.20 aim asks for and the target was
-  // a number the class law outranked by construction. The epoch receipt still reports
-  // targetBudgetShare beside actualFreedBudgetShare, so any remaining shortfall stays a
-  // readable fact per epoch rather than a silent miss.
+  // The campaign priced the trade and it went the other way. The commit rewrite tax is
+  // minTarget / (maxTarget - minTarget), because every commit re-reads roughly
+  // minTarget x budget of prefix uncached and a shallower cut buys less runway for nearly
+  // the same bill: 1.0 at 0.80/0.40 against 0.33 at 0.80/0.20. Every sol-20260826-full2
+  // fold repetition from 3 onward ran 0.80/0.20, including the fold-plus-canon rep 5 that
+  // answered 14 of 16 with nothing wrong at $100.85 against native-plus-canon's $201.70.
+  // The shipped default is now the configuration that was measured.
   //
-  // The cost is paid in cadence and it is the 2026-08-14 argument running backwards: a
-  // shallower cut buys less runway for nearly the same commit, so the refill distance
-  // goes from the observed 0.314 -> 0.80 to 0.40 -> 0.80 and the same session shape owes
-  // about a fifth more epochs, which is a fifth more full-prefix rewrites. Shane bought
-  // that deliberately: 100k of raw context held across the whole cycle is what he is
-  // paying for. The validation laws below bind exactly as before.
-  minTarget: 0.40,
+  // THE KNOWN LIMIT, unchanged and still true: MAX_PINNED_SHARE is 0.25, so a fully
+  // pinned session legally holds more than a 0.20 aim asks for, and there the commit
+  // stops short of its target by construction rather than by fault. The epoch receipt
+  // reports targetBudgetShare beside actualFreedBudgetShare, so the shortfall stays a
+  // readable fact per epoch rather than a silent miss. The validation laws below bind
+  // exactly as before.
+  minTarget: 0.20,
   consolidateAfter: 10,
   minFoldChars: 8_000,
 });

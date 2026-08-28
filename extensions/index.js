@@ -28,8 +28,8 @@ const REFUSED_OPTIONS = Object.freeze({
   guidance: "deleted 2026-08-23: it switched the copy that taught the agent to " +
     "CHOOSE SPANS, and the agent does not choose spans. The runtime cuts at the frontier and " +
     "the agent annotates what it cut, so the guidance it switched is replaced wholesale by " +
-    "the post-fold notice, which is not optional: a fold the agent is never told about is one " +
-    "it can never brief",
+    "the post-fold notice. That notice has its own option, postFoldNotice, which defaults " +
+    "false: the deterministic shape is what the campaign measured",
   toolName: "the deployment identity is hardwired to pi-fold: the tool is pi_fold_context",
   toolLabel: "the deployment identity is hardwired to pi-fold",
   brandNoun: "the deployment identity is hardwired to pi-fold",

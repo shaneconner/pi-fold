@@ -6428,12 +6428,22 @@ async function gateQuietRuntimeStormReplay() {
   // this share already puts the top of the band at 237,399 of a 251,520 budget, and
   // raising it toward that number directly would push the median peak into the fence.
   assert.equal(context.DEFAULT_THRESHOLDS.maxTarget, 0.80);
-  // 0.40, up from 0.20 (Shane 2026-08-23): the same corpus put 153 of 206 commit
-  // landings below 100,000 tokens, and the floor is what he was buying. It is also the
-  // first aim above MAX_PINNED_SHARE, so a fully pinned session can now reach it.
-  assert.equal(context.DEFAULT_THRESHOLDS.minTarget, 0.40);
-  assert(context.DEFAULT_THRESHOLDS.minTarget > context.MAX_PINNED_SHARE,
-    "The commit aims below what a fully pinned session legally holds");
+  // 0.20 (Shane 2026-08-28, on the sol-20260826-full2 verdict). It went to 0.40 on
+  // 2026-08-23 to seat the floor near where commits land, and came back when the campaign
+  // priced the cadence: the commit rewrite tax is minTarget / (maxTarget - minTarget),
+  // 1.0 at 0.80/0.40 against 0.33 at 0.80/0.20, and every fold repetition from 3 onward
+  // ran the shallower floor.
+  assert.equal(context.DEFAULT_THRESHOLDS.minTarget, 0.20);
+  // THE KNOWN LIMIT, ASSERTED RATHER THAN AVOIDED. The 0.40 default was partly chosen to
+  // sit above MAX_PINNED_SHARE so a fully pinned session could reach the aim; 0.20 does
+  // not, and that is the accepted state rather than an oversight. MAX_PINNED_SHARE is 0.25,
+  // so a fully pinned session legally holds more than the aim asks for and the commit
+  // stops short of it by construction rather than by fault. Pinned here so that moving
+  // the aim back above the cap has to confront this note, and so that the shortfall is
+  // known rather than discovered: the epoch reports targetBudgetShare beside
+  // actualFreedBudgetShare, which is where an unreachable aim shows up as a stated fact.
+  assert(context.DEFAULT_THRESHOLDS.minTarget < context.MAX_PINNED_SHARE,
+    "The aim moved above the pinned-share cap again; the note beside it is now stale");
   assert.equal(context.COMMIT_RECLAIM_FLOOR_SHARE, 0.02);
 
   // Plain epoch scheduling is unchanged: the cadence trigger is the guided-mode deletion.
@@ -12437,7 +12447,18 @@ async function gateFoldNoticeInvitesBriefs() {
 
   // BELOW THE BATCH IT SAYS NOTHING. One cut is not worth a turn's attention, and a
   // carrier that speaks on every cut is one the agent learns to skip.
-  const thin = await epochToolRuntime({ turns: 2, resultChars: 9_000 });
+  // THE DEFAULT IS SILENT (Shane 2026-08-28). postFoldNotice defaults false, the shape
+  // the campaign measured, so every fixture below asks for the invitation explicitly and
+  // this is the claim that the unasked-for runtime never speaks at all.
+  const unasked = await epochToolRuntime({ turns: 7, resultChars: 9_000 });
+  await measure(unasked, 20_000, 100_000);
+  const unaskedCuts = await frontierCuts(unasked);
+  assert(unaskedCuts.length >= context.UNBRIEFED_FOLDS_BEFORE_NOTICE,
+    `The default-silence fixture cut ${unaskedCuts.length} folds, too few to have spoken`);
+  assert.equal(notices(await project(unasked)).length, 0,
+    "The notice spoke on a runtime that never asked for it");
+
+  const thin = await epochToolRuntime({ turns: 2, resultChars: 9_000, postFoldNotice: true });
   await measure(thin, 20_000, 100_000);
   const thinCuts = await frontierCuts(thin);
   assert(thinCuts.length > 0 && thinCuts.length < context.UNBRIEFED_FOLDS_BEFORE_NOTICE,
@@ -12450,7 +12471,7 @@ async function gateFoldNoticeInvitesBriefs() {
   // a pass, so a fixture inside that bound has its whole frontier standing when the
   // notice first speaks and the naming can be checked for completeness rather than for
   // overlap.
-  const runtime = await epochToolRuntime({ turns: 7, resultChars: 9_000 });
+  const runtime = await epochToolRuntime({ turns: 7, resultChars: 9_000, postFoldNotice: true });
   await measure(runtime, 20_000, 100_000);
   const cut = await frontierCuts(runtime);
   assert(cut.length >= context.UNBRIEFED_FOLDS_BEFORE_NOTICE &&
@@ -14267,8 +14288,8 @@ async function gateDeadTurnIsAClosedTurn() {
 /**
  * GATE 148: THE TOOL-CALL DIET (2026-08-24, Shane's ToolFoldThreshold).
  *
- * One new public option, `toolFoldThreshold` (a share strictly between 0 and 1, off when
- * absent): at COMMIT TIME ONLY, tool results inside the oldest `toolFoldThreshold` share
+ * One new public option, `toolFoldThreshold` (a share in [0, 1), default 0.50 since
+ * 2026-08-28 and off at 0): at COMMIT TIME ONLY, tool results inside the oldest share
  * of the projected window are clipped IN VIEW to an identified head with the cut stated
  * and the recovery named, the full bytes staying peek-recoverable behind the entry id
  * the marker carries. Small results are cheap and stay whole (toolClipFloorChars); the
@@ -14475,9 +14496,19 @@ async function gateClipCommitRendersAndRecovers() {
     json.stableStringify(projected),
     "Two passes over unchanged clips rendered differently");
 
-  // OFF MEANS OFF: the same drive with no threshold commits the same folds with zero
-  // clips and no marker, and the durable state differs by the clip set alone.
-  const off = await driveClippedCommit();
+  // THE DEFAULT IS THE MEASURED VALUE (Shane 2026-08-28): an unconfigured runtime runs
+  // the diet at DEFAULT_TOOL_FOLD_THRESHOLD rather than not at all, so absence is no
+  // longer how a deployment says no.
+  assert.equal(context.DEFAULT_TOOL_FOLD_THRESHOLD, 0.50);
+  const unconfigured = await driveClippedCommit();
+  const unconfiguredFired = clipCommitsOf(unconfigured.runtime);
+  assert.equal(unconfiguredFired.length, 1);
+  assert(unconfiguredFired[0].clipped_results > 0,
+    "An unconfigured runtime did not run the diet its default names");
+
+  // OFF MEANS OFF, and 0 is how it is said: the same drive commits the same folds with
+  // zero clips and no marker, and the durable state differs by the clip set alone.
+  const off = await driveClippedCommit({ retiredOptions: { toolFoldThreshold: 0 } });
   const offFired = clipCommitsOf(off.runtime);
   assert.equal(offFired.length, 1);
   assert.equal(offFired[0].clipped_results, 0, "The diet ran with no threshold configured");
@@ -14530,15 +14561,16 @@ async function gateClipsNeverTouchTheFoldedBytes() {
 
 async function gateClipOptionIsValidated() {
   const built = makeFixture({ turns: 2, resultChars: 2_000 });
-  const refused = [0, 1, -0.25, 1.5, "0.5", Number.NaN];
+  const refused = [1, -0.25, 1.5, "0.5", Number.NaN];
   for (const value of refused) {
     assert.throws(
       () => makeRuntime(built, { retiredOptions: { toolFoldThreshold: value } }),
-      /toolFoldThreshold must be a share strictly between 0 and 1/,
+      /toolFoldThreshold must be a share in \[0, 1\)/,
       `toolFoldThreshold ${String(value)} was accepted`);
   }
-  // And the whole open interval is accepted, through the package surface gate 96 pins.
-  for (const value of [0.05, 0.5, 0.937]) {
+  // The half-open interval is accepted, 0 included: since 2026-08-28 the default is the
+  // measured 0.50, so absence no longer means off and 0 is how a deployment says it.
+  for (const value of [0, 0.05, 0.5, 0.937]) {
     makeRuntime(built, { retiredOptions: { toolFoldThreshold: value } });
   }
   return { refused: refused.length };

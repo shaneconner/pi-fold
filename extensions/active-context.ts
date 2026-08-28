@@ -105,6 +105,7 @@ import {
   ESTIMATED_BYTES_PER_TOKEN,
   entryTypeNamespace,
   MAX_FOLD_SPAN_CHARS,
+  DEFAULT_TOOL_FOLD_THRESHOLD,
   MAX_PINNED_SHARE,
   PEEK_DEFAULT_MAX_BYTES,
   peekIsEphemeral,
@@ -228,18 +229,20 @@ export function registerActiveContext(pi: any, options: {
   blacklistAutoFoldTools?: ReadonlySet<string>;
   providerInputBudget?: number;
   thresholds?: ActiveContextThresholds;
-  /** THE TOOL-CALL DIET's share point (2026-08-24): tool results in the oldest
-   *  toolFoldThreshold share of the projected window are clipped IN VIEW at each
-   *  commit, identified head kept, full bytes peek-recoverable behind the entry id
-   *  the marker names. Off when absent. */
+  /** THE TOOL-CALL DIET's share point (2026-08-24; default 0.50 since 2026-08-28, Shane,
+   *  on the sol-20260826-full2 verdict): tool results in the oldest toolFoldThreshold
+   *  share of the projected window are clipped IN VIEW at each commit, identified head
+   *  kept, full bytes peek-recoverable behind the entry id the marker names. A share in
+   *  [0, 1), where 0 turns the diet off; 0.50 is what every fold repetition from 3 onward
+   *  ran, so the default is the value that was measured rather than the absence of one. */
   toolFoldThreshold?: number;
-  /** THE INVITATION SWITCH (public since 2026-08-27; Shane, on the fold-vs-compaction
-   *  verdict: the deterministic condition won the campaign, so a deployment must be able
-   *  to run the winning shape). Default true: every fold announces itself with a standing
-   *  invitation for the agent to improve the brief. false silences the notice, so no
-   *  carrier ever invites a brief and every fold goes out with the runtime's own
-   *  deterministic words; the agent verbs stay on the tool, so an agent that finds it
-   *  can still annotate what it reads. */
+  /** THE INVITATION SWITCH (public since 2026-08-27; DEFAULT FALSE since 2026-08-28,
+   *  Shane, on the sol-20260826-full2 verdict). false is the deterministic shape the
+   *  campaign measured and the one it recommends: no carrier ever invites a brief and
+   *  every fold goes out with the runtime's own words, which drew 14, 14, 9 and 8 correct
+   *  against the invited condition's 3. true restores the standing invitation for the
+   *  agent to improve a brief. Either way the agent verbs stay on the tool, so an agent
+   *  that finds a fold can still annotate what it reads. */
   postFoldNotice?: boolean;
   /** THE WORKING MEMORY (Shane, 2026-08-26): a session-scoped ordered dictionary the
    *  agent maintains beside the fold index. `remember` writes or removes an entry,
@@ -261,19 +264,18 @@ export function registerActiveContext(pi: any, options: {
       "notice, false ships every fold with the runtime's deterministic brief and no " +
       "carrier inviting the agent to improve it");
   }
-  const postFoldNotice = options.postFoldNotice ?? true;
+  const postFoldNotice = options.postFoldNotice ?? false;
   if (options.workingMemory !== undefined && typeof options.workingMemory !== "boolean") {
     throw new Error("workingMemory must be a boolean: it enables the session-scoped " +
       "working-memory dictionary and its two actions, remember and recall");
   }
   const workingMemory = options.workingMemory === true;
-  const toolFoldThreshold = options.toolFoldThreshold;
-  if (toolFoldThreshold !== undefined &&
-      (typeof toolFoldThreshold !== "number" || !Number.isFinite(toolFoldThreshold) ||
-       toolFoldThreshold <= 0 || toolFoldThreshold >= 1)) {
-    throw new Error("toolFoldThreshold must be a share strictly between 0 and 1: it names " +
-      "the oldest fraction of the projected window whose tool results are clipped in view " +
-      "at each commit");
+  const toolFoldThreshold = options.toolFoldThreshold ?? DEFAULT_TOOL_FOLD_THRESHOLD;
+  if (typeof toolFoldThreshold !== "number" || !Number.isFinite(toolFoldThreshold) ||
+      toolFoldThreshold < 0 || toolFoldThreshold >= 1) {
+    throw new Error("toolFoldThreshold must be a share in [0, 1): it names the oldest " +
+      "fraction of the projected window whose tool results are clipped in view at each " +
+      "commit, and 0 turns the diet off");
   }
   for (const removed of ["foldScheduling", "foldPeekResults", "toolActions"]) {
     if (Object.hasOwn(options, removed)) {
@@ -1163,7 +1165,6 @@ export function registerActiveContext(pi: any, options: {
 
   const persistManual = async (
     next: ActiveContextState,
-    action: Exclude<ActiveContextToolAction, "status">,
     ctx: any,
   ): Promise<void> => {
     const stateAtEntry = persistence.state ? clone(persistence.state) : null;
@@ -2392,7 +2393,7 @@ export function registerActiveContext(pi: any, options: {
     // the one paid rewrite carries both and no non-commit pass ever moves a byte. The
     // full bytes stay in the transcript behind each clip's entry id.
     let clippedResults = 0;
-    if (toolFoldThreshold !== undefined) {
+    if (toolFoldThreshold > 0) {
       const clipAdditions = toolClipAdditions({
         snapshot,
         state: result.state,
@@ -3342,7 +3343,7 @@ export function registerActiveContext(pi: any, options: {
     const removed = before.filter((mark) => requested.has(mark.id));
     const unknown = ids.filter((id) => !before.some((mark) => mark.id === id));
     if (unknown.length) throw new Error(`No pending mark named ${unknown.join(", ")}`);
-    await persistManual(withPendingMarks(persistence.state!, kept), "unmark", ctx);
+    await persistManual(withPendingMarks(persistence.state!, kept), ctx);
     updateStatus(ctx);
     return removed as Array<Record<string, unknown>>;
   };
@@ -3372,7 +3373,7 @@ export function registerActiveContext(pi: any, options: {
           "folding keeps entries exactly recoverable without pinning them.");
       }
     }
-    await persistManual(nextProtection, pin ? "pin" : "unpin", ctx);
+    await persistManual(nextProtection, ctx);
     emit("context.pin", {
       pin,
       ids: ids.join(","),
@@ -3813,7 +3814,7 @@ export function registerActiveContext(pi: any, options: {
             briefs: { ...(persistence.state.briefs ?? {}), ...correctedBriefs },
           };
         }
-        await persistManual(persistence.state, action, ctx);
+        await persistManual(persistence.state, ctx);
         updateStatus(ctx);
         return toolPayload({
           version: 1,
@@ -3851,7 +3852,7 @@ export function registerActiveContext(pi: any, options: {
       if (!Object.keys(briefs).length) delete next.briefs;
       const leases = { ...next.leases };
       delete leases[id];
-      await persistManual({ ...next, leases }, action, ctx);
+      await persistManual({ ...next, leases }, ctx);
       updateStatus(ctx);
       return toolPayload({
         version: 1,
@@ -3897,11 +3898,7 @@ export function registerActiveContext(pi: any, options: {
         delete leases[id];
         next = { ...next, leases };
       }
-      await persistManual(
-        next,
-        action,
-        ctx,
-      );
+      await persistManual(next, ctx);
       updateStatus(ctx);
       return toolPayload({
         version: 1,
@@ -4007,7 +4004,7 @@ export function registerActiveContext(pi: any, options: {
           : mark),
       };
       persistence.state = nextState;
-      await persistManual(nextState, action, ctx);
+      await persistManual(nextState, ctx);
       updateStatus(ctx);
       emit("context.brief", { id, chars: text.length, origin: "agent" });
       const accounting = markAccounting(snapshot, persistence.state!);
@@ -4080,7 +4077,7 @@ export function registerActiveContext(pi: any, options: {
       };
       if (!nextMemory.length) delete (nextState as Partial<ActiveContextState>).memory;
       persistence.state = nextState;
-      await persistManual(nextState, action, ctx);
+      await persistManual(nextState, ctx);
       updateStatus(ctx);
       const toc = [...nextMemory].sort((left, right) => right.ordinal - left.ordinal)
         .map((entry) => ({ key: entry.key, chars: entry.body.length }));
@@ -4437,7 +4434,7 @@ export function registerActiveContext(pi: any, options: {
           // Refuse BEFORE persisting: a refused mark leaves state untouched and
           // persisting it would be a no-op write against the same-state projection.
           if (mark.ok !== true) throw new Error(String(mark.reason ?? "the span was refused"));
-          await persistManual(staged, "fold", ctx);
+          await persistManual(staged, ctx);
           updateStatus(ctx);
         });
         safeNotify(ctx, "Staged user mark(s); they apply at the next commit epoch.", "info");
