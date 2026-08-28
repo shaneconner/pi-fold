@@ -71,6 +71,7 @@ import {
   deriveFoldParents,
   flattenFoldRefs,
   foldIdFor,
+  foldRecordRef,
   makeFoldRecordEntry,
   makeStateCheckpoint,
   makeStateDelta,
@@ -158,6 +159,7 @@ import {
   foldMarkFor,
   ladderBrief,
   markAccounting,
+  markRewriteTokens,
   markFreedBytes,
   unmarkedRemainder,
   markClaimingRef,
@@ -914,15 +916,28 @@ export function registerActiveContext(pi: any, options: {
       if (next.folds.length > MAX_ACTIVE_FOLD_RECORDS) {
         throw new Error("Active-context fold closure exceeds persistence limit");
       }
+      // AN ALREADY-DURABLE FOLD NEEDS A DIGEST, NOT A RECORD (2026-08-28). This built the
+      // whole entry for every fold on every persist just to compare one hash and continue:
+      // `makeFoldRecordEntry` canonicalizes, hashes, then `parseFoldRecordEntry` re-validates,
+      // clones the fold again, recomputes `foldIdFor`, hashes a second time and stringifies
+      // for the wire cap. Replaying a real sealed session, 98.2 percent of 4,947 calls hit
+      // the `continue`, and 126 of 135 persists appended nothing while rebuilding all of it.
+      // `foldRecordRef` is the same digest by construction (`makeFoldRecordEntry` stores
+      // `canonicalFoldRecord`, and `stateFromFoldRefs` already matches records to refs on
+      // this equality at persistence.ts:809); gate 152 pins it. Equal digests mean
+      // byte-identical canonical bytes to a record that already passed
+      // `parseFoldRecordEntry`, so skipping the rebuild cannot reach a different verdict.
+      // Measured 85.0ms to 19.6ms at 400 folds.
       for (const fold of next.folds) {
-        const record = makeFoldRecordEntry(fold, sessionId);
-        const existing = persistence.persistedFoldRecords.get(record.foldId);
+        const ref = foldRecordRef(fold);
+        const existing = persistence.persistedFoldRecords.get(ref.id);
         if (existing) {
-          if (existing.recordSha256 !== record.recordSha256) {
-            throw new Error(`Conflicting durable active-context fold ${record.foldId}`);
+          if (existing.recordSha256 !== ref.sha256) {
+            throw new Error(`Conflicting durable active-context fold ${ref.id}`);
           }
           continue;
         }
+        const record = makeFoldRecordEntry(fold, sessionId);
         await pi.appendEntry(foldRecordEntryType, record);
         persistence.persistedFoldRecords.set(record.foldId, record);
         if (!sessionIdentityStillValid(ctx, sessionId, generationAtStart)) {
@@ -931,13 +946,20 @@ export function registerActiveContext(pi: any, options: {
         }
       }
       const wire = persistence.persistedWireVersion === 2 ? makeStateDelta(persistence.persisted, next) : makeStateCheckpoint(next);
-      if (persistence.persistedWireVersion === 2 && persistence.persistedStateSha256 !== semanticStateSha256(persistence.persisted)) {
+      // THE WIRE CARRIES BOTH DIGESTS IT JUST DERIVED (2026-08-28). `makeStateDelta` writes
+      // `baseStateSha256` from `persistence.persisted` and `stateSha256` from `next`, and
+      // nothing mutates either state between that call and here, so re-hashing two whole
+      // states was pure repetition at about 7ms per durable write. The drift check keeps its
+      // teeth: `baseStateSha256` is still derived from `persistence.persisted`, so a
+      // persisted digest that has drifted from the state it claims to describe still raises.
+      // Gate 152 pins both equalities.
+      if (wire.kind === "delta" && persistence.persistedStateSha256 !== wire.baseStateSha256) {
         throw new Error("Active-context durable base digest drift");
       }
       await pi.appendEntry(stateEntryType, wire);
       persistence.persisted = clone(next);
       persistence.persistedWireVersion = 2;
-      persistence.persistedStateSha256 = semanticStateSha256(next);
+      persistence.persistedStateSha256 = wire.stateSha256;
       persistence.state = lifecycle.shuttingDown ? null : clone(next);
       if (!sessionIdentityStillValid(ctx, sessionId, generationAtStart)) {
         if (ctx && !contextSessionMatches(ctx, sessionId)) load(ctx);
@@ -2286,6 +2308,10 @@ export function registerActiveContext(pi: any, options: {
     });
     state = wedges.state;
     const accounting = markAccounting(snapshot, state);
+    // Derived ONCE, here, against the pre-commit state both readers below report against.
+    // It left `MarkAccounting` because it serializes the whole marked tail and every other
+    // caller of `markAccounting` was paying for a number only this path reads.
+    const rewriteTokens = markRewriteTokens(snapshot, state);
     if (!accounting.pending) {
       const remainder = unmarkedRemainder(snapshot, state, projectionCharsPerToken());
       emit("context.commit", {
@@ -2443,7 +2469,7 @@ export function registerActiveContext(pi: any, options: {
       clipped_results: clippedResults,
       freed_bytes: freedBytes,
       freed_tokens: estimatedTokens(freedBytes),
-      rewrite_tokens: accounting.rewriteTokens,
+      rewrite_tokens: rewriteTokens,
       pinned_bytes: accounting.pinnedBytes,
       pinned_results: accounting.pinnedResults,
       protected_stale_bytes: pinHeld.bytes,
@@ -2515,7 +2541,7 @@ export function registerActiveContext(pi: any, options: {
       protectedStaleRefs: pinHeld.refs,
       retainedMarks: result.retained.length,
       eligibleMarks: accounting.eligibleMarks,
-      estimatedRewriteTokens: accounting.rewriteTokens,
+      estimatedRewriteTokens: rewriteTokens,
       estimatedFreedTokens: accounting.freedTokens,
       freedBudgetShare: accounting.freedBudgetShare,
       sourceBytesSaved: freedBytes,

@@ -467,8 +467,24 @@ export function validatePreparedShape(value: unknown): asserts value is Prepared
   }
 }
 
+// THE SPREAD IS THE COPY (2026-08-28). Roughly six calls per fold per persist, and only
+// `deriveFoldParents` wants a record it can write to, where it writes the TOP-LEVEL
+// `parentId` that the spread already gives it a fresh slot for. Every other caller hashes
+// and discards: `foldRecordRef`, `sameFoldRecordIdentity`, and `makeFoldRecordEntry`, whose
+// `parseFoldRecordEntry` deep-clones twice on its own.
+//
+// The digest cannot move. `safeJson` emits in `Reflect.ownKeys` order, a spread preserves
+// insertion order, and overwriting an existing key keeps it in its original position, so
+// `{ ...fold, parentId: null }` serializes to the same bytes as the cloned form.
+//
+// THE COST, STATED BECAUSE IT IS NOW LOAD-BEARING: the returned record shares every nested
+// object with its input, so "no caller mutates a canonical record's nested fields" is a rule
+// this function relies on rather than enforces. It holds today (`validateFoldForest` clones
+// at :281, `parseFoldRecordEntry` twice at :567-568, the hashing callers never write), and a
+// future caller that writes through `record.parts` would corrupt the fold it was built from.
+// Write `{ ...record, field: value }` rather than assigning into a nested one.
 export function canonicalFoldRecord(fold: ActiveFold): ActiveFold {
-  return { ...clone(fold), parentId: null };
+  return { ...fold, parentId: null };
 }
 
 export function sameFoldRecordIdentity(left: ActiveFold, right: ActiveFold): boolean {
@@ -530,7 +546,12 @@ export function legacyReplayOrderStateSha256(state: ActiveContextState): string 
 
 export function sameStateProjection(left: ActiveContextState, right: ActiveContextState): boolean {
   const normalized = (value: ActiveContextState): Partial<ActiveContextState> => {
-    const normalizedState = { ...clone(value), revision: 0 } as Partial<ActiveContextState>;
+    // A SHALLOW COPY IS ENOUGH TO DELETE TOP-LEVEL KEYS (2026-08-28). `delete` on a shallow
+    // copy cannot reach the original, the normalized object never escapes this function, and
+    // the runtime already stableStringifies live un-cloned state (`semanticStateSha256`), so
+    // un-cloned state is already required to be serializer-safe. Measured 97.6ms to 82.6ms
+    // on the largest real state in the corpus, at about two calls per provider request.
+    const normalizedState = { ...value, revision: 0 } as Partial<ActiveContextState>;
     if (normalizedState.tokensSinceToolFold === 0) delete normalizedState.tokensSinceToolFold;
     if (normalizedState.leases && Object.keys(normalizedState.leases).length === 0) delete normalizedState.leases;
     if (normalizedState.pendingMarks && normalizedState.pendingMarks.length === 0) delete normalizedState.pendingMarks;
@@ -952,7 +973,16 @@ export function materializeStatePersistence(
           wire.revision <= wire.baseRevision) {
         throw new Error("Broken active-context delta chain");
       }
-      const refs = state.folds.map(foldRecordRef);
+      // THE RECORD MAP ALREADY HOLDS THIS DIGEST (2026-08-28). `foldRecordRef` canonicalizes
+      // and hashes a whole fold, and this ran once per delta entry over every standing fold:
+      // 48,715 calls in ONE load of a real sealed session, 2.6 to 3.7s of a 24 to 33s load.
+      // `records` is built by the same replay and carries the same digest verbatim. The
+      // fallback is unreachable, because the pre-scan raises on a delta before a checkpoint;
+      // it is kept so the change is exactly behaviour-preserving rather than nearly so.
+      const refs = state.folds.map((fold) => {
+        const record = records.get(fold.id);
+        return record ? { id: fold.id, sha256: record.recordSha256 } : foldRecordRef(fold);
+      });
       const byId = new Map(refs.map((ref) => [ref.id, ref]));
       for (const id of wire.removeFoldIds) {
         if (!byId.delete(id)) throw new Error(`Unknown active-context delta removal ${id}`);

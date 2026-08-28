@@ -15170,6 +15170,119 @@ async function gateGrowingRangeStopsAtTheFirstObstruction() {
 	return { units: units.length, obstructedStarts, monotonePairs, iterationsSaved, agreements };
 }
 
+/**
+ * A VALUE ALREADY DERIVED IS NOT DERIVED AGAIN
+ *
+ * Seven hot-path derivations were deleted on 2026-08-28 because something the caller was
+ * already holding carried the same answer. Each deletion rests on an EQUALITY, and none of
+ * them is self-evident from the code that now depends on it: read alone, every one of those
+ * call sites looks like it is trusting a value from somewhere else. This gate states the
+ * equalities, so a change that breaks one fails here rather than silently persisting a
+ * digest that no longer describes what it names.
+ *
+ * The deletions: `markEligibility` reads gate 113's `mappedByKey` instead of rebuilding the
+ * window's key Set per mark; `markAccounting` no longer serializes the marked tail, which
+ * moved to `markRewriteTokens` beside its two readers and to `schedulingStatus`; persist
+ * compares `foldRecordRef` against the durable record instead of rebuilding the whole entry;
+ * persist reads both state digests off the wire it just built; ledger replay reads
+ * `recordSha256` off the record map it is filling; `sameStateProjection` shallow-copies to
+ * delete six keys; `canonicalFoldRecord` spreads instead of cloning; and `pinnedPeekMass`
+ * takes the early return its two siblings already had.
+ */
+async function gateDerivedOnce() {
+	const built = makeFixture({ turns: 10, resultChars: 4_000, tools: true });
+	const snapshot = epochSnapshot(built);
+	const sessionId = built.sessionId;
+
+	// A REAL COMMITTED FOLD, not a hand-built one: the equalities below are about what persist
+	// actually writes, and a synthetic fold that `validFoldShape` would refuse proves nothing.
+	const foldRuntime = await epochToolRuntime({ turns: 10 });
+	for (const tokens of [78_000, 82_000, 86_000, 88_000]) {
+		await measureAndCommit(foldRuntime, tokens, 100_000);
+	}
+	const committed = materialized(foldRuntime).folds;
+	assert(committed.length > 0, "The fixture committed no folds, so there is no record to compare");
+	const fold = committed[0];
+
+	// 1. THE FOLD-RECORD DIGEST. Persist skips rebuilding an entry when `foldRecordRef` matches
+	// the durable record's `recordSha256`. If those two ever disagree, persist either rewrites
+	// a fold it already has or, worse, accepts one it should have refused as conflicting.
+	const entry = persistenceModule.makeFoldRecordEntry(fold, foldRuntime.built.sessionId);
+	assert.equal(persistenceModule.foldRecordRef(fold).sha256, entry.recordSha256,
+		"foldRecordRef and the durable record disagree, so persist's skip is unsound");
+	assert.equal(persistenceModule.foldRecordRef(fold).id, entry.foldId,
+		"foldRecordRef's id is not the record's foldId");
+	// A PARENTED fold must key identically, because state.folds carry parents and records do not.
+	assert.equal(persistenceModule.foldRecordRef({ ...fold, parentId: "fold_" + "d".repeat(24) }).sha256,
+		entry.recordSha256, "A fold's parent reached its record digest, so state.folds and records stop matching");
+
+	// 2. THE CANONICAL RECORD DROPPED ITS CLONE. The digest must not move, and the cost that
+	// buys, nested objects shared with the input, is asserted rather than left to be found.
+	const canonical = persistenceModule.canonicalFoldRecord(fold);
+	assert.equal(json.stableStringify(canonical), json.stableStringify({ ...structuredClone(fold), parentId: null }),
+		"canonicalFoldRecord stopped matching its cloned form");
+	assert.equal(canonical.parts, fold.parts,
+		"canonicalFoldRecord deep-copies again; the comment above it says it does not, and callers were told to spread");
+
+	// 3. THE WIRE CARRIES BOTH STATE DIGESTS. Persist reads them off the wire instead of
+	// re-hashing two whole states, and the base one is what the drift check tests.
+	const base = context.emptyActiveContextState(sessionId);
+	const next = { ...base, revision: base.revision + 1, expanded: ["fold_x"] };
+	const delta = persistenceModule.makeStateDelta(base, next);
+	assert.equal(delta.kind, "delta", "makeStateDelta stopped producing a delta");
+	assert.equal(delta.baseStateSha256, persistenceModule.semanticStateSha256(base),
+		"The delta's base digest is not the base state's digest, so the drift check lost its teeth");
+	assert.equal(delta.stateSha256, persistenceModule.semanticStateSha256(next),
+		"The delta's state digest is not the next state's digest");
+	assert.equal(persistenceModule.makeStateCheckpoint(next).stateSha256,
+		persistenceModule.semanticStateSha256(next), "A checkpoint's state digest moved");
+
+	// 4. SAME-STATE PROJECTION WITHOUT THE CLONE. It must agree with the cloned form AND leave
+	// both inputs untouched, because it now normalizes shallow copies of live state.
+	const frozen = structuredClone(next);
+	assert.equal(persistenceModule.sameStateProjection(next, structuredClone(next)), true,
+		"Two equal states stopped projecting the same");
+	assert.equal(persistenceModule.sameStateProjection(next, base), false,
+		"Two different states projected the same");
+	assert.equal(json.stableStringify(next), json.stableStringify(frozen),
+		"sameStateProjection mutated the state it was handed");
+
+	// 5. THE MAPPED INDEX. `markEligibility` reads the memo; it must answer what the rebuilt
+	// Set answered, including for a ref the window does not carry.
+	const state = context.emptyActiveContextState(sessionId);
+	const inlined = new Set(snapshot.mapped.flatMap((item) => item.ref ? [json.objectRefKey(item.ref)] : []));
+	const memo = measurementModule.mappedByKey(snapshot);
+	assert.equal(memo.size, inlined.size, "The mapped memo and the rebuilt Set disagree on size");
+	let keysChecked = 0;
+	for (const key of inlined) {
+		assert(memo.has(key), `The mapped memo is missing ${key}`);
+		keysChecked += 1;
+	}
+	assert.equal(memo.has(json.objectRefKey({ sessionId, entryId: "absent", role: "user" })), false,
+		"The mapped memo claims a ref the window does not carry");
+	assert.equal(measurementModule.mappedByKey(snapshot), memo,
+		"mappedByKey stopped being derived once per snapshot object");
+
+	// 6. THE PINNED-PEEK GUARD IS EXACT, not an approximation: with nothing explicitly
+	// protected the full walk returned zero anyway, which is why the early return is allowed.
+	assert.equal(context.explicitProtectedKeys(state).size, 0, "The fixture state protects something");
+	assert.deepEqual(context.pinnedPeekMass(snapshot, state), { bytes: 0, results: 0 },
+		"pinnedPeekMass stopped returning zero on an unprotected state");
+
+	// 7. THE TAIL LEFT THE ACCOUNTING AND THE STATUS KEPT IT. Both halves matter: the field is
+	// gone from the hot object, and the surface the agent reads still publishes it.
+	const accounting = context.markAccounting(snapshot, state);
+	assert.equal("rewriteTokens" in accounting, false,
+		"The rewrite tail is back on markAccounting, which every commit-fill call pays for");
+	assert.equal(typeof context.markRewriteTokens(snapshot, state), "number",
+		"markRewriteTokens does not answer with a number");
+	return {
+		keysChecked,
+		equalities: ["foldRecordRef=recordSha256", "canonical=cloned", "wire=semantic",
+			"sameState=cloned", "mappedByKey=rebuilt", "pinnedPeek=0", "tail off accounting"],
+	};
+}
+
 const gates = [
   [1, "Registration, parse and deployment branding", gateRegistrationAndBranding],
   [2, "The durable record: lattice, chain and rollback", gateDurableRecord],
@@ -15294,6 +15407,7 @@ const gates = [
   [149, "The working memory", gateWorkingMemory],
   [150, "The ref key matches the serializer", gateRefKeyMatchesTheSerializer],
   [151, "A growing range stops at the first obstruction", gateGrowingRangeStopsAtTheFirstObstruction],
+  [152, "A value already derived is not derived again", gateDerivedOnce],
   // 143 is retired with the agent's `fold` verb (Shane 2026-08-23). Its subject was the
   // ANSWER a mark comes back with: the drop the next commit has to make, what the mark
   // covers of it, and what the ladder takes otherwise, all so an agent choosing spans could

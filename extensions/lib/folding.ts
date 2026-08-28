@@ -865,6 +865,13 @@ export function pinnedPeekMass(
   state: ActiveContextState,
 ): { bytes: number; results: number } {
   const explicitProtected = explicitProtectedKeys(state);
+  // ITS TWO SIBLINGS ALREADY RETURN HERE (2026-08-28). `protectedStaleMass` and
+  // `explicitProtectedMass` both open with this guard; this one did the whole quadratic walk
+  // and then returned zero, because every increment in its final loop is gated on
+  // `explicitProtected.has(...)`. So the guard is exact, not an approximation. It is not
+  // hypothetical either: `state.protected` is empty in all 10,521 persisted state records
+  // across 36 sealed runs, the corpus carrying no `context.pin` event at all.
+  if (!explicitProtected.size) return { bytes: 0, results: 0 };
   const folded = new Set<string>();
   for (const fold of state.folds) {
     for (const ref of flattenFoldRefs(fold, state)) folded.add(objectRefKey(ref));

@@ -220,7 +220,14 @@ export function markEligibility(
   if (span.unresolved) return span.unresolved.pending ? "protected" : "unfulfillable";
   const refs = span.refs;
   if (!refs.length) return "unfulfillable";
-  const mapped = new Set(snapshot.mapped.flatMap((item) => item.ref ? [objectRefKey(item.ref)] : []));
+  // THE MAPPED INDEX IS ALREADY DERIVED (2026-08-28). This built a fresh Set over the whole
+  // window to answer a membership question about the handful of refs in one mark's span, and
+  // `markAccounting` calls this once per pending mark while the commit fill calls
+  // `markAccounting` once per staged mark, so it was O(marks^2 x window). `mappedByKey` is
+  // gate 113's memo, keyed on the snapshot OBJECT, and `refsProtected` on the next line
+  // already depends on it being fresh: if it could serve stale, this function was already
+  // wrong. Measured 177.2ms to 41.6ms at the observed peak of 39 pending marks.
+  const mapped = mappedByKey(snapshot);
   if (refs.some((ref) => !mapped.has(objectRefKey(ref)))) return "unfulfillable";
   const blocked = refsProtected(refs, state, snapshot);
   return blocked ? "protected" : "eligible";
@@ -234,7 +241,6 @@ export interface MarkAccounting {
   freedBytes: number;
   freedTokens: number;
   freedBudgetShare: number;
-  rewriteTokens: number;
   eligibleMarks: number;
   retainedMarks: number;
   eligibleFreedBytes: number;
@@ -249,13 +255,10 @@ export function markAccounting(
   state: ActiveContextState,
 ): MarkAccounting {
   const marks = pendingMarks(state);
-  const indexByKey = new Map(snapshot.mapped.flatMap((item) =>
-    item.ref ? [[objectRefKey(item.ref), item.index] as const] : []));
   let freedBytes = 0;
   let eligibleFreedBytes = 0;
   let eligibleMarks = 0;
   let retainedMarks = 0;
-  let earliest = -1;
   for (const mark of marks) {
     const freed = markFreedBytes(snapshot, state, mark);
     freedBytes += freed;
@@ -264,15 +267,7 @@ export function markAccounting(
       eligibleMarks += 1;
       eligibleFreedBytes += freed;
     } else if (eligibility === "protected") retainedMarks += 1;
-    for (const ref of markSpanRefs(state, mark).refs) {
-      const index = indexByKey.get(objectRefKey(ref));
-      if (index === undefined) continue;
-      if (earliest < 0 || index < earliest) earliest = index;
-    }
   }
-  const rewriteBytes = earliest < 0
-    ? 0
-    : bytes(snapshot.messages.slice(earliest));
   const freedTokens = estimatedTokens(freedBytes);
   const eligibleFreedTokens = estimatedTokens(eligibleFreedBytes);
   const pinned = pinnedPeekMass(snapshot, state);
@@ -284,7 +279,6 @@ export function markAccounting(
     freedBytes,
     freedTokens,
     freedBudgetShare: snapshot.budgetTokens > 0 ? freedTokens / snapshot.budgetTokens : 0,
-    rewriteTokens: estimatedTokens(rewriteBytes),
     eligibleMarks,
     retainedMarks,
     eligibleFreedBytes,
@@ -295,6 +289,40 @@ export function markAccounting(
     pinnedBytes: pinned.bytes,
     pinnedResults: pinned.results,
   };
+}
+
+/**
+ * What one commit would make the provider re-read: the marked tail, from the earliest
+ * marked message to the end of the window.
+ *
+ * IT IS DERIVED WHERE IT IS READ (2026-08-28). This was a field on `MarkAccounting`, which
+ * meant `bytes(snapshot.messages.slice(earliest))`, a serialization of the whole marked
+ * tail, ran on EVERY accounting call: the commit fill calls one per staged mark, and the
+ * `brief` handler calls one to read `pending` alone. Two readers want the number and both
+ * already hold the snapshot and the state, so the work moved to them. A memo could not have
+ * helped: `snapshot.messages` is `clone(input.eventMessages)` (transcript.ts:531), so its
+ * elements are fresh objects on every derivation and nothing keyed on them can ever hit.
+ *
+ * `schedulingStatus` still publishes `rewriteTokens` and now derives it here, so the status
+ * surface is unchanged. It is NOT a getter on the accounting object: `schedulingStatus`
+ * spreads the accounting, and a spread evaluates getters, which would put the cost straight
+ * back on every reader it was moved away from.
+ */
+export function markRewriteTokens(
+  snapshot: ActiveContextSnapshot,
+  state: ActiveContextState,
+): number {
+  const indexByKey = new Map(snapshot.mapped.flatMap((item) =>
+    item.ref ? [[objectRefKey(item.ref), item.index] as const] : []));
+  let earliest = -1;
+  for (const mark of pendingMarks(state)) {
+    for (const ref of markSpanRefs(state, mark).refs) {
+      const index = indexByKey.get(objectRefKey(ref));
+      if (index === undefined) continue;
+      if (earliest < 0 || index < earliest) earliest = index;
+    }
+  }
+  return earliest < 0 ? 0 : estimatedTokens(bytes(snapshot.messages.slice(earliest)));
 }
 
 export function epochCommitDue(snapshot: ActiveContextSnapshot, ratio: number | null): boolean {
@@ -1112,6 +1140,11 @@ export function schedulingStatus(input: {
   return {
     mode: "epoch",
     ...accounting,
+    // The status surface keeps this field; the accounting no longer carries it. Status is a
+    // read the agent or the human asks for, so paying for the tail serialization HERE is
+    // the point of moving it: the commit fill calls `markAccounting` once per staged mark
+    // and none of those calls wants this number.
+    rewriteTokens: markRewriteTokens(input.snapshot, input.state),
     thresholds: { ...input.snapshot.thresholds },
     budgetTokens: input.snapshot.budgetTokens,
     commitDue: epochCommitDue(input.snapshot, input.ratio),
