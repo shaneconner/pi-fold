@@ -639,16 +639,24 @@ export function registerActiveContext(pi: any, options: {
       const used = measurements.lastProviderMeasurement?.tokens ?? null;
       const share = used !== null && capacity.budgetTokens > 0 ? used / capacity.budgetTokens : null;
       const parts: string[] = [];
+      // FAILURE LEADS. This line is cut to whatever width the host gives it, so the last
+      // segment is the first one a narrow terminal removes, and folding having stopped is
+      // the one state on this line a person has to act on. It was appended last.
+      if (ladder.automaticFailure) parts.push("FOLDING STOPPED");
       // Unmeasured is stated, never guessed: an estimate rendered as a fact is the habit
       // that cost a live session, and this line is the most-read surface there is.
       parts.push(share === null ? "not measured" : `${Math.round(share * 100)}% full`);
-      if (roots > 0) parts.push(`${roots} fold${roots === 1 ? "" : "s"}`);
-      if (staged > 0) parts.push(`${staged} staged`);
       const trigger = lifecycle.latestSnapshot?.thresholds.maxTarget ?? null;
-      if (share !== null && trigger !== null && share >= trigger) parts.push("commit due");
-      if (persistence.state?.prepared) parts.push("brief ready");
-      else if (ladder.preparing) parts.push("briefing");
-      if (ladder.automaticFailure) parts.push("FOLDING STOPPED");
+      // WHEN, not just how full. "68% full" only answers the second question a reader has
+      // if they already remember where the trigger sits; naming it answers both.
+      //
+      // NOT WHILE STOPPED, though: the line rendered "COMMIT DUE" and "FOLDING STOPPED"
+      // in one breath, promising the thing it was announcing would not happen.
+      if (share !== null && trigger !== null && !ladder.automaticFailure) {
+        parts.push(share >= trigger ? "COMMIT DUE" : `commit at ${Math.round(trigger * 100)}%`);
+      }
+      if (staged > 0) parts.push(`${staged} staged`);
+      if (roots > 0) parts.push(`${roots} fold${roots === 1 ? "" : "s"}`);
       ctx.ui?.setStatus?.(entryTypePrefix, `${brandNoun} ${parts.join(" · ")}`);
     } catch { }
   };
@@ -4078,8 +4086,6 @@ export function registerActiveContext(pi: any, options: {
         stagedMarks: staged.length,
         stagedTokens: staged.reduce((total, mark) =>
           total + estimatedTokens(markFreedBytes(snapshot, persistence.state!, mark)), 0),
-        briefedMarks: staged.filter((mark) => mark.briefProvenance?.kind === "supplied" ||
-          mark.briefProvenance?.kind === "augmented").length,
         pinned: persistence.state.protected.length,
         suspended: ladder.automaticFailure?.message ?? null,
         foldCommand: `/${commandNames.fold}`,
@@ -4224,12 +4230,15 @@ export function registerActiveContext(pi: any, options: {
         : null;
       const accounting = markAccounting(snapshot, state);
       return {
-        title: `pi-fold context editor · ${snapshot.sessionId.slice(0, 8)}`,
+        // NO SESSION ID. Eight hex characters of a value a person never types, on the
+        // title line of the surface, is the same defect the rows below it just lost.
+        title: `${brandNoun} window`,
         occupancy: {
           usedTokens: capacity.usedTokens,
           budgetTokens: capacity.budgetTokens,
           commitOccupancy: thresholds.maxTarget,
           commitDue: occupancy !== null && occupancy >= thresholds.maxTarget,
+          suspended: Boolean(ladder.automaticFailure),
         },
         blocks: buildFoldEditorData(snapshot, state, {
           foldRows: () => (state.folds ?? []).map((fold: any) => {

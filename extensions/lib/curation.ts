@@ -211,7 +211,6 @@ export function foldStatusText(input: {
   totalFolds: number;
   stagedMarks: number;
   stagedTokens: number;
-  briefedMarks: number;
   pinned: number;
   suspended: string | null;
   foldCommand: string;
@@ -222,7 +221,8 @@ export function foldStatusText(input: {
   const lines: string[] = [`[${brand} status]`];
 
   if (input.usedTokens === null || !(input.budgetTokens > 0)) {
-    lines.push("  Window   not measured yet; the first provider response sets it.");
+    // "provider" is infrastructure vocabulary and "sets it" names no observable event.
+    lines.push("  Window   not measured yet; the first model response will measure it.");
   } else {
     const share = input.usedTokens / input.budgetTokens;
     const filled = Math.max(0, Math.min(STATUS_BAR_WIDTH, Math.round(share * STATUS_BAR_WIDTH)));
@@ -232,40 +232,79 @@ export function foldStatusText(input: {
     const commitAt = input.commitAtShare * input.budgetTokens;
     // The headroom is what a person actually wants: not the trigger's share, but how much
     // further this session goes before anything happens to it.
-    lines.push(share >= input.commitAtShare
-      ? `           At the commit point (${Math.round(input.commitAtShare * 100)}%); ` +
-        `the next pass folds down toward ${Math.round(input.aimShare * 100)}%.`
-      : `           Commits at ${Math.round(input.commitAtShare * 100)}%, ` +
-        `${n(commitAt - input.usedTokens)} tokens away.`);
+    //
+    // A SUSPENDED SESSION IS PROMISED NOTHING. This line used to say "the next pass folds
+    // down toward 20%" one line above "Automatic folding is suspended", so the surface
+    // contradicted itself about the only thing the reader opened it to find out.
+    lines.push(input.suspended
+      ? `           At the ${Math.round(input.commitAtShare * 100)}% commit point.`
+      : share >= input.commitAtShare
+        ? `           At the ${Math.round(input.commitAtShare * 100)}% commit point; ` +
+          `folding now targets ${Math.round(input.aimShare * 100)}%.`
+        // "Commits at 80%" reads for a beat as a plural noun, or as a verb with no
+        // subject, and the missing subject is the PRODUCT: no surface anywhere said the
+        // runtime folds BY ITSELF, so a reader assembling this line with "/fold commits
+        // them now" concludes they have installed a manual tool.
+        : `           Folds automatically at ${Math.round(input.commitAtShare * 100)}%; ` +
+          `${n(commitAt - input.usedTokens)} tokens away.`);
+  }
+  // THE STOP SITS DIRECTLY UNDER THE WINDOW, not below three rows of routine counts.
+  // The order answers the reader's questions in the order they ask them: are we at the
+  // threshold, will anything fold, and why not.
+  if (input.suspended) {
+    lines.push("  STOPPED  Automatic folding is suspended.");
+    lines.push(`           Reason: ${oneLine(input.suspended, 160)}`);
   }
 
+  // VISIBLE FIRST, AND THE UNIT NAMED. The always-on line counts visible roots and this
+  // one led with the total, so the two surfaces looked like they disagreed about how many
+  // folds exist. "Top level" is tree-implementation language; "visible" is what a reader
+  // can check against the editor in front of them.
   lines.push(input.totalFolds === 0
     ? "  Folded   nothing yet."
-    : `  Folded   ${n(input.totalFolds)} fold${input.totalFolds === 1 ? "" : "s"}` +
-      `, ${n(input.roots)} at the top level. Every one keeps its exact source.`);
+    // "Each keeps its exact source" says the bytes survive but never says a SUMMARY stands
+    // where they were, and the likeliest wrong model a reader forms is that folded
+    // material is simply gone. One clause teaches what a fold actually is.
+    : `  Folded   ${n(input.roots)} here, ${n(input.totalFolds)} with nesting; ` +
+      "each a summary over its exact source.");
 
   if (input.stagedMarks > 0) {
-    // Staged mass is the number that explains the next commit's size, and "costs nothing
-    // until then" is the fact a reader needs to not act on it prematurely.
-    const briefed = input.briefedMarks > 0
-      ? `${n(input.briefedMarks)} with a written brief`
-      : input.stagedMarks === 1 ? "carrying the runtime's own brief" : "all carrying runtime briefs";
-    lines.push(`  Staged   ${n(input.stagedMarks)} mark${input.stagedMarks === 1 ? "" : "s"}` +
-      ` holding about ${n(input.stagedTokens)} tokens, ${briefed}.` +
-      `${input.stagedMarks === 1 ? " It moves" : " They move"} nothing until a commit.`);
+    // TWO CORRECTIONS IN ONE LINE.
+    //
+    // It said "holding about 28,400 tokens" about a number that is the sum of
+    // markFreedBytes: what a commit FREES, which is the same figure the editor header
+    // prints as "frees". One surface called it held and the other called it freed, and
+    // held was the wrong one.
+    //
+    // And the brief count is gone, input field and all. It counted provenance "supplied"
+    // or "augmented", and a brief the USER types on the editor's brief line is "supplied",
+    // so the row told a person the sentence they had just written was somebody else's.
+    // Nothing on any surface can add a brief to an already-staged mark either, so it was
+    // a number that could be wrong and could not be acted on.
+    //
+    // What remains leads with the fact that stops "staged" being read as "already
+    // applied", and fits inside 80 columns, where the old 105-character line wrapped with
+    // its continuation flush left inside the label field, reading as a fifth label.
+    lines.push(`  Staged   ${n(input.stagedMarks)} fold${input.stagedMarks === 1 ? "" : "s"}; ` +
+      `nothing moves until a commit frees about ${n(input.stagedTokens)} tokens.`);
   }
   if (input.pinned > 0) {
-    lines.push(`  Pinned   ${n(input.pinned)} entr${input.pinned === 1 ? "y" : "ies"} held raw, ` +
-      "never folded and freeing nothing.");
-  }
-  if (input.suspended) {
-    lines.push(`  STOPPED  Automatic folding is suspended: ${oneLine(input.suspended, 160)}`);
+    lines.push(`  Pinned   ${n(input.pinned)} entr${input.pinned === 1 ? "y" : "ies"} ` +
+      `stay${input.pinned === 1 ? "s" : ""} raw; ` +
+      `${input.pinned === 1 ? "it does" : "they do"} not free space.`);
   }
   // The closing line offers only what is actually available: proposing a commit with
   // nothing staged is an instruction that does nothing, which is the failure the deleted
   // fence made unforgivable.
+  // "commits them" took its antecedent from whichever row happened to come last, which is
+  // Pinned as often as Staged. Name the object.
   lines.push(input.stagedMarks > 0
-    ? `  ${input.foldCommand} commits them now; ${input.editorCommand} opens the window to steer it.`
-    : `  ${input.editorCommand} opens the window; ${input.foldCommand} commits once marks are staged.`);
+    // 78, not 80: pi-tui wraps at width minus two, so an 80-column line still wraps on an
+    // 80-column terminal, and its continuation lands flush left in the label field.
+    ? `  ${input.foldCommand} commits the staged folds; ${input.editorCommand} opens the window to steer it.`
+    // THE FRESH SESSION IS WHERE THE WRONG MODEL FORMS, so this is the line that has to
+    // say folding is automatic. A reader who meets the package here and reads only
+    // command names concludes nothing happens unless they type one.
+    : `  Folding is automatic; ${input.editorCommand} shows the window and ${input.foldCommand} commits early.`);
   return lines.join("\n");
 }

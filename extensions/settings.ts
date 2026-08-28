@@ -252,13 +252,19 @@ interface EditorRow {
 	description: string;
 }
 
+// WRITTEN FOR THE READER, NOT THE IMPLEMENTER (2026-08-28). "Fires a fold epoch" and
+// "parents owed per epoch = visible roots divided by this" are this codebase's words for
+// its own internals, and a person setting a value should not have to learn them. Each
+// description now says what the setting DOES to their session; the option name stays in
+// parentheses as the bridge to the README table and to registerPiFold, which document
+// these exact names.
 const EDITOR_ROWS: readonly EditorRow[] = [
-	{ id: "maxTarget", label: "Commit trigger", description: "Occupancy share of the budget that fires a fold epoch (maxTarget)" },
-	{ id: "minTarget", label: "Post-commit aim", description: "Share the epoch cuts back down toward (minTarget)" },
-	{ id: "consolidateAfter", label: "Consolidation divisor", description: "Parents owed per epoch = visible roots divided by this (consolidateAfter)" },
-	{ id: "minFoldChars", label: "Minimum fold size", description: "Characters a fold must reach to be worth making; a smaller gap between folds is absorbed by the fold beside it (minFoldChars)" },
-	{ id: "toolFoldThreshold", label: "Tool-result clipping", description: "Share of the window, oldest first, whose tool results are clipped in view; 0 turns it off (toolFoldThreshold)" },
-	{ id: "postFoldNotice", label: "Brief invitation", description: "Invite the model to improve a pending brief after each fold; off is the shape the campaign measured (postFoldNotice)" },
+	{ id: "maxTarget", label: "Start folding at", description: "How full the window gets before pi-fold folds. Nothing moves below this (maxTarget)" },
+	{ id: "minTarget", label: "Fold down to", description: "How empty a fold leaves the window. The gap between the two sets how often folding runs (minTarget)" },
+	{ id: "consolidateAfter", label: "Folds per group", description: "Once this many folds are visible, pi-fold groups them under one (consolidateAfter)" },
+	{ id: "minFoldChars", label: "Smallest fold", description: "Text this short is not worth folding on its own; it joins the fold beside it instead (minFoldChars)" },
+	{ id: "toolFoldThreshold", label: "Clip old tool results", description: "The oldest share of the window shows tool results shortened, still recoverable in full. Off keeps them whole (toolFoldThreshold)" },
+	{ id: "postFoldNotice", label: "Ask the model for briefs", description: "Invite the model to rewrite a fold's summary. Off is what the measured runs used (postFoldNotice)" },
 ];
 
 // The cycle lattices. Shares step in cents so no float drift reaches a threshold;
@@ -320,13 +326,14 @@ function rowDisplayValue(settings: FoldSettingsFile, id: FoldSettingId, budgetTo
 	if (id === "toolFoldThreshold") {
 		// The share is of the window rather than of a budget, so it is stated as the
 		// slice it names instead of the token count the other two shares translate to.
-		return Number(raw) === 0 ? "off" : `${Number(raw).toFixed(2)} · oldest ${Math.round(Number(raw) * 100)}%`;
+		return Number(raw) === 0 ? "off" : `oldest ${Math.round(Number(raw) * 100)}%`;
 	}
 	if (id === "consolidateAfter") return raw;
-	if (id === "minFoldChars") return `${Number(raw).toLocaleString("en-US")} chars`;
-	// toFixed(2) matches the cycle entries exactly; String(0.8) renders "0.8" while
-	// the cycle list carries "0.80", and SettingsList cycles by indexOf(currentValue).
-	return `${Number(raw).toFixed(2)} · ${Math.round(Number(raw) * budgetTokens).toLocaleString("en-US")} tok`;
+	if (id === "minFoldChars") return `${Number(raw).toLocaleString("en-US")} characters`;
+	// A PERCENTAGE, like every other human surface. The screen used to read "0.80" while
+	// the status line, /fold-status and the editor header all said "80%", so the one place
+	// a person CHANGES the number spoke a different dialect from the three that report it.
+	return `${Math.round(Number(raw) * 100)}% · ${Math.round(Number(raw) * budgetTokens).toLocaleString("en-US")} tokens`;
 }
 
 // The frame Pi's own /settings screen draws around its list. Implemented locally
@@ -420,7 +427,7 @@ export class FoldSettingsEditor extends Container {
 		const theme = this.themeLike;
 		this.addChild(new SettingsBorder((text) => theme.fg("border", text)));
 		this.addChild(new Text(theme.bold(theme.fg("accent", "pi-fold settings")), 0, 0));
-		this.addChild(new Text(theme.fg("muted", "Shares are of the serving budget; edits save immediately. ←→ steps · Enter types an exact value."), 0, 0));
+		this.addChild(new Text(theme.fg("muted", "Percentages are of the usable window. Every change saves as you make it."), 0, 0));
 		if (notice) this.addChild(new Text(theme.fg("error", notice), 0, 0));
 		this.addChild(new Spacer(1));
 		// SettingsList takes its own theme shape; adapt it off the live theme.
@@ -429,7 +436,12 @@ export class FoldSettingsEditor extends Container {
 			value: (text: string, selected: boolean) => (selected ? theme.fg("accent", text) : theme.fg("muted", text)),
 			description: (text: string) => theme.fg("dim", text),
 			cursor: theme.fg("accent", "→ "),
-			hint: (text: string) => theme.fg("dim", text),
+			// SettingsList ships its own hint, "Enter/Space to change · Esc to cancel", and
+			// BOTH halves are wrong on this screen: Enter opens an exact-value editor rather
+			// than cycling a value, and nothing is cancelled because every change is saved
+			// the moment it is made. The hint function is ours and is handed the string, so
+			// the correction happens here rather than being contradicted a line below.
+			hint: (_text: string) => theme.fg("dim", "←→ adjust · Enter types an exact value · Esc closes"),
 		};
 		this.settingsList = new SettingsList(
 			EDITOR_ROWS.map((row) => ({
@@ -453,8 +465,6 @@ export class FoldSettingsEditor extends Container {
 			() => this.done(true),
 		);
 		this.addChild(this.settingsList);
-		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  ←→ to step · Enter for exact · Esc to close"), 0, 0));
 		this.addChild(new SettingsBorder((text) => theme.fg("border", text)));
 	}
 

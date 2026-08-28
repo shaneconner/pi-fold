@@ -12301,9 +12301,9 @@ async function gateFoldSettingsRoundTrip() {
     // Both encodings move the cursor; assert the SELECTION moved, not just that no
     // exception flew, because a dead key handler also throws nothing.
     editor.handleInput("\x1bOB");
-    assert(renders().includes("→ Post-commit aim"), "SS3 down did not move the selection");
+    assert(renders().includes("→ Fold down to"), "SS3 down did not move the selection");
     editor.handleInput("\x1b[A");
-    assert(renders().includes("→ Commit trigger"), "CSI up did not move the selection back");
+    assert(renders().includes("→ Start folding at"), "CSI up did not move the selection back");
 
     // Steppable rows respond to LEFT/RIGHT by moving one allowed increment, clamped
     // at the range ends; the lattice is filtered against the current draft so
@@ -12355,7 +12355,7 @@ async function gateFoldSettingsRoundTrip() {
     // inert for every one of them.
     editor.handleInput("\x1b[B");
     editor.handleInput("\x1b[B");
-    assert(renders().includes("→ Minimum fold size"),
+    assert(renders().includes("→ Smallest fold"),
       "two SS3 downs did not reach the minimum fold size row");
     editor.handleInput("\r");
     assert(renders().includes("Enter to apply"), "the fold floor submenu did not open");
@@ -12685,7 +12685,9 @@ async function gateFoldEditorRendersReadOnly() {
   const rendered = liveView.render(140).join("\n");
 
   // THE BOOKENDS, COLORED BY THEME NAME.
-  assert(/\[success\]\u25b8 fold/.test(rendered), "no green opening line on the committed fold");
+  // The row no longer prints the word "fold" beside the glyph that already means it; the
+  // claim is the COLORED BOOKEND, so it is asserted on the glyph and its color.
+  assert(/\[success\]\u25b8 /.test(rendered), "no green opening line on the committed fold");
   assert(!/\u25b2 end/.test(rendered), "a collapsed fold rendered an end bookend");
   // `warning` is the RUNTIME's proposal and `accent` is a person's. Every proposal on this
   // fixture is the frontier's, so warning is what it must ask for; gate 145 lays a user
@@ -12696,13 +12698,14 @@ async function gateFoldEditorRendersReadOnly() {
   // THE PROPOSED BLOCK: the staged mark renders distinct from committed folds. The
   // origin is stated in the reader's word for it, not the state's own ("ladder"); gate
   // 157 owns that vocabulary and this asserts the runtime's cut still reads as one.
-  assert(/PROPOSED \(automatic\)/.test(rendered),
+  assert(/staged by automatic/.test(rendered),
     "the runtime's pending cut does not render as a proposed block");
   assert(colorsUsed.has("accent") || colorsUsed.has("warning"),
     "proposed blocks did not ask for a distinct color");
 
   // RAW GAPS summarize what stays unmarked; pins badge their entries on drill-in.
-  assert(/raw ×\d+/.test(rendered), "no raw-gap summary row");
+  // "×N" became a counted noun: ×N could be entries, nesting depth or generations.
+  assert(/raw · \d+ entr(y|ies)/.test(rendered), "no raw-gap summary row");
   assert(/1 pinned/.test(rendered), "the pin count is missing from the header");
 
   // DRILL-IN: expanding the committed fold reveals its brief; expanding the raw run
@@ -12787,7 +12790,9 @@ async function gateFoldEditorRendersReadOnly() {
   leftKb.requested = "tui.select.confirm";
   leftView.handleInput("\r"); // expand the parent: children and messages appear
   let out = leftView.render(140).join("\n");
-  assert(out.includes("fold_c") && out.includes("first message"),
+  // The child is named by its BRIEF, not its id: the row stopped carrying an address a
+  // person cannot use and started carrying what the fold covers.
+  assert(out.includes("child brief") && out.includes("first message"),
     "expanding the parent did not reveal child and messages");
   leftKb.requested = "tui.select.down";
   leftView.handleInput("\x1b[B"); // onto the child fold row
@@ -12798,7 +12803,7 @@ async function gateFoldEditorRendersReadOnly() {
   leftKb.requested = "tui.editor.cursorLeft";
   leftView.handleInput("\x1b[D");
   out = leftView.render(140).join("\n");
-  assert(!out.includes("fold_c") && !out.includes("first message"),
+  assert(!out.includes("child brief") && !out.includes("first message"),
     "left did not collapse the containing fold");
   assert(leftView.selectedKey === "fold_p",
     `left did not land on the collapsed fold: ${leftView.selectedKey}`);
@@ -12839,7 +12844,7 @@ async function gateFoldEditorRendersReadOnly() {
   // SCROLLING FOLLOWS THE SELECTION AND CLAMPS AT BOTH ENDS.
   const manyBlocks = Array.from({ length: 60 }, (_, i) => ({
     type: "fold", id: `fold_${String(i).padStart(2, "0")}`, startPosition: i * 3,
-    endPosition: i * 3 + 1, kind: "tool-result", brief: "", sourceCount: 2,
+    endPosition: i * 3 + 1, kind: "tool-result", brief: `covering batch ${i}`, sourceCount: 2,
   }));
   const scroller = new editorModule.FoldEditorView({
     title: "t",
@@ -12848,15 +12853,15 @@ async function gateFoldEditorRendersReadOnly() {
     pending: { count: 0, agentMarks: 0, ladderMarks: 0, freedTokens: 0 },
     pinned: [],
   }, () => {}, null, themedUi);
-  assert(scroller.render(140).join("\n").includes("fold_00"), "scrolling start is not the top");
+  assert(scroller.render(140).join("\n").includes("covering batch 0"), "scrolling start is not the top");
   // SELECTION NAVIGATES ROWS: folds, their END bookends, and (once expanded) their
   // messages. 60 folds render 120 rows, so 119 downs land on the very last row.
   for (let i = 0; i < 200; i += 1) scroller.handleInput("\x1b[B");
   assert.equal(scroller.selectedKey, "fold_59",
     `two hundred downs did not clamp on the last row: ${scroller.selectedKey}`);
   const bottom = scroller.render(140).join("\n");
-  assert(bottom.includes("fold_59"), "the last fold is not visible after clamping");
-  assert(!bottom.includes("fold_00"), "stale top blocks stayed in the viewport");
+  assert(bottom.includes("covering batch 59"), "the last fold is not visible after clamping");
+  assert(!bottom.includes("covering batch 0,"), "stale top blocks stayed in the viewport");
   scroller.handleInput("\x1b[A");
   scroller.handleInput("\x1b[H");
   void scroller;
@@ -12944,7 +12949,7 @@ async function gateFoldEditorUserMarks() {
   view.handleInput("m");
   const anchored = view.render(140).join("\n");
   assert(/\u25c6 start/.test(anchored), "the anchor row carries no diamond marker");
-  assert(!/PROPOSED \(you\)/.test(anchored), "anchoring alone staged a mark");
+  assert(!/staged by you/.test(anchored), "anchoring alone staged a mark");
 
   // MOVING PRICES THE SPAN LIVE: two entries covered, a token figure present.
   view.handleInput("\x1b[B");
@@ -12966,7 +12971,7 @@ async function gateFoldEditorUserMarks() {
   assert(!view.staging, "staging never finished");
   await settle();
   const stagedRender = view.render(140).join("\n");
-  assert(/PROPOSED \(you\)/.test(stagedRender),
+  assert(/staged by you/.test(stagedRender),
     `the staged user mark does not render as a proposed block: ${stagedRender.slice(0, 600)}`);
   assert(/1 yours/.test(stagedRender), "the header does not count the user's mark");
   assert(runtime.notifications.some((notice) => /Staged user mark/.test(notice.message)),
@@ -13107,7 +13112,7 @@ async function gateFoldEditorWithdrawPinBrief() {
     `the staged brief is not the typed one: ${userMark.brief}`);
   assert(userMark.briefProvenance.kind === "augmented",
     `a typed brief did not record augmented provenance: ${JSON.stringify(userMark.briefProvenance)}`);
-  assert(/PROPOSED \(you\)/.test(view.render(140).join("\n")),
+  assert(/staged by you/.test(view.render(140).join("\n")),
     "the briefed mark does not render as proposed");
 
   // u ON THE PROPOSED ROW WITHDRAWS IT through the unmark path: durable state drops
@@ -13129,7 +13134,7 @@ async function gateFoldEditorWithdrawPinBrief() {
   await settle();
   assert((newestState().pendingMarks ?? []).length === marksBeforeWithdraw - 1,
     "withdrawal left the durable mark standing");
-  assert(!view.render(140).join("\n").includes("PROPOSED (you)"),
+  assert(!view.render(140).join("\n").includes("staged by you"),
     "the withdrawn mark still renders as proposed");
   assert(runtime.notifications.some((notice) => /Withdrew 1 staged mark/.test(notice.message)),
     "withdrawal did not announce itself");
@@ -14784,6 +14789,39 @@ async function gateHumanSurface() {
   assert(/\d+% full/.test(measuredLine), `The measured line carries no occupancy: ${measuredLine}`);
   assert(!measuredLine.includes("pi_fold_context"),
     `The measured status line names the agent tool: ${measuredLine}`);
+  // WHEN, not only how full: the commit point is named, so the reader does not have to
+  // remember where their own trigger sits to know whether 67 percent is close to it.
+  assert(/commit at \d+%|COMMIT DUE/.test(measuredLine),
+    `The status line never says when a commit happens: ${measuredLine}`);
+  // FAILURE LEADS, because the line is cut to the host's width and the last segment is
+  // the first one lost. Folding having stopped is the only state here a person must act
+  // on, and it used to be appended after everything else. Driven through a REAL
+  // suspension, gate 123's own injection point, rather than by setting the latch.
+  const stopped = makeRuntime(makeFixture({ turns: 6, resultChars: 3_000, sessionId: "status-stopped" }), {
+    beforeAppend(customType) {
+      if (customType === context.ACTIVE_CONTEXT_FOLD_RECORD_ENTRY) {
+        throw new Error("durable fold record refused by the fixture");
+      }
+    },
+  });
+  await startRuntime(stopped);
+  await measureAndCommit(stopped, 80_000, 100_000);
+  const stoppedLine = stopped.statuses.at(-1).text;
+  assert(/^pi-fold FOLDING STOPPED/.test(stoppedLine),
+    `A stopped session did not lead with it: ${stoppedLine}`);
+  // AND IT DOES NOT ANNOUNCE A COMMIT IN THE SAME BREATH. The line rendered "COMMIT DUE"
+  // beside "FOLDING STOPPED", promising the event it was reporting could not happen.
+  assert(!/COMMIT DUE|commit at/.test(stoppedLine),
+    `A stopped status line still promised a commit: ${stoppedLine}`);
+  // AND /fold-status DOES NOT CONTRADICT ITSELF on the same session. It promised "the
+  // next pass folds down toward 20%" one line above "Automatic folding is suspended",
+  // which is the surface answering the reader's whole question in both directions.
+  const stoppedBefore = stopped.notifications.length;
+  await stopped.commands.get("fold-status").handler("", stopped.ctx);
+  const stoppedText = stopped.notifications.slice(stoppedBefore).map((n) => n.message).join("\n");
+  assert(/STOPPED/.test(stoppedText), `/fold-status hid the suspension: ${stoppedText}`);
+  assert(!/next commit folds|folds down to/.test(stoppedText),
+    `/fold-status promised a fold on a session where folding is suspended: ${stoppedText}`);
 
   // (b) /fold-status, THE TEXT VIEW. Driven through the real command, not the renderer.
   const before = runtime.notifications.length;
@@ -14795,6 +14833,18 @@ async function gateHumanSurface() {
   assert(/% {2}[\d,]+ \/ [\d,]+ tokens/.test(text) || text.includes("not measured yet"),
     `/fold-status carries no occupancy reading: ${text}`);
   assert(text.includes("/fold-editor"), "/fold-status never names the command that steers");
+  // THE PRODUCT'S OWN PREMISE. No surface said the runtime folds BY ITSELF, so a reader
+  // assembling "Commits at 80%" with "/fold commits them now" concluded they had
+  // installed a manual tool. One word, and it is the word the package is about.
+  assert(/automatic/i.test(text), `Nothing on /fold-status says folding happens by itself: ${text}`);
+  // NO LINE OVERRUNS THE WRAP WIDTH. pi-tui wraps this text at width minus two and its
+  // continuation renders FLUSH LEFT, landing inside the nine-column label field and
+  // reading as another label. The old Staged row was 105 characters and the clause it
+  // pushed onto that second line was the one saying nothing had been folded yet.
+  for (const line of text.split("\n")) {
+    if (/^ +Reason: /.test(line)) continue; // runtime text, bounded at 160 and wraps alone
+    assert(line.length <= 78, `A /fold-status line is ${line.length} columns: ${line}`);
+  }
   // It must name the FOLD count, and must not lead with raw ids the way it used to.
   assert(/Folded {3}/.test(text), `/fold-status states no fold count: ${text}`);
 
@@ -14809,21 +14859,28 @@ async function gateHumanSurface() {
       (saved) => { screenClosed = saved; },
     );
     const screenText = () => screen.render(120).join("\n");
-    assert(screenText().includes("Tool-result clipping") && screenText().includes("Brief invitation"),
+    assert(screenText().includes("Clip old tool results") && screenText().includes("Ask the model for briefs"),
       `The settings screen has no row for the newly exposed options: ${screenText()}`);
+    // AND IT DOES NOT TELL A LIE ABOUT ITS OWN KEYS. pi-tui's SettingsList ships the hint
+    // "Enter/Space to change · Esc to cancel"; Enter opens an exact-value editor rather
+    // than cycling, and nothing is cancelled, because every change is already saved.
+    assert(!screenText().includes("Esc to cancel"),
+      `The settings screen offers a cancel it does not have: ${screenText()}`);
+    assert(!screenText().includes("Enter/Space to change"),
+      `The settings screen describes a key behaviour it does not have: ${screenText()}`);
     // Both defaults are shown as the RUNTIME's, not as an absence: an unset scalar means
     // the package default, so a row reading "off" for a 0.50 default would be a lie.
     assert(screenText().includes("oldest 50%"),
       `The clipping row does not show the package default: ${screenText()}`);
     // Step down to the clipping row (it is fifth) and move it one notch.
     for (let i = 0; i < 4; i++) screen.handleInput("\x1bOB");
-    assert(screenText().includes("→ Tool-result clipping"), "the selection never reached the clipping row");
+    assert(screenText().includes("→ Clip old tool results"), "the selection never reached the clipping row");
     screen.handleInput("\x1bOC");
     assert.equal(JSON.parse(readFileSync(screenPath, "utf8")).toolFoldThreshold, 0.65,
       "stepping the clipping row did not reach disk (0.50 -> 0.65)");
     // The switch has no lattice: either direction is the other value.
     screen.handleInput("\x1bOB");
-    assert(screenText().includes("→ Brief invitation"), "the selection never reached the invitation row");
+    assert(screenText().includes("→ Ask the model for briefs"), "the selection never reached the invitation row");
     screen.handleInput("\x1bOC");
     assert.equal(JSON.parse(readFileSync(screenPath, "utf8")).postFoldNotice, true,
       "stepping the invitation row did not turn it on");
@@ -14919,6 +14976,31 @@ async function gateHumanSurface() {
     `The editor prints the runtime's internal origin name: ${liveRender}`);
   assert(!liveRender.includes("pi_fold_context"),
     `The editor names the agent tool: ${liveRender}`);
+  // NO MACHINE ADDRESSES ON THE ROWS OR THE TITLE. Twelve roots differed only by hex,
+  // which is the defect /fold-status was rewritten to remove, recreated one surface over;
+  // the title carried eight characters of session id for the same reason.
+  assert(!/\bfold_[0-9a-f]{4}/.test(liveRender) && !/\bmark_[0-9a-f]{4}/.test(liveRender),
+    `The editor shows fold ids to a person: ${liveRender}`);
+  // AND THE ROWS SAY WHAT THEY COUNT. "×9" could be entries, nesting depth or generations.
+  assert(!/×\d/.test(liveRender), `An editor row counts something it does not name: ${liveRender}`);
+
+  // THE EDITOR CAN REPRESENT A STOPPED WINDOW. It alone kept pricing the distance to a
+  // commit that cannot fire, on the surface a person opens in order to act.
+  const stoppedEditor = new editorModule.FoldEditorView({
+    title: "window",
+    occupancy: {
+      usedTokens: 85_000, budgetTokens: 100_000, commitOccupancy: 0.8,
+      commitDue: true, suspended: true,
+    },
+    blocks: [],
+    pending: { count: 0, agentMarks: 0, ladderMarks: 0, userMarks: 0, freedTokens: 0 },
+    pinned: [],
+  }, () => { });
+  const stoppedHeader = stoppedEditor.render(140).slice(0, 4).join("\n");
+  assert(stoppedHeader.includes("FOLDING STOPPED"),
+    `The editor cannot say folding has stopped: ${stoppedHeader}`);
+  assert(!stoppedHeader.includes("commit at") && !stoppedHeader.includes("COMMIT DUE"),
+    `A stopped editor still counted down to a commit that cannot fire: ${stoppedHeader}`);
 
   // Every origin the state can carry, rendered at once: each is named in a word a reader
   // already has, and the state's own name for it appears nowhere.
@@ -14933,12 +15015,12 @@ async function gateHumanSurface() {
     pinned: ["e1", "e2"],
   }, () => { });
   const whole = headerView.render(140).join("\n");
-  assert(!/\bladder\b/.test(whole) && !/\(agent\)/.test(whole) && !/\(user\)/.test(whole),
+  assert(!/\bladder\b/.test(whole) && !/by agent\b/.test(whole) && !/by user\b/.test(whole),
     `A proposed row states the state's own origin name: ${whole}`);
-  for (const word of ["PROPOSED (automatic)", "PROPOSED (the model)", "PROPOSED (you)"]) {
+  for (const word of ["staged by automatic", "staged by the model", "staged by you"]) {
     assert(whole.includes(word), `No proposed row reads "${word}": ${whole}`);
   }
-  const header = headerView.render(140).slice(0, 3).join("\n");
+  const header = headerView.render(140).slice(0, 4).join("\n");
   assert(!/\bladder\b/.test(header), `The header still says ladder: ${header}`);
   assert(header.includes("1 automatic") && header.includes("2 by the model") && header.includes("1 yours"),
     `The header does not name all three mark origins in the reader's words: ${header}`);
@@ -14952,10 +15034,26 @@ async function gateHumanSurface() {
     pending: { count: 0, agentMarks: 0, ladderMarks: 0, userMarks: 0, freedTokens: 0 },
     pinned: [],
   }, () => { });
-  const due = dueView.render(140).slice(0, 3).join("\n");
+  const due = dueView.render(140).slice(0, 4).join("\n");
   assert(due.includes("COMMIT DUE") && !due.includes("to go"),
     `A window already past the trigger was told how far it had left to go: ${due}`);
-  assert(due.includes("staged: 0 marks") && !due.includes("("),
+  // THE UNMEASURED EDITOR, the hole this gate had. The other surfaces were checked for a
+  // guessed occupancy and this one was not, so it rendered an EMPTY 24-cell bar beside
+  // "?%", which reads to the eye as a window that is 0 percent full: a guess wearing the
+  // costume of a measurement, on the surface most likely to be open while it is true.
+  const blankView = new editorModule.FoldEditorView({
+    title: "window",
+    occupancy: { usedTokens: null, budgetTokens: 100_000, commitOccupancy: 0.8, commitDue: false },
+    blocks: [],
+    pending: { count: 0, agentMarks: 0, ladderMarks: 0, userMarks: 0, freedTokens: 0 },
+    pinned: [],
+  }, () => { });
+  const blank = blankView.render(140).slice(0, 4).join("\n");
+  assert(blank.includes("not measured yet"),
+    `The unmeasured editor did not say so: ${blank}`);
+  assert(!blank.includes("?") && !/[█·]{4}/.test(blank),
+    `The unmeasured editor drew an occupancy bar it has no measurement for: ${blank}`);
+  assert(due.includes("staged: 0 folds") && !due.includes("staged by:"),
     `A header with nothing staged spelled out three zero origins: ${due}`);
 
   return {

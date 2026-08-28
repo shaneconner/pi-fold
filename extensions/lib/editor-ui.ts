@@ -50,6 +50,9 @@ export interface FoldEditorData {
 		budgetTokens: number;
 		commitOccupancy: number;
 		commitDue: boolean;
+		/** Automatic folding has stopped. The editor is the surface a person opens in order
+		 *  to ACT, and without this it priced a countdown to a commit that cannot fire. */
+		suspended?: boolean;
 	};
 	/** Top-level blocks only: raw gaps and ROOT folds, in window order. */
 	blocks: FoldEditorBlock[];
@@ -72,7 +75,10 @@ export function occupancyBar(usedTokens: number | null, budgetTokens: number): s
 		? Math.max(0, Math.min(1, usedTokens / budgetTokens))
 		: 0;
 	const filled = Math.round(ratio * BAR_WIDTH);
-	return `${"█".repeat(filled)}${"·".repeat(BAR_WIDTH - filled)}`;
+	// THE SAME ALPHABET /fold-status USES. The editor drew its empty cells with the middle
+	// dot that also separates the fields on that very line, so the bar's tail and the
+	// line's punctuation were the same glyph doing two jobs.
+	return `${"▇".repeat(filled)}${"░".repeat(BAR_WIDTH - filled)}`;
 }
 
 function shortId(id: string): string {
@@ -85,6 +91,10 @@ function shortId(id: string): string {
  * reading a proposed row needs to know WHO proposed the fold, not which code path
  * staged it. An unrecognized origin passes through rather than being hidden, because a
  * name we do not have a word for is still better than a blank.
+ *
+ * ONE WORD FOR ONE THING (2026-08-28): the rows said PROPOSED while the header said
+ * staged, for the same marks on the same screen, which asks a reader to learn that two
+ * words mean one thing before they can read either line.
  */
 const ORIGIN_WORDS: Record<string, string> = {
 	ladder: "automatic",
@@ -183,7 +193,9 @@ export function buildFoldEditorData(
 		if (block.type === "raw") {
 			const roles = new Map<string, number>();
 			for (const entry of block.entries) roles.set(entry.role, (roles.get(entry.role) ?? 0) + 1);
-			block.rolesSummary = [...roles.entries()].map(([role, count]) => `${role}×${count}`).join(" ");
+			// "user×2 assistant×3" put the count behind the same bare multiplication sign the
+			// fold rows just lost. Count first, noun second, like everything else here.
+			block.rolesSummary = [...roles.entries()].map(([role, count]) => `${count} ${role}`).join(", ");
 		}
 	}
 
@@ -344,12 +356,25 @@ export class FoldEditorView {
 		const foldKey = `${keyPrefix}${block.id}`;
 		const isOpen = this.expanded.has(foldKey);
 		const pad = "  ".repeat(depth);
-		const kindLabel = `${block.kind} \u00d7${block.sourceCount}`;
+		// THE ROW SAYS WHAT WAS FOLDED (2026-08-28). It read "fold fold_a1b2c3 chapter ×9":
+		// the word "fold" twice (the ▸ glyph is already the word), thirteen columns of an
+		// id nothing in this view accepts as input, and the brief that says what the fold
+		// COVERS hidden behind Enter. Twelve roots differed only by hex, which recreates
+		// inside the editor the exact defect /fold-status was rewritten to remove.
+		//
+		// The id is dropped rather than trailed: it is unusable here, the expanded state
+		// still carries it on the end bookend, and a trailing id is what truncation eats
+		// first anyway. "×9" becomes a counted noun, because ×9 could be entries, nesting
+		// depth or generations and the reader has no way to tell which.
+		const kindLabel = `${block.kind} · ${block.sourceCount} ` +
+			`${block.sourceCount === 1 ? "entry" : "entries"}`;
 		const marker = isOpen ? "\u25bc" : "\u25b8";
 		const foldCursor = this.selectedKey === foldKey ? "\u276f" : " ";
+		const [foldHead] = briefChunks(block.brief ?? "");
 		rows.push({
 			key: foldKey,
-			text: `${foldCursor}${this.color("success", `${pad}${marker} fold ${shortId(block.id)}`)} ${kindLabel}`,
+			text: `${foldCursor}${this.color("success", `${pad}${marker} ${kindLabel}`)}` +
+				`${foldHead ? ` · ${foldHead}` : ""}`,
 			toggleId: foldKey,
 		});
 		if (!isOpen) return;
@@ -409,10 +434,17 @@ export class FoldEditorView {
 			if (block.type === "proposed") {
 				const isLadder = block.origin === "ladder";
 				const color = isLadder ? "warning" : "accent";
-				const sizeNote = typeof block.tokens === "number" ? ` · ~${block.tokens.toLocaleString("en-US")} tok` : "";
+				const sizeNote = typeof block.tokens === "number"
+					? ` · frees ~${block.tokens.toLocaleString("en-US")} tokens` : "";
+				const [stagedHead] = briefChunks(block.brief ?? "");
 				rows.push({
 					key: block.id,
-					text: `${cursor}${this.color(color, `\u25c7 PROPOSED (${originWord(block.origin)}) ${shortId(block.id)}`)} \u00d7${block.sourceCount}${sizeNote}${this.selectedKey === block.id ? " · u:withdraw" : ""}`,
+					// Same treatment as the fold row: no id, a counted noun, and the brief seated
+					// as the tail so it is what degrades if the terminal is narrow.
+					text: `${cursor}${this.color(color, `\u25c7 staged by ${originWord(block.origin)}`)}` +
+						` · ${block.sourceCount} ${block.sourceCount === 1 ? "entry" : "entries"}${sizeNote}` +
+						`${stagedHead ? ` · ${stagedHead}` : ""}` +
+						`${this.selectedKey === block.id ? " · u:withdraw" : ""}`,
 					toggleId: block.id,
 					proposedMarkId: block.id,
 				});
@@ -439,7 +471,8 @@ export class FoldEditorView {
 					}
 				}
 			} else {
-				const label = `\u00b7 raw \u00d7${block.sourceCount}` +
+				const label = `\u00b7 raw · ${block.sourceCount} ` +
+					`${block.sourceCount === 1 ? "entry" : "entries"}` +
 					`${block.rolesSummary ? ` ${block.rolesSummary}` : ""}`;
 				rows.push({
 					key: block.id,
@@ -693,15 +726,22 @@ export class FoldEditorView {
 		const lines: string[] = [];
 		const { occupancy, pending } = this.data;
 		lines.push(truncateToWidth(`── ${this.data.title} ──`, width));
+		// UNMEASURED IS PROSE, NEVER A BAR. An empty bar beside "?%" reads to the eye as
+		// a window that is 0 percent full, which is a guess wearing the costume of a
+		// measurement: the exact failure the other three surfaces already refuse, on the
+		// one surface the rule was never checked against. Nothing here is estimated.
+		if (occupancy.usedTokens === null || !(occupancy.budgetTokens > 0)) {
+			lines.push(truncateToWidth(
+				"window not measured yet; the first model response will measure it", width));
+			for (const line of this.stagedLines()) lines.push(truncateToWidth(line, width));
+			return lines;
+		}
 		// A WHOLE PERCENT. The tenth was false precision on a figure that moves with every
 		// message, and it read as a measurement finer than the thing being measured. The
-		// other two human surfaces round, so this one does too.
-		const percent = occupancy.usedTokens !== null && occupancy.budgetTokens > 0
-			? Math.round((occupancy.usedTokens / occupancy.budgetTokens) * 100)
-			: "?";
-		const usedTokensText = occupancy.usedTokens !== null
-			? occupancy.usedTokens.toLocaleString("en-US")
-			: "?";
+		// other three human surfaces round, so this one does too. Past the guard above,
+		// both values are known, so neither can render as "?".
+		const percent = Math.round((occupancy.usedTokens / occupancy.budgetTokens) * 100);
+		const usedTokensText = occupancy.usedTokens.toLocaleString("en-US");
 		// The DISTANCE to the commit, not just the share it fires at. "commit at 80%" is
 		// a property of the configuration; "29,674 to go" is the answer to the question
 		// the reader actually has, and it is the same number /fold-status states.
@@ -712,13 +752,31 @@ export class FoldEditorView {
 		// Same ordering rule as the line below it: the raw token pair is the most
 		// expendable thing here, because the percentage in front of it already says what
 		// it says. At 80 columns the first draft cut the headroom instead.
+		// A STOPPED WINDOW IS TOLD SO, NOT GIVEN A COUNTDOWN. Every other surface reports
+		// the suspension and this one alone kept pricing the distance to a commit that
+		// will not happen, which is the one state here that can cost somebody a session.
+		const timing = occupancy.suspended
+			? " · FOLDING STOPPED"
+			: ` · commit at ${(occupancy.commitOccupancy * 100).toFixed(0)}%${headroom}` +
+				`${occupancy.commitDue ? " · COMMIT DUE" : ""}`;
 		lines.push(truncateToWidth(
 			`${occupancyBar(occupancy.usedTokens, occupancy.budgetTokens)} ` +
-			`${percent}% · commit at ${(occupancy.commitOccupancy * 100).toFixed(0)}%${headroom}` +
-			`${occupancy.commitDue ? " · COMMIT DUE" : ""}` +
-			` · ${usedTokensText}/${occupancy.budgetTokens.toLocaleString("en-US")} tokens`,
+			`${percent}%${timing}` +
+			` · ${usedTokensText}/${occupancy.budgetTokens.toLocaleString("en-US")}`,
 			width,
 		));
+		for (const line of this.stagedLines()) lines.push(truncateToWidth(line, width));
+		return lines;
+	}
+
+	/**
+	 * ORDERED SO TRUNCATION COSTS THE LEAST. This line is cut to the terminal's width, and
+	 * at 100 columns the first draft lost the pin count off the end while spending its
+	 * width on who staged what. What the marks free and what is pinned are facts about the
+	 * window; the origin breakdown is colour, so it goes last.
+	 */
+	private stagedLines(): string[] {
+		const { pending } = this.data;
 		// The same vocabulary as ORIGIN_WORDS above, inflected for a count rather than a
 		// label: "1 automatic" and "2 by the model" read where "2 the model" does not.
 		// Only origins that actually staged something are listed, because a run of zeroes
@@ -728,18 +786,17 @@ export class FoldEditorView {
 			pending.agentMarks > 0 ? `${pending.agentMarks} by the model` : "",
 			pending.userMarks > 0 ? `${pending.userMarks} yours` : "",
 		].filter((part) => part !== "").join(", ");
-		// ORDERED SO TRUNCATION COSTS THE LEAST. This line is cut to the terminal's width,
-		// and at 100 columns the first draft lost the pin count off the end while spending
-		// its width on who staged what. What the marks free and what is pinned are facts
-		// about the window; the origin breakdown is colour, so it goes last.
-		lines.push(truncateToWidth(
-			`staged: ${pending.count} mark${pending.count === 1 ? "" : "s"}` +
+		// TWO LINES RATHER THAN ONE THAT RUNS OFF THE TERMINAL. At 97 characters the single
+		// line ended mid-phrase at "2 by the model" on any normal window; vertical space is
+		// cheaper than a sentence cut in half. The facts about the window come first and
+		// who staged what follows, so a narrow terminal still keeps the first line whole.
+		// "folds" not "marks": /fold-status and the always-on line both say folds, and one
+		// object carrying two nouns on adjacent surfaces is a thing to learn for nothing.
+		const staged = [`staged: ${pending.count} fold${pending.count === 1 ? "" : "s"}` +
 			` · frees ~${pending.freedTokens.toLocaleString("en-US")} tokens at commit` +
-			` · ${this.data.pinned.length} pinned` +
-			`${origins ? ` · ${origins}` : ""}`,
-			width,
-		));
-		return lines;
+			` · ${this.data.pinned.length} pinned`];
+		if (origins) staged.push(`staged by: ${origins}`);
+		return staged;
 	}
 
 	render(width: number): string[] {
@@ -751,7 +808,11 @@ export class FoldEditorView {
 		this.scroll = Math.max(0, Math.min(this.scroll, Math.max(0, rows.length - MAX_VISIBLE_ROWS)));
 		const body = rows
 			.slice(this.scroll, this.scroll + MAX_VISIBLE_ROWS)
-			.map((row) => truncateToWidth(row.text, width, ""));
+			// THE PROJECT'S OWN BOUNDING LAW (gate 136): "..." means content continues in the
+			// source and never appears when nothing was cut. Header lines already take the
+			// default marker; body rows passed "" and were cut mid-word in silence, so the
+			// display layer contradicted the rule the briefs it displays all obey.
+			.map((row) => truncateToWidth(row.text, width));
 		// THE WOULD-BE FOLD SIZE (Shane, 2026-08-23): while a span is being laid down,
 		// the footer states what the second mark point would commit, in the runtime's
 		// own token arithmetic -- the same numbers the staged mark will answer with.
@@ -777,7 +838,10 @@ export class FoldEditorView {
 			"",
 			...body,
 			...footers,
-			truncateToWidth("enter:expand/detail · arrows:navigate · m:mark raw span · esc:close", width, ""),
+			// p AND u CHANGE STATE AND WERE NAMED NOWHERE, while the header prints a pin count
+			// on every render. "raw span" stays: it is the word explaining why m does
+			// nothing on a fold row. The width comes out of enter and arrows instead.
+			truncateToWidth("enter:open · arrows:move · m:mark raw span · p:pin · u:withdraw · esc:close", width),
 		];
 	}
 }
