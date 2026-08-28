@@ -482,9 +482,6 @@ export function registerActiveContext(pi: any, options: {
   };
 
   const advisory = {
-    hardFenceNoticeKey: null as string | null,
-    hardFenceReleaseSessionId: null as string | null,
-    hardFenceReleasedProjectionKeys: new Set<string>(),
   };
 
   // EPHEMERAL PEEK (Build 4b): tool call ids whose peek asked for one-read
@@ -786,16 +783,11 @@ export function registerActiveContext(pi: any, options: {
     curation.lastRecovery = null;
     ladder.lastAutomaticAction = null;
     ladder.automaticFailure = null;
-    advisory.hardFenceNoticeKey = null;
     measurements.providerMeasurementReceipts.clear();
     measurements.providerMeasurementRevisionByMessageSha.clear();
     measurements.providerMeasurementByMessageSha.clear();
     measurements.providerMeasurementAnchorByMessageSha.clear();
     const sessionId = ctx.sessionManager.getSessionId();
-    if (advisory.hardFenceReleaseSessionId !== sessionId) {
-      advisory.hardFenceReleaseSessionId = sessionId;
-      advisory.hardFenceReleasedProjectionKeys.clear();
-    }
     let restored: ActiveContextState | null = null;
     let restoreError: unknown = null;
     let restoredPersistence: MaterializedStatePersistence | null = null;
@@ -1311,53 +1303,6 @@ export function registerActiveContext(pi: any, options: {
     safeNotify(ctx, `Automatic context management suspended: ${message}`, "warning");
   };
 
-  const abortUnsafeHardContext = (
-    snapshot: ActiveContextSnapshot | null,
-    ctx: any,
-    allowUnmeasuredRevisionRelease = false,
-  ): boolean => {
-    if (measurements.latestRatio === null || measurements.latestRatio < hardFenceRatio(snapshot ?? undefined, ctx) || !persistence.state) return false;
-    const measuredRevision = measurements.lastProviderMeasurement
-      ? measurements.providerMeasurementRevisionByMessageSha.get(measurements.lastProviderMeasurement.messageSha256)
-      : undefined;
-    if (allowUnmeasuredRevisionRelease && !ladder.automaticFailure &&
-        measuredRevision !== undefined && measurements.lastProviderMeasurement &&
-        !durableProviderMeasurementMatches(measurements.lastProviderMeasurement)) {
-      const releaseKey = sha256Value({
-        sessionId: persistence.state.sessionId,
-        topologySha256: topologySha256(persistence.state),
-        protectionSha256: protectionSha256(persistence.state),
-        measuredRevision,
-        providerMessageSha256: measurements.lastProviderMeasurement?.messageSha256 ?? null,
-      });
-      if (!advisory.hardFenceReleasedProjectionKeys.has(releaseKey) &&
-          advisory.hardFenceReleasedProjectionKeys.size < 4_096) {
-        advisory.hardFenceReleasedProjectionKeys.add(releaseKey);
-        return false;
-      }
-    }
-    const key = ladder.automaticFailure?.key ?? sha256Value({
-      sessionId: snapshot?.sessionId ?? persistence.state.sessionId,
-      revision: persistence.state.revision,
-      providerMessageSha256: measurements.lastProviderMeasurement?.messageSha256 ?? null,
-      phase: "hard-provider-fence",
-    });
-    ladder.pendingContextNote = `Provider context reached the hard ${brandNoun} fence without a newly committed lossless fold. ` +
-      "The provider request was aborted before transmission; run /compact or make an explicit bounded context fold.";
-    if (advisory.hardFenceNoticeKey !== key) {
-      advisory.hardFenceNoticeKey = key;
-      safeNotify(
-        ctx,
-        "Provider request aborted at the hard context fence; run /compact or make an explicit bounded context fold.",
-        "error",
-      );
-    }
-    if (typeof ctx.abort !== "function") {
-      throw new Error(`Pi hard-fence abort capability is unavailable at ratio ${measurements.latestRatio}`);
-    }
-    ctx.abort();
-    return true;
-  };
 
   const PROJECTION_CALIBRATION_MIN_CHARS = 20_000;
   const PROJECTION_CALIBRATION_MIN_TOKENS = 5_000;
@@ -1561,40 +1506,6 @@ export function registerActiveContext(pi: any, options: {
     };
   };
 
-  const abortOverBudgetProjection = (
-    tokens: number,
-    budgetTokens: number,
-    ctx: any,
-    recoveryAttempts = 0,
-  ): void => {
-    const key = sha256Value({
-      sessionId: persistence.state?.sessionId ?? null,
-      revision: persistence.state?.revision ?? null,
-      tokens,
-      budgetTokens,
-      phase: "projection-budget-fence",
-    });
-    ladder.pendingContextNote =
-      `The ${brandNoun} projection estimates ${tokens} tokens against a ${budgetTokens}-token serving budget` +
-      (recoveryAttempts
-        ? `, after ${recoveryAttempts} recovery attempt(s) that folded everything foldable. The remaining ` +
-          "inflow does not fit at any folding depth, which is an impossibility rather than a recoverable state."
-        : ".") +
-      " The provider request was aborted before transmission; run /compact or make an explicit bounded context fold.";
-    if (advisory.hardFenceNoticeKey !== key) {
-      advisory.hardFenceNoticeKey = key;
-      safeNotify(
-        ctx,
-        "Provider request aborted: the projection exceeds the serving budget. " +
-        "Run /compact or make an explicit bounded context fold.",
-        "error",
-      );
-    }
-    if (typeof ctx.abort !== "function") {
-      throw new Error(`Pi projection-budget abort capability is unavailable at ${tokens} estimated tokens`);
-    }
-    ctx.abort();
-  };
 
   // THE BAND TOP COMMITS ON ITS OWN (Shane, 2026-08-22).
   //
@@ -1798,10 +1709,10 @@ export function registerActiveContext(pi: any, options: {
     snapshot: ActiveContextSnapshot,
     projected: unknown[],
     ctx: any,
-  ): Promise<{ projected: unknown[]; aborted: boolean; text: string }> => {
+  ): Promise<{ projected: unknown[]; text: string }> => {
     let measured = projectionExceedsBudget(projected, ctx);
     const rejected = curation.pendingRejection !== null;
-    if (!measured.crowded && !rejected) return { projected, aborted: false, text: measured.text };
+    if (!measured.crowded && !rejected) return { projected, text: measured.text };
     const trigger = measured;
     let reduced = projected;
     let attempts = 0;
@@ -1905,11 +1816,24 @@ export function registerActiveContext(pi: any, options: {
       }));
       curation.pendingRejection = null;
     }
-    // `measured` is recomputed on `reduced` at every turn of the loop above, so its text is
-    // the serialization of the array both of these exits return.
-    if (!measured.over) return { projected: reduced, aborted: false, text: measured.text };
-    abortOverBudgetProjection(measured.tokens, measured.budgetTokens, ctx, attempts);
-    return { projected: reduced, aborted: true, text: measured.text };
+    // THE RUNTIME COMMITS AND TRANSMITS; ONLY THE PROVIDER REFUSES (Shane, 2026-08-28).
+    //
+    // This used to abort the request when the projection still read over budget after the
+    // loop. It was deleted because it let an ESTIMATE veto a request that ground truth
+    // would have accepted: a live session read 220,883 tokens where the provider counted
+    // 111,837, was refused before transmission, and could not be rescued, because the
+    // commit before the refusal had applied 28 marks and the next applied 0. The advice it
+    // printed, fold manually or run /compact, named the two things the mechanism had just
+    // proven it could not do.
+    //
+    // maxTarget is a TRIGGER meaning "commit now", not a bound meaning "refuse to
+    // proceed", and only the first is something an estimate can be right about. What
+    // remains is the loop above, which commits everything it can reach; the request then
+    // goes to the provider, and a genuine overflow is handled by the rejection path, which
+    // branches back, folds and retries on the provider's own count rather than ours.
+    // `measured` is recomputed on `reduced` at every turn of the loop, so its text is the
+    // serialization of the array this returns.
+    return { projected: reduced, text: measured.text };
   };
 
   const startPreparation = (snapshot: ActiveContextSnapshot, ratio: number | null, ctx: any): void => {
@@ -2880,11 +2804,6 @@ export function registerActiveContext(pi: any, options: {
       try { projected = projectWithAdvisory(snapshot); }
       catch (error) {
         suspendAutomatic(error, "projection", ctx);
-        abortUnsafeHardContext(snapshot, ctx);
-        return { messages: event.messages };
-      }
-      if (abortUnsafeHardContext(snapshot, ctx, true)) {
-        updateStatus(ctx);
         return { messages: event.messages };
       }
       // THE FRONTIER CUTS FIRST, and it costs the projection nothing to do so: a pending
@@ -2900,7 +2819,6 @@ export function registerActiveContext(pi: any, options: {
         try { projected = projectWithAdvisory(snapshot); }
         catch (error) {
           suspendAutomatic(error, "projection", ctx);
-          abortUnsafeHardContext(snapshot, ctx);
           return { messages: event.messages };
         }
       }
@@ -2915,10 +2833,6 @@ export function registerActiveContext(pi: any, options: {
       // chars here is what fed base64 straight into the fence's own accounting.
       measurements.lastProjectedSizeTokens = reading.sizeTokens;
       measurements.lastProjectedEstimateCalibrated = measurements.projectionCalibrations.length > 0;
-      if (budgeted.aborted) {
-        updateStatus(ctx);
-        return { messages: projected };
-      }
       noteProjection(projected, budgeted.text);
       updateStatus(ctx);
       return { messages: projected };
@@ -2932,7 +2846,6 @@ export function registerActiveContext(pi: any, options: {
         if (!persistedSucceeded) ladder.boundaryFailure = lifecycle.latestSnapshotError;
         suspendAutomatic(error, persistedSucceeded ? "post-persist-projection" : "context", ctx);
       }
-      abortUnsafeHardContext(lifecycle.latestSnapshot, ctx);
       return { messages: event.messages };
     }
   };

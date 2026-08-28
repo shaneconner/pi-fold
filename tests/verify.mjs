@@ -91,7 +91,6 @@ const DEPLOYMENT_IDENTITY_FIXTURE = Object.freeze({
   handoffCompactionBrand: "Acme context ",
   completedCompaction: "native compaction completed; Acme folding state rebuilt",
   compactionNotice: "Pi native compaction ran; Acme folding state was rebuilt.",
-  hardFenceNote: "Provider context reached the hard Acme fence without a newly committed lossless fold. The provider request was aborted before transmission; run /compact or make an explicit bounded context fold.",
   mcpToolName: "mcp__acme__fetch",
   mcpOwnerKind: "acme-mcp",
   mcpOwnerId: "acme:active-context-test",
@@ -842,15 +841,6 @@ async function collectRegistrationSurface(registration, mcpToolName) {
       details: { structuredContent: { payload: "b".repeat(20_000) } },
     }, runtime.ctx);
 
-    const fenceRuntime = makeRuntime(
-      makeFixture({ turns: 3, tools: false, contextWindow: 100_000 }),
-      runtimeOptions,
-    );
-    await startRuntime(fenceRuntime);
-    await measure(fenceRuntime, 95_000, 100_000);
-    await project(fenceRuntime);
-    const fenceStatus = await toolStatus(fenceRuntime, [...fenceRuntime.tools.keys()][0]);
-
     return {
       toolName: tool.name,
       toolLabel: tool.label,
@@ -870,7 +860,6 @@ async function collectRegistrationSurface(registration, mcpToolName) {
       handoffCompaction: handoffStatus.details.automatic.lastCompactionDecision?.reason,
       completedCompaction: completedStatus.details.automatic.lastCompactionDecision?.reason,
       compactionNotices: runtime.notifications.map((notice) => notice.message),
-      hardFenceNote: fenceStatus.details.automatic.pendingContextNote,
       evidence: {
         ownerKind: evidenceProjection.details.evidence.owner.kind,
         ownerId: evidenceProjection.details.evidence.owner.id,
@@ -963,11 +952,9 @@ async function gateNeutralDefaultBranding() {
   assert(surface.compactionNotices.includes(
     "Pi native compaction ran; pi-fold folding state was rebuilt.",
   ));
-  assert.equal(
-    surface.hardFenceNote,
-    "Provider context reached the hard pi-fold fence without a newly committed lossless fold. " +
-      "The provider request was aborted before transmission; run /compact or make an explicit bounded context fold.",
-  );
+  // The branded hard-fence note is GONE with the fence itself (2026-08-28). Nine branded
+  // surfaces still carry the deployment noun here, which is what keeps this gate's
+  // neutrality claim honest; one fewer is a smaller surface, not a weaker rule.
   assert.equal(surface.evidence.ownerKind, "pi-fold-mcp");
   assert.equal(surface.evidence.ownerId, "pi-fold:active-context-test");
   assert(surface.evidence.path.includes("/pi-fold-evidence/"));
@@ -1007,7 +994,6 @@ async function gateDeploymentBrandingReproduction() {
     `The boundary decision is not brand-derived: ${surface.handoffCompaction}`);
   assert.equal(surface.completedCompaction, fixture.completedCompaction);
   assert(surface.compactionNotices.includes(fixture.compactionNotice));
-  assert.equal(surface.hardFenceNote, fixture.hardFenceNote);
   assert.equal(surface.evidence.ownerKind, fixture.mcpOwnerKind);
   assert.equal(surface.evidence.ownerId, fixture.mcpOwnerId);
   assert(surface.evidence.path.includes(`/${fixture.evidenceDirectory}/`));
@@ -1322,7 +1308,12 @@ async function gateOverflowRegression() {
   await project(runtime);
   let status = await toolStatus(runtime);
   assert.equal(status.details.automatic.automaticSuspended, false);
-  assert(runtime.aborts >= 1, "Overflow did not reach the hard-fence abort");
+  // THE RUNTIME NO LONGER REFUSES (2026-08-28). This asserted an abort at 110k against a
+  // 100k window. Both fences are deleted: an over-budget reading commits what it can and
+  // TRANSMITS, and a request that genuinely will not fit is the provider's to reject, on
+  // its own count rather than on our estimate. What must still hold is that the session
+  // survives the crossing with automatic folding intact.
+  assert.equal(runtime.aborts, 0, "An over-budget projection was refused instead of transmitted");
   await measure(runtime, 60_000, 100_000);
   status = await toolStatus(runtime);
   assert.equal(status.details.automatic.pressureRatio, 0.60);
@@ -3844,13 +3835,21 @@ async function gateTruthfulCapacityAdmission() {
   await startRuntime(stale);
   await measure(stale, 297_000, 272_000);
   await project(stale);
-  assert(stale.aborts >= 1, "The descriptor fence did not abort at 297k against 272k");
+  // Once the descriptor fence would have fired; now nothing refuses. The DISTINCTION the
+  // rest of this gate draws is untouched and is the real subject: a descriptor budget and
+  // a truthful one disagree about the same load, and the truthful one is right, which the
+  // capacity readings below still prove. What is gone is the refusal that acted on the
+  // disagreement before the provider could settle it.
+  assert.equal(stale.aborts, 0, "The descriptor reading refused a request instead of transmitting it");
 
   const truthfulRuntime = makeRuntime(fixture(), { providerInputBudget: 383_616 });
   await startRuntime(truthfulRuntime);
   await measure(truthfulRuntime, 297_000, 272_000);
   await project(truthfulRuntime);
   assert.equal(truthfulRuntime.aborts, 0, "The truthful budget aborted inside real headroom");
+  // Neither reading aborts now, so the two runtimes must be separated by their CAPACITY,
+  // which is what the assertions below do. Left as a pair deliberately: if a refusal ever
+  // returns, the stale runtime is where it fires first and this gate says so.
   const capacity = (await toolStatus(truthfulRuntime)).details.automatic.capacity;
   assert.equal(capacity.mode, "truthful");
   // Window and budget are ONE number once the deployment declares its serving budget:
@@ -4625,9 +4624,16 @@ async function gateProjectionBudgetFence() {
   const starvedFolds = materialized(guardedOnly).folds.length;
   assert(starvedFolds >= 1,
     "The fold path reached nothing on the open excursion, so the starvation is back");
+  // AND IT TRANSMITS ANYWAY (2026-08-28). This asserted an abort here. Both fences are
+  // deleted, so a projection the fold path cannot reduce far enough is SENT: the estimate
+  // may schedule work, never veto a request that ground truth would have accepted. What
+  // makes that safe is the rest of this gate, which was already here and is now the whole
+  // story rather than a second line of defence. The provider rejects on its own count, the
+  // rollback moves the leaf back past the failed request, one notice is steered, and the
+  // retried pass runs the recovery lane. Truth refuses; we do not.
   const guardedAbortsBeforeOverflow = guardedOnly.aborts;
-  assert(guardedAbortsBeforeOverflow >= 1,
-    "A projection the fold path cannot reduce far enough was transmitted instead of aborted");
+  assert.equal(guardedAbortsBeforeOverflow, 0,
+    "A projection was refused on an estimate instead of being left to the provider");
 
   // THE ROLLBACK CARRIES IT. The provider rejects, the leaf moves back past the request
   // that failed, one notice is steered, and the retried pass runs the recovery lane.
@@ -4667,20 +4673,21 @@ async function gateProjectionBudgetFence() {
   assert.equal(guardedRecovery.freed_tokens, 0, "The recovery pass freed tokens it did not report");
   assert.equal(guardedRecovery.rejected_tokens, guardedRecovery.tokens_after,
     "The rebuilt request differs in size from the one the provider rejected");
-  assert(guardedOnly.aborts > guardedAbortsBeforeOverflow,
-    "An over-budget projection was transmitted after the rollback");
+  assert.equal(guardedOnly.aborts, guardedAbortsBeforeOverflow,
+    "A rebuilt request was refused on an estimate instead of being left to the provider");
 
-  // The invariant, stated once: a projection the fence weighs as over budget is never
-  // transmitted. It may still be RETURNED -- an aborted turn hands back the projection,
-  // never the raw corpus -- but the abort is what stops the send.
+  // THE INVARIANT, RESTATED FOR THE NEW LAW. It used to read: a projection the fence
+  // weighs as over budget is never transmitted. That is deleted. What replaces it is
+  // narrower and true: the runtime NEVER REFUSES, and every pass hands back the
+  // PROJECTION rather than the raw corpus, so the request that goes out is always the
+  // folded one and never the branch behind it. Sending something the provider may reject
+  // is now an accepted outcome; sending the unfolded corpus never is.
   const abortsBeforeFinal = runtime.aborts;
   const finalProjection = await project(runtime);
-  const finalStatus = (await toolStatus(runtime)).details.automatic;
-  const finalTokens = Math.ceil(bytesOf(finalProjection.messages) / finalStatus.projectionCharsPerToken);
-  assert(finalTokens <= budgetTokens || runtime.aborts > abortsBeforeFinal,
-    `A ${finalTokens}-token projection was transmitted against a ${budgetTokens}-token budget`);
+  assert.equal(runtime.aborts, abortsBeforeFinal,
+    "A pass refused to transmit instead of committing what it could and sending");
   assert(bytesOf(finalProjection.messages) < bytesOf(runtime.messages),
-    "An aborted pass handed back the raw branch instead of the projection");
+    "A pass handed back the raw branch instead of the projection");
 
   return {
     orderMarkedMarks: orderMarked,
@@ -5017,8 +5024,13 @@ async function gateFenceMarginAndDepth() {
   // reaches into the middle. It is a rollback.
   const foldedOnTheWayUp = climb.some((entry, index) => index > 0 && entry.chars < climb[index - 1].chars);
   assert(foldedOnTheWayUp, "The ordinary reach never reduced the window while stale mass remained");
-  assert(climb.at(-1).aborts > climb[0].aborts,
-    "The climb transmitted instead of aborting");
+  // AND THEN IT TRANSMITS. This asserted the climb ended in an abort. The abort is gone,
+  // and what the climb still proves is the part that mattered: the ordinary reach folds
+  // while stale mass remains and then stops, honestly, without the zone law being bent to
+  // reach into the open middle. Where it used to end in a refusal it now ends in a send,
+  // and a rollback answers it if the provider disagrees.
+  assert.equal(climb.at(-1).aborts, climb[0].aborts,
+    "The climb refused on an estimate instead of transmitting");
   // The third claim here is DELETED, not weakened, and this is the one place it could be
   // read as a loss. It asserted `reduction === null` on the last pass: the fence reaching
   // the top with nothing left it may take. That fixture built its untakeable mass out of
@@ -5068,13 +5080,18 @@ async function gateFenceMarginAndDepth() {
   "The recovery queued more than one steered message");
   assert(!runtime.branch.some((entry) => entry.message?.stopReason === "error"),
     "The rejected entry is still on the live branch");
+  // The retry goes out too. A session whose material genuinely will not fit reaches the
+  // provider again and is rejected again, which is a loop bounded by the provider rather
+  // than by us. That is the accepted cost of never refusing: the alternative, measured
+  // once for real, was a session that could not send anything ever again and could not be
+  // rescued by folding or by /compact, because the estimate that condemned it was wrong.
   const abortsBeforeRetry = runtime.aborts;
   const retriedProjection = await project(runtime);
   await settle();
-  assert(runtime.aborts > abortsBeforeRetry,
-    "The retried request was transmitted against a budget it still does not fit");
+  assert.equal(runtime.aborts, abortsBeforeRetry,
+    "The retried request was refused on an estimate instead of being left to the provider");
   assert(retriedProjection.messages.length >= 1,
-    "An aborted pass handed back nothing at all instead of the projection");
+    "A pass handed back nothing at all instead of the projection");
 
   // Calibration recency: the session's ratio drifts from seven chars per token to five.
   // The estimate must follow it, because at this occupancy a stale ratio is the whole
@@ -8277,8 +8294,12 @@ async function gateFenceOpensTheMiddle() {
     assert(fold.refs.every((key) => !pinnedRefs.has(key)),
       `Fold ${fold.id} took pinned evidence at the fence`);
   }
-  assert(runtime.aborts > abortsBeforeFence,
-    "An untransmittable request went out instead of being aborted");
+  // The fence COMMITS and the request goes out. Folds landing under pressure is the
+  // property this gate audits and it is asserted above; the abort that used to follow
+  // them is deleted, because refusing on an estimate killed a live session that the
+  // provider would have accepted.
+  assert.equal(runtime.aborts, abortsBeforeFence,
+    "A request was refused at the fence instead of being committed and transmitted");
 
   // (d) A COMMIT PASS WITH NOTHING TO PROPOSE SAYS SO. It used to return silently, which
   // is how the rep-2 starvation stayed invisible for 25 stages: the pass that answered a
