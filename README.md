@@ -4,6 +4,10 @@
 
 **Rotate stale text out of the context window without losing it, and spend the prefix cache once per commit instead of continuously.** The oldest part of a session collapses into short briefs while the exact originals stay on disk, one tool call away. Folding is automatic and needs no agent participation. The shipped shape is deterministic briefs paired with a durable memory store, which is the cheapest configuration measured that kept recall intact.
 
+![pi-fold folding a session in place: marks outline completed spans as the session works, and the marks commit together at a fold event](https://raw.githubusercontent.com/shaneconner/pi-fold/main/media/fold-demo.gif)
+
+*Marks outline spans as they complete and move nothing; the next commit applies every standing mark in one rewrite. Expanding a brief brings the exact messages back byte for byte. Illustrative animation drawn on the 2.x surface, where the agent laid the marks; since 3.0 the runtime lays them.*
+
 ## Install
 
 ```sh
