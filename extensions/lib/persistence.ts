@@ -1217,8 +1217,35 @@ export function makeStateDelta(previous: ActiveContextState, next: ActiveContext
   }, next.sessionId) as ActiveContextDeltaV2;
 }
 
+// THE FOREST IS HASHED ONCE PER STATE OBJECT (2026-08-28). Nine call-site pairs reach this,
+// and the one that scales is the per-mark loop in `commitPendingMarks`: `prepareFold` hashes
+// `state`, and the `commitPreparedFold` on the very next statement re-hashes the SAME object
+// through `preparedFoldError`. So every applied mark paid one avoidable whole-forest hash,
+// and `state` grows by a fold each iteration, making a commit epoch O(marks x folds).
+// Instrumented across the suite: 6,363 calls, 63.8 percent of them repeats on an object
+// already hashed, peaking at 198 in a single context event.
+//
+// It is gate 113's rule, gate 120's and gate 121's, at a fourth address: kept against the
+// state OBJECT rather than its contents, because state is REPLACED on every change rather
+// than mutated, so a replaced one misses and hashes again instead of serving something
+// stale. Every transition in the runtime is a spread; nothing writes `state.folds`,
+// `state.expanded` or a fold in place.
+//
+// The accepted cost, which is the same one gate 121 accepted: a state mutated in place keeps
+// its first digest, and this digest is persisted into `PreparedFold.topologySha256`.
+//
+// NOT memoized beside it: `protectionSha256`, measured at 0.037 to 0.061ms on real states
+// because `state.protected` is empty in every sealed run, so a memo there buys about 3
+// percent and adds a second retained map for nothing.
+const TOPOLOGY_SHA256 = new WeakMap<object, string>();
+
 export function topologySha256(state: Pick<ActiveContextState, "folds" | "expanded">): string {
-  return sha256Value({ folds: state.folds, expanded: [...state.expanded].sort() });
+  const key = state as unknown as object;
+  const memoized = TOPOLOGY_SHA256.get(key);
+  if (memoized !== undefined) return memoized;
+  const digest = sha256Value({ folds: state.folds, expanded: [...state.expanded].sort() });
+  TOPOLOGY_SHA256.set(key, digest);
+  return digest;
 }
 
 export function protectionSha256(state: Pick<ActiveContextState, "protected">): string {

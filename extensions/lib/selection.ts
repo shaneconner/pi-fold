@@ -736,12 +736,45 @@ export function automaticToolBatches(
     if (ids.size !== expected.length || expected.some((id) => !ids.has(id)) ||
         refs.some((ref) => !ref || ref.role !== "toolResult")) continue;
     const exactRefs = refs as EvidenceRef[];
-    const size = group.reduce((total, { item }) => total + bytes(item.message), 0);
+    const size = group.reduce((total, { item }) => total + messageBytes(item.message), 0);
     if (refsProtected(exactRefs, state, snapshot) || refsInOrder(snapshot, exactRefs) === null ||
         size < snapshot.thresholds.minFoldChars) continue;
     batches.push({ refs: exactRefs, indices: group.map(({ item }) => item.index), bytes: size });
   }
   return batches;
+}
+
+/**
+ * The serialized size of ONE transcript message, derived once per message object.
+ *
+ * `selectAutomaticSpan` tries the batch lane first, so this runs up to
+ * MAX_FRONTIER_CUTS_PER_PASS times per context event from `frontierMarks`, once per staged
+ * mark in a fill, and again from `unmarkedRemainder`. Everything else in
+ * `automaticToolBatches` was already memoized; this was not, and it ran BEFORE the
+ * eligibility filter, on every complete group including ones that go on to be refused.
+ *
+ * IT IS KEYED ON THE MESSAGE OBJECT, which is only useful because of where the object comes
+ * from: `snapshot.mapped[i].message` is `input.eventMessages[index]` VERBATIM
+ * (transcript.ts:494-508), so it is the same object across every snapshot derived from the
+ * same session, and the memo hits. `snapshot.messages` is `clone(input.eventMessages)`
+ * (transcript.ts:531), fresh objects on every derivation, so a caller reading THAT would
+ * never hit and should not be routed here.
+ *
+ * Deliberately NOT a wrapper on `bytes()`, which is also called on transient arrays
+ * (folding.ts, scheduling.ts) whose keys could never hit and would only grow the map.
+ *
+ * The accepted cost is gate 121's: a message mutated in place keeps its first size.
+ */
+const MESSAGE_BYTES = new WeakMap<object, number>();
+
+export function messageBytes(message: unknown): number {
+  const key = message && typeof message === "object" ? message as object : null;
+  if (!key) return bytes(message);
+  const memoized = MESSAGE_BYTES.get(key);
+  if (memoized !== undefined) return memoized;
+  const size = bytes(message);
+  MESSAGE_BYTES.set(key, size);
+  return size;
 }
 
 export function selectAutomaticToolBatch(

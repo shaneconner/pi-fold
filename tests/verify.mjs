@@ -15283,6 +15283,93 @@ async function gateDerivedOnce() {
 	};
 }
 
+/**
+ * TWO MORE DERIVATIONS KEPT AGAINST THE OBJECT, AND THE COST THAT BUYS
+ *
+ * `topologySha256` hashes the whole fold forest and `messageBytes` serializes one transcript
+ * message. Both are now memoized on the OBJECT they are handed, which is gate 113's rule,
+ * gate 120's and gate 121's, at two more addresses: state and messages are REPLACED on every
+ * change rather than mutated, so a replaced one misses and derives again instead of serving
+ * something stale.
+ *
+ * This gate ASSERTS THE COST rather than leaving it to be found as a bug later, which is the
+ * only honest way to pin a memo: a value mutated IN PLACE keeps its first answer. That is
+ * also what makes the gate non-vacuous, because it cannot pass without the memo existing.
+ *
+ * Why it was worth it. `topologySha256`: `prepareFold` hashes `state` and the
+ * `commitPreparedFold` on the very next statement re-hashes the same object through
+ * `preparedFoldError`, so every applied mark paid one avoidable whole-forest hash while
+ * `state` grew by a fold per iteration. 6,363 calls across the suite, 63.8 percent repeats,
+ * 198 in one context event. `messageBytes`: `automaticToolBatches` sized every complete group
+ * before the eligibility filter, up to eight times per event from `frontierMarks`.
+ *
+ * The structural fact the message memo RESTS on is pinned here too, because it is not
+ * obvious and it decides which callers may use it: `snapshot.mapped[i].message` is the
+ * session's own message object, while `snapshot.messages[i]` is a clone. A caller reading
+ * the clones would never hit, so routing them here would grow the map for nothing.
+ */
+async function gateDerivedAgainstTheObject() {
+	const built = makeFixture({ turns: 8, resultChars: 3_000, tools: true });
+	const snapshot = epochSnapshot(built);
+
+	// THE STRUCTURAL FACT. mapped carries the session's own objects; messages carries clones.
+	const carrier = snapshot.mapped.find((item) => item.ref);
+	assert(carrier !== undefined, "The fixture mapped nothing");
+	assert.equal(carrier.message, built.messages[carrier.index],
+		"snapshot.mapped stopped carrying the session's own message objects, so the size memo cannot hit");
+	assert.notEqual(snapshot.messages[carrier.index], built.messages[carrier.index],
+		"snapshot.messages stopped being a clone; if that changed, say so where messageBytes is defined");
+	assert.equal(json.stableStringify(snapshot.messages[carrier.index]), json.stableStringify(carrier.message),
+		"The clone and the original stopped carrying the same content");
+
+	// THE MESSAGE SIZE. Same object, same answer; a DISTINCT object with identical content
+	// derives independently and must agree, or the memo would be hiding a wrong number.
+	const size = context.messageBytes(carrier.message);
+	assert.equal(context.messageBytes(carrier.message), size, "messageBytes is not stable on one object");
+	assert.equal(context.messageBytes(structuredClone(carrier.message)), size,
+		"Two objects with identical content disagreed on size");
+	assert.equal(size, bytesOf(carrier.message), "messageBytes stopped agreeing with the serializer");
+	// THE COST, asserted: mutate in place and the first answer stands. Only a memo does this.
+	const mutable = structuredClone(carrier.message);
+	const before = context.messageBytes(mutable);
+	mutable.content = `${JSON.stringify(mutable.content)} and a great deal more text besides`;
+	assert.equal(context.messageBytes(mutable), before,
+		"messageBytes re-derived after an in-place write, so it is no longer memoized");
+	assert.notEqual(bytesOf(mutable), before, "The fixture's mutation did not change the message's size");
+	// A non-object falls straight through rather than being keyed.
+	// The runtime's own `bytes`, not `bytesOf`: a STRING is measured directly rather than
+	// JSON-quoted, and messageBytes must fall through to exactly that.
+	assert.equal(context.messageBytes("plain"), context.bytes("plain"),
+		"messageBytes mishandles a value it cannot key");
+
+	// THE FOREST DIGEST. Same three claims, one level up.
+	const state = context.emptyActiveContextState(built.sessionId);
+	const digest = persistenceModule.topologySha256(state);
+	assert.equal(persistenceModule.topologySha256(state), digest, "topologySha256 is not stable on one object");
+	assert.equal(persistenceModule.topologySha256({ folds: [...state.folds], expanded: [...state.expanded] }),
+		digest, "Two states with identical topology disagreed");
+	// Replacement is what the runtime actually does, and it must re-derive.
+	const moved = { ...state, expanded: [...state.expanded, "fold_moved"] };
+	assert.notEqual(persistenceModule.topologySha256(moved), digest,
+		"A changed topology kept the old digest; every transition in the runtime is a spread");
+	// The cost, asserted.
+	const inPlace = { folds: [...state.folds], expanded: [...state.expanded] };
+	const first = persistenceModule.topologySha256(inPlace);
+	inPlace.expanded.push("fold_written_in_place");
+	assert.equal(persistenceModule.topologySha256(inPlace), first,
+		"topologySha256 re-derived after an in-place write, so it is no longer memoized");
+	assert.notEqual(persistenceModule.topologySha256({ ...inPlace }), first,
+		"A replaced state served the mutated object's stale digest");
+
+	// `protectionSha256` is deliberately NOT memoized, and the reason is that it is cheap on
+	// real states. Pin that it still answers from content, so a future memo there is a choice
+	// someone makes rather than one that drifts in.
+	const pinned = { protected: [] };
+	assert.equal(persistenceModule.protectionSha256(pinned), persistenceModule.protectionSha256({ protected: [] }),
+		"protectionSha256 stopped being content-addressed");
+	return { messageBytes: size, memoized: ["topologySha256", "messageBytes"], notMemoized: ["protectionSha256"] };
+}
+
 const gates = [
   [1, "Registration, parse and deployment branding", gateRegistrationAndBranding],
   [2, "The durable record: lattice, chain and rollback", gateDurableRecord],
@@ -15408,6 +15495,7 @@ const gates = [
   [150, "The ref key matches the serializer", gateRefKeyMatchesTheSerializer],
   [151, "A growing range stops at the first obstruction", gateGrowingRangeStopsAtTheFirstObstruction],
   [152, "A value already derived is not derived again", gateDerivedOnce],
+  [153, "A derivation kept against the object it was handed", gateDerivedAgainstTheObject],
   // 143 is retired with the agent's `fold` verb (Shane 2026-08-23). Its subject was the
   // ANSWER a mark comes back with: the drop the next commit has to make, what the mark
   // covers of it, and what the ladder takes otherwise, all so an agent choosing spans could
