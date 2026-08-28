@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="300" viewBox="0 0 720 300" role="img" aria-label="Compaction replaces the transcript with a summary and discards the originals. pi-fold replaces it with a brief and keeps the originals on disk, one peek or expand away.">
+<defs><marker id="a-6e7681" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 9 5 L 0 9 z" fill="#6e7681"/></marker><marker id="s-6e7681" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 9 1 L 0 5 L 9 9 z" fill="#6e7681"/></marker><marker id="a-4493f8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 9 5 L 0 9 z" fill="#4493f8"/></marker><marker id="s-4493f8" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 9 1 L 0 5 L 9 9 z" fill="#4493f8"/></marker><marker id="a-db6d28" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 9 5 L 0 9 z" fill="#db6d28"/></marker><marker id="s-db6d28" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 9 1 L 0 5 L 9 9 z" fill="#db6d28"/></marker></defs>
+<rect x="1" y="18" width="718" height="112" rx="9" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="20" y="12" font-size="11" font-weight="700" fill="#9198a1" letter-spacing="0.08em" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">COMPACTION</text>
+<rect x="28" y="48" width="150" height="52" rx="7" fill="#0d1117" stroke="#3d444d" stroke-width="1.4"/>
+<text x="103.0" y="78.0" font-size="13" font-weight="400" fill="#e6edf3" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">transcript</text>
+<line x1="178" y1="74" x2="268" y2="74" stroke="#6e7681" stroke-width="1.6" marker-end="url(#a-6e7681)"/>
+<rect x="268" y="40" width="180" height="34" rx="7" fill="#0d1117" stroke="#3d444d" stroke-width="1.4"/>
+<text x="358.0" y="61.0" font-size="12.5" font-weight="400" fill="#e6edf3" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">summary</text>
+<rect x="268" y="84" width="180" height="34" rx="7" fill="#0d1117" stroke="#db6d28" stroke-width="1.4" stroke-dasharray="5 4"/>
+<text x="358.0" y="105.0" font-size="12.5" font-weight="400" fill="#e6edf3" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">originals discarded</text>
+<text x="472" y="79" font-size="12.5" fill="#9198a1" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">the session starts over</text>
+<rect x="1" y="160" width="718" height="132" rx="9" fill="#151b23" stroke="#3d444d" stroke-width="1"/>
+<text x="20" y="154" font-size="11" font-weight="700" fill="#9198a1" letter-spacing="0.08em" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">PI-FOLD</text>
+<rect x="28" y="200" width="150" height="52" rx="7" fill="#0d1117" stroke="#3d444d" stroke-width="1.4"/>
+<text x="103.0" y="230.0" font-size="13" font-weight="400" fill="#e6edf3" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">transcript</text>
+<line x1="178" y1="226" x2="268" y2="200" stroke="#6e7681" stroke-width="1.6" marker-end="url(#a-6e7681)"/>
+<line x1="178" y1="226" x2="268" y2="258" stroke="#6e7681" stroke-width="1.6" marker-end="url(#a-6e7681)"/>
+<rect x="268" y="182" width="180" height="34" rx="7" fill="#121d2f" stroke="#4493f8" stroke-width="1.4"/>
+<text x="358.0" y="203.0" font-size="12.5" font-weight="400" fill="#e6edf3" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">brief in the window</text>
+<rect x="268" y="240" width="180" height="38" rx="7" fill="#0d1117" stroke="#3d444d" stroke-width="1.4"/>
+<text x="358.0" y="263.0" font-size="12.5" font-weight="400" fill="#e6edf3" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">exact originals on disk</text>
+<line x1="358" y1="240" x2="358" y2="218" stroke="#4493f8" stroke-width="1.6" marker-end="url(#a-4493f8)" marker-start="url(#s-4493f8)"/>
+<text x="368" y="233" font-size="11.5" fill="#4493f8" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">peek / expand</text>
+<text x="472" y="225" font-size="12.5" fill="#9198a1" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif">the session keeps going</text>
+</svg>

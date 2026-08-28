@@ -1,8 +1,8 @@
 # pi-fold
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21856873.svg)](https://doi.org/10.5281/zenodo.21856873)
+[![npm](https://img.shields.io/npm/v/pi-fold)](https://www.npmjs.com/package/pi-fold) [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22142456.svg)](https://doi.org/10.5281/zenodo.22142456)
 
-Agent-governed lossless context folding for Pi. A session folds its own transcript instead of losing it: the stale end collapses into short briefs while the exact originals stay on disk, addressed and verified by SHA-256, one tool call away.
+**Rotate stale text out of the context window without losing it, and without throwing away the prefix cache.** The oldest part of a session collapses into short briefs while the exact originals stay on disk, one tool call away. The agent can steer what happens, or ignore it entirely and still get folded. It composes with a long-term memory store, and that pairing is where the measured value sat.
 
 ![pi-fold folding a session in place: marks outline completed spans as the session works, and the marks commit together at a fold event](https://raw.githubusercontent.com/shaneconner/pi-fold/main/media/fold-demo.gif)
 
@@ -16,26 +16,16 @@ pi install npm:pi-fold
 
 Node 22 or later, Pi 0.83 or later. MIT licensed.
 
-Pairs with a long-term memory store, and the results below are the case for doing that. [pi-canon](https://github.com/shaneconner/pi-canon) is one, built alongside this and kept separate on purpose; any store offering durable placement and a followable address should compose the same way.
+The store it pairs with is your choice. [pi-canon](https://github.com/shaneconner/pi-canon) is one, built alongside this and kept separate on purpose; anything offering durable placement and a followable address should compose the same way.
 
 ## What it does
 
 Compaction does not continue a session, it starts a new one: it summarizes the transcript, discards the originals, and begins again from the summary. Folding keeps the turn.
 
-```mermaid
-flowchart TB
-  subgraph B["pi-fold"]
-    direction LR
-    B1["transcript"] --> B2["brief in the window"]
-    B1 --> B3["exact originals on disk<br/>SHA-256 verified"]
-    B3 -. "peek / expand" .-> B2
-  end
-  subgraph A["compaction"]
-    direction LR
-    A1["transcript"] --> A2["summary"]
-    A1 --> A3["originals discarded"]
-  end
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/shaneconner/pi-fold/main/media/fold-vs-compaction-dark.svg">
+  <img alt="Compaction turns the transcript into a summary and discards the originals, so the session starts over. pi-fold turns it into a brief and keeps the exact originals on disk, one peek or expand away, so the session keeps going." src="https://raw.githubusercontent.com/shaneconner/pi-fold/main/media/fold-vs-compaction-light.svg">
+</picture>
 
 A fold takes a contiguous span of session entries and replaces it, in the window only, with a short brief. The entries go to a fold store byte for byte, addressed by their SHA-256 hash. The brief carries a handle, the handle resolves to the original, and expansion restores the exact bytes after verifying the hash. A fold is a claim the runtime can check, not one the reader has to trust.
 
@@ -43,47 +33,31 @@ The package registers one tool, `pi_fold_context`, with nine actions over the tr
 
 ## Results
 
-One 64-stage assignment over the curl C repository, delivered as a single agentic turn per run. Model gpt-5.6-sol at xhigh effort, 272,000-token descriptor, 251,520-token serving budget, identical in every run. After all 64 stages landed, one withheld final message asked sixteen questions about material from across the whole session.
+One 64-stage assignment over the curl C repository, run as a single agentic turn. Same model, same 251,520-token serving budget, every run. After all 64 stages landed, one withheld message asked sixteen questions about material from across the whole session.
 
-| Condition | Correct of 16 | Wrong | Cost |
-| --- | :--- | ---: | ---: |
-| Compaction | 4 | 3 | $151.24 |
-| Compaction + memory store | 14 | 0 | $201.70 |
-| pi-fold, deterministic briefs | 14 · 14 · 9 · 8 | 0 · 0 · 7 · 7 | $83.98 to $109.52 |
-| pi-fold + memory store | 14 | 0 | $100.85 |
-| pi-fold, agent-written briefs | 3 | 9 | $111.96 |
+| Condition | Correct of 16 | Wrong | Cost | Fresh input | Cached input | Wall clock |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Compaction | 4 | 3 | $151.24 | 7.64M | 160.2M | 6.9h |
+| Compaction + memory store | 14 | 0 | $201.70 | 9.65M | 231.7M | 9.0h |
+| pi-fold, deterministic briefs | 11.3 avg | 3.5 avg | $93.65 | 5.74M | 91.2M | 4.6h |
+| **pi-fold + memory store** | **14** | **0** | **$100.85** | **5.57M** | **102.2M** | **5.2h** |
+| pi-fold, agent-written briefs | 3 | 9 | $111.96 | 7.12M | 108.8M | 5.4h |
 
-Four things the table says, in order of how much they should change a decision:
+*Fresh input is what the provider had to read for the first time; cached input is what it replayed. The deterministic-briefs row averages four runs that scored 14, 14, 9 and 8.*
 
-**Composed with a store, the two mechanisms score the same and the fold costs half.** 14 correct and nothing wrong on both, $100.85 against $201.70. The gap is request count, not price per request: the two arms paid the same per provider request, and compaction needed 1,700 of them against the fold's 916 for the same 64 stages, plus $14.73 of summarizer calls that never appear in its provider ledger.
+**Read the bolded row against the one above it.** Paired with a store, folding and compaction answer identically and folding costs half. That gap is request count rather than price: compaction needed roughly twice the provider requests for the same work, plus summarizer calls that never show up in its own ledger.
 
-**Compaction alone did not confabulate, it abstained.** Four correct, three wrong, nine abstentions. That is the honest move for a mechanism whose summary is all it has, and it is why the recommendation below is a store rather than a scolding.
+Two things worth knowing before you trust the rest. Compaction alone did not make things up, it declined to answer, which is the honest failure for a mechanism whose summary is all it has. And the fold's deterministic runs are bimodal rather than average: two answered 14 with nothing wrong, two lost old material, and cost did not predict which. The store removed that spread both times it was tried, which is two for two and suggestive, not a rate.
 
-**The fold's deterministic draws are bimodal.** Two draws answered 14 with nothing wrong; two lost old material and answered 9 and 8. Cost does not predict which: the cheapest run of the campaign tied the best score, and the most expensive fold draw hit the seven-wrong mode. The store removed that variance in both attempts it was given, which is two for two and suggestive, not a rate.
+The last row is why the invitation to write briefs ships off. Asking the model to improve a brief scored worst of anything measured.
 
-**Agent-written briefs scored worst of everything, by a wide margin.** Inviting the model to improve a brief drew 3 correct against 9 wrong. That is why deterministic briefs are the shipped default and the invitation is off.
-
-Wall clock ran with the money here, 4.1 to 5.3 hours for the fold runs against 6.9 for compaction and 9.0 for compaction with a store, though an earlier campaign ordered it the other way, so that is a result and not a law. The long-context price tier is not this campaign's story either: neither composed run crossed it.
-
-### The setup to run
-
-Deterministic briefs alongside a long-term memory store, which is the shipped default plus one store.
-
-Rotation and retention are different jobs. Rotation gets stale material out of the window. Retention keeps what the session learned. A handoff summary does both in one pass, which is why it works and also where it runs out: it is durable context living in exactly one record, written once under time pressure, bounded by the window it has to fit inside. Folding is the rotation half and only that half. A store is the other: many records rather than one, each at its own address, written as the work happens, outliving the session.
-
-### Scheduling, measured against itself
-
-Folding is cheap to decide and expensive to apply, and the expense is set by how often the projection changes rather than by how much each change reclaims. Two runs on the same plan and seed with scheduling as the only variable: applying each fold when it was made spent 19,623,502 fresh input tokens at a pooled cache share of 0.119, and recording marks to land together spent 3,603,440 at 0.756. A 5.4x reduction in what the provider had to read for the first time. It was slower in wall clock, 33.5 minutes against 26.7, so that trade bought tokens and not time.
-
-Papers, figure sources, redacted per-request ledgers and campaign logs are on Zenodo: [the design and trace evaluation](https://doi.org/10.5281/zenodo.21856873), [working memory under context shedding](https://doi.org/10.5281/zenodo.21980746), [ephemeral retrieval](https://doi.org/10.5281/zenodo.22142454), and [rotation and retention](https://doi.org/10.5281/zenodo.22142456), which is the campaign above. Narrative versions are on Medium, from [compaction doesn't have to mean starting over](https://medium.com/@shane.conner/compaction-doesnt-have-to-mean-starting-over-89c0b319d1a6) to [a compaction summary is one record doing a store's job](https://medium.com/@shane.conner/a-compaction-summary-is-one-record-doing-a-stores-job-3f46212ef059). Interactive versions of every mechanism on this page are at [shaneconner.com/projects/pi-fold](https://shaneconner.com/projects/pi-fold/). Full chronology: [the experiment log](https://github.com/shaneconner/pi-fold/blob/main/docs/fold_vs_compaction/experiment-log.md).
+Four papers with figure sources, redacted per-request ledgers and campaign logs are on Zenodo: [design and trace evaluation](https://doi.org/10.5281/zenodo.21856873), [working memory under context shedding](https://doi.org/10.5281/zenodo.21980746), [ephemeral retrieval](https://doi.org/10.5281/zenodo.22142454), and [rotation and retention](https://doi.org/10.5281/zenodo.22142456), which is the campaign above. Narrative versions on [Medium](https://medium.com/@shane.conner/a-compaction-summary-is-one-record-doing-a-stores-job-3f46212ef059), interactive versions at [shaneconner.com](https://shaneconner.com/projects/pi-fold/), and the full chronology in [the experiment log](https://github.com/shaneconner/pi-fold/blob/main/docs/fold_vs_compaction/experiment-log.md).
 
 ## Limits
 
-- The benchmarks were built to reproduce specific things compaction was believed to handle badly. That makes them useful and it makes them narrow. They are not a neutral sample of real work.
-- Runs were accumulated adaptively: one to four per condition, a sequential case series rather than a fixed-N trial.
-- Nothing here estimates production behavior, because that is not something this setup can test.
-- Native compaction is strong and is the right default for most sessions. It costs nothing to adopt, needs no tool surface, and models are trained under it. This is an alternative for workflows where the numbers above matter, not a replacement.
-- Lossless recall is worth less alone than it sounds: an agent in a real deployment can usually reach its own transcript by other means. The pairing with a store is where the measured value sat.
+- **Native compaction is strong and is the right default for most sessions.** It costs nothing to adopt, needs no tool surface, and models are trained under it. This is an alternative for workflows where the numbers above matter, not a replacement.
+- **The benchmark is narrow by construction.** It was built to reproduce specific things compaction handles badly, one to four runs per condition, and it says nothing about production behavior.
+- **Lossless recall is worth less on its own than it sounds.** An agent can usually reach its transcript by other means. The pairing with a store is where the measured value sat.
 
 ## How it works
 
@@ -95,16 +69,10 @@ Papers, figure sources, redacted per-request ledgers and campaign logs are on Ze
 
 ### Marks are free, commits are not
 
-```mermaid
-flowchart LR
-  A["unit completes"] --> B["runtime marks the span<br/>window unchanged, cache intact"]
-  B --> C{"occupancy<br/>at maxTarget?"}
-  C -- "no" --> B
-  C -- "yes" --> D["one commit<br/>every standing mark, one rewrite"]
-  D --> E["brief in the window"]
-  E -- "peek" --> F["exact bytes appended<br/>prefix untouched"]
-  E -- "expand" --> G["originals restored in place"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/shaneconner/pi-fold/main/media/marks-and-commits-dark.svg">
+  <img alt="A completed unit becomes a pending mark that leaves the window and its cached prefix untouched. Marks repeat for free below maxTarget; at maxTarget one commit applies every standing mark in a single rewrite. From the brief, peek appends the exact bytes and expand restores them in place, both after verifying the SHA-256." src="https://raw.githubusercontent.com/shaneconner/pi-fold/main/media/marks-and-commits-light.svg">
+</picture>
 
 A mark moves nothing. The moment a tool batch or chapter closes, the frontier cuts it into a pending mark, up to eight cuts per pass, stalest first. The mark lives in durable state outside the window, so the projection stays byte-identical and the cached prefix survives. Marks accumulate for free until one commit applies all of them in a single rewrite.
 
@@ -144,7 +112,11 @@ Evidence ingestion writes read-only artifacts under the session directory's `pi-
 
 ## Configuration
 
-`registerPiFold(pi)` takes six options and refuses every other name.
+`registerPiFold(pi)` works with no arguments, and the defaults are the configuration the campaign above actually ran: deterministic briefs, the invitation off, the tool-call diet at half the window, and a 0.80/0.20 band. Nothing here needs tuning to get the result in the table.
+
+The one thing worth adding is a long-term memory store. Rotation and retention are different jobs: folding gets stale material out of the window, a store keeps what the session learned. A handoff summary tries to do both in one record, written once under time pressure, bounded by the window it has to fit in. Folding is the rotation half and only that half.
+
+Six options, and every other name is refused.
 
 | Option | Default | Effect |
 | --- | --- | --- |
@@ -162,14 +134,3 @@ Upgrading from 2.x: the `fold` action is gone from the tool surface, since the r
 ## Prior work
 
 pi-fold combines two recent lines in one mechanism. Lossless hierarchical compaction, exemplified by LCM ([arXiv:2605.04050](https://arxiv.org/abs/2605.04050)) with a walkthrough at [losslesscontext.ai](https://www.losslesscontext.ai/), builds a summary DAG over older messages with lossless pointers to every original, but the system decides when to compact. Agentic context management, exemplified by [Letta](https://github.com/letta-ai/letta) and by [arXiv:2510.11967](https://arxiv.org/abs/2510.11967), gives the agent tools over its own memory, but what it edits is usually a scratchpad beside the transcript rather than the transcript itself. See also [arXiv:2607.00692](https://arxiv.org/abs/2607.00692).
-
-## Status
-
-Stable. The gate suite is the contract: `tests/verify.mjs` covers the runtime and `scripts/verify_pi_context_experiment.mjs` covers the experiment harness. New behavior lands with its gate.
-
-```sh
-npm ci
-npm run lint
-npm test
-node scripts/verify_pi_context_experiment.mjs
-```
