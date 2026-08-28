@@ -178,3 +178,94 @@ export function receiptBlockText(input: {
   }
   return [header, ...kept, verbs].join("\n");
 }
+
+const STATUS_BAR_WIDTH = 24;
+
+/**
+ * /fold-status: THE TEXT VIEW, FOR A PERSON.
+ *
+ * What this replaced said, in full: "Active context: 12 fold(s), roots a1b2, c3d4. Use
+ * pi_fold_context status for exact recursive actions." Three things were wrong with it.
+ * It told a HUMAN to call an AGENT tool they have no way to invoke. It printed fold ids,
+ * which are addresses for a machine and noise for a reader. And it answered a question
+ * nobody asks (how many folds exist) while leaving the only ones they do ask unanswered:
+ * how full am I, when does something happen, and what can I do about it.
+ *
+ * The command survives rather than being deleted because it is the documented fallback
+ * when /fold-editor cannot open, which is any session without an interactive UI. That
+ * makes it the ONLY window view some deployments ever get, so it carries what the editor
+ * header carries and closes by naming the two commands that act.
+ *
+ * Occupancy is stated as the provider's own measurement when there is one, and as
+ * "not measured yet" when there is not. It is never guessed: a made-up percentage is
+ * worse than an absent one, and this runtime has already paid once for treating an
+ * estimate as though it were a fact.
+ */
+export function foldStatusText(input: {
+  brand?: string;
+  usedTokens: number | null;
+  budgetTokens: number;
+  commitAtShare: number;
+  aimShare: number;
+  roots: number;
+  totalFolds: number;
+  stagedMarks: number;
+  stagedTokens: number;
+  briefedMarks: number;
+  pinned: number;
+  suspended: string | null;
+  foldCommand: string;
+  editorCommand: string;
+}): string {
+  const brand = contextBrand(input.brand ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
+  const n = (value: number): string => Math.round(value).toLocaleString("en-US");
+  const lines: string[] = [`[${brand} status]`];
+
+  if (input.usedTokens === null || !(input.budgetTokens > 0)) {
+    lines.push("  Window   not measured yet; the first provider response sets it.");
+  } else {
+    const share = input.usedTokens / input.budgetTokens;
+    const filled = Math.max(0, Math.min(STATUS_BAR_WIDTH, Math.round(share * STATUS_BAR_WIDTH)));
+    const bar = `${"▇".repeat(filled)}${"░".repeat(STATUS_BAR_WIDTH - filled)}`;
+    lines.push(`  Window   ${bar}  ${Math.round(share * 100)}%  ` +
+      `${n(input.usedTokens)} / ${n(input.budgetTokens)} tokens`);
+    const commitAt = input.commitAtShare * input.budgetTokens;
+    // The headroom is what a person actually wants: not the trigger's share, but how much
+    // further this session goes before anything happens to it.
+    lines.push(share >= input.commitAtShare
+      ? `           At the commit point (${Math.round(input.commitAtShare * 100)}%); ` +
+        `the next pass folds down toward ${Math.round(input.aimShare * 100)}%.`
+      : `           Commits at ${Math.round(input.commitAtShare * 100)}%, ` +
+        `${n(commitAt - input.usedTokens)} tokens away.`);
+  }
+
+  lines.push(input.totalFolds === 0
+    ? "  Folded   nothing yet."
+    : `  Folded   ${n(input.totalFolds)} fold${input.totalFolds === 1 ? "" : "s"}` +
+      `, ${n(input.roots)} at the top level. Every one keeps its exact source.`);
+
+  if (input.stagedMarks > 0) {
+    // Staged mass is the number that explains the next commit's size, and "costs nothing
+    // until then" is the fact a reader needs to not act on it prematurely.
+    const briefed = input.briefedMarks > 0
+      ? `${n(input.briefedMarks)} with a written brief`
+      : input.stagedMarks === 1 ? "carrying the runtime's own brief" : "all carrying runtime briefs";
+    lines.push(`  Staged   ${n(input.stagedMarks)} mark${input.stagedMarks === 1 ? "" : "s"}` +
+      ` holding about ${n(input.stagedTokens)} tokens, ${briefed}.` +
+      `${input.stagedMarks === 1 ? " It moves" : " They move"} nothing until a commit.`);
+  }
+  if (input.pinned > 0) {
+    lines.push(`  Pinned   ${n(input.pinned)} entr${input.pinned === 1 ? "y" : "ies"} held raw, ` +
+      "never folded and freeing nothing.");
+  }
+  if (input.suspended) {
+    lines.push(`  STOPPED  Automatic folding is suspended: ${oneLine(input.suspended, 160)}`);
+  }
+  // The closing line offers only what is actually available: proposing a commit with
+  // nothing staged is an instruction that does nothing, which is the failure the deleted
+  // fence made unforgivable.
+  lines.push(input.stagedMarks > 0
+    ? `  ${input.foldCommand} commits them now; ${input.editorCommand} opens the window to steer it.`
+    : `  ${input.editorCommand} opens the window; ${input.foldCommand} commits once marks are staged.`);
+  return lines.join("\n");
+}

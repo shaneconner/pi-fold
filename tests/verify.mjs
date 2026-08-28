@@ -22,7 +22,7 @@ const assert = Object.assign(
 );
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -65,7 +65,9 @@ const DEPLOYMENT_IDENTITY_FIXTURE = Object.freeze({
   toolName: "acme_context",
   commands: Object.freeze(["acme-context", "fold-context", "fold-editor"]),
   statusKey: "acme-active-context",
-  statusText: "acme_context folds: 0 · provider usage unmeasured",
+  // The status line leads with the deployment BRAND now, not the tool name, so this
+  // fixture covers one more branded surface than it did.
+  statusText: "Acme not measured · 8 staged",
   entryTypes: Object.freeze([
     "acme-active-context-fold-record",
     "acme-active-context-state",
@@ -929,7 +931,7 @@ async function gateNeutralDefaultBranding() {
   assert.deepEqual(surface.commands, ["fold", "fold-editor", "fold-status"]);
   assert.deepEqual(surface.initialStatus, {
     key: "pi-fold-active-context",
-    text: "pi_fold_context folds: 0 · provider usage unmeasured",
+    text: "pi-fold not measured · 8 staged",
   });
   assert.deepEqual(surface.entryTypes, [
     "pi-fold-active-context-fold-record",
@@ -12691,15 +12693,17 @@ async function gateFoldEditorRendersReadOnly() {
   assert(colorsUsed.has("success") && colorsUsed.has("warning"),
     `bookends did not ask for theme colors: ${[...colorsUsed].join(",")}`);
 
-  // THE PROPOSED BLOCK: the staged mark renders distinct from committed folds.
-  assert(/PROPOSED \(ladder\)/.test(rendered),
+  // THE PROPOSED BLOCK: the staged mark renders distinct from committed folds. The
+  // origin is stated in the reader's word for it, not the state's own ("ladder"); gate
+  // 157 owns that vocabulary and this asserts the runtime's cut still reads as one.
+  assert(/PROPOSED \(automatic\)/.test(rendered),
     "the runtime's pending cut does not render as a proposed block");
   assert(colorsUsed.has("accent") || colorsUsed.has("warning"),
     "proposed blocks did not ask for a distinct color");
 
   // RAW GAPS summarize what stays unmarked; pins badge their entries on drill-in.
   assert(/raw ×\d+/.test(rendered), "no raw-gap summary row");
-  assert(/pinned: 1/.test(rendered), "the pin count is missing from the header");
+  assert(/1 pinned/.test(rendered), "the pin count is missing from the header");
 
   // DRILL-IN: expanding the committed fold reveals its brief; expanding the raw run
   // lists individual entries with the pin badged.
@@ -12940,7 +12944,7 @@ async function gateFoldEditorUserMarks() {
   view.handleInput("m");
   const anchored = view.render(140).join("\n");
   assert(/\u25c6 start/.test(anchored), "the anchor row carries no diamond marker");
-  assert(!/PROPOSED \(user\)/.test(anchored), "anchoring alone staged a mark");
+  assert(!/PROPOSED \(you\)/.test(anchored), "anchoring alone staged a mark");
 
   // MOVING PRICES THE SPAN LIVE: two entries covered, a token figure present.
   view.handleInput("\x1b[B");
@@ -12962,9 +12966,9 @@ async function gateFoldEditorUserMarks() {
   assert(!view.staging, "staging never finished");
   await settle();
   const stagedRender = view.render(140).join("\n");
-  assert(/PROPOSED \(user\)/.test(stagedRender),
+  assert(/PROPOSED \(you\)/.test(stagedRender),
     `the staged user mark does not render as a proposed block: ${stagedRender.slice(0, 600)}`);
-  assert(/, 1 you/.test(stagedRender), "the header does not count the user's mark");
+  assert(/1 yours/.test(stagedRender), "the header does not count the user's mark");
   assert(runtime.notifications.some((notice) => /Staged user mark/.test(notice.message)),
     "staging did not tell the user what it did");
 
@@ -13103,7 +13107,7 @@ async function gateFoldEditorWithdrawPinBrief() {
     `the staged brief is not the typed one: ${userMark.brief}`);
   assert(userMark.briefProvenance.kind === "augmented",
     `a typed brief did not record augmented provenance: ${JSON.stringify(userMark.briefProvenance)}`);
-  assert(/PROPOSED \(user\)/.test(view.render(140).join("\n")),
+  assert(/PROPOSED \(you\)/.test(view.render(140).join("\n")),
     "the briefed mark does not render as proposed");
 
   // u ON THE PROPOSED ROW WITHDRAWS IT through the unmark path: durable state drops
@@ -13125,7 +13129,7 @@ async function gateFoldEditorWithdrawPinBrief() {
   await settle();
   assert((newestState().pendingMarks ?? []).length === marksBeforeWithdraw - 1,
     "withdrawal left the durable mark standing");
-  assert(!view.render(140).join("\n").includes("PROPOSED (user)"),
+  assert(!view.render(140).join("\n").includes("PROPOSED (you)"),
     "the withdrawn mark still renders as proposed");
   assert(runtime.notifications.some((notice) => /Withdrew 1 staged mark/.test(notice.message)),
     "withdrawal did not announce itself");
@@ -13147,14 +13151,14 @@ async function gateFoldEditorWithdrawPinBrief() {
   while (view.staging && Date.now() < pinDeadline) await new Promise((r) => setTimeout(r, 5));
   await settle();
   assert(/\ud83d\udccc/.test(view.render(140).join("\n")), "the pinned entry wears no badge");
-  assert(/pinned: 1/.test(view.render(140).join("\n")), "the header did not count the pin");
+  assert(/1 pinned/.test(view.render(140).join("\n")), "the header did not count the pin");
   const pinEvents = contextEvents(runtime, fromEvents).filter((record) => record.kind === "context.pin");
   assert(pinEvents.length === 1 && pinEvents[0].pin === true,
     `pinning did not record exactly one context.pin event: ${JSON.stringify(pinEvents)}`);
   view.handleInput("p");
   while (view.staging) await new Promise((r) => setTimeout(r, 5));
   await settle();
-  assert(!/\ud83d\udccc/.test(view.render(140).join("\n")) && /pinned: 0/.test(view.render(140).join("\n")),
+  assert(!/\ud83d\udccc/.test(view.render(140).join("\n")) && /0 pinned/.test(view.render(140).join("\n")),
     "the second p did not release the pin");
 
   void closedCount;
@@ -14734,6 +14738,235 @@ async function gateClipDeltaCarriesOnlyTheChange() {
  * would have corrected the over-read is precisely the one the minimum discards. Calibrate
  * on an image-bearing projection and the estimator can never learn its way out.
  */
+/**
+ * GATE 157: THE HUMAN SURFACE SPEAKS TO A HUMAN (2026-08-28).
+ *
+ * Three surfaces a person actually sees, and every one of them used to answer the wrong
+ * question. /fold-status said "Active context: 12 fold(s), roots a1b2, c3d4. Use
+ * pi_fold_context status for exact recursive actions", which told a HUMAN to call an
+ * AGENT tool they cannot invoke and spent the rest of its width on fold ids, which are
+ * addresses for a machine. The always-on status line led with the tool's name and then
+ * printed two raw token counts for the reader to divide themselves. And /fold-settings
+ * configured four of the package's options while three others could only be set in
+ * deployment code.
+ *
+ * WHAT THIS PINS, in the order it matters:
+ *   - No human surface names the agent tool. That is the defect, stated directly: the
+ *     tool name appearing in text addressed to a person is what made the old status
+ *     line useless, and a rule against it is the only thing that keeps it out.
+ *   - The status text answers occupancy, and says so honestly when nothing is measured
+ *     rather than rendering an estimate as a fact. This runtime has already paid once
+ *     for treating an estimate as though it were the truth (gate 156).
+ *   - /fold-settings reaches toolFoldThreshold and postFoldNotice, each refused by name
+ *     on a bad value through the SAME path the file reader validates with, so a
+ *     hand-edited file cannot hold a value the screen would reject.
+ *   - A settings file may still never stop the agent (gate 140's law), including one
+ *     carrying the new keys with the wrong types.
+ *   - The /fold-editor header names mark origins in the reader's words and states the
+ *     DISTANCE to the commit. "1 ladder" is the same defect one register down: this
+ *     runtime's internal name for its automatic marking pass, printed at a person.
+ */
+async function gateHumanSurface() {
+  const built = makeFixture({ turns: 6, resultChars: 3_000 });
+  const runtime = makeRuntime(built, SEALED_SPINE);
+  await startRuntime(runtime);
+
+  // (a) THE ALWAYS-ON LINE. Occupancy first, brand not tool, and unmeasured said plainly.
+  const line = runtime.statuses.at(-1);
+  assert.equal(line.key, "pi-fold-active-context");
+  assert(!line.text.includes("pi_fold_context"),
+    `The status line names the agent tool: ${line.text}`);
+  assert(line.text.startsWith("pi-fold "), `The status line does not lead with the brand: ${line.text}`);
+  assert(line.text.includes("not measured"),
+    `An unmeasured session did not say so: ${line.text}`);
+  await measureAndCommit(runtime, 60_000, 100_000);
+  const measuredLine = runtime.statuses.at(-1).text;
+  assert(/\d+% full/.test(measuredLine), `The measured line carries no occupancy: ${measuredLine}`);
+  assert(!measuredLine.includes("pi_fold_context"),
+    `The measured status line names the agent tool: ${measuredLine}`);
+
+  // (b) /fold-status, THE TEXT VIEW. Driven through the real command, not the renderer.
+  const before = runtime.notifications.length;
+  await runtime.commands.get("fold-status").handler("", runtime.ctx);
+  const text = runtime.notifications.slice(before).map((notice) => notice.message).join("\n");
+  assert(text.length > 0, "/fold-status said nothing at all");
+  assert(!text.includes("pi_fold_context"),
+    `/fold-status told a person to use the agent tool: ${text}`);
+  assert(/% {2}[\d,]+ \/ [\d,]+ tokens/.test(text) || text.includes("not measured yet"),
+    `/fold-status carries no occupancy reading: ${text}`);
+  assert(text.includes("/fold-editor"), "/fold-status never names the command that steers");
+  // It must name the FOLD count, and must not lead with raw ids the way it used to.
+  assert(/Folded {3}/.test(text), `/fold-status states no fold count: ${text}`);
+
+  // (c) THE SETTINGS SCREEN CARRIES A ROW FOR EACH, driven through its real input path.
+  // Validating the edit function is not the claim: the defect was that two shipped
+  // options could only be set in deployment code, and only a ROW fixes that.
+  const screenPath = join(tmpdir(), `fold-screen-${process.pid}-${Date.now()}.json`);
+  try {
+    let screenClosed = null;
+    const screen = new settingsModule.FoldSettingsEditor(
+      {}, 251_520, screenPath, { fg: (_role, t) => t, bold: (t) => t },
+      (saved) => { screenClosed = saved; },
+    );
+    const screenText = () => screen.render(120).join("\n");
+    assert(screenText().includes("Tool-result clipping") && screenText().includes("Brief invitation"),
+      `The settings screen has no row for the newly exposed options: ${screenText()}`);
+    // Both defaults are shown as the RUNTIME's, not as an absence: an unset scalar means
+    // the package default, so a row reading "off" for a 0.50 default would be a lie.
+    assert(screenText().includes("oldest 50%"),
+      `The clipping row does not show the package default: ${screenText()}`);
+    // Step down to the clipping row (it is fifth) and move it one notch.
+    for (let i = 0; i < 4; i++) screen.handleInput("\x1bOB");
+    assert(screenText().includes("→ Tool-result clipping"), "the selection never reached the clipping row");
+    screen.handleInput("\x1bOC");
+    assert.equal(JSON.parse(readFileSync(screenPath, "utf8")).toolFoldThreshold, 0.65,
+      "stepping the clipping row did not reach disk (0.50 -> 0.65)");
+    // The switch has no lattice: either direction is the other value.
+    screen.handleInput("\x1bOB");
+    assert(screenText().includes("→ Brief invitation"), "the selection never reached the invitation row");
+    screen.handleInput("\x1bOC");
+    assert.equal(JSON.parse(readFileSync(screenPath, "utf8")).postFoldNotice, true,
+      "stepping the invitation row did not turn it on");
+    screen.handleInput("\x1b[D");
+    assert.equal(JSON.parse(readFileSync(screenPath, "utf8")).postFoldNotice, false,
+      "stepping the invitation row back did not turn it off");
+    // What the screen saved reloads as itself, through the reader's own validation.
+    const back = settingsModule.readFoldSettingsFile(screenPath);
+    assert.equal(back.refusal, null);
+    assert.equal(back.settings.toolFoldThreshold, 0.65);
+    assert.equal(back.settings.postFoldNotice, false);
+    screen.handleInput("\x1b");
+    assert.equal(screenClosed, true, "escape did not close the settings screen");
+  } finally {
+    try { rmSync(screenPath, { force: true }); } catch { }
+  }
+
+  // Each option is refused BY NAME on a bad value, through the same path the file
+  // reader validates with, so a hand-edited file cannot hold a value the screen rejects.
+  for (const [id, bad, pattern] of [
+    ["toolFoldThreshold", "1", /share from 0 up to but not including 1/],
+    ["toolFoldThreshold", "-0.2", /share from 0 up to but not including 1/],
+    ["postFoldNotice", "maybe", /postFoldNotice is on or off/],
+  ]) {
+    const refused = settingsModule.applyFoldSettingsEdit({}, id, bad);
+    assert.equal(refused.ok, false, `${id}=${bad} was accepted`);
+    assert.match(refused.error, pattern, `${id}=${bad} was refused without naming why`);
+  }
+  // 0 IS A VALUE, not an absence: absence means the package default, so "off" has to be
+  // expressible or a deployment loses its only way to decline in-view clipping.
+  const off = settingsModule.applyFoldSettingsEdit({}, "toolFoldThreshold", "0");
+  assert.equal(off.ok, true, "toolFoldThreshold 0 was refused, so off cannot be said");
+  assert.equal(off.draft.toolFoldThreshold, 0);
+  const on = settingsModule.applyFoldSettingsEdit({}, "postFoldNotice", "true");
+  assert.equal(on.draft.postFoldNotice, true);
+
+  // (d) BOTH SURVIVE A ROUND TRIP, and an older thresholds-only file gains neither by
+  // accident: absent means the package default and must stay absent on disk.
+  const path = join(tmpdir(), `fold-settings-${process.pid}-${Date.now()}.json`);
+  try {
+    settingsModule.saveFoldSettingsFile(path, { toolFoldThreshold: 0, postFoldNotice: true });
+    const round = settingsModule.readFoldSettingsFile(path);
+    assert.equal(round.refusal, null);
+    assert.equal(round.settings.toolFoldThreshold, 0);
+    assert.equal(round.settings.postFoldNotice, true);
+
+    settingsModule.saveFoldSettingsFile(path, { thresholds: context.DEFAULT_THRESHOLDS });
+    const old = settingsModule.readFoldSettingsFile(path);
+    assert.equal(old.refusal, null);
+    assert.equal(old.migrated, false, "A thresholds-only file was migrated by the new keys");
+    assert.equal(old.settings.toolFoldThreshold, undefined,
+      "An absent scalar was written into the file as a default");
+    assert.equal(old.settings.postFoldNotice, undefined);
+
+    // (e) GATE 140'S LAW STILL HOLDS over the new keys: a bad file is refused by name,
+    // never thrown, and LEFT AS WRITTEN so the person can fix what they meant.
+    for (const bad of [{ postFoldNotice: "yes" }, { toolFoldThreshold: "half" }, { toolFoldThreshold: 1 }]) {
+      writeFileSync(path, `${JSON.stringify(bad)}\n`);
+      const before = readFileSync(path, "utf8");
+      const load = settingsModule.readFoldSettingsFile(path);
+      assert(load.refusal, `${JSON.stringify(bad)} loaded without a refusal`);
+      assert.match(load.refusal, /Package defaults are in force/);
+      assert.deepEqual(load.settings, {}, "A refused file still handed settings through");
+      assert.equal(readFileSync(path, "utf8"), before,
+        "A refused settings file was overwritten instead of left for its author");
+      // doesNotThrow is not one of the suite's counted assert methods; the callable
+      // assert is, so the try/catch carries the claim itself.
+      let threw = null;
+      try { settingsModule.loadFoldSettingsFile(path); } catch (error) { threw = error; }
+      assert(threw === null,
+        `A bad settings file threw out of the loader and would not start pi: ${threw}`);
+    }
+  } finally {
+    try { rmSync(path, { force: true }); } catch { }
+  }
+
+  // (f) THE EDITOR HEADER. Driven twice: once through the REAL command so the claim is
+  // about the surface that ships, and once over literal data so the exact wording and
+  // the headroom arithmetic are pinned without depending on what the fixture staged.
+  const editorModule = await jiti.import(join(projectRoot, "extensions", "lib", "editor-ui.ts"));
+  const opened = [];
+  runtime.ctx.ui.custom = async (factory) => {
+    opened.push(factory(null, {}, null, () => { }));
+    return opened.at(-1);
+  };
+  await runtime.commands.get("fold-editor").handler("", runtime.ctx);
+  await settle();
+  assert.equal(opened.length, 1, "/fold-editor did not open exactly one view");
+  // The WHOLE render, not just the header: the origin leaked into the proposed ROWS as
+  // well, and a rule scoped to the top three lines would have passed over it.
+  const liveRender = opened[0].render(140).join("\n");
+  assert(!/\bladder\b/.test(liveRender),
+    `The editor prints the runtime's internal origin name: ${liveRender}`);
+  assert(!liveRender.includes("pi_fold_context"),
+    `The editor names the agent tool: ${liveRender}`);
+
+  // Every origin the state can carry, rendered at once: each is named in a word a reader
+  // already has, and the state's own name for it appears nowhere.
+  const headerView = new editorModule.FoldEditorView({
+    title: "window",
+    occupancy: { usedTokens: 50_000, budgetTokens: 100_000, commitOccupancy: 0.8, commitDue: false },
+    blocks: ["ladder", "agent", "user"].map((origin, at) => ({
+      type: "proposed", id: `mark_${origin}`, startPosition: at, endPosition: at,
+      origin, brief: "a staged span", sourceCount: 1, tokens: 1_000, entries: [], children: [],
+    })),
+    pending: { count: 4, agentMarks: 2, ladderMarks: 1, userMarks: 1, freedTokens: 28_400 },
+    pinned: ["e1", "e2"],
+  }, () => { });
+  const whole = headerView.render(140).join("\n");
+  assert(!/\bladder\b/.test(whole) && !/\(agent\)/.test(whole) && !/\(user\)/.test(whole),
+    `A proposed row states the state's own origin name: ${whole}`);
+  for (const word of ["PROPOSED (automatic)", "PROPOSED (the model)", "PROPOSED (you)"]) {
+    assert(whole.includes(word), `No proposed row reads "${word}": ${whole}`);
+  }
+  const header = headerView.render(140).slice(0, 3).join("\n");
+  assert(!/\bladder\b/.test(header), `The header still says ladder: ${header}`);
+  assert(header.includes("1 automatic") && header.includes("2 by the model") && header.includes("1 yours"),
+    `The header does not name all three mark origins in the reader's words: ${header}`);
+  // 0.8 of 100,000 is 80,000, and 50,000 is in the window, so 30,000 is the distance.
+  assert(header.includes("commit at 80% (30,000 to go)"),
+    `The header states the trigger's share but not the distance to it: ${header}`);
+  const dueView = new editorModule.FoldEditorView({
+    title: "window",
+    occupancy: { usedTokens: 85_000, budgetTokens: 100_000, commitOccupancy: 0.8, commitDue: true },
+    blocks: [],
+    pending: { count: 0, agentMarks: 0, ladderMarks: 0, userMarks: 0, freedTokens: 0 },
+    pinned: [],
+  }, () => { });
+  const due = dueView.render(140).slice(0, 3).join("\n");
+  assert(due.includes("COMMIT DUE") && !due.includes("to go"),
+    `A window already past the trigger was told how far it had left to go: ${due}`);
+  assert(due.includes("staged: 0 marks") && !due.includes("("),
+    `A header with nothing staged spelled out three zero origins: ${due}`);
+
+  return {
+    statusLine: measuredLine,
+    statusTextLines: text.split("\n").length,
+    namesTheAgentTool: false,
+    exposedSettings: ["toolFoldThreshold", "postFoldNotice"],
+    editorHeader: header.split("\n").at(-1),
+  };
+}
+
 async function gateImageIsNotText() {
   const payload = "A".repeat(240_000);
   const estimateFor = async (block) => {
@@ -15526,6 +15759,7 @@ const gates = [
   [147, "The frontier waits for the batch", gateFrontierWaitsForTheBatch],
   [148, "The tool-call diet", gateToolCallDiet],
   [156, "An image is not measured as text", gateImageIsNotText],
+  [157, "The human surface speaks to a human", gateHumanSurface],
   [150, "The ref key matches the serializer", gateRefKeyMatchesTheSerializer],
   [151, "A growing range stops at the first obstruction", gateGrowingRangeStopsAtTheFirstObstruction],
   [152, "A value already derived is not derived again", gateDerivedOnce],

@@ -138,6 +138,7 @@ import {
 import {
   contextReceipt,
   foldNoticeText,
+  foldStatusText,
   receiptBlockText,
   withReceipt,
 } from "./lib/curation.ts";
@@ -620,15 +621,35 @@ export function registerActiveContext(pi: any, options: {
     lifecycle.generation === expectedGeneration && persistence.state?.sessionId === sessionId &&
     (!ctx || contextSessionMatches(ctx, sessionId));
 
+  /**
+   * THE ONE LINE THAT IS ALWAYS ON SCREEN, so it answers the question a person actually
+   * has: how full am I, and is anything about to happen.
+   *
+   * It used to read `pi_fold_context folds: 3 · provider 187234/272000`. That led with the
+   * AGENT TOOL'S NAME, which a person cannot call and does not care about, and then spent
+   * its remaining width on two raw counts they would have to divide themselves. The brand
+   * leads now, occupancy is a percentage of the serving budget, and the commit point is
+   * named only when it is close enough to matter.
+   */
   const updateStatus = (ctx: any): void => {
     try {
       const roots = persistence.state && lifecycle.latestSnapshot ? orderedRoots(persistence.state, lifecycle.latestSnapshot).length : 0;
-      const prepared = persistence.state?.prepared ? " · brief ready" : ladder.preparing ? " · briefing" : "";
-      const usage = measurements.lastProviderMeasurement
-        ? ` · provider ${measurements.lastProviderMeasurement.tokens}/${measurements.lastProviderMeasurement.contextWindow}`
-        : " · provider usage unmeasured";
-      const suspended = ladder.automaticFailure ? " · automatic suspended" : "";
-      ctx.ui?.setStatus?.(entryTypePrefix, `${toolName} folds: ${roots}${prepared}${usage}${suspended}`);
+      const staged = persistence.state ? pendingMarks(persistence.state).length : 0;
+      const capacity = currentCapacity(ctx);
+      const used = measurements.lastProviderMeasurement?.tokens ?? null;
+      const share = used !== null && capacity.budgetTokens > 0 ? used / capacity.budgetTokens : null;
+      const parts: string[] = [];
+      // Unmeasured is stated, never guessed: an estimate rendered as a fact is the habit
+      // that cost a live session, and this line is the most-read surface there is.
+      parts.push(share === null ? "not measured" : `${Math.round(share * 100)}% full`);
+      if (roots > 0) parts.push(`${roots} fold${roots === 1 ? "" : "s"}`);
+      if (staged > 0) parts.push(`${staged} staged`);
+      const trigger = lifecycle.latestSnapshot?.thresholds.maxTarget ?? null;
+      if (share !== null && trigger !== null && share >= trigger) parts.push("commit due");
+      if (persistence.state?.prepared) parts.push("brief ready");
+      else if (ladder.preparing) parts.push("briefing");
+      if (ladder.automaticFailure) parts.push("FOLDING STOPPED");
+      ctx.ui?.setStatus?.(entryTypePrefix, `${brandNoun} ${parts.join(" · ")}`);
     } catch { }
   };
 
@@ -4044,12 +4065,26 @@ export function registerActiveContext(pi: any, options: {
     try {
       const snapshot = authoritativeSnapshotFor(ctx);
       const status = activeContextStatus(snapshot, persistence.state, 0, 40);
-      safeNotify(
-        ctx,
-        `Active context: ${status.totalFolds} fold(s), roots ${(status.roots as string[]).join(", ") || "none"}. ` +
-          `Use ${toolName} status for exact recursive actions.`,
-        "info",
-      );
+      const capacity = currentCapacity(ctx);
+      const staged = pendingMarks(persistence.state);
+      safeNotify(ctx, foldStatusText({
+        brand: brandNoun,
+        usedTokens: measurements.lastProviderMeasurement?.tokens ?? null,
+        budgetTokens: capacity.budgetTokens,
+        commitAtShare: snapshot.thresholds.maxTarget,
+        aimShare: snapshot.thresholds.minTarget,
+        roots: (status.roots as string[]).length,
+        totalFolds: Number(status.totalFolds ?? 0),
+        stagedMarks: staged.length,
+        stagedTokens: staged.reduce((total, mark) =>
+          total + estimatedTokens(markFreedBytes(snapshot, persistence.state!, mark)), 0),
+        briefedMarks: staged.filter((mark) => mark.briefProvenance?.kind === "supplied" ||
+          mark.briefProvenance?.kind === "augmented").length,
+        pinned: persistence.state.protected.length,
+        suspended: ladder.automaticFailure?.message ?? null,
+        foldCommand: `/${commandNames.fold}`,
+        editorCommand: "/fold-editor",
+      }), "info");
     } catch (error) {
       safeNotify(ctx, `Active-context status unavailable; native Pi context is unchanged: ${String(error)}`, "warning");
     }

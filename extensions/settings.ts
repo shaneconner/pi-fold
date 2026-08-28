@@ -21,6 +21,7 @@ import { Container, Input, Key, matchesKey, SettingsList, Spacer, Text } from "@
 import {
 	DEFAULT_CONTEXT_WINDOW,
 	DEFAULT_THRESHOLDS,
+	DEFAULT_TOOL_FOLD_THRESHOLD,
 	resolveThresholds,
 	servingBudgetTokens,
 	ThresholdPolicyError,
@@ -36,6 +37,13 @@ export const DEFAULT_FOLD_SETTINGS_PATH = join(
 
 export interface FoldSettingsFile {
 	thresholds?: ActiveContextThresholds;
+	// TWO INDEPENDENT SCALARS, NOT A SECOND WHOLE-OBJECT (2026-08-28). The thresholds
+	// object is stored whole because its fields carry cross-field invariants and a partial
+	// one would silently mean whatever the defaults are at read time. These two answer to
+	// nothing but themselves, so absent simply means the package default, which is what
+	// lets an older file gain them without a migration.
+	toolFoldThreshold?: number;
+	postFoldNotice?: boolean;
 }
 
 // The four settings, named once. This was a hand-written union until the migration
@@ -48,7 +56,15 @@ const THRESHOLD_FIELDS = [
 	"minFoldChars",
 ] as const;
 
-export type FoldSettingId = typeof THRESHOLD_FIELDS[number];
+// The settings that are NOT thresholds. Each is a top-level scalar with its own
+// validation and no relationship to any other value on the screen.
+const SCALAR_FIELDS = ["toolFoldThreshold", "postFoldNotice"] as const;
+
+export type FoldSettingId = typeof THRESHOLD_FIELDS[number] | typeof SCALAR_FIELDS[number];
+
+function isThresholdField(id: FoldSettingId): id is typeof THRESHOLD_FIELDS[number] {
+	return (THRESHOLD_FIELDS as readonly string[]).includes(id);
+}
 
 // One edit, applied against the WHOLE draft: the merged thresholds object is
 // re-validated through resolveThresholds so cross-field invariants
@@ -59,6 +75,23 @@ export function applyFoldSettingsEdit(
 	id: FoldSettingId,
 	rawValue: string,
 ): { ok: true; draft: FoldSettingsFile } | { ok: false; error: string } {
+	if (id === "postFoldNotice") {
+		const raw = rawValue.trim().toLowerCase();
+		if (raw !== "true" && raw !== "false") {
+			return { ok: false, error: "postFoldNotice is on or off" };
+		}
+		return { ok: true, draft: { ...draft, postFoldNotice: raw === "true" } };
+	}
+	if (id === "toolFoldThreshold") {
+		const value = Number(rawValue.trim());
+		// The runtime's own range, restated here so the screen refuses before the file
+		// does: [0, 1) with 0 meaning off. Absence would ALSO mean the default rather
+		// than off, which is why 0 has to be expressible.
+		if (!Number.isFinite(value) || value < 0 || value >= 1) {
+			return { ok: false, error: "toolFoldThreshold is a share from 0 up to but not including 1; 0 turns it off" };
+		}
+		return { ok: true, draft: { ...draft, toolFoldThreshold: value } };
+	}
 	try {
 		const value = Number(rawValue.trim());
 		if ((id === "consolidateAfter" || id === "minFoldChars") && !Number.isSafeInteger(value)) {
@@ -146,13 +179,32 @@ export function readFoldSettingsFile(path: string = DEFAULT_FOLD_SETTINGS_PATH):
 	// this package created. A key that was never on the surface is still a refusal.
 	let dropped = false;
 	for (const key of Object.keys(parsed)) {
-		if (key === "thresholds") continue;
+		if (key === "thresholds" || (SCALAR_FIELDS as readonly string[]).includes(key)) continue;
 		if (RETIRED_FILE_KEYS.includes(key)) { delete parsed[key]; dropped = true; continue; }
-		return refused(`fold settings file has no ${key} field: the surface is thresholds`);
+		return refused(`fold settings file has no ${key} field: the surface is ` +
+			`thresholds, ${SCALAR_FIELDS.join(", ")}`);
+	}
+	// The two scalars are validated the same way the editor validates them, through the
+	// one path, so a hand-edited file cannot hold a value the screen would refuse.
+	const scalars: FoldSettingsFile = {};
+	for (const field of SCALAR_FIELDS) {
+		if (parsed[field] === undefined) continue;
+		const value = parsed[field];
+		const applied = applyFoldSettingsEdit({}, field, String(value));
+		if (!applied.ok) return refused(`fold settings ${field} is invalid: ${applied.error}`);
+		// String("0.5") round-trips, but a JSON string would too, and the file's own type
+		// has to be right or the value means something different on the next read.
+		if (field === "postFoldNotice" && typeof value !== "boolean") {
+			return refused("fold settings postFoldNotice must be true or false");
+		}
+		if (field === "toolFoldThreshold" && typeof value !== "number") {
+			return refused("fold settings toolFoldThreshold must be a number");
+		}
+		Object.assign(scalars, applied.draft);
 	}
 	if (parsed.thresholds === undefined) {
-		if (dropped) { try { saveFoldSettingsFile(path, {}); } catch { } }
-		return { settings: {}, refusal: null, migrated: dropped };
+		if (dropped) { try { saveFoldSettingsFile(path, scalars); } catch { } }
+		return { settings: scalars, refusal: null, migrated: dropped };
 	}
 	const stored = parsed.thresholds;
 	if (!stored || typeof stored !== "object" || Array.isArray(stored)) {
@@ -169,8 +221,9 @@ export function readFoldSettingsFile(path: string = DEFAULT_FOLD_SETTINGS_PATH):
 			? { ...Object.fromEntries(missing.map((field) => [field, DEFAULT_THRESHOLDS[field]])), ...supplied }
 			: supplied);
 		const migrated = missing.length > 0 || dropped;
-		if (migrated) { try { saveFoldSettingsFile(path, { thresholds }); } catch { } }
-		return { settings: { thresholds }, refusal: null, migrated };
+		const settings: FoldSettingsFile = { thresholds, ...scalars };
+		if (migrated) { try { saveFoldSettingsFile(path, settings); } catch { } }
+		return { settings, refusal: null, migrated };
 	} catch (error: any) {
 		return refused(`fold settings file at ${path} is invalid: ${error?.message ?? error}`);
 	}
@@ -183,6 +236,10 @@ export function loadFoldSettingsFile(path: string = DEFAULT_FOLD_SETTINGS_PATH):
 export function saveFoldSettingsFile(path: string, settings: FoldSettingsFile): void {
 	const clean: FoldSettingsFile = {};
 	if (settings.thresholds !== undefined) clean.thresholds = settings.thresholds;
+	// Written only when SET. An absent scalar means the package default, and writing the
+	// default out would pin today's value into a file that should follow the package.
+	if (settings.toolFoldThreshold !== undefined) clean.toolFoldThreshold = settings.toolFoldThreshold;
+	if (settings.postFoldNotice !== undefined) clean.postFoldNotice = settings.postFoldNotice;
 	mkdirSync(dirname(path), { recursive: true });
 	const temporary = `${path}.tmp`;
 	writeFileSync(temporary, `${JSON.stringify(clean, null, 2)}\n`);
@@ -200,6 +257,8 @@ const EDITOR_ROWS: readonly EditorRow[] = [
 	{ id: "minTarget", label: "Post-commit aim", description: "Share the epoch cuts back down toward (minTarget)" },
 	{ id: "consolidateAfter", label: "Consolidation divisor", description: "Parents owed per epoch = visible roots divided by this (consolidateAfter)" },
 	{ id: "minFoldChars", label: "Minimum fold size", description: "Characters a fold must reach to be worth making; a smaller gap between folds is absorbed by the fold beside it (minFoldChars)" },
+	{ id: "toolFoldThreshold", label: "Tool-result clipping", description: "Share of the window, oldest first, whose tool results are clipped in view; 0 turns it off (toolFoldThreshold)" },
+	{ id: "postFoldNotice", label: "Brief invitation", description: "Invite the model to improve a pending brief after each fold; off is the shape the campaign measured (postFoldNotice)" },
 ];
 
 // The cycle lattices. Shares step in cents so no float drift reaches a threshold;
@@ -217,6 +276,10 @@ const CONSOLIDATE_CHOICES = [2, 3, 4, 5, 6, 8, 10, 12, 15, 20];
 // enforces, below which a placeholder can cost more than the source it replaces.
 const MIN_FOLD_CHOICES = [2_000, 4_000, 6_000, 8_000, 12_000, 16_000, 24_000, 32_000];
 
+// 0 IS ON THE LATTICE, and first, because absence means the package default rather than
+// off: without a 0 here the only way to decline in-view clipping would be the file.
+const TOOL_FOLD_CHOICES = [0, 0.25, 0.35, 0.50, 0.65, 0.75, 0.90];
+
 function shareCandidates(id: "maxTarget" | "minTarget"): number[] {
 	const { min, max, step } = SHARE_STEPS[id];
 	const values: number[] = [];
@@ -229,6 +292,7 @@ function shareCandidates(id: "maxTarget" | "minTarget"): number[] {
 // The lattice a row steps along, as numbers. Display belongs to rowDisplayValue and
 // only to it: this list is stepped, never shown.
 function allowedValues(id: FoldSettingId, thresholds: ActiveContextThresholds): number[] {
+	if (id === "toolFoldThreshold") return TOOL_FOLD_CHOICES;
 	if (id === "consolidateAfter") return CONSOLIDATE_CHOICES;
 	if (id === "minFoldChars") return MIN_FOLD_CHOICES;
 	const { minTarget, maxTarget } = thresholds;
@@ -238,12 +302,26 @@ function allowedValues(id: FoldSettingId, thresholds: ActiveContextThresholds): 
 }
 
 function rowRawValue(settings: FoldSettingsFile, id: FoldSettingId): string {
+	// A SCALAR THAT IS ABSENT READS AS THE PACKAGE DEFAULT, never as zero or false. The
+	// file omits what was never set on purpose, so the screen has to supply the same
+	// value the runtime would, or the row would show a setting nobody chose.
+	if (!isThresholdField(id)) {
+		return id === "toolFoldThreshold"
+			? String(settings.toolFoldThreshold ?? DEFAULT_TOOL_FOLD_THRESHOLD)
+			: String(settings.postFoldNotice ?? false);
+	}
 	const thresholds = settings.thresholds ?? DEFAULT_THRESHOLDS;
 	return String(thresholds[id]);
 }
 
 function rowDisplayValue(settings: FoldSettingsFile, id: FoldSettingId, budgetTokens: number): string {
 	const raw = rowRawValue(settings, id);
+	if (id === "postFoldNotice") return raw === "true" ? "on" : "off";
+	if (id === "toolFoldThreshold") {
+		// The share is of the window rather than of a budget, so it is stated as the
+		// slice it names instead of the token count the other two shares translate to.
+		return Number(raw) === 0 ? "off" : `${Number(raw).toFixed(2)} · oldest ${Math.round(Number(raw) * 100)}%`;
+	}
 	if (id === "consolidateAfter") return raw;
 	if (id === "minFoldChars") return `${Number(raw).toLocaleString("en-US")} chars`;
 	// toFixed(2) matches the cycle entries exactly; String(0.8) renders "0.8" while
@@ -384,6 +462,12 @@ export class FoldSettingsEditor extends Container {
 	// filtered against the CURRENT draft, so stepping can never leave the policy
 	// surface; an exact off-lattice value arrives only through Enter's editor.
 	private step(id: FoldSettingId, direction: number): void {
+		// A SWITCH HAS NO LATTICE. Either direction moves to the other value, which is
+		// what a person expects of a two-state row sitting among stepped ones.
+		if (id === "postFoldNotice") {
+			this.applyAndSave(id, rowRawValue(this.draft, id) === "true" ? "false" : "true");
+			return;
+		}
 		const thresholds = this.draft.thresholds ?? DEFAULT_THRESHOLDS;
 		const candidates = allowedValues(id, thresholds);
 		const current = Number(rowRawValue(this.draft, id));
@@ -434,7 +518,7 @@ export function registerFoldSettings(
 ): void {
 	const settingsPath = options.settingsPath ?? DEFAULT_FOLD_SETTINGS_PATH;
 	pi.registerCommand("fold-settings", {
-		description: "Configure pi-fold: commit trigger, post-commit aim, consolidation divisor, minimum fold size",
+		description: "Configure pi-fold: commit band, consolidation, fold size, tool-result clipping, brief invitation",
 		handler: async (_args: string, ctx: any) => {
 			if (typeof ctx.ui?.custom !== "function") {
 				throw new Error("/fold-settings needs an interactive UI; set thresholds in the settings file instead");

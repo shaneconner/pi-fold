@@ -80,6 +80,24 @@ function shortId(id: string): string {
 }
 
 /**
+ * MARK ORIGINS IN THE READER'S OWN WORDS. The state's names are for the state: "ladder"
+ * is this runtime's internal name for its own automatic marking pass, and a person
+ * reading a proposed row needs to know WHO proposed the fold, not which code path
+ * staged it. An unrecognized origin passes through rather than being hidden, because a
+ * name we do not have a word for is still better than a blank.
+ */
+const ORIGIN_WORDS: Record<string, string> = {
+	ladder: "automatic",
+	agent: "the model",
+	user: "you",
+};
+
+function originWord(origin: string | undefined): string {
+	if (!origin) return "staged";
+	return ORIGIN_WORDS[origin] ?? origin;
+}
+
+/**
  * Assemble the top-level window stream. Committed folds nest by containment (a fold
  * whose span sits inside another becomes a CHILD of the innermost container), so the
  * view can keep nested folds hidden until their ancestors expand. Staged marks stay
@@ -394,7 +412,7 @@ export class FoldEditorView {
 				const sizeNote = typeof block.tokens === "number" ? ` · ~${block.tokens.toLocaleString("en-US")} tok` : "";
 				rows.push({
 					key: block.id,
-					text: `${cursor}${this.color(color, `\u25c7 PROPOSED (${block.origin}) ${shortId(block.id)}`)} \u00d7${block.sourceCount}${sizeNote}${this.selectedKey === block.id ? " · u:withdraw" : ""}`,
+					text: `${cursor}${this.color(color, `\u25c7 PROPOSED (${originWord(block.origin)}) ${shortId(block.id)}`)} \u00d7${block.sourceCount}${sizeNote}${this.selectedKey === block.id ? " · u:withdraw" : ""}`,
 					toggleId: block.id,
 					proposedMarkId: block.id,
 				});
@@ -675,24 +693,50 @@ export class FoldEditorView {
 		const lines: string[] = [];
 		const { occupancy, pending } = this.data;
 		lines.push(truncateToWidth(`── ${this.data.title} ──`, width));
+		// A WHOLE PERCENT. The tenth was false precision on a figure that moves with every
+		// message, and it read as a measurement finer than the thing being measured. The
+		// other two human surfaces round, so this one does too.
 		const percent = occupancy.usedTokens !== null && occupancy.budgetTokens > 0
-			? ((occupancy.usedTokens / occupancy.budgetTokens) * 100).toFixed(1)
+			? Math.round((occupancy.usedTokens / occupancy.budgetTokens) * 100)
 			: "?";
 		const usedTokensText = occupancy.usedTokens !== null
 			? occupancy.usedTokens.toLocaleString("en-US")
 			: "?";
+		// The DISTANCE to the commit, not just the share it fires at. "commit at 80%" is
+		// a property of the configuration; "29,674 to go" is the answer to the question
+		// the reader actually has, and it is the same number /fold-status states.
+		const headroom = occupancy.usedTokens !== null && occupancy.budgetTokens > 0 && !occupancy.commitDue
+			? ` (${Math.round(occupancy.commitOccupancy * occupancy.budgetTokens - occupancy.usedTokens)
+				.toLocaleString("en-US")} to go)`
+			: "";
+		// Same ordering rule as the line below it: the raw token pair is the most
+		// expendable thing here, because the percentage in front of it already says what
+		// it says. At 80 columns the first draft cut the headroom instead.
 		lines.push(truncateToWidth(
 			`${occupancyBar(occupancy.usedTokens, occupancy.budgetTokens)} ` +
-			`${percent}% · ${usedTokensText}/${occupancy.budgetTokens.toLocaleString("en-US")} tokens · ` +
-			`commit at ${(occupancy.commitOccupancy * 100).toFixed(0)}%` +
-			`${occupancy.commitDue ? " · COMMIT DUE" : ""}`,
+			`${percent}% · commit at ${(occupancy.commitOccupancy * 100).toFixed(0)}%${headroom}` +
+			`${occupancy.commitDue ? " · COMMIT DUE" : ""}` +
+			` · ${usedTokensText}/${occupancy.budgetTokens.toLocaleString("en-US")} tokens`,
 			width,
 		));
+		// The same vocabulary as ORIGIN_WORDS above, inflected for a count rather than a
+		// label: "1 automatic" and "2 by the model" read where "2 the model" does not.
+		// Only origins that actually staged something are listed, because a run of zeroes
+		// spends the line's width saying nothing happened three different ways.
+		const origins = [
+			pending.ladderMarks > 0 ? `${pending.ladderMarks} automatic` : "",
+			pending.agentMarks > 0 ? `${pending.agentMarks} by the model` : "",
+			pending.userMarks > 0 ? `${pending.userMarks} yours` : "",
+		].filter((part) => part !== "").join(", ");
+		// ORDERED SO TRUNCATION COSTS THE LEAST. This line is cut to the terminal's width,
+		// and at 100 columns the first draft lost the pin count off the end while spending
+		// its width on who staged what. What the marks free and what is pinned are facts
+		// about the window; the origin breakdown is colour, so it goes last.
 		lines.push(truncateToWidth(
-			`staged marks: ${pending.count} (${pending.agentMarks} agent, ${pending.ladderMarks} ladder` +
-			`${pending.userMarks > 0 ? `, ${pending.userMarks} you` : ""})` +
-			` · about ${pending.freedTokens.toLocaleString("en-US")} tokens freed when committed · ` +
-			`pinned: ${this.data.pinned.length}`,
+			`staged: ${pending.count} mark${pending.count === 1 ? "" : "s"}` +
+			` · frees ~${pending.freedTokens.toLocaleString("en-US")} tokens at commit` +
+			` · ${this.data.pinned.length} pinned` +
+			`${origins ? ` · ${origins}` : ""}`,
 			width,
 		));
 		return lines;
