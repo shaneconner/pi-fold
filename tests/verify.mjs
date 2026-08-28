@@ -8517,7 +8517,7 @@ async function gateOpenTurnCommits() {
 /**
  * THE public surface: five options, and nothing else reaches the runtime.
  *
- * Every name outside the five is refused, and a name that was RENAMED is refused by its
+ * Every name outside the six is refused, and a name that was RENAMED is refused by its
  * old spelling with the new one in the message. Silence would be worse than a name that
  * never existed: an unknown key used to spread straight through, so a caller who passed
  * a deleted option believed it had bought behavior and got the opposite. `registerPiFold`
@@ -8533,13 +8533,15 @@ async function gatePublicOptionSurface() {
   const register = (options) => makeRuntime(built, {
     ...options, packageRegistration: true, retiredOptions: options,
   }).tools;
-  // The whole surface, exercised together: five names, all accepted at once. It was four
+  // The whole surface, exercised together: six names, all accepted at once. It was four
   // until `guidance` went with the agent's `fold` verb on 2026-08-23 (the copy it switched
   // taught the agent to choose spans, and the agent does not choose spans), four
   // again since 2026-08-24 with `toolFoldThreshold`, the tool-call diet's one public knob
-  // (gate 148 owns its behaviour; this gate owns its seat on the surface), and five since
+  // (gate 148 owns its behaviour; this gate owns its seat on the surface), five since
   // 2026-08-26 with `workingMemory`, the digest channel's switch (gate 149 owns its
-  // behaviour).
+  // behaviour), and six since 2026-08-27 with `postFoldNotice`, the invitation switch
+  // promoted on the fold-vs-compaction verdict (the silenced condition won the campaign;
+  // gateFoldNoticeSilenced owns its behaviour and its acceptance at the door).
   const surface = makeRuntime(built, {
     packageRegistration: true,
     retiredOptions: {
@@ -8548,6 +8550,7 @@ async function gatePublicOptionSurface() {
       blacklistAutoFoldTools: new Set(["repo_stage"]),
       toolFoldThreshold: 0.5,
       workingMemory: true,
+      postFoldNotice: false,
     },
   });
   assert.deepEqual(Object.keys(surface.registration), ["projectionCandidates"]);
@@ -8616,7 +8619,7 @@ async function gatePublicOptionSurface() {
   assert.throws(() => makeRuntime(built, { retiredOptions: { autoFoldableTools: new Set(["read"]) } }),
     /autoFoldableTools is now blacklistAutoFoldTools, and the sense is INVERTED/);
   return {
-    publicOptions: 5,
+    publicOptions: 6,
     renamesRefusedByOldName: renamed.length,
     identityOptionsRefused: 6,
     unknownNamesRefused: 2,
@@ -12377,13 +12380,17 @@ async function gateFoldSettingsRoundTrip() {
  */
 
 /**
- * MECHANISM. THE DETERMINISTIC CONDITION (Shane, 2026-08-24). `postFoldNotice: false` on
- * the INTERNAL seam silences the brief invitation: the frontier still cuts, the commit
- * still lands, and every fold goes out with the runtime's own deterministic words. It
- * exists for the experiment arm that prices the annotation lane against the same plan,
- * and it is NOT a deployment option: registerPiFold refuses the name, because a
- * deployment that silences the notice has an agent that can never annotate what it is
- * never told about.
+ * MECHANISM. THE DETERMINISTIC CONDITION (Shane, 2026-08-24; promoted to the public
+ * surface 2026-08-27). `postFoldNotice: false` silences the brief invitation: the
+ * frontier still cuts, the commit still lands, and every fold goes out with the
+ * runtime's own deterministic words. Born as the experiment arm that priced the
+ * annotation lane against the same plan; promoted when that arm won the
+ * fold-vs-compaction campaign (14/14/9/8 correct across the silenced draws against the
+ * invited condition's 3, the errors tracking the annotations), because a reader must be
+ * able to run the winning shape. The agent verbs stay on the tool either way, so the
+ * old refusal rationale, an agent that can never annotate what it is never told about,
+ * is now the documented tradeoff of choosing false rather than a reason to bar the
+ * choice.
  */
 async function gateFoldNoticeSilenced() {
   const noticeType = "pi-fold-active-context-fold-notice";
@@ -12403,18 +12410,23 @@ async function gateFoldNoticeSilenced() {
     assert.equal(fold.provenance.kind, "deterministic",
       `Fold ${fold.id} carries ${fold.provenance.kind} provenance under the silenced condition`);
   }
-  // NOT a deployment option: the public surface refuses the name before registering.
+  // A DEPLOYMENT OPTION since 2026-08-27 (Shane, on the campaign verdict: the silenced
+  // deterministic condition won, so a deployment must be able to run the winning shape).
+  // The door accepts the boolean and still refuses a non-boolean by name, so a truthy
+  // string cannot silently keep the invitation on.
+  piFold.registerPiFold(
+    { registerTool() {}, registerCommand() {}, on() {} }, { postFoldNotice: false });
   assert.throws(
     () => piFold.registerPiFold(
-      { registerTool() {}, registerCommand() {}, on() {} }, { postFoldNotice: false }),
-    /postFoldNotice is not a pi-fold option/,
-    "registerPiFold accepted the internal seam's switch");
+      { registerTool() {}, registerCommand() {}, on() {} }, { postFoldNotice: "off" }),
+    /postFoldNotice must be a boolean/,
+    "registerPiFold accepted a non-boolean invitation switch");
   return {
     cutsStaged: cut.length,
     noticesWhileSilenced: 0,
     foldsCommitted: committed.folds.length,
     deterministicProvenance: true,
-    publiclyRefused: true,
+    publicOption: true,
   };
 }
 

@@ -266,11 +266,13 @@ export function registerActiveContext(pi: any, options: {
    *  commit, identified head kept, full bytes peek-recoverable behind the entry id
    *  the marker names. Off when absent. */
   toolFoldThreshold?: number;
-  /** INTERNAL SEAM ONLY (the experiment's deterministic condition): false suppresses
-   *  the post-fold notice, so no carrier ever invites a brief and every fold goes out
-   *  with the runtime's own words. registerPiFold refuses the name, because a
-   *  deployment that silences the notice has an agent that can never annotate what it
-   *  is never told about. */
+  /** THE INVITATION SWITCH (public since 2026-08-27; Shane, on the fold-vs-compaction
+   *  verdict: the deterministic condition won the campaign, so a deployment must be able
+   *  to run the winning shape). Default true: every fold announces itself with a standing
+   *  invitation for the agent to improve the brief. false silences the notice, so no
+   *  carrier ever invites a brief and every fold goes out with the runtime's own
+   *  deterministic words; the agent verbs stay on the tool, so an agent that finds it
+   *  can still annotate what it reads. */
   postFoldNotice?: boolean;
   /** THE WORKING MEMORY (Shane, 2026-08-26): a session-scoped ordered dictionary the
    *  agent maintains beside the fold index. `remember` writes or removes an entry,
@@ -287,6 +289,11 @@ export function registerActiveContext(pi: any, options: {
   const brandNoun = options.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN;
   const entryTypePrefix = options.entryTypePrefix ?? DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX;
   const blacklistAutoFoldTools = options.blacklistAutoFoldTools ?? AUTO_FOLD_BLACKLIST_DEFAULT;
+  if (options.postFoldNotice !== undefined && typeof options.postFoldNotice !== "boolean") {
+    throw new Error("postFoldNotice must be a boolean: true keeps the post-fold invitation " +
+      "notice, false ships every fold with the runtime's deterministic brief and no " +
+      "carrier inviting the agent to improve it");
+  }
   const postFoldNotice = options.postFoldNotice ?? true;
   if (options.workingMemory !== undefined && typeof options.workingMemory !== "boolean") {
     throw new Error("workingMemory must be a boolean: it enables the session-scoped " +
