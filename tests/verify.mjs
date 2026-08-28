@@ -14952,44 +14952,96 @@ async function gateToolCallDiet() {
  * Identity is the contract rather than round-tripping, and the reason is downstream:
  * these keys order `protectionSha256`'s sort and reach `branchSha256`'s missing-digest,
  * so a format that parsed the same but ordered differently would move digests that sealed
- * sessions carry. The gate compares against the serializer ITSELF on every input rather
- * than against a second copy of the expected format, which is what makes it survive a
- * change to either side: change one and this fails.
+ * sessions carry. The gate compares against the serializer ITSELF rather than against a
+ * second copy of the expected format, which is what makes it survive a change to either
+ * side: change one and this fails. It compares OUTCOMES, the return value or the thrown
+ * message, because the serializer refuses several field shapes and the fast path has to
+ * refuse exactly those.
  */
 async function gateRefKeyMatchesTheSerializer() {
+	// Return-or-throw parity, because the serializer refuses some values and the fast path
+	// must refuse exactly those, with the same message. Comparing return values alone would
+	// pass a fast path that formatted something the serializer would have rejected.
+	const outcome = (run) => {
+		try {
+			return { returned: run() };
+		} catch (error) {
+			return { threw: error instanceof Error ? error.message : String(error) };
+		}
+	};
+	const agrees = (ref, note) => {
+		const mine = outcome(() => json.objectRefKey(ref));
+		const serializer = outcome(() => json.stableStringify({
+			sessionId: ref.sessionId, entryId: ref.entryId, role: ref.role,
+		}));
+		assert.deepEqual(mine, serializer, `objectRefKey diverged from the serializer on ${note}`);
+	};
+
 	const roles = ["assistant", "toolResult", "user", "custom", "bashExecution"];
-	const corpus = [];
-	for (let index = 0; index < 500; index += 1) {
-		corpus.push({
+	let strings = 0;
+	for (let index = 0; index < 64; index += 1) {
+		agrees({
 			sessionId: `01a045d8-ca65-7945-8883-${String(index).padStart(12, "0")}`,
 			entryId: `entry-${index}-8f8b192a`,
 			role: roles[index % roles.length],
-		});
+		}, `ordinary ref ${index}`);
+		strings += 1;
 	}
-	// The cases a hand-built format could get wrong: characters JSON escapes, characters
-	// that change string ORDER, non-BMP, and every field shape that must fall through to
-	// the serializer instead of being formatted as a string.
-	corpus.push(
-		{ sessionId: 's"quote', entryId: "back\\slash", role: "new\nline" },
-		{ sessionId: "tab\there", entryId: "ret\rurn", role: "form\ffeed" },
-		{ sessionId: "\u0000null", entryId: "\u001f", role: "\u007f" },
-		{ sessionId: "e\u0301", entryId: "\u4e2d\u6587", role: "\u{1f600}" },
-		{ sessionId: "a", entryId: "a ", role: "a!" },
-		{ sessionId: "", entryId: "", role: "" },
-		{ sessionId: "s", entryId: "e", role: undefined },
-		{ sessionId: undefined, entryId: undefined, role: undefined },
-		{ sessionId: "s", entryId: 42, role: "r" },
-		{ sessionId: "s", entryId: "e", role: null },
-		{ sessionId: "s", entryId: "e", role: true },
-		{ sessionId: 0, entryId: "e", role: "r" },
-	);
-	for (const ref of corpus) {
-		const expected = json.stableStringify({
-			sessionId: ref.sessionId, entryId: ref.entryId, role: ref.role,
-		});
-		assert.equal(json.objectRefKey(ref), expected,
-			`objectRefKey diverged from the serializer on ${JSON.stringify(ref)}`);
+	// The characters JSON escapes, the characters that change string ORDER, non-BMP, and a
+	// lone surrogate, which is the one case where a hand-rolled escaper would diverge.
+	for (const [note, ref] of Object.entries({
+		quote: { sessionId: 's"q', entryId: "e", role: "r" },
+		backslash: { sessionId: "back\\slash", entryId: "e", role: "r" },
+		controls: { sessionId: "new\nline", entryId: "tab\there", role: "form\ffeed" },
+		lowControls: { sessionId: "\u0000", entryId: "\u001f", role: "\u007f" },
+		nonBmp: { sessionId: "\u{1f600}", entryId: "\u4e2d\u6587", role: "e\u0301" },
+		loneSurrogate: { sessionId: "\ud800", entryId: "\udfff", role: "r" },
+		ordering: { sessionId: "a", entryId: "a ", role: "a!" },
+		empty: { sessionId: "", entryId: "", role: "" },
+	})) {
+		agrees(ref, note);
+		strings += 1;
 	}
+
+	// EVERY FIELD SHAPE THAT IS NOT A PRIMITIVE STRING, because each one has to fall
+	// through to the serializer and be returned or refused exactly as it decides. A boxed
+	// String is the sharp one: typeof is "object", so the fast path must not format it.
+	const cyclic = {};
+	cyclic.self = cyclic;
+	let shapes = 0;
+	for (const [note, value] of Object.entries({
+		undefinedField: undefined,
+		nullField: null,
+		number: 42,
+		notFinite: Number.NaN,
+		boolean: true,
+		boxedString: new String("boxed"),
+		bigint: 10n,
+		symbol: Symbol("s"),
+		functionValue: () => "f",
+		array: ["a", "b"],
+		object: { nested: "v" },
+		nullPrototype: Object.assign(Object.create(null), { nested: "v" }),
+		cycle: cyclic,
+	})) {
+		for (const field of ["sessionId", "entryId", "role"]) {
+			agrees({ sessionId: "s", entryId: "e", role: "r", [field]: value }, `${note} at ${field}`);
+			shapes += 1;
+		}
+	}
+	// And ref shapes rather than field shapes: a getter-backed ref, an inherited field, a
+	// frozen ref, and a ref whose own-property order differs from the literal's. The getter
+	// is deliberately pure, because both paths read each field exactly once and a counting
+	// getter would measure this gate rather than the runtime.
+	agrees(Object.defineProperties({}, {
+		sessionId: { get: () => "s", enumerable: true },
+		entryId: { get: () => "e", enumerable: true },
+		role: { get: () => "r", enumerable: true },
+	}), "getter-backed ref");
+	agrees(Object.create({ sessionId: "s", entryId: "e", role: "r" }), "inherited fields");
+	agrees(Object.freeze({ sessionId: "s", entryId: "e", role: "r" }), "frozen ref");
+	agrees({ role: "r", entryId: "e", sessionId: "s" }, "reordered own properties");
+
 	// Only the three fields travel: a ref carrying extra properties must key identically to
 	// one carrying just the three, or two refs naming the same evidence stop colliding in
 	// every Map and Set that keys by this.
@@ -15000,7 +15052,7 @@ async function gateRefKeyMatchesTheSerializer() {
 	assert.equal(json.objectRefKey(bare),
 		'{"sessionId":"s","entryId":"e","role":"user"}',
 		"The ref key format moved, and every digest that sorts or hashes these keys moved with it");
-	return { corpus: corpus.length, format: "sessionId,entryId,role in own-property order" };
+	return { strings, fieldShapes: shapes, format: "sessionId,entryId,role in own-property order" };
 }
 
 const gates = [

@@ -197,7 +197,7 @@ export function isObjectRef(value: unknown): value is EvidenceRef {
 // THE HOT PATH (issue #2, 2026-08-28). This is the most-called function in the package:
 // every mark, span, claim, eligibility and measurement pass keys its refs through it,
 // and a reporter profiling a 467KB window found the serializer under it at the top of a
-// V8 sample with the process pegged at 80 percent for forty minutes. The general
+// V8 profile with the process pegged at 80 percent for forty minutes. The general
 // serializer earns its cost on arbitrary values, checking for proxies, cycles, accessors
 // and non-plain prototypes; none of that is in question for three strings off a ref.
 //
