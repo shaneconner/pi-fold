@@ -59,6 +59,25 @@ Four papers with figure sources, redacted per-request ledgers and campaign logs 
 - **The benchmark is narrow by construction.** It was built to reproduce specific things compaction handles badly, one to four runs per condition, and it says nothing about production behavior.
 - **Folding is not a memory store.** It rotates transcript source out of the window; durable placement of what a session learned is a separate job, and the pairing is where the measured value sat.
 
+## Configuration
+
+`registerPiFold(pi)` works with no arguments, and the defaults are the configuration the campaign above actually ran: deterministic briefs, the invitation off, the tool-call diet at half the window, and a 0.80/0.20 band. Nothing here needs tuning.
+
+The one thing worth adding is a long-term memory store. Rotation and retention are different jobs: folding gets stale material out of the window, a store keeps what the session learned. A handoff summary tries to do both in one record, written once under time pressure, bounded by the window it has to fit in. Folding is the rotation half and only that half.
+
+Six options, and every other name is refused.
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `thresholds` | `{ maxTarget: 0.80, minTarget: 0.20, consolidateAfter: 10, minFoldChars: 8000 }` | The band, set whole or not at all. The first two are proportions of the serving budget. `consolidateAfter` is how many visible roots a parent is owed. `minFoldChars` is the size a fold has to reach to be worth making, and the floor a gap between folds has to clear to stay raw. Validated atomically; an impossible policy is refused by name rather than clamped. |
+| `providerInputBudget` | the transport's descriptor | The tokens this deployment may actually put in a request, already net of any output reservation. Every ratio, fence and budget on this page is a share of this one number. |
+| `blacklistAutoFoldTools` | `new Set()` | The exception list. Every completed tool batch is foldable without an agent mark; name a tool here and its results stay raw. |
+| `toolFoldThreshold` | `0.50` | The tool-call diet: a share in `[0, 1)` naming the oldest fraction of the window whose tool results are clipped in view. `0` turns it off. |
+| `postFoldNotice` | `false` | The invitation switch. False is the shape that won the campaign above: no carrier invites a brief and every fold ships the runtime's own words. `true` appends a standing invitation to improve a pending brief. |
+| `workingMemory` | off | An in-window keyed dictionary the agent maintains beside the fold index, with `remember` and `recall` added to the tool. Offered to one run, which never called it. |
+
+Four commands ship for the human: `/fold-status`, `/fold` (commit every staged mark now), `/fold-editor` (the interactive map of the window) and `/fold-settings`.
+
 ## How it works
 
 ### The cache invariant
@@ -109,27 +128,6 @@ Briefs are bounded at 2,000 characters each, so the visible index normally costs
 Pi's automatic compaction stays enabled underneath and is intercepted by kind. A threshold pass is cancelled, because the fold commit fires first. An overflow pass becomes an automated recovery: the session branches back to the last message before the error, and the retried pass folds and commits before transmitting. Manual `/compact` passes through untouched as the escape hatch.
 
 Evidence ingestion writes read-only artifacts under the session directory's `pi-fold-evidence/` at mode `0444`, under a 512 MB session cap. It is always on: the artifacts are what an oversized result folds against, so a deployment that stopped writing them would keep its folds and lose what makes them lossless.
-
-## Configuration
-
-`registerPiFold(pi)` works with no arguments, and the defaults are the configuration the campaign above actually ran: deterministic briefs, the invitation off, the tool-call diet at half the window, and a 0.80/0.20 band. Nothing here needs tuning.
-
-The one thing worth adding is a long-term memory store. Rotation and retention are different jobs: folding gets stale material out of the window, a store keeps what the session learned. A handoff summary tries to do both in one record, written once under time pressure, bounded by the window it has to fit in. Folding is the rotation half and only that half.
-
-Six options, and every other name is refused.
-
-| Option | Default | Effect |
-| --- | --- | --- |
-| `thresholds` | `{ maxTarget: 0.80, minTarget: 0.20, consolidateAfter: 10, minFoldChars: 8000 }` | The band, set whole or not at all. The first two are proportions of the serving budget. `consolidateAfter` is how many visible roots a parent is owed. `minFoldChars` is the size a fold has to reach to be worth making, and the floor a gap between folds has to clear to stay raw. Validated atomically; an impossible policy is refused by name rather than clamped. |
-| `providerInputBudget` | the transport's descriptor | The tokens this deployment may actually put in a request, already net of any output reservation. Every ratio, fence and budget on this page is a share of this one number. |
-| `blacklistAutoFoldTools` | `new Set()` | The exception list. Every completed tool batch is foldable without an agent mark; name a tool here and its results stay raw. |
-| `toolFoldThreshold` | `0.50` | The tool-call diet: a share in `[0, 1)` naming the oldest fraction of the window whose tool results are clipped in view. `0` turns it off. |
-| `postFoldNotice` | `false` | The invitation switch. False is the shape that won the campaign above: no carrier invites a brief and every fold ships the runtime's own words. `true` appends a standing invitation to improve a pending brief. |
-| `workingMemory` | off | An in-window keyed dictionary the agent maintains beside the fold index, with `remember` and `recall` added to the tool. Offered to one run, which never called it. |
-
-Four commands ship for the human: `/fold-status`, `/fold` (commit every staged mark now), `/fold-editor` (the interactive map of the window) and `/fold-settings`.
-
-Upgrading from 2.x: the `fold` action is gone from the tool surface, since the runtime stages every completed unit itself; `guidance` is refused by name and `postFoldNotice` replaces it; `thresholds.freshTail` is gone, and a settings file carrying it is migrated with every tuned value kept. Existing sessions stay readable, folds and briefs included.
 
 ## Prior work
 
