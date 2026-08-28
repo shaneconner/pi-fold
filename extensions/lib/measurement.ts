@@ -570,3 +570,50 @@ export function parseNativeCompactionCompletion(value: unknown, expectedSessionI
   }
   return { ...(clone(value) as unknown as NativeCompactionCompletionReceipt), decision };
 }
+
+/**
+ * AN IMAGE IS NOT TEXT, AND MEASURING IT AS TEXT KILLS SESSIONS (2026-08-28).
+ *
+ * The projection is sized by serializing it and counting UTF-8 bytes, which is right for
+ * prose and catastrophically wrong for an image: a content block carries its pixels as
+ * base64, so a screenshot lands as several hundred thousand characters that the estimator
+ * then divides by a chars-per-token ratio learned from PROSE. A live session read three
+ * PNGs of 364,801, 631,045 and 827,513 bytes; the projection went 636,687 chars to
+ * 1,268,275 in one step and the estimate went 110,687 tokens to 220,883, while the
+ * provider's own count for that same request came back 111,837. Every token of the
+ * 109,046 difference was base64 counted as if it were sentences.
+ *
+ * The calibration cannot learn its way out, and that is the part worth understanding.
+ * `projectionCharsPerToken` takes the MINIMUM ratio over its window so the estimate never
+ * under-reads. An image pushes the true ratio UP, so the minimum discards exactly the
+ * sample that would have corrected it and keeps dividing base64 by the prose ratio. The
+ * conservative rule that protects against under-reading is what locks in the over-read.
+ *
+ * So image payload is removed from the character count and replaced by a flat per-image
+ * token cost. The count cannot be exact across providers, and it does not need to be: it
+ * needs to be the right order of magnitude instead of wrong by seventy times, and the
+ * provider anchor corrects the remainder the moment a real measurement lands.
+ */
+export function imageMass(projected: unknown[]): { base64Chars: number; images: number } {
+  let base64Chars = 0;
+  let images = 0;
+  for (const message of projected) {
+    const content = ownValue(message, "content");
+    const blocks = denseOwnArrayValues(content);
+    if (!blocks) continue;
+    for (const block of blocks) {
+      if (ownValue(block, "type") !== "image") continue;
+      images += 1;
+      // Two shapes reach here: the flat `data` a Pi tool result carries, and the nested
+      // `source.data` of a provider-native block. Both are counted; neither is required.
+      const direct = ownValue(block, "data");
+      const nested = ownValue(ownValue(block, "source"), "data");
+      const payload = typeof direct === "string" ? direct
+        : typeof nested === "string" ? nested : "";
+      // The serialization counts the JSON-escaped string, and base64 has no character
+      // JSON escapes, so its byte length in the serialized form is its own length.
+      base64Chars += bytes(payload);
+    }
+  }
+  return { base64Chars, images };
+}

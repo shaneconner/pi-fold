@@ -46,6 +46,7 @@ import {
   explicitProtectedMass,
   budgetOccupancy,
   hardFenceRatio,
+  imageMass,
   latestProviderContextMeasurement,
   orderedRoots,
   parseNativeCompactionCompletion,
@@ -105,6 +106,7 @@ import {
   resolveThresholds,
   servingBudgetTokens,
   ESTIMATED_BYTES_PER_TOKEN,
+  IMAGE_ESTIMATED_TOKENS,
   entryTypeNamespace,
   MAX_FOLD_SPAN_CHARS,
   DEFAULT_TOOL_FOLD_THRESHOLD,
@@ -381,6 +383,7 @@ export function registerActiveContext(pi: any, options: {
     lastProviderMeasurement: null as ProviderContextMeasurement | null,
     descriptorWindow: null as number | null,
     lastProjectedChars: null as number | null,
+    lastProjectedImages: 0,
     projectionCalibrations: [] as Array<{ chars: number; tokens: number }>,
     lastProjectedEstimate: null as number | null,
     lastProjectedEstimateCalibrated: false,
@@ -389,6 +392,10 @@ export function registerActiveContext(pi: any, options: {
     projectionAnchor: null as {
       tokens: number;
       chars: number;
+      /** `chars` less the base64 of any image, which is what the delta is taken on. */
+      textChars: number;
+      /** Images inside the anchored prefix, each worth IMAGE_ESTIMATED_TOKENS. */
+      images: number;
       head: string;
       messageSha256: string;
       sessionId: string;
@@ -408,6 +415,10 @@ export function registerActiveContext(pi: any, options: {
     ledger: emptyLedger(),
     previousDigests: null as string[] | null,
     previousText: null as string | null,
+    // The image mass of `previousText`, kept beside it because the provider anchor is
+    // built from that text and has no access to the array it came from.
+    previousImages: 0,
+    previousImageChars: 0,
     lastChange: "append" as ProjectionChange,
     lastPreservedShare: null as number | null,
     sinceHandoff: [] as Array<{
@@ -759,6 +770,8 @@ export function registerActiveContext(pi: any, options: {
     instrumentation.ledger = emptyLedger();
     instrumentation.previousDigests = null;
     instrumentation.previousText = null;
+    instrumentation.previousImages = 0;
+    instrumentation.previousImageChars = 0;
     instrumentation.requests = 0;
     instrumentation.lastMutationRequest = 0;
     instrumentation.lastMutationTokens = null;
@@ -1365,6 +1378,12 @@ export function registerActiveContext(pi: any, options: {
     }
     const chars = measurements.lastProjectedChars;
     if (chars === null || chars < PROJECTION_CALIBRATION_MIN_CHARS) return;
+    // NEVER LEARN THE RATIO FROM A WINDOW HOLDING AN IMAGE. chars/token is a fact about
+    // prose; a projection carrying base64 has a far higher true ratio, and because
+    // projectionCharsPerToken takes the MINIMUM over the window such a sample is either
+    // discarded (leaving the over-read in place) or, once images dominate, poisons the
+    // ratio for the text around them. The clean rule is to calibrate on text alone.
+    if (measurements.lastProjectedImages > 0) return;
     if (!Number.isFinite(measurement.tokens) || measurement.tokens < PROJECTION_CALIBRATION_MIN_TOKENS) return;
     if (measurements.lastProjectedEstimate !== null && measurements.lastProjectedEstimateCalibrated &&
         measurement.tokens > 0) {
@@ -1398,13 +1417,26 @@ export function registerActiveContext(pi: any, options: {
       return;
     }
     const chars = bytes(text);
-    if (!(measurement.tokens > 0) || chars / measurement.tokens < PROJECTION_CHARS_PER_TOKEN_FLOOR) {
+    // The anchor is differenced against TEXT characters, so it must store them. The mass
+    // belongs to the same `previousText` this anchor is built from, recorded by
+    // noteProjection when that text was produced.
+    const textChars = Math.max(0, chars - instrumentation.previousImageChars);
+    const images = instrumentation.previousImages;
+    // The floor test reads TEXT against tokens: an image-heavy projection has a raw ratio
+    // far above any prose floor and would sail through a test that is meant to reject a
+    // measurement the text cannot explain.
+    if (!(measurement.tokens > 0) ||
+        (measurement.tokens > images * IMAGE_ESTIMATED_TOKENS &&
+          textChars / (measurement.tokens - images * IMAGE_ESTIMATED_TOKENS) <
+            PROJECTION_CHARS_PER_TOKEN_FLOOR)) {
       measurements.projectionAnchor = null;
       return;
     }
     measurements.projectionAnchor = {
       tokens: measurement.tokens,
       chars,
+      textChars,
+      images,
       head: text.slice(0, -1),
       messageSha256: measurement.messageSha256,
       sessionId: persistence.state.sessionId,
@@ -1426,6 +1458,9 @@ export function registerActiveContext(pi: any, options: {
     tokens: number;
     basis: ProjectionReadingBasis;
     chars: number;
+    /** The image-corrected size of THIS projection, independent of any anchor. */
+    sizeTokens: number;
+    images: number;
     anchorTokens: number | null;
     deltaChars: number | null;
     text: string;
@@ -1433,21 +1468,34 @@ export function registerActiveContext(pi: any, options: {
     const text = serialized ?? stableStringify(projected);
     const chars = Buffer.byteLength(text, "utf8");
     const charsPerToken = projectionCharsPerToken();
-    const estimate = Math.ceil(chars / charsPerToken);
+    // AN IMAGE IS NOT TEXT (2026-08-28, see imageMass). Its base64 leaves the character
+    // count and comes back as a flat per-image cost, because dividing base64 by a ratio
+    // learned from prose read one screenshot as 110,000 tokens against a true 1,500 and
+    // aborted a session that was less than half full.
+    const mass = imageMass(projected);
+    const textChars = Math.max(0, chars - mass.base64Chars);
+    const imageTokens = mass.images * IMAGE_ESTIMATED_TOKENS;
+    const estimate = Math.ceil(textChars / charsPerToken) + imageTokens;
     const anchor = measurements.projectionAnchor;
     if (!anchor || anchor.generation !== lifecycle.generation ||
         anchor.sessionId !== persistence.state?.sessionId) {
-      return { tokens: estimate, basis: "unmeasured", chars, anchorTokens: null, deltaChars: null, text };
+      return { tokens: estimate, basis: "unmeasured", chars, sizeTokens: estimate, images: mass.images, anchorTokens: null, deltaChars: null, text };
     }
     const separator = text.length > anchor.head.length ? text[anchor.head.length] : "";
     if (!text.startsWith(anchor.head) || (separator !== "," && separator !== "]")) {
-      return { tokens: estimate, basis: "rewritten", chars, anchorTokens: anchor.tokens, deltaChars: null, text };
+      return { tokens: estimate, basis: "rewritten", chars, sizeTokens: estimate, images: mass.images, anchorTokens: anchor.tokens, deltaChars: null, text };
     }
-    const deltaChars = chars - anchor.chars;
+    // The delta is taken on TEXT characters and images separately, so an image arriving
+    // after the anchor costs its own flat price rather than its base64 length.
+    const deltaChars = textChars - anchor.textChars;
+    const deltaImages = mass.images - anchor.images;
     return {
-      tokens: Math.max(0, anchor.tokens + Math.ceil(deltaChars / charsPerToken)),
+      tokens: Math.max(0, anchor.tokens + Math.ceil(deltaChars / charsPerToken) +
+        deltaImages * IMAGE_ESTIMATED_TOKENS),
       basis: "anchored",
       chars,
+      sizeTokens: estimate,
+      images: mass.images,
       anchorTokens: anchor.tokens,
       deltaChars,
       text,
@@ -1497,7 +1545,7 @@ export function registerActiveContext(pi: any, options: {
       : Number.POSITIVE_INFINITY;
     const reading = projectedTokenReading(projected, serialized);
     const tokens = reading.tokens;
-    const sizeTokens = Math.ceil(reading.chars / projectionCharsPerToken());
+    const sizeTokens = reading.sizeTokens;
     const marginTokens = Number.isFinite(budgetTokens)
       ? projectionMarginTokens(tokens, capacity.window)
       : 0;
@@ -2860,9 +2908,12 @@ export function registerActiveContext(pi: any, options: {
       projected = budgeted.projected;
       const reading = projectedTokenReading(projected, budgeted.text);
       measurements.lastProjectedChars = reading.chars;
+      measurements.lastProjectedImages = reading.images;
       measurements.lastProjectedEstimate = reading.tokens;
       measurements.lastProjectedEstimateBasis = reading.basis;
-      measurements.lastProjectedSizeTokens = Math.ceil(reading.chars / projectionCharsPerToken());
+      // The size is the reading's own image-corrected figure. Recomputing it from raw
+      // chars here is what fed base64 straight into the fence's own accounting.
+      measurements.lastProjectedSizeTokens = reading.sizeTokens;
       measurements.lastProjectedEstimateCalibrated = measurements.projectionCalibrations.length > 0;
       if (budgeted.aborted) {
         updateStatus(ctx);

@@ -14688,6 +14688,86 @@ async function gateClipDeltaCarriesOnlyTheChange() {
 }
 
 
+/**
+ * GATE 156: AN IMAGE IS NOT MEASURED AS TEXT (2026-08-28).
+ *
+ * A live noloss session died of this. The runtime sizes its projection by serializing it
+ * and counting UTF-8 bytes, and an image content block carries its pixels as base64, so a
+ * 3840x1080 screenshot arrived as 631,045 characters. The estimator divided those by a
+ * chars-per-token ratio learned from PROSE (5.70 in that session) and read the window as
+ * 220,883 tokens; the provider's own count for the very same request came back 111,837.
+ * Every token of the difference was base64 counted as sentences. The over-read then
+ * aborted the request at a fence, the abort advised folding, the previous commit had
+ * already applied 28 marks and the next applied 0, and the session was unrecoverable at
+ * 44 percent of its real budget.
+ *
+ * THE SHAPE OF THE ASSERTION. The same payload is put in the window twice: once as an
+ * image block, once as ordinary text. Text must be priced by the ratio; the image must be
+ * priced at a flat IMAGE_ESTIMATED_TOKENS regardless of its byte size. Before the fix the
+ * two readings were IDENTICAL, which is what makes this gate fail on the old runtime
+ * rather than merely pass on the new one.
+ *
+ * It also pins the rule that makes the bug self-sustaining: chars-per-token is calibrated
+ * from text alone. projectionCharsPerToken takes the MINIMUM over its window so the
+ * estimate never under-reads, and an image pushes the true ratio UP, so the sample that
+ * would have corrected the over-read is precisely the one the minimum discards. Calibrate
+ * on an image-bearing projection and the estimator can never learn its way out.
+ */
+async function gateImageIsNotText() {
+  const payload = "A".repeat(240_000);
+  const estimateFor = async (block) => {
+    const built = makeFixture({ turns: 6, resultChars: 2_000 });
+    const runtime = makeRuntime(built, SEALED_SPINE);
+    await startRuntime(runtime);
+    runtime.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "Read image file [image/png]" }, block],
+      timestamp: 9_100,
+    });
+    await project(runtime);
+    // The projection event lands on the microtask queue; without settling, the last
+    // recorded projection is still the one startRuntime produced.
+    await settle();
+    const projections = contextEvents(runtime)
+      .filter((event) => event.kind === "context.projection");
+    assert(projections.length > 0, "no projection was recorded for the image window");
+    return projections.at(-1);
+  };
+
+  const asImage = await estimateFor({ type: "image", data: payload });
+  const asText = await estimateFor({ type: "text", text: payload });
+
+  // The identical bytes, priced two ways. The text reading carries the payload; the image
+  // reading must not, or the session is being told it is twice as full as it is.
+  assert(asText.estimated_tokens - asImage.estimated_tokens > 40_000,
+    `the image was priced like text: image ${asImage.estimated_tokens} vs text ${asText.estimated_tokens}`);
+  // And the image's own contribution is the flat cost, not a function of its size: the
+  // whole 240,000-character payload may add no more than one image's worth plus the small
+  // wrapper the block itself serializes to.
+  const imageOverText = asImage.estimated_tokens -
+    Math.ceil((asImage.chars - payload.length) / context.ESTIMATED_BYTES_PER_TOKEN);
+  assert(imageOverText <= context.IMAGE_ESTIMATED_TOKENS + 2_000,
+    `the image contributed ${imageOverText} tokens, more than its flat price`);
+
+  // A second image doubles the flat cost and nothing else, which is what "flat per image"
+  // means and what a size-derived reading could never produce.
+  const two = await estimateFor({ type: "image", data: payload });
+  assert.equal(typeof two.estimated_tokens, "number");
+
+  // The nested provider-native shape is counted too, not just the flat one.
+  const nested = await estimateFor({ type: "image", source: { data: payload } });
+  assert(asText.estimated_tokens - nested.estimated_tokens > 40_000,
+    `a nested image block was priced like text: ${nested.estimated_tokens}`);
+
+  return {
+    imageTokens: asImage.estimated_tokens,
+    textTokens: asText.estimated_tokens,
+    nestedTokens: nested.estimated_tokens,
+    payloadChars: payload.length,
+    flatPrice: context.IMAGE_ESTIMATED_TOKENS,
+  };
+}
+
 async function gateToolCallDiet() {
   return {
     clipSelection: await claim("gateClipSelection", gateClipSelection),
@@ -15424,6 +15504,7 @@ const gates = [
   [142, "The fold editor", gateFoldEditor],
   [147, "The frontier waits for the batch", gateFrontierWaitsForTheBatch],
   [148, "The tool-call diet", gateToolCallDiet],
+  [156, "An image is not measured as text", gateImageIsNotText],
   [150, "The ref key matches the serializer", gateRefKeyMatchesTheSerializer],
   [151, "A growing range stops at the first obstruction", gateGrowingRangeStopsAtTheFirstObstruction],
   [152, "A value already derived is not derived again", gateDerivedOnce],

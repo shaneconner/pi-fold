@@ -261,6 +261,22 @@ export function servingBudgetTokens(window: number): number {
 
 export const MAX_PENDING_MARKS = 256;
 export const ESTIMATED_BYTES_PER_TOKEN = 4;
+
+/**
+ * What one image in the window is worth, in tokens, for estimation only.
+ *
+ * A provider prices an image from its DIMENSIONS, not its byte size: Anthropic bills
+ * about width x height / 750, which puts a 2000x563 screenshot near 1,500 tokens, and a
+ * large image caps close to this number once the long edge is scaled to the 1568px limit.
+ * The exact figure differs per provider and cannot be known from the base64 alone.
+ *
+ * It does not need to be exact. The value it replaces was the image's base64 length
+ * divided by a prose chars-per-token ratio, which read one screenshot as 110,000 tokens
+ * against a true cost near 1,500. Being within an order of magnitude ends the failure;
+ * the provider anchor corrects the rest as soon as a real measurement lands. A constant
+ * rather than an option, because nobody can tune this better than the anchor can.
+ */
+export const IMAGE_ESTIMATED_TOKENS = 1_600;
 export const ESTIMATED_PLACEHOLDER_OVERHEAD_BYTES = 240;
 
 export const PEEK_MIN_SLICE_BYTES = 1_024;
