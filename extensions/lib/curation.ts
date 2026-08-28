@@ -120,8 +120,6 @@ export interface ContextReceipt {
   occupancyAfter: number | null;
   spansFolded: number;
   toolResultsFolded: number;
-  splitFolds: number;
-  splitFromChars: number;
   absorbedWedges: number;
   recovered: boolean;
   protectedBytes: number;
@@ -140,8 +138,6 @@ export function contextReceipt(input: Partial<ContextReceipt> & { kind: string; 
     occupancyAfter: input.occupancyAfter ?? null,
     spansFolded: input.spansFolded ?? 0,
     toolResultsFolded: input.toolResultsFolded ?? 0,
-    splitFolds: input.splitFolds ?? 0,
-    splitFromChars: input.splitFromChars ?? 0,
     absorbedWedges: input.absorbedWedges ?? 0,
     recovered: input.recovered ?? false,
     protectedBytes: input.protectedBytes ?? 0,
@@ -172,9 +168,6 @@ export function receiptLine(receipt: ContextReceipt): string {
     `about ${receipt.freedTokens} tokens freed.`,
     occupancy,
     folded,
-    receipt.splitFolds
-      ? `A ${receipt.splitFromChars}-char span was split into ${receipt.splitFolds} bite-sized folds.`
-      : "",
     receipt.absorbedWedges
       ? `${receipt.absorbedWedges} short stale span(s) wedged between folds were absorbed into their ` +
         "later neighbour rather than left as crumbs."

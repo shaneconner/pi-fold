@@ -127,7 +127,6 @@ import type {
   FoldCandidate,
   FoldKind,
   FoldRecordEntry,
-  MarkOrigin,
   PreparedFold,
   WorkingMemoryEntry,
 } from "./lib/policy.ts";
@@ -219,38 +218,6 @@ export * from "./lib/rollback.ts";
 export * from "./lib/scheduling.ts";
 export * from "./lib/selection.ts";
 export * from "./lib/transcript.ts";
-
-export interface BatchedMarkRequest {
-  ids: string[];
-  brief?: string;
-}
-
-export function batchedMarkRequests(params: Record<string, unknown>): BatchedMarkRequest[] {
-  const batched = params.marks;
-  if (batched === undefined) {
-    return [{
-      ids: stringIds(params.ids),
-      ...(typeof params.brief === "string" && params.brief.trim() ? { brief: params.brief } : {}),
-    }];
-  }
-  const values = denseOwnArrayValues(batched);
-  if (!values || !values.length || values.length > 64) {
-    throw new Error("marks must be a dense array of 1-64 {ids, brief} objects");
-  }
-  return values.map((value, index) => {
-    if (!value || typeof value !== "object" || Array.isArray(value)) {
-      throw new Error(`marks[${index}] must be an object with ids and an optional brief`);
-    }
-    const brief = ownValue(value, "brief");
-    if (brief !== undefined && (typeof brief !== "string" || !brief.trim())) {
-      throw new Error(`marks[${index}].brief must be a nonempty string`);
-    }
-    return {
-      ids: stringIds(ownValue(value, "ids")),
-      ...(typeof brief === "string" && brief.trim() ? { brief } : {}),
-    };
-  });
-}
 
 export function registerActiveContext(pi: any, options: {
   toolName?: string;
@@ -624,10 +591,9 @@ export function registerActiveContext(pi: any, options: {
   };
 
   const PREFIX_MUTATING_KINDS: ReadonlySet<string> = new Set([
-    "context.commit", "context.fold", "context.absorb", "context.split", "context.recovery",
+    "context.commit", "context.fold", "context.absorb", "context.recovery",
   ]);
   const CACHE_ACTION_REQUEST_CLASS: Readonly<Record<string, string>> = Object.freeze({
-    fold: "after-mark",
     peek: "after-peek",
     expand: "after-expand",
     refold: "after-refold",
@@ -641,8 +607,6 @@ export function registerActiveContext(pi: any, options: {
       folds_committed: receipt.foldsCommitted,
       folds_created: receipt.foldsCreated,
       freed_tokens: receipt.freedTokens,
-      split_folds: receipt.splitFolds,
-      split_from_chars: receipt.splitFromChars,
       absorbed_wedges: receipt.absorbedWedges,
       recovered: receipt.recovered,
       protected_bytes: receipt.protectedBytes,
@@ -2600,8 +2564,6 @@ export function registerActiveContext(pi: any, options: {
       occupancyAfter: occupancyBefore === null ? null : Math.max(0, occupancyBefore - freedTokens),
       spansFolded: epoch ? Number(epoch.foldedSpans ?? 0) : foldIds,
       toolResultsFolded: epoch ? Number(epoch.foldedToolResults ?? 0) : 0,
-      splitFolds: Number(action.splitFolds ?? 0),
-      splitFromChars: Number(action.splitFromChars ?? 0),
       absorbedWedges: Number(epoch?.absorbedWedges ?? 0),
       recovered: curation.recoveryAttempts > 0,
       protectedBytes: Number(epoch?.protectedStaleBytes ?? 0),
@@ -3370,15 +3332,6 @@ export function registerActiveContext(pi: any, options: {
   };
 
   /**
-   * THE ONE STAGING PATH FOR FOLD MARKS (2026-08-23). The tool's fold action and the
-   * /fold-editor's user marks run THIS code and nothing else: span snapping, claim
-   * refusal, brief contract, prepareFold, replacement of a standing mark over the
-   * same span. Only the ORIGIN differs -- "agent" for the model, "user" for a human
-   * laying marks in the editor -- and origin changes nothing mechanical: a user mark
-   * counts toward the commit's coverage, answers with its commit arithmetic, and
-   * folds at the epoch exactly as an agent mark does.
-   */
-  /**
    * THE WITHDRAWAL PATH, shared by the tool's unmark action and the editor's
    * withdraw intent: same refusal for an unknown id, same persist, same status.
    */
@@ -3430,140 +3383,140 @@ export function registerActiveContext(pi: any, options: {
     updateStatus(ctx);
   };
 
-  const stageFoldMarks = async (
-    requests: BatchedMarkRequest[],
-    origin: MarkOrigin,
+  /**
+   * THE ONE STAGING PATH FOR FOLD MARKS (2026-08-23). The /fold-editor's user marks
+   * run THIS code and nothing else: span snapping, claim refusal, brief contract,
+   * prepareFold, replacement of a standing mark over the same span. A user mark is
+   * mechanically an ordinary mark: it counts toward the commit's coverage, answers
+   * with its commit arithmetic, and folds at the epoch exactly as a runtime mark does.
+   */
+  const stageFoldMark = async (
+    ids: string[],
+    supplied: string | undefined,
     signal: AbortSignal,
     ctx: any,
     snapshot: ActiveContextSnapshot,
-  ): Promise<{ marks: Array<Record<string, unknown>>; corrections: SpanCorrection[]; staged: ActiveContextState }> => {
-      const resolved: Array<{
-        candidate: FoldCandidate;
-        brief?: string;
-        corrections: SpanCorrection[];
-        splitFrom: number;
-      }> = [];
-      for (const request of requests) {
-        const snapped = snapFoldCandidate(snapshot, persistence.state, request.ids, { allowProtected: true });
-        // AN AGENT'S SPAN IS TAKEN WHOLE (Shane, 2026-08-22). The bite-size cap was
-        // applied to manual marks too, and it was the only caller: the ladder never
-        // splits, because `selectAutomaticChapter` stops accumulating at the cap on its
-        // own. So the split existed solely to second-guess the one judgement the design
-        // wants to encourage, and it charged for it twice. One intended fold became five
-        // or ten placeholders, and every piece was handed the SAME brief, so each one
-        // claimed to describe a span it held a fraction of, while the correction text
-        // said "each with its own brief", which was never true.
-        //
-        // The cap stays for the ladder, where it was earned (2026-08-06 rep 6: one
-        // 60,432-byte chapter hid the fact the run needed). The difference is who chose
-        // the boundary. A ladder fold is a span nobody vouched for, so it is kept small
-        // enough to read back cheaply. An agent fold is a span the agent cut and wrote a
-        // brief for, and it stays navigable by a route that did not exist in 2026-08:
-        // peek takes offset and bytes, states the omitted middle, and reads any child id,
-        // so a large fold has a narrow read. An expand that will not fit is refused with
-        // a peek offered instead, so size costs a refusal rather than a window.
-        resolved.push({
-          candidate: snapped.candidate,
-          brief: request.brief,
-          corrections: snapped.corrections,
-          splitFrom: 0,
-        });
-      }
-      const corrections = resolved.flatMap((item) => item.corrections);
-      const marks: Array<Record<string, unknown>> = [];
-      let staged = persistence.state!;
-      for (const item of resolved) {
-        const { candidate } = item;
-        const alreadyPrepared = staged.folds.some((fold) =>
-          fold.id === foldIdFor(candidate.kind, candidate.parts));
-        const deferred = refsProtected(candidate.sourceRefs, staged, snapshot) ||
-          (candidate.kind === "tool-result" &&
-            refsProtected(candidate.sourceRefs, staged, snapshot));
-        // A MARK IS EDITABLE UNTIL IT COMMITS (Shane, 2026-08-21). Marking a span you
-        // already marked REPLACES the mark, so a brief written in haste is corrected by
-        // writing it again: the span is identical, the id derives from the span, and no
-        // byte has moved yet, so the correction costs nothing at all. After the commit
-        // the fold is standing and there is no rewrite verb, because rewriting a
-        // standing brief rewrites the projection at its placeholder; `reboundary`
-        // re-cuts the span instead, which was going to rewrite anyway.
-        const replacing = foldIdFor(candidate.kind, candidate.parts);
-        const claimed = markClaimingRef(staged, candidate.sourceRefs);
-        if (claimed && claimed.markId !== replacing) {
-          marks.push({
-            id: replacing,
-            kind: candidate.kind,
-            ok: false,
-            deferred: false,
-            reason: `Evidence ${claimed.entryId} is already held by pending mark ${claimed.markId}, ` +
-              `which folds at the next commit. Unmark ${claimed.markId} first if you want to ` +
-              "mark this span differently.",
-          });
-          continue;
-        }
-        const suppliedComplaint = item.brief === undefined
-          ? null
-          : briefContractComplaint(item.brief.trim(), snapshot.policy.agentBriefReserve, snapshot.toolName);
-        if (suppliedComplaint !== null) {
-          marks.push({
-            id: foldIdFor(candidate.kind, candidate.parts),
-            kind: candidate.kind,
-            ok: false,
-            deferred: false,
-            reason: `Supplied brief rejected. ${suppliedComplaint}`,
-          });
-          continue;
-        }
-        const briefed = !deferred && !alreadyPrepared
-          ? await prepareFold({
-            candidate,
-            snapshot,
-            state: staged,
-            generation: lifecycle.generation,
-            brief: item.brief,
-            ctx,
-            signal,
-          })
-          : null;
-        const mark = foldMarkFor({
-          candidate,
-          brief: briefed?.fold.brief ?? item.brief ?? ladderBrief(snapshot, staged, candidate),
-          briefProvenance: briefed?.fold.provenance ??
-            (item.brief ? { kind: "supplied" } : { kind: "deterministic" }),
-          origin,
-          ordinal: markOrdinal(snapshot),
-        });
-        // Drop the standing mark over this exact span before adding, so a re-mark is a
-        // replacement rather than a duplicate refusal. `claimed` is this same mark by the
-        // check above, and the id is derived from the span, so the state after is the
-        // state a first mark with the new brief would have produced.
-        const replaced = claimed !== null;
-        if (replaced) {
-          staged = withPendingMarks(staged,
-            pendingMarks(staged).filter((standing) => standing.id !== replacing));
-        }
-        const addition = addPendingMark(staged, mark);
-        if (!addition.added) {
-          marks.push({ id: mark.id, kind: mark.kind, ok: false, deferred: false, reason: addition.reason });
-          continue;
-        }
-        staged = addition.state;
-        marks.push({
-          id: mark.id,
-          kind: mark.kind,
-          ok: true,
-          deferred,
-          ...(replaced ? { replaced: true } : {}),
-          ...(deferred
-            ? {
-              scheduled: "the span is still in the fresh window; this mark is held and folds at the " +
-                "first commit after it ages out",
-            }
-            : {}),
-          brief: mark.brief,
-          provenance: normalizeLegacyProvenance(mark.briefProvenance),
-        });
-      }
-      return { marks, corrections, staged };
+  ): Promise<{ mark: Record<string, unknown>; corrections: SpanCorrection[]; staged: ActiveContextState }> => {
+    const snapped = snapFoldCandidate(snapshot, persistence.state, ids, { allowProtected: true });
+    // AN AGENT'S SPAN IS TAKEN WHOLE (Shane, 2026-08-22). The bite-size cap was
+    // applied to manual marks too, and it was the only caller: the ladder never
+    // splits, because `selectAutomaticChapter` stops accumulating at the cap on its
+    // own. So the split existed solely to second-guess the one judgement the design
+    // wants to encourage, and it charged for it twice. One intended fold became five
+    // or ten placeholders, and every piece was handed the SAME brief, so each one
+    // claimed to describe a span it held a fraction of, while the correction text
+    // said "each with its own brief", which was never true.
+    //
+    // The cap stays for the ladder, where it was earned (2026-08-06 rep 6: one
+    // 60,432-byte chapter hid the fact the run needed). The difference is who chose
+    // the boundary. A ladder fold is a span nobody vouched for, so it is kept small
+    // enough to read back cheaply. An agent fold is a span the agent cut and wrote a
+    // brief for, and it stays navigable by a route that did not exist in 2026-08:
+    // peek takes offset and bytes, states the omitted middle, and reads any child id,
+    // so a large fold has a narrow read. An expand that will not fit is refused with
+    // a peek offered instead, so size costs a refusal rather than a window.
+    const candidate = snapped.candidate;
+    const corrections = snapped.corrections;
+    let staged = persistence.state!;
+    const alreadyPrepared = staged.folds.some((fold) =>
+      fold.id === foldIdFor(candidate.kind, candidate.parts));
+    const deferred = refsProtected(candidate.sourceRefs, staged, snapshot);
+    // A MARK IS EDITABLE UNTIL IT COMMITS (Shane, 2026-08-21). Marking a span you
+    // already marked REPLACES the mark, so a brief written in haste is corrected by
+    // writing it again: the span is identical, the id derives from the span, and no
+    // byte has moved yet, so the correction costs nothing at all. After the commit
+    // the fold is standing and there is no rewrite verb, because rewriting a
+    // standing brief rewrites the projection at its placeholder; `reboundary`
+    // re-cuts the span instead, which was going to rewrite anyway.
+    const replacing = foldIdFor(candidate.kind, candidate.parts);
+    const claimed = markClaimingRef(staged, candidate.sourceRefs);
+    if (claimed && claimed.markId !== replacing) {
+      return {
+        mark: {
+          id: replacing,
+          kind: candidate.kind,
+          ok: false,
+          deferred: false,
+          reason: `Evidence ${claimed.entryId} is already held by pending mark ${claimed.markId}, ` +
+            `which folds at the next commit. Unmark ${claimed.markId} first if you want to ` +
+            "mark this span differently.",
+        },
+        corrections,
+        staged,
+      };
+    }
+    const suppliedComplaint = supplied === undefined
+      ? null
+      : briefContractComplaint(supplied.trim(), snapshot.policy.agentBriefReserve, snapshot.toolName);
+    if (suppliedComplaint !== null) {
+      return {
+        mark: {
+          id: replacing,
+          kind: candidate.kind,
+          ok: false,
+          deferred: false,
+          reason: `Supplied brief rejected. ${suppliedComplaint}`,
+        },
+        corrections,
+        staged,
+      };
+    }
+    const briefed = !deferred && !alreadyPrepared
+      ? await prepareFold({
+        candidate,
+        snapshot,
+        state: staged,
+        generation: lifecycle.generation,
+        brief: supplied,
+        ctx,
+        signal,
+      })
+      : null;
+    const mark = foldMarkFor({
+      candidate,
+      brief: briefed?.fold.brief ?? supplied ?? ladderBrief(snapshot, staged, candidate),
+      briefProvenance: briefed?.fold.provenance ??
+        (supplied ? { kind: "supplied" } : { kind: "deterministic" }),
+      origin: "user",
+      ordinal: markOrdinal(snapshot),
+    });
+    // Drop the standing mark over this exact span before adding, so a re-mark is a
+    // replacement rather than a duplicate refusal. `claimed` is this same mark by the
+    // check above, and the id is derived from the span, so the state after is the
+    // state a first mark with the new brief would have produced.
+    const replaced = claimed !== null;
+    if (replaced) {
+      staged = withPendingMarks(staged,
+        pendingMarks(staged).filter((standing) => standing.id !== replacing));
+    }
+    const addition = addPendingMark(staged, mark);
+    if (!addition.added) {
+      return {
+        mark: { id: mark.id, kind: mark.kind, ok: false, deferred: false, reason: addition.reason },
+        corrections,
+        staged,
+      };
+    }
+    staged = addition.state;
+    return {
+      mark: {
+        id: mark.id,
+        kind: mark.kind,
+        ok: true,
+        deferred,
+        ...(replaced ? { replaced: true } : {}),
+        ...(deferred
+          ? {
+            scheduled: "the span is still in the fresh window; this mark is held and folds at the " +
+              "first commit after it ages out",
+          }
+          : {}),
+        brief: mark.brief,
+        provenance: normalizeLegacyProvenance(mark.briefProvenance),
+      },
+      corrections,
+      staged,
+    };
   };
 
   const executeAction = async (
@@ -4177,12 +4130,6 @@ export function registerActiveContext(pi: any, options: {
     }
     throw new Error(`Unknown ${toolName} action '${action}'`);
   };
-  const requestedMarkCount = (params: Record<string, unknown>): number => {
-    const batched = denseOwnArrayValues(params?.marks);
-    if (batched) return batched.length;
-    return params?.ids === undefined && params?.id === undefined ? 0 : 1;
-  };
-
   const toolHandler = async (
     toolCallId: string,
     params: Record<string, unknown>,
@@ -4199,7 +4146,6 @@ export function registerActiveContext(pi: any, options: {
           ok,
           error,
           tool_call_id: toolCallId,
-          marks_requested: requestedMarkCount(params),
           corrections_applied: corrections.length,
           arguments_sha256: sha256Value(params ?? {}),
           ...(action === "peek" ? { ephemeral: peekIsEphemeral(params) } : {}),
@@ -4485,19 +4431,12 @@ export function registerActiveContext(pi: any, options: {
       onStageMark: async (fromId: string, toId: string, brief?: string): Promise<void> => {
         await runQueued(async () => {
           const fresh = authoritativeSnapshotFor(ctx);
-          const request = brief && brief.trim()
-            ? { ids: [fromId, toId], brief: brief.trim() }
-            : { ids: [fromId, toId] };
-          const { marks, staged } = await stageFoldMarks(
-            batchedMarkRequests(request), "user",
+          const { mark, staged } = await stageFoldMark(
+            [fromId, toId], brief && brief.trim() ? brief.trim() : undefined,
             new AbortController().signal, ctx, fresh);
-          // Refuse BEFORE persisting: an all-refused batch leaves state untouched and
+          // Refuse BEFORE persisting: a refused mark leaves state untouched and
           // persisting it would be a no-op write against the same-state projection.
-          if (!marks.some((mark) => mark.ok === true)) {
-            const reason = marks.map((mark) => mark.reason).filter(Boolean).join("; ") ||
-              "the span was refused";
-            throw new Error(reason);
-          }
+          if (mark.ok !== true) throw new Error(String(mark.reason ?? "the span was refused"));
           await persistManual(staged, "fold", ctx);
           updateStatus(ctx);
         });

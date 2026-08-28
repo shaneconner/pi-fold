@@ -60,18 +60,10 @@ export function applyFoldSettingsEdit(
 	rawValue: string,
 ): { ok: true; draft: FoldSettingsFile } | { ok: false; error: string } {
 	try {
-		if (id === "consolidateAfter" || id === "minFoldChars") {
-			const value = Number(rawValue.trim());
-			if (!Number.isSafeInteger(value)) {
-				return { ok: false, error: `thresholds.${id} must be a whole number` };
-			}
-			const thresholds = resolveThresholds({
-				...(draft.thresholds ?? DEFAULT_THRESHOLDS),
-				[id]: value,
-			});
-			return { ok: true, draft: { ...draft, thresholds } };
-		}
 		const value = Number(rawValue.trim());
+		if ((id === "consolidateAfter" || id === "minFoldChars") && !Number.isSafeInteger(value)) {
+			return { ok: false, error: `thresholds.${id} must be a whole number` };
+		}
 		const thresholds = resolveThresholds({
 			...(draft.thresholds ?? DEFAULT_THRESHOLDS),
 			[id]: value,
