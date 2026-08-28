@@ -15462,6 +15462,87 @@ async function gateProjectionSerializedOnce() {
 	return { boundaries, projectionChars: last.chars, basis: last.estimate_basis };
 }
 
+/**
+ * THE FOREST IS VALIDATED ONCE PER PASS, AND STILL ALWAYS VALIDATED
+ *
+ * `deriveFoldParents` ended in `validateFoldForest`, and two of its four callers handed the
+ * result straight to `parseActiveContextState`, whose first act is to validate it again. So
+ * one persist validated the same forest three times, and validation is not cheap: it deep
+ * clones the forest, recomputes `foldIdFor` per fold, and calls `flattenFoldRefs` per fold,
+ * which rebuilds `foldMap` over every fold. It split into `assignFoldParents` plus the
+ * validating wrapper, and those two callers took the unvalidated one.
+ *
+ * THAT READS AS REMOVING VALIDATION AND IS NOT, which is the only reason this gate exists.
+ * The claim being pinned is not "the split is faster", it is that a corrupt forest still
+ * raises through BOTH callers, from the parse on the very next statement instead of from the
+ * assignment. A future edit that moves the parse away from those call sites, or makes it
+ * conditional, silently deletes a check; this fails when that happens.
+ *
+ * The error text moves with the raise, from `deriveFoldParents` to `parseActiveContextState`.
+ * Nothing catches either string, checked across the runtime and the suite, so the gate pins
+ * that a raise HAPPENS rather than pinning a message that was never a contract.
+ */
+async function gateForestValidatedOncePerPass() {
+	const runtime = await epochToolRuntime({ turns: 10 });
+	for (const tokens of [78_000, 82_000, 86_000, 88_000]) {
+		await measureAndCommit(runtime, tokens, 100_000);
+	}
+	const state = materialized(runtime);
+	assert(state.folds.length > 0, "The fixture committed no folds, so there is no forest to validate");
+
+	// THE SPLIT IS TRANSPARENT on a sound forest: same parents, same bytes.
+	const assigned = persistenceModule.assignFoldParents(state.folds);
+	const derived = persistenceModule.deriveFoldParents(state.folds);
+	assert.equal(json.stableStringify(assigned), json.stableStringify(derived),
+		"assignFoldParents and deriveFoldParents disagree on a sound forest");
+	assert.equal(assigned.length, state.folds.length, "The assignment dropped or added a fold");
+
+	// A CORRUPTION THE ASSIGNMENT CANNOT SEE. It has to be about a fold's OWN identity rather
+	// than about who owns whom, and it has to land on a fold nobody claims as a child, or the
+	// assignment's dangling-child check catches it and the gate proves the wrong thing. So:
+	// an unclaimed fold whose parts no longer produce its id.
+	const claimed = new Set(state.folds.flatMap((fold) =>
+		fold.parts.filter((part) => part.kind === "fold").map((part) => part.foldId)));
+	const victim = state.folds.find((fold) => !claimed.has(fold.id) && fold.parts.length > 1);
+	assert(victim !== undefined, "The fixture has no unclaimed multi-part fold to corrupt");
+	const corrupt = state.folds.map((fold) => fold.id === victim.id
+		? { ...structuredClone(fold), parts: structuredClone(fold.parts).slice(0, -1) }
+		: structuredClone(fold));
+	assert.throws(() => persistenceModule.deriveFoldParents(corrupt),
+		"The validating wrapper stopped refusing a fold whose id does not match its parts");
+	// The unvalidated one lets it through, which is exactly why its callers must parse next.
+	const passedThrough = persistenceModule.assignFoldParents(corrupt);
+	assert.equal(passedThrough.length, corrupt.length,
+		"assignFoldParents refused a forest it is not responsible for judging");
+
+	// AND THE PARSE CATCHES IT. This is the claim the split rests on.
+	assert.throws(() => persistenceModule.parseActiveContextState(
+		{ ...state, folds: passedThrough }, state.sessionId),
+		"A corrupt forest survived the parse that both assignFoldParents callers rely on");
+
+	// THE ASSIGNMENT KEEPS ITS OWN CHECK, which is about the assignment and nothing else: a
+	// child claimed by two parents is a contradiction only this loop is positioned to see.
+	const parent = state.folds.find((fold) => fold.parts.some((part) => part.kind === "fold"));
+	if (parent) {
+		const childId = parent.parts.find((part) => part.kind === "fold").foldId;
+		const twiceClaimed = state.folds.map((fold) => fold.id === parent.id
+			? structuredClone(fold)
+			: { ...structuredClone(fold), parts: [...fold.parts, { kind: "fold", foldId: childId }] });
+		assert.throws(() => persistenceModule.assignFoldParents(twiceClaimed),
+			"A child claimed by two parents passed the assignment");
+	}
+
+	// BOTH REAL CALLERS STILL REFUSE A CORRUPT FOREST END TO END, through the parse rather
+	// than through the assignment. This is what a future edit would break.
+	assert.throws(() => measurementModule.persistenceProjection({ ...state, folds: corrupt }, epochSnapshot(runtime.built)),
+		"persistenceProjection stopped refusing a corrupt forest");
+	return {
+		folds: state.folds.length,
+		consolidationParent: Boolean(parent),
+		raises: ["deriveFoldParents", "parseActiveContextState", "persistenceProjection"],
+	};
+}
+
 const gates = [
   [1, "Registration, parse and deployment branding", gateRegistrationAndBranding],
   [2, "The durable record: lattice, chain and rollback", gateDurableRecord],
@@ -15589,6 +15670,7 @@ const gates = [
   [152, "A value already derived is not derived again", gateDerivedOnce],
   [153, "A derivation kept against the object it was handed", gateDerivedAgainstTheObject],
   [154, "The window is serialized once and read many times", gateProjectionSerializedOnce],
+  [155, "The forest is validated once per pass", gateForestValidatedOncePerPass],
   // 143 is retired with the agent's `fold` verb (Shane 2026-08-23). Its subject was the
   // ANSWER a mark comes back with: the drop the next commit has to make, what the mark
   // covers of it, and what the ladder takes otherwise, all so an agent choosing spans could

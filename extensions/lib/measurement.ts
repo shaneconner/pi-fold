@@ -15,7 +15,7 @@ import {
 } from "./canonical.ts";
 import {
   childFoldIds,
-  deriveFoldParents,
+  assignFoldParents,
   flattenFoldRefs,
   foldMap,
   parseActiveContextState,
@@ -348,7 +348,9 @@ export function persistenceProjection(state: ActiveContextState, snapshot: Activ
   if (projected.prepared && projected.prepared.sourceRefs.some((ref) => !mapped.has(objectRefKey(ref)))) {
     delete projected.prepared;
   }
-  projected.folds = deriveFoldParents(projected.folds);
+  // The parse on the next line validates this forest, so `assignFoldParents` is the whole
+  // job here; `deriveFoldParents` would walk it twice.
+  projected.folds = assignFoldParents(projected.folds);
   return parseActiveContextState(projected, state.sessionId);
 }
 
