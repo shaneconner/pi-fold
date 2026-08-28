@@ -11,7 +11,7 @@ export {
 
 const PUBLIC_OPTIONS = Object.freeze([
   "thresholds", "providerInputBudget", "blacklistAutoFoldTools", "toolFoldThreshold",
-  "workingMemory", "postFoldNotice",
+  "postFoldNotice",
 ]);
 
 const GENERATOR_DELETED = "the model brief generator is deleted (2026-08-14): across 15 sealed " +
@@ -25,6 +25,10 @@ const INVERTED_AUTO_FOLD_LIST = "renamed blacklistAutoFoldTools, and the sense i
   "it meant to permit";
 
 const REFUSED_OPTIONS = Object.freeze({
+  workingMemory: "deleted 2026-08-28: a session-scoped dictionary with remember and recall, "
+    + "offered to one sealed run that never called it once, wire-proven. Retention is a durable "
+    + "store's job and folding is the rotation half, so a second unused memory surface was the "
+    + "bloat the KISS rule exists to remove. Sealed state carrying it still loads, entries dropped",
   guidance: "deleted 2026-08-23: it switched the copy that taught the agent to " +
     "CHOOSE SPANS, and the agent does not choose spans. The runtime cuts at the frontier and " +
     "the agent annotates what it cut, so the guidance it switched is replaced wholesale by " +

@@ -65,7 +65,7 @@ Four papers with figure sources, redacted per-request ledgers and campaign logs 
 
 The one thing worth adding is a long-term memory store. Rotation and retention are different jobs: folding gets stale material out of the window, a store keeps what the session learned. A handoff summary tries to do both in one record, written once under time pressure, bounded by the window it has to fit in. Folding is the rotation half and only that half.
 
-Six options, and every other name is refused.
+Five options, and every other name is refused.
 
 | Option | Default | Effect |
 | --- | --- | --- |
@@ -74,7 +74,6 @@ Six options, and every other name is refused.
 | `blacklistAutoFoldTools` | `new Set()` | The exception list. Every completed tool batch is foldable without an agent mark; name a tool here and its results stay raw. |
 | `toolFoldThreshold` | `0.50` | The tool-call diet: a share in `[0, 1)` naming the oldest fraction of the window whose tool results are clipped in view. `0` turns it off. |
 | `postFoldNotice` | `false` | The invitation switch. False is the shape that won the campaign above: no carrier invites a brief and every fold ships the runtime's own words. `true` appends a standing invitation to improve a pending brief. |
-| `workingMemory` | off | An in-window keyed dictionary the agent maintains beside the fold index, with `remember` and `recall` added to the tool. Offered to one run, which never called it. |
 
 Four commands ship for the human: `/fold-status`, `/fold` (commit every staged mark now), `/fold-editor` (the interactive map of the window) and `/fold-settings`.
 

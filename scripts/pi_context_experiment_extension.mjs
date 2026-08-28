@@ -512,7 +512,6 @@ export function createPiContextExperimentExtension(config) {
             ...(config.toolFoldThreshold === undefined ? {} : { toolFoldThreshold: config.toolFoldThreshold }),
             // The digest channel: the working-memory seam travels verbatim; the
             // runtime's own registration validation refuses a non-boolean.
-            ...(config.workingMemory === undefined ? {} : { workingMemory: config.workingMemory }),
           });
         } finally {
           pi.registerTool = registerTool;

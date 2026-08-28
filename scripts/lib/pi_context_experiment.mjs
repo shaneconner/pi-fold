@@ -2418,10 +2418,12 @@ export const EXPERIMENT_RUN_CONFIG_OPTIONAL_KEYS = Object.freeze([
   // heads at each commit, full bytes peek-recoverable (package gate 148). The runtime
   // revalidates at registration; here the config layer pins the arm rule and the range.
   "toolFoldThreshold",
-  // THE WORKING MEMORY (Shane 2026-08-26): the digest channel's A/B seam for the pifold
-  // arm, so a sealed run states in its own config that the session carried the
-  // remember/recall dictionary and its per-commit table of contents (package gate 149).
-  // The runtime revalidates at registration; here the config layer pins the arm rule.
+  // THE WORKING MEMORY, RETIRED 2026-08-28. The channel is deleted from the package and
+  // registerPiFold now refuses the name, so no NEW run can carry it: the runner's flag is
+  // gone and the extension no longer forwards it. The key stays valid HERE, and only here,
+  // because sol-20260826-full2 reps 4 and 6 state it in their own sealed configs and a
+  // campaign this project still cites has to keep adjudicating. Same treatment as
+  // briefGenerator: readable forever, creatable never.
   "workingMemory",
   // THE CANON CONDITION (Shane 2026-08-26): the run carries the pi-canon Pi extension
   // beside its arm's own mechanism, registered against a blank store under the sandbox

@@ -91,9 +91,7 @@ export const RETIRED_TOOL_ACTIONS: Readonly<Record<string, string>> = Object.fre
     "peek already carries losslessly. Write the brief you want when you mark the span, or " +
     "use reboundary to re-cut it.",
 });
-export type ActiveContextToolAction =
-  | typeof ACTIVE_CONTEXT_TOOL_ACTIONS[number]
-  | typeof WORKING_MEMORY_TOOL_ACTIONS[number];
+export type ActiveContextToolAction = typeof ACTIVE_CONTEXT_TOOL_ACTIONS[number];
 export const USER_RESCUE_MAX_SOURCE_CHARS = 512_000;
 export const DEFAULT_CONTEXT_WINDOW = 272_000;
 export const EXPAND_LEASE_GENERATIONS = 8;
@@ -310,34 +308,6 @@ export function peekIsEphemeral(params: Record<string, unknown> | undefined | nu
 
 export const PEEK_READ_ONLY_CONTEXT_ACTIONS: ReadonlySet<string> = new Set(["status", "peek", "recall"]);
 
-/**
- * THE WORKING MEMORY (Shane, 2026-08-26). A session-scoped ordered dictionary the agent
- * maintains beside the fold index: keys list in a table of contents the projection
- * carries, bodies live in state and are read on demand with `recall`. It exists because
- * the campaign measured a structural gap, not a tuning one: a maintained digest (running
- * tallies, current totals) is a different operation from a lossless index, and blending
- * digest prose into the index's briefs was measured making BOTH worse (sol-20260826-full2
- * rep 4: nine confident wrong end-block answers against the deterministic arm's zero).
- * The digest gets its own channel and the index stays mechanical.
- *
- * Three constants, not knobs. The key cap keeps the table of contents a table of
- * contents; the body cap is deliberately larger than a brief because a digest is
- * maintained prose, not an index row; the entry cap bounds the whole store at a size
- * whose table of contents stays one glance.
- */
-export const MEMORY_KEY_CHARS = 64;
-export const MEMORY_BODY_CHARS = 4_000;
-export const MEMORY_KEYS_MAX = 24;
-
-export const WORKING_MEMORY_TOOL_ACTIONS = Object.freeze(["remember", "recall"] as const);
-
-export interface WorkingMemoryEntry {
-  key: string;
-  body: string;
-  /** Write counter at last update; the table of contents lists freshest first. */
-  ordinal: number;
-}
-
 /** "user" is a mark laid down by the human through /fold-editor; it stages and
  *  commits through the same validated path as an agent mark and counts toward the
  *  commit's coverage the same way. */
@@ -457,8 +427,6 @@ export interface ActiveContextState {
     armed?: { milestone: AdvisoryMilestone; threshold: number; scheduleKey: string };
   };
   rider?: { epoch: number; text: string };
-  /** The working memory's entries, in write order; absent when empty. */
-  memory?: WorkingMemoryEntry[];
 }
 
 export interface FoldRecordRef {
@@ -488,7 +456,6 @@ export interface ActiveContextCheckpointV2 {
   pendingMarks?: PendingMark[];
   briefs?: Record<string, BriefOverride>;
   clips?: ToolClip[];
-  memory?: WorkingMemoryEntry[];
   advisory?: NonNullable<ActiveContextState["advisory"]>;
   rider?: NonNullable<ActiveContextState["rider"]>;
   lastCall?: NonNullable<ActiveContextState["lastCall"]>;
@@ -530,11 +497,6 @@ export interface ActiveContextDeltaV2 {
   clips?: ToolClip[];
   clipBase?: number;
   addClips?: ToolClip[];
-  // `memory` on a delta is the WHOLE array. It is bounded by MEMORY_KEYS_MAX entries and
-  // edited in place by key, so a change form would have to restate the key order the way
-  // the marks do while saving at most a handful of bounded bodies: the whole array is the
-  // cheaper wire. Absent means empty, by the same discriminator rule as the marks.
-  memory?: WorkingMemoryEntry[];
   advisory?: NonNullable<ActiveContextState["advisory"]>;
   rider?: NonNullable<ActiveContextState["rider"]>;
   lastCall?: NonNullable<ActiveContextState["lastCall"]>;

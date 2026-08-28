@@ -403,12 +403,6 @@ async function run() {
     assertExperiment(Number.isFinite(toolFoldThreshold) && toolFoldThreshold > 0 && toolFoldThreshold < 1,
       "--tool-fold-threshold takes a share strictly between 0 and 1");
   }
-  // `--working-memory` runs the pifold arm with the session-scoped digest channel: the
-  // remember/recall dictionary and its per-commit table of contents (package gate 149).
-  const workingMemory = process.argv.includes("--working-memory");
-  if (workingMemory) {
-    assertExperiment(arm === "pifold", "--working-memory belongs to the pifold arm alone");
-  }
   // `--canon-memory <pi-canon checkout>` runs the arm beside a blank pi-canon store: the
   // plugin's own Pi extension is staged into the harness copy (CANON_HARNESS_FILES, same
   // copy-then-delete lifecycle as the harness source), registered with a store root under
@@ -544,7 +538,6 @@ async function run() {
         ...(requestedNotice === "off" ? { postFoldNotice: false } : {}),
         ...(thresholds === null ? {} : { thresholds }),
         ...(toolFoldThreshold === null ? {} : { toolFoldThreshold }),
-        ...(workingMemory ? { workingMemory: true } : {}),
         ...(canonTreeSha256 === null ? {} : { canonMemory: true, canonTreeSha256 }),
         // No brief generator: the deterministic brief carries the opening prose
         // now (package gate 134), and this run measures the no-generator condition

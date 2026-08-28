@@ -309,7 +309,6 @@ function makeRuntime(built, {
   omitSendMessage = false,
   providerInputBudget,
   postFoldNotice,
-  workingMemory,
   packageRegistration = false,
   sessionFile = join(tmpdir(), "pi-fold-test-session.jsonl"),
   // One injection point for a durable write that FAILS. Persistence is the only place
@@ -440,7 +439,6 @@ function makeRuntime(built, {
     ...(removedOptions ?? {}),
     ...(providerInputBudget === undefined ? {} : { providerInputBudget }),
     ...(postFoldNotice === undefined ? {} : { postFoldNotice }),
-    ...(workingMemory === undefined ? {} : { workingMemory }),
   };
   if (packageRegistration) {
     runtime.registration = piFold.registerPiFold(pi, registrationOptions);
@@ -8543,15 +8541,17 @@ async function gatePublicOptionSurface() {
   const register = (options) => makeRuntime(built, {
     ...options, packageRegistration: true, retiredOptions: options,
   }).tools;
-  // The whole surface, exercised together: six names, all accepted at once. It was four
+  // The whole surface, exercised together: FIVE names, all accepted at once. It was four
   // until `guidance` went with the agent's `fold` verb on 2026-08-23 (the copy it switched
   // taught the agent to choose spans, and the agent does not choose spans), four
   // again since 2026-08-24 with `toolFoldThreshold`, the tool-call diet's one public knob
-  // (gate 148 owns its behaviour; this gate owns its seat on the surface), five since
-  // 2026-08-26 with `workingMemory`, the digest channel's switch (gate 149 owns its
-  // behaviour), and six since 2026-08-27 with `postFoldNotice`, the invitation switch
-  // promoted on the fold-vs-compaction verdict (the silenced condition won the campaign;
+  // (gate 148 owns its behaviour; this gate owns its seat on the surface), and five since
+  // 2026-08-27 with `postFoldNotice`, the invitation switch promoted on the
+  // fold-vs-compaction verdict (the silenced condition won the campaign;
   // gateFoldNoticeSilenced owns its behaviour and its acceptance at the door).
+  // `workingMemory` sat here from 2026-08-26 until it was DELETED on 2026-08-28: one
+  // sealed run was offered the channel and never called it once. Gate 149 is retired and
+  // its number stays spent; the name is refused below beside the other deletions.
   const surface = makeRuntime(built, {
     packageRegistration: true,
     retiredOptions: {
@@ -8559,7 +8559,6 @@ async function gatePublicOptionSurface() {
       providerInputBudget: 90_000,
       blacklistAutoFoldTools: new Set(["repo_stage"]),
       toolFoldThreshold: 0.5,
-      workingMemory: true,
       postFoldNotice: false,
     },
   });
@@ -8619,6 +8618,14 @@ async function gatePublicOptionSurface() {
   // word: a deployment that set it needs to know the notice is unconditional now.
   assert.throws(() => register({ guidance: { actionResponses: true } }),
     /guidance is no longer an option: deleted 2026-08-23/);
+  // Deleted 2026-08-28 on the same rule that deleted the brief generator: it was OFFERED
+  // to a sealed run and never called once, and retention belongs to a durable store rather
+  // than to a second in-window surface. Refused by name so a deployment that enabled it
+  // learns the channel is gone rather than watching the flag be ignored.
+  assert.throws(() => register({ workingMemory: true }),
+    /workingMemory is no longer an option: deleted 2026-08-28/);
+  assert.throws(() => register({ workingMemory: false }),
+    /workingMemory is no longer an option: deleted 2026-08-28/);
   assert.throws(() => register({ foldScheduling: "epoch" }), /foldScheduling is not a pi-fold option/);
   // The seam is not reachable through the door: the runtime still accepts a synthetic
   // brand when registered directly, which is what keeps the neutrality gate honest.
@@ -14680,253 +14687,6 @@ async function gateClipDeltaCarriesOnlyTheChange() {
   };
 }
 
-/**
- * THE WORKING MEMORY (Shane, 2026-08-26).
- *
- * One law: the digest gets its own channel and the index stays mechanical. A maintained
- * digest (running tallies, current totals) is a different operation from a lossless
- * index, and the campaign measured what blending them costs: sol-20260826-full2 rep 4
- * invited agent prose into the index's briefs and answered nine end-block questions
- * confidently wrong where the deterministic arm answered zero wrong, while native's
- * maintained summary won exactly the running-tally artifact (6/6 against pifold's 0/6)
- * that no index operation can carry. So the working memory is a session-scoped ordered
- * dictionary in STATE: `remember` writes, updates or (empty body) removes an entry,
- * `recall` reads bodies on demand, and the projection carries ONE table of contents that
- * refreshes at each commit through the carrier freeze, so a quiet pass moves no byte.
- * Off by default: the option is the experiment's A/B seam and a deployment that does not
- * ask for the channel keeps yesterday's surface byte for byte.
- */
-async function gateMemorySurfaceOff() {
-  const built = makeFixture({ turns: 4, resultChars: 3_000 });
-  // OFF IS THE DEFAULT, AND OFF IS YESTERDAY'S SURFACE. The action enum, the schema
-  // properties and the description must be byte-identical to a build that never heard of
-  // the working memory, so the option cannot leak wording into deployments that did not
-  // ask for it.
-  const off = makeRuntime(built);
-  await startRuntime(off);
-  const offTool = off.tools.get("pi_fold_context");
-  assert.equal(offTool.parameters.properties.action.enum.includes("remember"), false,
-    "remember is in the action enum with the working memory off");
-  assert.equal(offTool.parameters.properties.action.enum.includes("recall"), false,
-    "recall is in the action enum with the working memory off");
-  for (const param of ["key", "body", "keys"]) {
-    assert.equal(Object.hasOwn(offTool.parameters.properties, param), false,
-      `The ${param} parameter is in the schema with the working memory off`);
-  }
-  assert.equal(offTool.description.includes("WORKING MEMORY"), false,
-    "The tool description teaches the working memory while the option is off");
-  let offRefusal = null;
-  try {
-    await toolCall(off, { action: "remember", key: "a", body: "b" });
-  } catch (error) {
-    offRefusal = error instanceof Error ? error.message : String(error);
-  }
-  assert(offRefusal !== null, "remember executed with the working memory off");
-  assert.match(offRefusal, /not enabled/,
-    "The off refusal does not say the action is not enabled");
-  // ON, THE SURFACE TEACHES THE CHANNEL WITH ITS REAL CONSTANTS. The caps are stated
-  // from policy, so a constant that moves cannot leave the tool text lying.
-  const on = makeRuntime(built, { workingMemory: true });
-  await startRuntime(on);
-  const onTool = on.tools.get("pi_fold_context");
-  for (const action of ["remember", "recall"]) {
-    assert(onTool.parameters.properties.action.enum.includes(action),
-      `${action} is missing from the action enum with the working memory on`);
-  }
-  assert.equal(onTool.parameters.properties.key.maxLength, policyModule.MEMORY_KEY_CHARS,
-    "The key parameter does not state the key cap");
-  assert.equal(onTool.parameters.properties.body.maxLength, policyModule.MEMORY_BODY_CHARS,
-    "The body parameter does not state the body cap");
-  assert(onTool.description.includes(`${policyModule.MEMORY_KEYS_MAX} entries`),
-    "The description does not state the entry cap from the constant");
-  assert.match(onTool.description, /table of contents/,
-    "The description does not say only the table of contents rides the window");
-  // The option is a boolean, refused by name otherwise.
-  assert.throws(() => makeRuntime(built, { workingMemory: "yes" }),
-    /workingMemory must be a boolean/, "A non-boolean workingMemory was accepted");
-  return { offSurfaceUnchanged: true, capsStatedFromConstants: true };
-}
-
-async function gateMemoryDictionary() {
-  const built = makeFixture({ turns: 4, resultChars: 3_000 });
-  const runtime = makeRuntime(built, { workingMemory: true });
-  await startRuntime(runtime);
-  const payload = (result) => JSON.parse(result.content[0].text);
-  const refusal = async (params) => {
-    try {
-      const result = await toolCall(runtime, params);
-      return result?.isError ? String(result.content?.[0]?.text ?? "") : null;
-    } catch (error) {
-      return error instanceof Error ? error.message : String(error);
-    }
-  };
-  // RECALL ON AN EMPTY MEMORY NAMES THE REPAIR, not a bare failure.
-  const empty = await refusal({ action: "recall" });
-  assert(empty !== null, "recall on an empty memory returned entries");
-  assert.match(empty, /remember/, "The empty-memory refusal does not name remember as the repair");
-  // WRITE, UPDATE, ORDER. Three entries, then an update, and the table of contents is
-  // freshest first at every step: recency is the order the agent needs, because the
-  // entry that just changed is the one the next read wants.
-  for (const [key, body] of [["alpha", "first body"], ["beta", "second body"], ["gamma", "third body"]]) {
-    const written = await toolCall(runtime, { action: "remember", key, body });
-    assert(!written.isError, `remember ${key} was refused: ${JSON.stringify(written.content)}`);
-  }
-  const updated = payload(await toolCall(runtime, { action: "remember", key: "alpha", body: "first body, revised" }));
-  assert.deepEqual(updated.entries.map((entry) => entry.key), ["alpha", "gamma", "beta"],
-    "An updated entry did not move to the front of the table of contents");
-  // RECALL READS BODIES: everything when keys is omitted, exactly the named ones
-  // otherwise, and an unknown key is refused NAMING the keys that exist, because the
-  // agent that misremembers a key is the agent that needs the list.
-  const everything = payload(await toolCall(runtime, { action: "recall" }));
-  assert.deepEqual(everything.entries.map((entry) => entry.body),
-    ["first body, revised", "third body", "second body"],
-    "recall does not return every body freshest first");
-  const one = payload(await toolCall(runtime, { action: "recall", keys: ["beta"] }));
-  assert.deepEqual(one.entries, [{ key: "beta", chars: "second body".length, body: "second body" }],
-    "recall with keys does not return exactly the named entry");
-  const unknown = await refusal({ action: "recall", keys: ["delta"] });
-  assert(unknown !== null, "recall of an unknown key returned something");
-  assert.match(unknown, /alpha.*gamma.*beta/s,
-    "The unknown-key refusal does not list the keys that exist");
-  // AN EMPTY BODY REMOVES, and removing what does not exist is refused with the list.
-  const removed = payload(await toolCall(runtime, { action: "remember", key: "beta", body: "" }));
-  assert.equal(removed.removed, true, "An empty body did not report the removal");
-  assert.deepEqual(removed.entries.map((entry) => entry.key), ["alpha", "gamma"],
-    "The removed entry still stands in the table of contents");
-  const missing = await refusal({ action: "remember", key: "beta", body: "" });
-  assert(missing !== null, "Removing an absent entry succeeded");
-  // THE CAPS REFUSE BY NAME, stating the constant and the repair, never a bare limit.
-  const longKey = await refusal({ action: "remember", key: "k".repeat(policyModule.MEMORY_KEY_CHARS + 1), body: "x" });
-  assert(longKey !== null, "An over-cap key was accepted");
-  assert.match(longKey, new RegExp(`${policyModule.MEMORY_KEY_CHARS}-character`),
-    "The key refusal does not state the cap");
-  const longBody = await refusal({ action: "remember", key: "wide", body: "b".repeat(policyModule.MEMORY_BODY_CHARS + 1) });
-  assert(longBody !== null, "An over-cap body was accepted");
-  assert.match(longBody,
-    new RegExp(`${policyModule.MEMORY_BODY_CHARS}-character.*${policyModule.MEMORY_BODY_CHARS + 1}`, "s"),
-    "The body refusal does not state the cap and the actual length");
-  for (let index = 0; index < policyModule.MEMORY_KEYS_MAX - 2; index += 1) {
-    const filled = await toolCall(runtime, { action: "remember", key: `fill-${index}`, body: "filler" });
-    assert(!filled.isError, `Filling entry ${index} was refused`);
-  }
-  const over = await refusal({ action: "remember", key: "one-too-many", body: "x" });
-  assert(over !== null, "A write past the entry cap was accepted");
-  assert.match(over, new RegExp(`maximum of ${policyModule.MEMORY_KEYS_MAX}[\\s\\S]*Merge`),
-    "The entry-cap refusal does not state the cap and the merge-or-remove repair");
-  const atCap = await toolCall(runtime, { action: "remember", key: "alpha", body: "updates stay open at the cap" });
-  assert(!atCap.isError, "Updating an existing entry was refused at the entry cap");
-  // AND THE WRITES ARE DURABLE: the materialized state carries what the tool said it kept.
-  const durable = materialized(runtime).memory ?? [];
-  assert.equal(durable.length, policyModule.MEMORY_KEYS_MAX,
-    "The durable state does not hold what the tool reported");
-  assert.equal(durable.find((entry) => entry.key === "alpha")?.body, "updates stay open at the cap",
-    "The durable body is not the last write");
-  return { entriesExercised: policyModule.MEMORY_KEYS_MAX, capsRefuseByName: 3 };
-}
-
-async function gateMemoryTocOneCopyPerCommit() {
-  const tocType = "pi-fold-active-context-memory-toc";
-  const built = makeFixture({ turns: 8, resultChars: 10_000, contextWindow: 100_000 });
-  const runtime = makeRuntime(built, { workingMemory: true });
-  await startRuntime(runtime);
-  // EMPTY MEMORY PROJECTS NOTHING: no carrier, no wording, no byte.
-  const before = await project(runtime);
-  assert.equal(before.messages.filter((message) => message?.customType === tocType).length, 0,
-    "An empty working memory put a table of contents in the projection");
-  // ONE COPY, AND A QUIET PASS MOVES NO BYTE. The carrier freeze is the refresh law:
-  // between commits the copy stays buried at its index, so the occupancy anchor holds.
-  await toolCall(runtime, { action: "remember", key: "tally", body: "three passes reviewed so far" });
-  await toolCall(runtime, { action: "remember", key: "route", body: "the second pass owns the socket group" });
-  const seated = await project(runtime);
-  const tocs = seated.messages.filter((message) => message?.customType === tocType);
-  assert.equal(tocs.length, 1, `${tocs.length} table-of-contents copies stand in one projection`);
-  assert.match(tocs[0].content, /route[\s\S]*tally/,
-    "The table of contents does not list the keys freshest first");
-  assert.match(tocs[0].content, /"action":"recall"/,
-    "The table of contents does not teach recall");
-  const again = await project(runtime);
-  assert.equal(json.stableStringify(again.messages), json.stableStringify(seated.messages),
-    "A quiet pass over the same window moved a byte");
-  // A WRITE BETWEEN COMMITS DOES NOT RE-RENDER THE CARRIER. The tool result is the live
-  // view; the buried copy stays exactly where the freeze holds it, because a carrier
-  // that moves on a quiet pass costs the whole prefix cache (the fold notice paid to
-  // learn this and its comment records it).
-  await toolCall(runtime, { action: "remember", key: "late", body: "arrived after the carrier seated" });
-  const held = await project(runtime);
-  const heldTocs = held.messages.filter((message) => message?.customType === tocType);
-  assert.equal(heldTocs.length, 1, "A write between commits duplicated the carrier");
-  assert.equal(heldTocs[0].content, tocs[0].content,
-    "A write between commits re-rendered the buried carrier in place");
-  // THE COMMIT REFRESHES IT: the old copy is gone, the fresh one lists the latest keys.
-  const epoch = await runtimeCommit(runtime, { tokens: 95_000, contextWindow: 100_000 });
-  assert(epoch.fired, "The commit did not fire, so the refresh is unproven");
-  // The commit reclaimed the window, and the next measurement says so: without it the
-  // occupancy anchor still reads the pre-commit 95 percent and the hard-context guard
-  // returns the raw passthrough, which is that guard's own gate's subject, not this one's.
-  await measure(runtime, 40_000, 100_000);
-  const refreshed = await project(runtime);
-  const after = refreshed.messages.filter((message) => message?.customType === tocType);
-  assert.equal(after.length, 1, `${after.length} table-of-contents copies stand after the commit`);
-  assert.match(after[0].content, /late/,
-    "The refreshed table of contents does not carry the key written before the commit");
-  assert.notEqual(after[0].content, tocs[0].content,
-    "The table of contents did not refresh at the commit");
-  return { copiesPerProjection: 1, refreshedAtCommit: true };
-}
-
-async function gateMemoryPersistence() {
-  const sessionId = "memory-session";
-  const base = {
-    version: 1, sessionId, revision: 3, folds: [], expanded: [], protected: [],
-    tokensSinceToolFold: 0, leases: {},
-    memory: [
-      { key: "tally", body: "three passes reviewed", ordinal: 1 },
-      { key: "route", body: "socket group next", ordinal: 2 },
-    ],
-  };
-  // THE CHECKPOINT CARRIES IT AND THE READER GIVES IT BACK.
-  const checkpoint = persistenceModule.makeStateCheckpoint(base);
-  assert.deepEqual(checkpoint.memory, base.memory, "The checkpoint does not carry the memory");
-  const reread = persistenceModule.stateFromFoldRefs(checkpoint, checkpoint.foldRefs, new Map());
-  assert.deepEqual(reread.memory, base.memory, "The memory does not survive the checkpoint round trip");
-  // THE DELTA CARRIES THE WHOLE ARRAY, and a delta without the field replays EMPTY: the
-  // discriminator rule the marks, the briefs and the clips already live by.
-  const next = { ...base, revision: 4, memory: [{ key: "tally", body: "four passes reviewed", ordinal: 3 }] };
-  const delta = persistenceModule.makeStateDelta(base, next);
-  assert.deepEqual(delta.memory, next.memory, "The delta does not carry the whole array");
-  const clearedTarget = { ...base, revision: 5 };
-  delete clearedTarget.memory;
-  const cleared = persistenceModule.makeStateDelta(next, clearedTarget);
-  assert.equal(Object.hasOwn(cleared, "memory"), false,
-    "A delta clearing the memory still carries the field, so absent cannot mean empty");
-  // THE PARSER REFUSES what it cannot reproduce: a duplicate key, an over-cap store, a
-  // malformed entry. Each by its own name.
-  const reject = (memory, pattern, label) => assert.throws(
-    () => persistenceModule.makeStateCheckpoint({ ...base, memory }), pattern, label);
-  reject([{ key: "a", body: "x", ordinal: 1 }, { key: "a", body: "y", ordinal: 2 }],
-    /duplicate key/, "A duplicate key was persisted");
-  reject(Array.from({ length: policyModule.MEMORY_KEYS_MAX + 1 },
-    (unused, index) => ({ key: `k${index}`, body: "x", ordinal: index })),
-  new RegExp(`over ${policyModule.MEMORY_KEYS_MAX} entries`), "An over-cap store was persisted");
-  reject([{ key: "a", body: "x", ordinal: 1, extra: true }],
-    /working-memory entry/, "A malformed entry was persisted");
-  // EMPTY AND ABSENT ARE THE SAME STATE, so a removal that empties the store cannot read
-  // as a change forever after.
-  const absent = { ...base };
-  delete absent.memory;
-  assert.equal(persistenceModule.sameStateProjection({ ...base, memory: [] }, absent), true,
-    "An empty memory array reads as different from an absent one");
-  return { wireForms: 2, refusalsByName: 3 };
-}
-
-async function gateWorkingMemory() {
-  return {
-    surfaceOffByDefault: await claim("gateMemorySurfaceOff", gateMemorySurfaceOff),
-    dictionary: await claim("gateMemoryDictionary", gateMemoryDictionary),
-    tocOneCopyPerCommit: await claim("gateMemoryTocOneCopyPerCommit", gateMemoryTocOneCopyPerCommit),
-    persistenceRoundTrip: await claim("gateMemoryPersistence", gateMemoryPersistence),
-  };
-}
 
 async function gateToolCallDiet() {
   return {
@@ -15664,7 +15424,6 @@ const gates = [
   [142, "The fold editor", gateFoldEditor],
   [147, "The frontier waits for the batch", gateFrontierWaitsForTheBatch],
   [148, "The tool-call diet", gateToolCallDiet],
-  [149, "The working memory", gateWorkingMemory],
   [150, "The ref key matches the serializer", gateRefKeyMatchesTheSerializer],
   [151, "A growing range stops at the first obstruction", gateGrowingRangeStopsAtTheFirstObstruction],
   [152, "A value already derived is not derived again", gateDerivedOnce],

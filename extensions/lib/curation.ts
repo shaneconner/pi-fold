@@ -73,41 +73,6 @@ export function foldNoticeText(input: {
     `[${brand} folds] Pending folds are waiting for briefs; the list is unavailable this pass.`);
 }
 
-/**
- * THE WORKING MEMORY'S TABLE OF CONTENTS (Shane, 2026-08-26). One copy rides the
- * projection, refreshed at each commit by the carrier freeze: keys only, freshest first,
- * because the bodies live in state and are read on demand. The instruction is fixed and
- * the key list is the variable part, exactly as the fold notice above, and a list that
- * stops early counts what it dropped (gate 136's law). It shares FOLD_NOTICE_BYTES: both
- * are one-glance carriers and a second bound would be a knob with no second job.
- */
-export function memoryTocText(input: {
-  entries: ReadonlyArray<{ key: string; chars: number }>;
-  toolName: string;
-  brandNoun?: string;
-}): string {
-  const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
-  const head = [
-    `[${brand} memory] Your working memory holds ${input.entries.length} ` +
-      `entr${input.entries.length === 1 ? "y" : "ies"}, freshest first.`,
-    `Read any of them with ${input.toolName} {"action":"recall","keys":["<key>"]}. ` +
-      `Update an entry whose facts have changed, or add one, with ${input.toolName} ` +
-      '{"action":"remember","key":"<key>","body":"..."}; an empty body removes the entry.',
-  ].join("\n");
-  const rows = input.entries.map((entry) => `${entry.key} (${entry.chars} chars)`);
-  const overflowText = (seated: number) =>
-    `${input.toolName} {"action":"recall"} lists the other ${input.entries.length - seated}.`;
-  let seated = rows.length;
-  let list = `Entries: ${rows.join("; ")}.`;
-  while (seated > 0 && Buffer.byteLength(`${head}\n${list}`, "utf8") > FOLD_NOTICE_BYTES) {
-    seated -= 1;
-    list = seated === 0
-      ? overflowText(0)
-      : `Entries: ${rows.slice(0, seated).join("; ")}. ${overflowText(seated)}`;
-  }
-  return boundReceiptText(`${head}\n${list}`, FOLD_NOTICE_BYTES,
-    `[${brand} memory] Working memory has entries; the list is unavailable this pass.`);
-}
 
 export interface ContextReceipt {
   kind: string;

@@ -7,7 +7,6 @@
  * nothing: the next model call that reads a result, a natural boundary in the work.
  */
 
-import { MEMORY_BODY_CHARS, MEMORY_KEY_CHARS, MEMORY_KEYS_MAX } from "./policy.ts";
 
 type ToolHandler = (
   toolCallId: string,
@@ -45,16 +44,13 @@ export function buildActiveContextTool(input: {
   const recoveryGuidance = input.allowedActions.includes("expand")
     ? " A fold brief is an index entry, not the source: when a question or task depends on material that is folded, peek or expand that fold and answer from the exact bytes, never from memory of them. Recalling folded detail without reopening it is how specifics get misremembered."
     : "";
-  const memoryGuidance = input.allowedActions.includes("remember")
-    ? ` WORKING MEMORY: a session-scoped dictionary you maintain beside the fold index. remember with key and body writes or updates an entry (${MEMORY_KEY_CHARS}-character keys, ${MEMORY_BODY_CHARS}-character bodies, ${MEMORY_KEYS_MAX} entries); an empty body removes it; recall with keys reads bodies back, or everything when keys is omitted. The bodies live outside your window: only a one-glance table of contents rides your context, refreshed at each commit, so writing an entry costs your window almost nothing. Keep entries current as the work moves: when a fact an entry records changes, or new information lands that belongs in one, update it then rather than at the end.`
-    : "";
   const standingGuidance = " Folding is automatic, lossless and recoverable: the runtime folds stale spans on its own when the window needs room, nothing is ever discarded, and every folded span keeps its exact source. You are never asked to make room and no fold is ever announced in advance. Work normally and let it happen.";
   return {
     name: input.name,
     label: input.label,
     description: input.fullSurface
-      ? `Page, peek, brief, expand, refold, pin, or re-cut exact Pi active-context evidence.${peekGuidance}${correctionGuidance}${pinGuidance}${epochGuidance}${recoveryGuidance}${memoryGuidance}${standingGuidance} Mutations persist immediately and affect the next model call inside the same continuing turn; no turn boundary is required. Supplied fold briefs have a hard ${input.maxBriefChars}-character maximum.`
-      : `Use only the configured active-context actions: ${input.allowedActions.join(", ")}.${peekGuidance}${correctionGuidance}${pinGuidance}${epochGuidance}${recoveryGuidance}${memoryGuidance}${standingGuidance} Supplied fold briefs have a hard ${input.maxBriefChars}-character maximum.`,
+      ? `Page, peek, brief, expand, refold, pin, or re-cut exact Pi active-context evidence.${peekGuidance}${correctionGuidance}${pinGuidance}${epochGuidance}${recoveryGuidance}${standingGuidance} Mutations persist immediately and affect the next model call inside the same continuing turn; no turn boundary is required. Supplied fold briefs have a hard ${input.maxBriefChars}-character maximum.`
+      : `Use only the configured active-context actions: ${input.allowedActions.join(", ")}.${peekGuidance}${correctionGuidance}${pinGuidance}${epochGuidance}${recoveryGuidance}${standingGuidance} Supplied fold briefs have a hard ${input.maxBriefChars}-character maximum.`,
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -89,31 +85,6 @@ export function buildActiveContextTool(input: {
         },
         limit: { type: "integer", minimum: 1, maximum: 100 },
         detail: { type: "string", enum: [...input.statusDetails] },
-        ...(input.allowedActions.includes("remember")
-          ? {
-            key: {
-              type: "string",
-              minLength: 1,
-              maxLength: MEMORY_KEY_CHARS,
-              description: "remember only: the working-memory entry to write, update or " +
-                "(with an empty body) remove.",
-            },
-            body: {
-              type: "string",
-              maxLength: MEMORY_BODY_CHARS,
-              description: "remember only: the entry's full text, replacing what the key " +
-                "held. Empty removes the entry.",
-            },
-            keys: {
-              type: "array",
-              minItems: 1,
-              maxItems: MEMORY_KEYS_MAX,
-              items: { type: "string", minLength: 1 },
-              description: "recall only: the working-memory entries to read. Omit to read " +
-                "every entry.",
-            },
-          }
-          : {}),
       },
     },
     execute: input.handler,

@@ -846,10 +846,12 @@ for (const outside of [0, 1, -0.25, 1.5, "0.5", Number.NaN]) {
 }
 checks.toolFoldThresholdConditionPinned = true;
 
-// THE WORKING-MEMORY CONDITION (Shane 2026-08-26): workingMemory on the pifold arm alone,
-// a boolean, refused by name everywhere else. The runtime revalidates at registration
-// (package gate 149); this layer pins what a sealed config may claim to have run under,
-// and the extension passes the seam verbatim so the arm IS the config.
+// THE WORKING-MEMORY CONDITION, RETIRED 2026-08-28. The channel is deleted from the
+// package (registerPiFold refuses the name) and no new run can carry it. What this gate
+// pins now is the RETIREMENT being honest in both directions: a sealed config still
+// validates, because sol-20260826-full2 reps 4 and 6 state the condition in their own
+// configs and must keep adjudicating, while the extension no longer forwards the seam to
+// a registration that would throw on it. Package gate 149 is retired and its number spent.
 validateExperimentRunConfig({ ...runConfig, arm: "pifold", workingMemory: true });
 validateExperimentRunConfig({ ...runConfig, arm: "pifold", workingMemory: false });
 assert.throws(() => validateExperimentRunConfig({ ...runConfig, workingMemory: true }),
@@ -861,10 +863,14 @@ for (const outside of [1, "true", null]) {
     /must be a boolean/, `workingMemory ${String(outside)} was accepted`);
 }
 {
+  // The forwarding is GONE: leaving it would hand a refused option to registerPiFold and
+  // kill the arm at construction on any replay of a sealed working-memory run.
   const extensionSource = source("scripts/pi_context_experiment_extension.mjs");
-  assert(extensionSource.includes(
-    'config.workingMemory === undefined ? {} : { workingMemory: config.workingMemory }'),
-  "the extension does not pass the working-memory seam to the runtime registration");
+  assert(!extensionSource.includes("workingMemory"),
+    "the extension still forwards the deleted working-memory seam to registration");
+  const runnerSource = source("scripts/run_pi_context_experiment.mjs");
+  assert(!runnerSource.includes("--working-memory"),
+    "the runner still offers a flag for the deleted working-memory condition");
 }
 checks.workingMemoryConditionPinned = true;
 
