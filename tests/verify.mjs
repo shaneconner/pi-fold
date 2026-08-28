@@ -14938,6 +14938,71 @@ async function gateToolCallDiet() {
   };
 }
 
+/**
+ * THE REF KEY IS THE SERIALIZER'S OUTPUT, BYTE FOR BYTE
+ *
+ * One law: `objectRefKey` returns exactly what `stableStringify` would have returned for
+ * the same three fields, on every input.
+ *
+ * It stopped calling the general serializer on 2026-08-28 (issue #2: a reporter profiling
+ * a 467KB window found safeJson at the top of a V8 sample with the process pegged at 80
+ * percent for forty minutes). It is the most-called function in the package and the fast
+ * path is a string literal.
+ *
+ * Identity is the contract rather than round-tripping, and the reason is downstream:
+ * these keys order `protectionSha256`'s sort and reach `branchSha256`'s missing-digest,
+ * so a format that parsed the same but ordered differently would move digests that sealed
+ * sessions carry. The gate compares against the serializer ITSELF on every input rather
+ * than against a second copy of the expected format, which is what makes it survive a
+ * change to either side: change one and this fails.
+ */
+async function gateRefKeyMatchesTheSerializer() {
+	const roles = ["assistant", "toolResult", "user", "custom", "bashExecution"];
+	const corpus = [];
+	for (let index = 0; index < 500; index += 1) {
+		corpus.push({
+			sessionId: `01a045d8-ca65-7945-8883-${String(index).padStart(12, "0")}`,
+			entryId: `entry-${index}-8f8b192a`,
+			role: roles[index % roles.length],
+		});
+	}
+	// The cases a hand-built format could get wrong: characters JSON escapes, characters
+	// that change string ORDER, non-BMP, and every field shape that must fall through to
+	// the serializer instead of being formatted as a string.
+	corpus.push(
+		{ sessionId: 's"quote', entryId: "back\\slash", role: "new\nline" },
+		{ sessionId: "tab\there", entryId: "ret\rurn", role: "form\ffeed" },
+		{ sessionId: "\u0000null", entryId: "\u001f", role: "\u007f" },
+		{ sessionId: "e\u0301", entryId: "\u4e2d\u6587", role: "\u{1f600}" },
+		{ sessionId: "a", entryId: "a ", role: "a!" },
+		{ sessionId: "", entryId: "", role: "" },
+		{ sessionId: "s", entryId: "e", role: undefined },
+		{ sessionId: undefined, entryId: undefined, role: undefined },
+		{ sessionId: "s", entryId: 42, role: "r" },
+		{ sessionId: "s", entryId: "e", role: null },
+		{ sessionId: "s", entryId: "e", role: true },
+		{ sessionId: 0, entryId: "e", role: "r" },
+	);
+	for (const ref of corpus) {
+		const expected = json.stableStringify({
+			sessionId: ref.sessionId, entryId: ref.entryId, role: ref.role,
+		});
+		assert.equal(json.objectRefKey(ref), expected,
+			`objectRefKey diverged from the serializer on ${JSON.stringify(ref)}`);
+	}
+	// Only the three fields travel: a ref carrying extra properties must key identically to
+	// one carrying just the three, or two refs naming the same evidence stop colliding in
+	// every Map and Set that keys by this.
+	const bare = { sessionId: "s", entryId: "e", role: "user" };
+	assert.equal(json.objectRefKey({ ...bare, sha256: "f".repeat(64), extra: [1, 2] }),
+		json.objectRefKey(bare), "A ref's other properties reached its key");
+	// And the format itself, stated once, so a silent reformat of BOTH sides is still caught.
+	assert.equal(json.objectRefKey(bare),
+		'{"sessionId":"s","entryId":"e","role":"user"}',
+		"The ref key format moved, and every digest that sorts or hashes these keys moved with it");
+	return { corpus: corpus.length, format: "sessionId,entryId,role in own-property order" };
+}
+
 const gates = [
   [1, "Registration, parse and deployment branding", gateRegistrationAndBranding],
   [2, "The durable record: lattice, chain and rollback", gateDurableRecord],
@@ -15060,6 +15125,7 @@ const gates = [
   [147, "The frontier waits for the batch", gateFrontierWaitsForTheBatch],
   [148, "The tool-call diet", gateToolCallDiet],
   [149, "The working memory", gateWorkingMemory],
+  [150, "The ref key matches the serializer", gateRefKeyMatchesTheSerializer],
   // 143 is retired with the agent's `fold` verb (Shane 2026-08-23). Its subject was the
   // ANSWER a mark comes back with: the drop the next commit has to make, what the mark
   // covers of it, and what the ladder takes otherwise, all so an agent choosing spans could

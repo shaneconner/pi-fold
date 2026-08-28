@@ -194,8 +194,30 @@ export function isObjectRef(value: unknown): value is EvidenceRef {
     typeof sha256 === "string" && reflectApply(regexpTest, sha256Pattern, [sha256]);
 }
 
+// THE HOT PATH (issue #2, 2026-08-28). This is the most-called function in the package:
+// every mark, span, claim, eligibility and measurement pass keys its refs through it,
+// and a reporter profiling a 467KB window found the serializer under it at the top of a
+// V8 sample with the process pegged at 80 percent for forty minutes. The general
+// serializer earns its cost on arbitrary values, checking for proxies, cycles, accessors
+// and non-plain prototypes; none of that is in question for three strings off a ref.
+//
+// The output is IDENTICAL, not merely equivalent, and that is the whole design of this
+// shape: safeJson emits object keys in own-property order rather than sorted, so the
+// literal below is the same byte sequence its object form produced, and string escaping
+// is native JSON.stringify on both paths. It matters because these keys order
+// `protectionSha256`'s sort and reach `branchSha256`'s missing-digest, so a format that
+// merely round-trips would move digests that sealed sessions carry. Anything that is not
+// three strings falls through to the serializer, which owns every remaining case.
+// Measured 8.5x, 4.27us to 0.50us per call, over 2,000 refs. Gate 150 pins the identity.
 export function objectRefKey(ref: EvidenceRef): string {
-  return stableStringify({ sessionId: ref.sessionId, entryId: ref.entryId, role: ref.role });
+  const sessionId = ref.sessionId;
+  const entryId = ref.entryId;
+  const role = ref.role;
+  if (typeof sessionId === "string" && typeof entryId === "string" && typeof role === "string") {
+    return `{"sessionId":${jsonStringify(sessionId)},"entryId":${jsonStringify(entryId)},` +
+      `"role":${jsonStringify(role)}}`;
+  }
+  return stableStringify({ sessionId, entryId, role });
 }
 
 export function sameObjectIdentity(left: EvidenceRef, right: EvidenceRef): boolean {
