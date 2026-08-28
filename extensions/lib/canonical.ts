@@ -15,6 +15,40 @@ export function bytes(value: unknown): number {
   return Buffer.byteLength(typeof value === "string" ? value : stableStringify(value), "utf8");
 }
 
+/**
+ * Does `heldText`, the serialization of the first `held` elements, stand as a prefix of
+ * `bodyText`, the serialization of the whole array?
+ *
+ * ARRAY SERIALIZATION IS PREFIX-FREE BY CONSTRUCTION, which is the whole reason this can be
+ * answered from a string the caller already has instead of by serializing a slice. `safeJson`
+ * emits `[`, then the elements separated by `,`, then `]`: no whitespace, no trailing comma.
+ * So the serialization of the first `held` elements is exactly the head of the whole one with
+ * `]` in place of the `,` that follows element `held - 1`.
+ *
+ * The two ends break that rule and are branched on rather than argued away. At `held` 0 the
+ * prefix is `[]` and there is no comma to match, so testing `"[," ` would be nonsense. At
+ * `held === length` there is no following element and the two strings are simply equal.
+ *
+ * The comma is the reason this is not a bare `startsWith`, and it is worth being exact about
+ * when it earns its place. JSON's object and string forms SELF-TERMINATE, with `}` and a
+ * closing quote, so for the message arrays this has one caller for, a bare `startsWith` would
+ * happen to agree. Numbers do not self-terminate: `[1]` is a leading substring of `[12]` and
+ * a bare `startsWith` accepts it. The separator is what makes the predicate correct for any
+ * array rather than for today's caller, and a false positive in that caller splices a stale
+ * head in front of a live tail. Gate 154 drives the numeric case for exactly this reason.
+ */
+export function serializedPrefixHolds(
+  bodyText: string,
+  heldText: string | null | undefined,
+  held: number,
+  length: number,
+): boolean {
+  if (heldText === null || heldText === undefined || length < held) return false;
+  if (held === 0) return heldText === "[]";
+  if (held === length) return bodyText === heldText;
+  return bodyText.startsWith(`${heldText.slice(0, -1)},`);
+}
+
 export function boundedUtf8(text: string, maximumBytes: number): string {
   const buffer = Buffer.from(text, "utf8");
   if (buffer.length <= maximumBytes) return text;

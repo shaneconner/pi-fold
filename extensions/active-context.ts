@@ -11,6 +11,7 @@ import {
   clone,
   emptyActiveContextState,
   ownValue,
+  serializedPrefixHolds,
   sessionEntryMessages,
   uniqueMessageDigestAnchor,
 } from "./lib/canonical.ts";
@@ -1431,25 +1432,36 @@ export function registerActiveContext(pi: any, options: {
     };
   };
 
-  const projectedTokenReading = (projected: unknown[]): {
+  // THE SERIALIZATION TRAVELS, THE READING DOES NOT (2026-08-28). Six whole-window
+  // serializations rode every provider request and four were the same string from the same
+  // unmutated array. Only the TEXT is threaded, never a finished reading: each site still
+  // re-reads `measurements.projectionAnchor` and `projectionCharsPerToken()` at its own
+  // time, so every emitted number stays what it was. That matters on the commit path, where
+  // `enforceProjectionBudget` awaits `attemptAutomaticCommit` and an `attributionChanged`
+  // can null the anchor between the last measurement and the read: threading a reading would
+  // freeze `basis` at "measured" where today it flips to "unmeasured". Roughly 50ms per
+  // request at a 467KB window, 100ms at 1MB, all of it blocking main-loop CPU. Honest
+  // framing: six become three, not one.
+  const projectedTokenReading = (projected: unknown[], serialized?: string): {
     tokens: number;
     basis: ProjectionReadingBasis;
     chars: number;
     anchorTokens: number | null;
     deltaChars: number | null;
+    text: string;
   } => {
-    const text = stableStringify(projected);
+    const text = serialized ?? stableStringify(projected);
     const chars = Buffer.byteLength(text, "utf8");
     const charsPerToken = projectionCharsPerToken();
     const estimate = Math.ceil(chars / charsPerToken);
     const anchor = measurements.projectionAnchor;
     if (!anchor || anchor.generation !== lifecycle.generation ||
         anchor.sessionId !== persistence.state?.sessionId) {
-      return { tokens: estimate, basis: "unmeasured", chars, anchorTokens: null, deltaChars: null };
+      return { tokens: estimate, basis: "unmeasured", chars, anchorTokens: null, deltaChars: null, text };
     }
     const separator = text.length > anchor.head.length ? text[anchor.head.length] : "";
     if (!text.startsWith(anchor.head) || (separator !== "," && separator !== "]")) {
-      return { tokens: estimate, basis: "rewritten", chars, anchorTokens: anchor.tokens, deltaChars: null };
+      return { tokens: estimate, basis: "rewritten", chars, anchorTokens: anchor.tokens, deltaChars: null, text };
     }
     const deltaChars = chars - anchor.chars;
     return {
@@ -1458,6 +1470,7 @@ export function registerActiveContext(pi: any, options: {
       chars,
       anchorTokens: anchor.tokens,
       deltaChars,
+      text,
     };
   };
 
@@ -1488,7 +1501,7 @@ export function registerActiveContext(pi: any, options: {
     estimatorErrorShare() * estimate + expectedInflowTokens(),
   ));
 
-  const projectionExceedsBudget = (projected: unknown[], ctx: any): {
+  const projectionExceedsBudget = (projected: unknown[], ctx: any, serialized?: string): {
     tokens: number;
     sizeTokens: number;
     basis: ProjectionReadingBasis;
@@ -1496,12 +1509,13 @@ export function registerActiveContext(pi: any, options: {
     marginTokens: number;
     over: boolean;
     crowded: boolean;
+    text: string;
   } => {
     const capacity = currentCapacity(ctx);
     const budgetTokens = Number.isFinite(capacity.budgetTokens) && capacity.budgetTokens > 0
       ? capacity.budgetTokens
       : Number.POSITIVE_INFINITY;
-    const reading = projectedTokenReading(projected);
+    const reading = projectedTokenReading(projected, serialized);
     const tokens = reading.tokens;
     const sizeTokens = Math.ceil(reading.chars / projectionCharsPerToken());
     const marginTokens = Number.isFinite(budgetTokens)
@@ -1515,6 +1529,7 @@ export function registerActiveContext(pi: any, options: {
       marginTokens,
       over: tokens > budgetTokens,
       crowded: tokens + marginTokens > budgetTokens,
+      text: reading.text,
     };
   };
 
@@ -1790,10 +1805,10 @@ export function registerActiveContext(pi: any, options: {
     snapshot: ActiveContextSnapshot,
     projected: unknown[],
     ctx: any,
-  ): Promise<{ projected: unknown[]; aborted: boolean }> => {
+  ): Promise<{ projected: unknown[]; aborted: boolean; text: string }> => {
     let measured = projectionExceedsBudget(projected, ctx);
     const rejected = curation.pendingRejection !== null;
-    if (!measured.crowded && !rejected) return { projected, aborted: false };
+    if (!measured.crowded && !rejected) return { projected, aborted: false, text: measured.text };
     const trigger = measured;
     let reduced = projected;
     let attempts = 0;
@@ -1897,9 +1912,11 @@ export function registerActiveContext(pi: any, options: {
       }));
       curation.pendingRejection = null;
     }
-    if (!measured.over) return { projected: reduced, aborted: false };
+    // `measured` is recomputed on `reduced` at every turn of the loop above, so its text is
+    // the serialization of the array both of these exits return.
+    if (!measured.over) return { projected: reduced, aborted: false, text: measured.text };
     abortOverBudgetProjection(measured.tokens, measured.budgetTokens, ctx, attempts);
-    return { projected: reduced, aborted: true };
+    return { projected: reduced, aborted: true, text: measured.text };
   };
 
   const startPreparation = (snapshot: ActiveContextSnapshot, ratio: number | null, ctx: any): void => {
@@ -2063,26 +2080,35 @@ export function registerActiveContext(pi: any, options: {
       if (freeze.projection) carryWithdrawalIntoFreeze(freeze.projection, withdrawn);
     }
     const held = freeze.body?.length ?? 0;
-    freeze.active = freeze.projection !== null && body.length >= held &&
-      stableStringify(body.slice(0, held)) === freeze.bodyText;
+    // THE PREFIX IS READ OUT OF THE WHOLE SERIALIZATION (2026-08-28). This asked
+    // `stableStringify(body.slice(0, held)) === freeze.bodyText`, and in steady state `held`
+    // is `body.length` minus the couple of messages that just arrived, so it was a second
+    // full serialization of the window plus a slice allocation, beside the one below that
+    // every pass does anyway. `serializedPrefixHolds` carries why that is sound; a false
+    // POSITIVE here splices the previous pass's `freeze.projection` in front of the new tail
+    // and emits stale messages, which is a content bug rather than a slowdown, and gate 154
+    // drives the predicate itself rather than restating it.
+    const bodyText = stableStringify(body);
+    freeze.active = freeze.projection !== null &&
+      serializedPrefixHolds(bodyText, freeze.bodyText, held, body.length);
     const projected = freeze.active
       ? [...freeze.projection!, ...body.slice(held)]
       : [...body];
     if (!freeze.active) freeze.keys.clear();
     freeze.body = body;
-    freeze.bodyText = stableStringify(body);
+    freeze.bodyText = bodyText;
     appendReceipts(projected, snapshot);
     appendFoldNotice(projected, snapshot);
     appendMemoryToc(projected, snapshot);
     return holdFrozen(projected);
   };
-  const noteProjection = (projected: unknown[]): void => {
+  const noteProjection = (projected: unknown[], serialized?: string): void => {
     const digests = messageDigests(projected);
     const comparison = compareProjections(instrumentation.previousDigests, digests);
     recordProjection(instrumentation.ledger, comparison, digests);
     instrumentation.previousDigests = digests;
     instrumentation.lastChange = comparison.change;
-    const text = stableStringify(projected);
+    const text = serialized ?? stableStringify(projected);
     const divergence = prefixDivergence(instrumentation.previousText, text);
     const previousChars = instrumentation.previousText?.length ?? 0;
     instrumentation.lastPreservedShare = previousChars > 0
@@ -2110,7 +2136,7 @@ export function registerActiveContext(pi: any, options: {
           : latestCacheActionClass
             ? latestCacheActionClass
             : divergence.index === null ? "steady-state" : "after-message";
-    const reading = projectedTokenReading(projected);
+    const reading = projectedTokenReading(projected, text);
     emit("context.projection", {
       change: comparison.change,
       previous_count: comparison.previousCount,
@@ -2888,7 +2914,7 @@ export function registerActiveContext(pi: any, options: {
       }
       const budgeted = await enforceProjectionBudget(snapshot, projected, ctx);
       projected = budgeted.projected;
-      const reading = projectedTokenReading(projected);
+      const reading = projectedTokenReading(projected, budgeted.text);
       measurements.lastProjectedChars = reading.chars;
       measurements.lastProjectedEstimate = reading.tokens;
       measurements.lastProjectedEstimateBasis = reading.basis;
@@ -2898,7 +2924,7 @@ export function registerActiveContext(pi: any, options: {
         updateStatus(ctx);
         return { messages: projected };
       }
-      noteProjection(projected);
+      noteProjection(projected, budgeted.text);
       updateStatus(ctx);
       return { messages: projected };
     } catch (error) {

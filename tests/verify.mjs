@@ -15370,6 +15370,98 @@ async function gateDerivedAgainstTheObject() {
 	return { messageBytes: size, memoized: ["topologySha256", "messageBytes"], notMemoized: ["protectionSha256"] };
 }
 
+/**
+ * THE WINDOW IS SERIALIZED ONCE AND READ MANY TIMES
+ *
+ * Two claims, both about the same string.
+ *
+ * FIRST, ARRAY SERIALIZATION IS PREFIX-FREE, which is what lets the frozen-prefix check read
+ * the head of a serialization it already has instead of building a second one. `safeJson`
+ * emits `[`, the elements separated by `,`, then `]`: no whitespace, no trailing comma. So
+ * the serialization of the first N elements is the head of the whole one with `]` in place
+ * of the `,` after element N-1. Both ends break that rule and both are branched on in the
+ * runtime: at N=0 the prefix is `[]` with no comma to match, and at N=length the two strings
+ * are simply equal. This gate drives all three branches against the serializer itself, at
+ * element boundaries chosen so a naive `startsWith` on the raw prefix would pass while the
+ * real test fails. A false positive there splices a stale projection in front of the live
+ * tail and emits the previous pass's messages, so this is a content bug, not a slowdown.
+ *
+ * SECOND, THE READING ACCEPTS A SERIALIZATION AND MUST NOT CHANGE ITS ANSWER because of it.
+ * `projectedTokenReading` is handed the text from `enforceProjectionBudget` and from
+ * `noteProjection`; the gate drives a real session and requires the emitted projection
+ * numbers to be what an independent serialization of the same array produces.
+ *
+ * Only the TEXT is threaded, never a finished reading. Each site still re-reads the anchor
+ * and `projectionCharsPerToken()` at its own time, because `enforceProjectionBudget` awaits
+ * `attemptAutomaticCommit` and an `attributionChanged` can null the anchor between the last
+ * measurement and the read, which flips `basis` from "measured" to "unmeasured". Threading a
+ * reading would freeze that; threading the text cannot.
+ */
+async function gateProjectionSerializedOnce() {
+	// THE PREFIX LAW, against the serializer, at every boundary that matters.
+	const element = (index) => ({
+		role: index % 2 ? "assistant" : "user",
+		content: `message ${index} ${"z".repeat(index * 3)}`,
+		timestamp: index,
+	});
+	const body = Array.from({ length: 12 }, (_, index) => element(index));
+	const whole = json.stableStringify(body);
+	// THE RUNTIME'S OWN PREDICATE, driven rather than restated: a gate that reimplements the
+	// rule passes while the runtime uses a naive startsWith, which is exactly the bug.
+	const prefixHolds = (held, fullText, heldText) =>
+		context.serializedPrefixHolds(fullText, heldText, held, body.length);
+	let boundaries = 0;
+	for (let held = 0; held <= body.length; held += 1) {
+		const heldText = json.stableStringify(body.slice(0, held));
+		assert.equal(prefixHolds(held, whole, heldText), true,
+			`The prefix rule refused a genuine prefix of ${held} elements`);
+		boundaries += 1;
+	}
+	// AND IT MUST REFUSE. Two shapes, and the second is the one that earns the comma.
+	//
+	// A changed element is caught either way, because JSON's object and string forms
+	// SELF-TERMINATE: `}` and the closing quote mean a longer element can never contain a
+	// shorter one as a leading substring that also ends where the shorter one ends.
+	const extended = [...body.slice(0, 5), { ...element(5), content: `${element(5).content} and more` }, ...body.slice(6)];
+	const frozenSix = json.stableStringify(body.slice(0, 6));
+	assert.equal(prefixHolds(6, json.stableStringify(extended), frozenSix), false,
+		"A body that only shares a leading substring of element 5 was accepted as a frozen prefix");
+	// NUMBERS DO NOT SELF-TERMINATE, and that is exactly what the `,` is for: `[1]` against
+	// `[12]` passes a bare `startsWith` and must not pass here. The runtime's own arrays hold
+	// message objects, so this is the predicate being correct for any array rather than for
+	// the one caller it has today; drop the comma and this is the assertion that fails.
+	assert.equal(context.serializedPrefixHolds(json.stableStringify([12]), json.stableStringify([1]), 1, 1),
+		false, "A bare startsWith would accept [1] as a prefix of [12]; the separator is load-bearing");
+	assert.equal(context.serializedPrefixHolds(json.stableStringify([12, 3]), json.stableStringify([1]), 1, 2),
+		false, "The separator stopped separating: [1] was accepted as the frozen head of [12,3]");
+	assert.equal(context.serializedPrefixHolds(json.stableStringify([1, 2]), json.stableStringify([1]), 1, 2),
+		true, "A genuine numeric prefix was refused");
+	// A shorter body cannot carry a longer frozen prefix, whatever its bytes say.
+	assert.equal(json.stableStringify(body.slice(0, 3)).startsWith(json.stableStringify(body.slice(0, 2)).slice(0, -1) + ","),
+		true, "The serializer stopped emitting elements in order with a single comma between them");
+	// The two ends are not the general rule, which is why the runtime branches on them.
+	assert.equal(json.stableStringify([]), "[]", "An empty array stopped serializing as []");
+	assert.equal(`${json.stableStringify(body.slice(0, 0)).slice(0, -1)},`, "[,",
+		"The zero case would be tested with a nonsense prefix if it were not branched on");
+
+	// THE READING IS THE SAME WHETHER OR NOT IT IS HANDED THE TEXT. Driven through a real
+	// session, because the numbers this protects are the ones the projection event carries.
+	const runtime = await epochToolRuntime({ turns: 10 });
+	for (const tokens of [78_000, 82_000, 86_000]) await measureAndCommit(runtime, tokens, 100_000);
+	const projection = await project(runtime);
+	const events = contextEvents(runtime).filter((event) => event.kind === "context.projection");
+	assert(events.length >= 1, "The session emitted no projection event to check");
+	const last = events.at(-1);
+	// The handler returns { messages }; the reading measures that array.
+	assert.equal(last.chars, Buffer.byteLength(json.stableStringify(projection.messages), "utf8"),
+		"The projection's reported chars stopped matching an independent serialization of it");
+	assert(typeof last.estimated_tokens === "number" && last.estimated_tokens > 0,
+		"The projection event carries no token estimate");
+	assert(["measured", "unmeasured", "anchored", "rewritten"].includes(last.estimate_basis),
+		`The projection basis is not one the reading produces: ${last.estimate_basis}`);
+	return { boundaries, projectionChars: last.chars, basis: last.estimate_basis };
+}
+
 const gates = [
   [1, "Registration, parse and deployment branding", gateRegistrationAndBranding],
   [2, "The durable record: lattice, chain and rollback", gateDurableRecord],
@@ -15496,6 +15588,7 @@ const gates = [
   [151, "A growing range stops at the first obstruction", gateGrowingRangeStopsAtTheFirstObstruction],
   [152, "A value already derived is not derived again", gateDerivedOnce],
   [153, "A derivation kept against the object it was handed", gateDerivedAgainstTheObject],
+  [154, "The window is serialized once and read many times", gateProjectionSerializedOnce],
   // 143 is retired with the agent's `fold` verb (Shane 2026-08-23). Its subject was the
   // ANSWER a mark comes back with: the drop the next commit has to make, what the mark
   // covers of it, and what the ladder takes otherwise, all so an agent choosing spans could
