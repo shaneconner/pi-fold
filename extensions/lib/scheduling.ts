@@ -30,7 +30,6 @@ import {
 } from "./measurement.ts";
 import {
   childFoldIds,
-  clearPrepared,
   flattenFoldRefs,
   foldIdFor,
   parsePendingMarks,
@@ -1087,9 +1086,6 @@ export async function commitPendingMarks(input: {
         generation: input.generation,
       });
       applied.push({ mark: "fold", id: mark.id, origin: mark.origin, foldId: prepared.id });
-      if (state.prepared && state.folds.some((fold) => fold.id === state.prepared!.id)) {
-        state = clearPrepared(state);
-      }
     } catch (error) {
       refused.push({
         mark: mark.mark,

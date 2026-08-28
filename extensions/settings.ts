@@ -226,16 +226,15 @@ function shareCandidates(id: "maxTarget" | "minTarget"): number[] {
 	return values;
 }
 
-function allowedValues(id: FoldSettingId, thresholds: ActiveContextThresholds, budgetTokens: number): string[] {
-	if (id === "consolidateAfter") return CONSOLIDATE_CHOICES.map(String);
-	if (id === "minFoldChars") return MIN_FOLD_CHOICES.map((value) => `${value.toLocaleString("en-US")} chars`);
+// The lattice a row steps along, as numbers. Display belongs to rowDisplayValue and
+// only to it: this list is stepped, never shown.
+function allowedValues(id: FoldSettingId, thresholds: ActiveContextThresholds): number[] {
+	if (id === "consolidateAfter") return CONSOLIDATE_CHOICES;
+	if (id === "minFoldChars") return MIN_FOLD_CHOICES;
 	const { minTarget, maxTarget } = thresholds;
-	const candidates = id === "maxTarget"
+	return id === "maxTarget"
 		? shareCandidates("maxTarget").filter((v) => v > minTarget)
 		: shareCandidates("minTarget").filter((v) => v < maxTarget);
-	// Entries carry the SAME display format as currentValue: SettingsList cycles by
-	// indexOf(currentValue), so a format mismatch wraps every first press to the head.
-	return candidates.map((v) => `${v.toFixed(2)} · ${Math.round(v * budgetTokens).toLocaleString("en-US")} tok`);
 }
 
 function rowRawValue(settings: FoldSettingsFile, id: FoldSettingId): string {
@@ -366,7 +365,7 @@ export class FoldSettingsEditor extends Container {
 						row.label,
 						row.description,
 						rowRawValue(draft, row.id),
-						(raw) => this.applyEdit(row.id, raw),
+						(raw) => this.applyAndSave(row.id, raw),
 						submenuDone,
 					),
 			})),
@@ -386,8 +385,7 @@ export class FoldSettingsEditor extends Container {
 	// surface; an exact off-lattice value arrives only through Enter's editor.
 	private step(id: FoldSettingId, direction: number): void {
 		const thresholds = this.draft.thresholds ?? DEFAULT_THRESHOLDS;
-		const candidates = allowedValues(id, thresholds).map((entry) =>
-			Number.parseFloat(entry.replace(/,/g, "")));
+		const candidates = allowedValues(id, thresholds);
 		const current = Number(rowRawValue(this.draft, id));
 		const target = direction > 0
 			? candidates.find((candidate) => candidate > current + 1e-9)
@@ -406,10 +404,6 @@ export class FoldSettingsEditor extends Container {
 			if (item) item.currentValue = rowDisplayValue(this.draft, row.id, this.budgetTokens);
 		}
 		return { ok: true, display: rowDisplayValue(this.draft, id, this.budgetTokens) };
-	}
-
-	private applyEdit(id: FoldSettingId, raw: string): { ok: true; display: string } | { ok: false; error: string } {
-		return this.applyAndSave(id, raw);
 	}
 
 	handleInput(data: string): void {

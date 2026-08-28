@@ -562,10 +562,6 @@ function mcpServerForTool(toolName, fallback) {
     : fallback;
 }
 
-function conventionalMcpTool(toolName) {
-  return mcpServerForTool(toolName, null) !== null;
-}
-
 export function registerEvidenceIngestion(pi, {
   entryTypePrefix = DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX,
 } = {}) {
@@ -626,7 +622,7 @@ export function registerEvidenceIngestion(pi, {
       return projectEvidenceText(text, descriptor, "utf8-head", truncation ? { truncation } : undefined);
     }
 
-    if (conventionalMcpTool(toolName)) {
+    if (mcpServerForTool(toolName, null) !== null) {
       const envelope = eventEnvelope(event);
       const serialized = `${stableStringify(envelope)}\n`;
       if (utf8Bytes(serialized) <= TOOL_RESULT_PROJECTION_BYTES) return;

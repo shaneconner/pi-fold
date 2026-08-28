@@ -1005,8 +1005,6 @@ export function manualFoldCandidate(
   ids: string[],
   options: { allowProtected?: boolean } = {},
 ): FoldCandidate {
-  const blockedTool = (refs: EvidenceRef[]): boolean =>
-    !options.allowProtected && refsProtected(refs, state, snapshot);
   const blocked = (refs: EvidenceRef[]): boolean =>
     !options.allowProtected && refsProtected(refs, state, snapshot);
   const owners = directFoldOwners(state.folds);
@@ -1034,10 +1032,10 @@ export function manualFoldCandidate(
       calls.length === first.batch.length &&
       new Set(calls.map((call) => call!.id)).size === first.batch.length &&
       first.batch.every((id) => calls.some((call) => call!.id === id));
-    if (completeBatch && !blockedTool(refs)) {
+    if (completeBatch && !blocked(refs)) {
       return bounded({ kind: "tool-result", parts: refs.map((ref) => ({ kind: "raw", ref })), sourceRefs: refs });
     }
-    if (one && first && first.batch.length === 1 && !blockedTool(refs)) {
+    if (one && first && first.batch.length === 1 && !blocked(refs)) {
       return bounded({ kind: "tool-result", parts: [{ kind: "raw", ref: refs[0] }], sourceRefs: refs });
     }
   }
