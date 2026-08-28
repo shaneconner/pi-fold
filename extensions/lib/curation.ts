@@ -92,7 +92,7 @@ export function memoryTocText(input: {
       `entr${input.entries.length === 1 ? "y" : "ies"}, freshest first.`,
     `Read any of them with ${input.toolName} {"action":"recall","keys":["<key>"]}. ` +
       `Update an entry whose facts have changed, or add one, with ${input.toolName} ` +
-      `{"action":"remember","key":"<key>","body":"..."}; an empty body removes the entry.`,
+      '{"action":"remember","key":"<key>","body":"..."}; an empty body removes the entry.',
   ].join("\n");
   const rows = input.entries.map((entry) => `${entry.key} (${entry.chars} chars)`);
   const overflowText = (seated: number) =>
