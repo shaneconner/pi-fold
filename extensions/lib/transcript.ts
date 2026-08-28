@@ -78,19 +78,6 @@ export function completeTurns(messages: unknown[]): CompleteTurn[] {
   return turns;
 }
 
-export function leadingCompactionContinuation(messages: unknown[]): CompleteTurn | null {
-  if (messageRole(messages[0]) !== "compactionSummary") return null;
-  let firstUser = -1;
-  for (let index = 0; index < messages.length; index += 1) {
-    if (messageRole(messages[index]) === "user") { firstUser = index; break; }
-  }
-  if (firstUser <= 1 || messageRole(messages[1]) !== "assistant") return null;
-  let end = firstUser;
-  while (end > 1 && (messageRole(messages[end - 1]) === "custom" ||
-      messageRole(messages[end - 1]) === "bashExecution")) end -= 1;
-  return end > 1 && terminalAssistant(messages[end - 1]) ? { start: 1, end } : null;
-}
-
 export const READ_ONLY_CONTEXT_ACTION_ARGUMENTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   status: Object.freeze(["action", "detail", "offset", "limit"]),
   // offset and bytes are the tool surface's own narrowing parameters: a paged or

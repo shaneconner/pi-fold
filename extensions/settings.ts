@@ -50,17 +50,6 @@ const THRESHOLD_FIELDS = [
 
 export type FoldSettingId = typeof THRESHOLD_FIELDS[number];
 
-function readProportion(raw: string, field: string): number {
-	const value = Number(raw);
-	if (!Number.isFinite(value) || value <= 0 || value >= 1) {
-		throw new ThresholdPolicyError(
-			field,
-			`thresholds.${field} must be a proportion above 0 and below 1`,
-		);
-	}
-	return value;
-}
-
 // One edit, applied against the WHOLE draft: the merged thresholds object is
 // re-validated through resolveThresholds so cross-field invariants
 // (minTarget < maxTarget) hold at every saved state, never
@@ -82,7 +71,7 @@ export function applyFoldSettingsEdit(
 			});
 			return { ok: true, draft: { ...draft, thresholds } };
 		}
-		const value = readProportion(rawValue.trim(), id);
+		const value = Number(rawValue.trim());
 		const thresholds = resolveThresholds({
 			...(draft.thresholds ?? DEFAULT_THRESHOLDS),
 			[id]: value,

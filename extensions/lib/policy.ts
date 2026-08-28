@@ -243,11 +243,6 @@ export function assertThresholdsServable(_thresholds: ActiveContextThresholds, b
   }
 }
 
-export function zoneBytes(share: number, budgetTokens: number): number {
-  if (!Number.isFinite(share) || share <= 0 || !Number.isFinite(budgetTokens) || budgetTokens <= 0) return 0;
-  return Math.floor(share * budgetTokens * ESTIMATED_BYTES_PER_TOKEN);
-}
-
 export function servingBudgetTokens(window: number): number {
   const resolved = Number.isFinite(window) && window > 0 ? window : DEFAULT_CONTEXT_WINDOW;
   return resolved - Math.min(ACTIVE_CONTEXT_POLICY.responseReserve, Math.floor(resolved * 0.1));
