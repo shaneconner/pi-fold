@@ -78,7 +78,7 @@ One 64-stage staged assignment over the curl C repository: one Pi session per ru
 
 There is one run per arm, and native did not finish: it ended its turn at stage 56 of 64. That leaves two pairings, and both are reported here rather than the flattering one.
 
-The measurement is written up as a paper, with the figure sources, the redacted per-request ledgers, and the campaign log deposited beside it: [doi.org/10.5281/zenodo.21856873](https://doi.org/10.5281/zenodo.21856873). The story of how the campaign got here is on [Medium](https://medium.com/@shane.conner/compaction-doesnt-have-to-mean-starting-over-89c0b319d1a6).
+The measurement is written up as a paper, with the figure sources, the redacted per-request ledgers, and the campaign log deposited beside it: [doi.org/10.5281/zenodo.21856873](https://doi.org/10.5281/zenodo.21856873). The story of how the campaigns got here is on Medium, in four parts, from [compaction doesn't have to mean starting over](https://medium.com/@shane.conner/compaction-doesnt-have-to-mean-starting-over-89c0b319d1a6) to [a compaction summary is one record doing a store's job](https://medium.com/@shane.conner/a-compaction-summary-is-one-record-doing-a-stores-job-3f46212ef059).
 
 ### Same seed, both cut at stage 56
 
