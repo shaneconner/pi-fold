@@ -12326,6 +12326,55 @@ async function gateFoldSettingsRoundTrip() {
     for (let i = 0; i < 20; i++) editor.handleInput("\x1bOC");
     assert.equal(JSON.parse(readFileSync(editorPath, "utf8")).thresholds.maxTarget, 0.95,
       "stepping past the top of the range was not clamped at 0.95");
+
+    // THE LATTICE'S ONLY GUARDS ARE THE POLICY'S OWN (2026-08-29). The two share rows
+    // used to carry invented ranges, 0.40 to 0.95 for the trigger and 0.05 to 0.60 for
+    // the aim. On a 1,000,000-token window that floor put the first fold at about
+    // 393,000 tokens and the only way below it was Enter's exact-value editor, after
+    // which one arrow keypress snapped the value back up to 0.40, because the lattice
+    // did not contain where the person was standing. A second editor takes the whole
+    // band down with ARROWS ALONE, which is the claim: what is selectable is exactly
+    // what resolveThresholds accepts, no more and no less.
+    const bandPath = join(scratch, "band.json");
+    const band = new settingsModule.FoldSettingsEditor(
+      {}, 983_616, bandPath, themeLike, () => {},
+    );
+    // An unwritten file means no edit was ever saved, which means the row would not
+    // move, so it reads as the draft's own starting values rather than as a crash: the
+    // gate has to fail on the SHARE it reached, not on a missing file.
+    const bandBand = () => (existsSync(bandPath)
+      ? JSON.parse(readFileSync(bandPath, "utf8")).thresholds
+      : context.DEFAULT_THRESHOLDS);
+    // The aim first, because the trigger is filtered against it: 0.20 to the floor.
+    band.handleInput("\x1b[B");
+    for (let i = 0; i < 12; i++) band.handleInput("\x1b[D");
+    assert.equal(bandBand().minTarget, 0.05,
+      `stepping the aim down stopped at ${bandBand().minTarget} instead of the lattice floor`);
+    // Then the trigger, far below the 0.40 that used to be its floor. It stops one
+    // increment ABOVE the aim and never at it, because the filter is the invariant.
+    band.handleInput("\x1b[A");
+    for (let i = 0; i < 30; i++) band.handleInput("\x1b[D");
+    assert.equal(bandBand().maxTarget, 0.10,
+      `the trigger stepped to ${bandBand().maxTarget}, not to one increment above the aim`);
+    assert.deepEqual(context.resolveThresholds(bandBand()), bandBand(),
+      "a band reachable by arrow keys alone is not one the policy accepts");
+    // The floor is a LATTICE, not a bound: a finer value still arrives by typing, and
+    // the two bounds that do exist are refused BY NAME.
+    const finerAim = edit({ thresholds: bandBand() }, "minTarget", "0.02");
+    assert.equal(finerAim.ok, true, `an exact aim below the lattice floor was refused: ${finerAim.error}`);
+    const finerBand = edit(finerAim.draft, "maxTarget", "0.03");
+    assert.equal(finerBand.ok, true, `an exact trigger below the lattice floor was refused: ${finerBand.error}`);
+    assert.equal(finerBand.draft.thresholds.maxTarget, 0.03);
+    for (const [field, value] of [["maxTarget", "0"], ["maxTarget", "1"], ["minTarget", "0"], ["minTarget", "1"]]) {
+      const outside = edit(finerBand.draft, field, value);
+      assert.equal(outside.ok, false, `${field} accepted ${value}, which is not a proportion`);
+      assert(/above 0 and below 1/.test(outside.error),
+        `${field} at ${value} did not name the bound it broke: ${outside.error}`);
+    }
+    const crossed = edit({ thresholds: context.DEFAULT_THRESHOLDS }, "maxTarget", "0.15");
+    assert.equal(crossed.ok, false, "a trigger typed below the aim was accepted");
+    assert(/must sit below/.test(crossed.error),
+      `a crossed band did not name the invariant: ${crossed.error}`);
     // Enter opens the exact editor prefilled; an off-lattice value lands verbatim.
     editor.handleInput("\r");
     assert(renders().includes("Enter to apply"), "the exact-value editor did not open");
@@ -12385,6 +12434,7 @@ async function gateFoldSettingsRoundTrip() {
       roundTrip: loaded,
       editedMaxTarget: draft.thresholds.maxTarget,
       crossFieldRefusal: refused.error,
+      steppedBand: `${bandBand().maxTarget}/${bandBand().minTarget}`,
       command: registered[0].name,
       editorClosedWith: closed,
     };

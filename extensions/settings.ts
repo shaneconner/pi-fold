@@ -267,13 +267,21 @@ const EDITOR_ROWS: readonly EditorRow[] = [
 	{ id: "postFoldNotice", label: "Ask the model for briefs", description: "Invite the model to rewrite a fold's summary. Off is what the measured runs used (postFoldNotice)" },
 ];
 
-// The cycle lattices. Shares step in cents so no float drift reaches a threshold;
-// each row's list is FILTERED against the current draft before display, which is
-// what makes an invalid combination unselectable rather than an error message.
-const SHARE_STEPS: Record<"maxTarget" | "minTarget", { min: number; max: number; step: number }> = {
-	maxTarget: { min: 0.40, max: 0.95, step: 0.05 },
-	minTarget: { min: 0.05, max: 0.60, step: 0.05 },
-};
+// The cycle lattice for both shares. Shares step in cents so no float drift reaches a
+// threshold; each row's list is FILTERED against the current draft before display, which
+// is what makes an invalid combination unselectable rather than an error message.
+//
+// ONE LATTICE, AND ITS ONLY GUARDS ARE THE POLICY'S OWN (Shane, 2026-08-29). The rows
+// used to carry ranges of their own, 0.40 to 0.95 for the trigger and 0.05 to 0.60 for
+// the aim, and nothing in the runtime asks for either bound: resolveThresholds wants a
+// share strictly between 0 and 1 with the aim below the trigger, and that is all. Found
+// in use on a 1,000,000-token window, where 0.40 is a first fold at about 393,000 tokens:
+// later than the person wanted to start, reachable past only through Enter's exact-value
+// editor, and one arrow keypress after that snapped the value back up to 0.40, because
+// the lattice did not contain where they were standing.
+// The lattice now spans the legal range at the same step, so stepping is the ordinary
+// way to reach a low band and typing is only for values finer than the step.
+const SHARE_LATTICE = { min: 0.05, max: 0.95, step: 0.05 };
 
 const CONSOLIDATE_CHOICES = [2, 3, 4, 5, 6, 8, 10, 12, 15, 20];
 
@@ -286,8 +294,8 @@ const MIN_FOLD_CHOICES = [2_000, 4_000, 6_000, 8_000, 12_000, 16_000, 24_000, 32
 // off: without a 0 here the only way to decline in-view clipping would be the file.
 const TOOL_FOLD_CHOICES = [0, 0.25, 0.35, 0.50, 0.65, 0.75, 0.90];
 
-function shareCandidates(id: "maxTarget" | "minTarget"): number[] {
-	const { min, max, step } = SHARE_STEPS[id];
+function shareCandidates(): number[] {
+	const { min, max, step } = SHARE_LATTICE;
 	const values: number[] = [];
 	for (let cents = Math.round(min * 100); cents <= Math.round(max * 100); cents += Math.round(step * 100)) {
 		values.push(cents / 100);
@@ -302,9 +310,12 @@ function allowedValues(id: FoldSettingId, thresholds: ActiveContextThresholds): 
 	if (id === "consolidateAfter") return CONSOLIDATE_CHOICES;
 	if (id === "minFoldChars") return MIN_FOLD_CHOICES;
 	const { minTarget, maxTarget } = thresholds;
+	// The cross-field invariant IS the filter, so a row can be stepped to any legal share
+	// and never to an illegal one; the trigger stops one increment above the aim rather
+	// than at some number chosen here.
 	return id === "maxTarget"
-		? shareCandidates("maxTarget").filter((v) => v > minTarget)
-		: shareCandidates("minTarget").filter((v) => v < maxTarget);
+		? shareCandidates().filter((v) => v > minTarget)
+		: shareCandidates().filter((v) => v < maxTarget);
 }
 
 function rowRawValue(settings: FoldSettingsFile, id: FoldSettingId): string {
