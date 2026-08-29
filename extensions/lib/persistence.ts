@@ -22,9 +22,6 @@ import {
   EXPAND_LEASE_GENERATIONS,
   MAX_EXPAND_LEASES,
   MAX_PENDING_MARKS,
-  MEMORY_BODY_CHARS,
-  MEMORY_KEY_CHARS,
-  MEMORY_KEYS_MAX,
 } from "./policy.ts";
 import type {
   ActiveContextCheckpointV2,

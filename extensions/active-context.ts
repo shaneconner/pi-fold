@@ -129,7 +129,6 @@ import type {
   FoldKind,
   FoldRecordEntry,
   PreparedFold,
-  WorkingMemoryEntry,
 } from "./lib/policy.ts";
 import {
   absorbWedgeMarks,
@@ -480,9 +479,6 @@ export function registerActiveContext(pi: any, options: {
     attempts: 0,
     last: null as Record<string, unknown> | null,
     pendingOverflow: null as { at: number; entryId: string | null } | null,
-  };
-
-  const advisory = {
   };
 
   // EPHEMERAL PEEK (Build 4b): tool call ids whose peek asked for one-read
@@ -1332,7 +1328,6 @@ export function registerActiveContext(pi: any, options: {
     safeNotify(ctx, `Automatic context management suspended: ${message}`, "warning");
   };
 
-
   const PROJECTION_CALIBRATION_MIN_CHARS = 20_000;
   const PROJECTION_CALIBRATION_MIN_TOKENS = 5_000;
   const PROJECTION_CHARS_PER_TOKEN_FLOOR = 2;
@@ -1535,7 +1530,6 @@ export function registerActiveContext(pi: any, options: {
     };
   };
 
-
   // THE BAND TOP COMMITS ON ITS OWN (Shane, 2026-08-22).
   //
   // `maxTarget` is what the settings panel calls the commit trigger, and until now it
@@ -1698,7 +1692,6 @@ export function registerActiveContext(pi: any, options: {
     });
     return projected;
   };
-
 
   const enforceBandTop = async (
     snapshot: ActiveContextSnapshot,

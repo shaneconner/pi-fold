@@ -7,7 +7,6 @@
  * nothing: the next model call that reads a result, a natural boundary in the work.
  */
 
-
 type ToolHandler = (
   toolCallId: string,
   params: Record<string, unknown>,

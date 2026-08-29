@@ -441,7 +441,7 @@ export class FoldSettingsEditor extends Container {
 			// than cycling a value, and nothing is cancelled because every change is saved
 			// the moment it is made. The hint function is ours and is handed the string, so
 			// the correction happens here rather than being contradicted a line below.
-			hint: (_text: string) => theme.fg("dim", "←→ adjust · Enter types an exact value · Esc closes"),
+			hint: () => theme.fg("dim", "←→ adjust · Enter types an exact value · Esc closes"),
 		};
 		this.settingsList = new SettingsList(
 			EDITOR_ROWS.map((row) => ({

@@ -724,7 +724,7 @@ export class FoldEditorView {
 
 	private headerLines(width: number): string[] {
 		const lines: string[] = [];
-		const { occupancy, pending } = this.data;
+		const { occupancy } = this.data;
 		lines.push(truncateToWidth(`── ${this.data.title} ──`, width));
 		// UNMEASURED IS PROSE, NEVER A BAR. An empty bar beside "?%" reads to the eye as
 		// a window that is 0 percent full, which is a guess wearing the costume of a

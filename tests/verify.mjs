@@ -14717,7 +14717,6 @@ async function gateClipDeltaCarriesOnlyTheChange() {
   };
 }
 
-
 /**
  * GATE 156: AN IMAGE IS NOT MEASURED AS TEXT (2026-08-28).
  *
