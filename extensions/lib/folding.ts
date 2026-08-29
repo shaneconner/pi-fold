@@ -31,6 +31,7 @@ import {
   refsProtected,
 } from "./measurement.ts";
 import {
+  assertFoldForestValid,
   childFoldIds,
   clearPrepared,
   flattenFoldRefs,
@@ -908,7 +909,7 @@ export function projectActiveContext(
   snapshot: ActiveContextSnapshot,
   state: ActiveContextState,
 ): unknown[] {
-  validateFoldForest(state.folds);
+  assertFoldForestValid(state.folds);
   const replacements = new Map<number, { end: number; messages: unknown[] }>();
   for (const root of orderedRoots(state, snapshot)) {
     const rendered = renderFold(root.fold, state, snapshot);

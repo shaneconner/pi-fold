@@ -311,6 +311,43 @@ export function validateFoldForest(folds: ActiveFold[]): ActiveFold[] {
   return values;
 }
 
+// A FOREST THAT VALIDATED ONCE IS NOT VALIDATED AGAIN (gate 160, 2026-08-29). Profiling
+// twelve projections of a sealed 681-fold session put 51.2 percent of ALL self time on one
+// call path, and caller attribution found every serialization sample on it:
+//
+//   projectActiveContext -> validateFoldForest -> sha256Value -> stableStringify -> safeJson
+//
+// The cost is this function's closing digest-drift loop, which flattens every fold's refs
+// (for a consolidation parent, the union of all descendants) and hashes the array. The
+// projection opens with `validateFoldForest(state.folds)` on EVERY context event and throws
+// the result away: it wants the throw, not the normalized array. So it paid a full forest
+// rehash per event to re-prove something it had already proven.
+//
+// THIS WRAPPER IS THE ONLY THING THAT CHANGES. `validateFoldForest` is untouched, still
+// clones, still normalizes, still returns; the three callers that CONSUME its return value
+// (parseActiveContextState, stateFromFoldRefs, commitPreparedFold) still call it directly
+// and are unaffected. Each of those hands it a freshly built array anyway, so a memo could
+// never have hit there; the projection is the one caller that reads the same array again
+// and again, which is exactly why it is the one that pays.
+//
+// KEYED ON THE INPUT ARRAY, and sound because a state is rebuilt immutably: a changed
+// forest is always a new array, and nothing anywhere mutates a folds array in place (no
+// push, splice, sort, reverse or slot assignment on any `.folds` in extensions/). Nothing
+// is shared out, because nothing is returned, so this carries none of gate 158's aliasing
+// question.
+//
+// THE ONE COST, stated rather than hidden: a folds array mutated IN PLACE keeps its first
+// verdict and a corruption introduced that way would go unreported. Gate 160 asserts that
+// cost directly rather than pretending it away, and still requires a corrupt NEW forest to
+// raise on first sight.
+const VALIDATED_FORESTS = new WeakSet<readonly ActiveFold[]>();
+
+export function assertFoldForestValid(folds: ActiveFold[]): void {
+  if (VALIDATED_FORESTS.has(folds)) return;
+  validateFoldForest(folds);
+  VALIDATED_FORESTS.add(folds);
+}
+
 export function parseActiveContextState(
   value: unknown,
   sessionId: string,

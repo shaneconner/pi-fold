@@ -14751,6 +14751,95 @@ async function gateClipDeltaCarriesOnlyTheChange() {
  * on an image-bearing projection and the estimator can never learn its way out.
  */
 /**
+ * GATE 160: A FOREST THAT VALIDATED ONCE IS NOT VALIDATED AGAIN (2026-08-29).
+ *
+ * Profiling twelve projections of sealed sol-20260826-full2 pifold-rep7 (3,364 messages,
+ * 681 folds) put 51.2 percent of ALL self time on one call path, with every serialization
+ * sample on it:
+ *
+ *   projectActiveContext -> validateFoldForest -> sha256Value -> stableStringify -> safeJson
+ *
+ * The cost is `validateFoldForest`'s closing digest-drift loop, which flattens every fold's
+ * refs (for a consolidation parent, the union of all descendants) and hashes the array.
+ * `projectActiveContext` ran it on EVERY context event and DISCARDED the result: it wants
+ * the throw, not the normalized array.
+ *
+ * `assertFoldForestValid` is that caller's own door, memoized on a WeakSet of the input
+ * ARRAY. Sound because a state is rebuilt immutably, so a changed forest is always a new
+ * array and nothing mutates a folds array in place. Nothing is shared out, because nothing
+ * is returned, so it carries none of gate 158's aliasing question.
+ *
+ * THE GATE'S SHAPE. A memo that cannot be observed is indistinguishable from a no-op, so
+ * this proves the memo is LIVE by proving its COST: a fold corrupted in place after the
+ * verdict is not noticed. That is the honest way to pin it (gates 120/121/153), and it is
+ * paired with the assertion that keeps the memo from blinding the check: the SAME corrupt
+ * fold inside a NEW array still raises on first sight. It also pins that the split did not
+ * leak, that `validateFoldForest` itself is still unmemoized for its three real callers.
+ */
+async function gateForestValidatedOnce() {
+  const built = makeFixture({ turns: 24, resultChars: 9_000, contextWindow: 100_000 });
+  const snapshot = epochSnapshot(built);
+  let state = context.emptyActiveContextState(built.sessionId);
+  for (let round = 0; round < 12; round += 1) {
+    const candidate = context.selectAutomaticToolBatch(snapshot, state)[0];
+    if (!candidate) break;
+    state = (await commitCandidate(state, snapshot, candidate, {
+      brief: `A completed batch folded so the forest has something to validate, round ${round}.`,
+      generation: round + 1,
+    })).state;
+  }
+  // Anti-vacuity: an empty forest validates trivially and would prove nothing.
+  assert(state.folds.length >= 3,
+    `The fixture committed ${state.folds.length} folds, too few to validate a real forest`);
+
+  // A valid forest passes, and the assert door returns nothing.
+  assert.equal(context.assertFoldForestValid(state.folds), undefined,
+    "The assert door returned a value; it exists precisely so nothing is shared out");
+
+  // A projection drives that door, and a second projection of the same state is the case
+  // the memo exists for.
+  const before = json.stableStringify(context.projectActiveContext(snapshot, state));
+  assert.equal(json.stableStringify(context.projectActiveContext(snapshot, state)), before,
+    "Two projections of one state differed");
+
+  // THE COST, ASSERTED. Corrupt a fold IN PLACE. The array is the same object, so the
+  // verdict stands and nothing notices. This is the price of keying on the array, and
+  // saying it out loud is what makes the memo honest.
+  const victim = state.folds[0];
+  const trueDigest = victim.sourceSha256;
+  victim.sourceSha256 = `${trueDigest.slice(0, -4)}dead`;
+  assert.equal(context.assertFoldForestValid(state.folds), undefined,
+    "The memo noticed an in-place corruption, so it is not keyed on the array as documented");
+  context.projectActiveContext(snapshot, state);
+
+  // AND THE MEMO DOES NOT BLIND THE CHECK. The same corrupt fold inside a NEW array is a
+  // forest nothing has vouched for, and it must raise on first sight.
+  assert.throws(() => context.assertFoldForestValid([...state.folds]), /source digest drift/,
+    "A corrupt forest passed on first sight, so the memo swallowed a real corruption");
+
+  // THE SPLIT DID NOT LEAK. `validateFoldForest` is what three callers use for its RETURN
+  // value, and it must stay unmemoized: the same corrupt array raises through it every time.
+  assert.throws(() => context.validateFoldForest(state.folds), /source digest drift/,
+    "validateFoldForest went memoized too, so its three consuming callers lost their check");
+  assert.throws(() => context.validateFoldForest(state.folds), /source digest drift/,
+    "validateFoldForest raised once and then stopped, so it is memoized after all");
+
+  // Repaired, the new array validates and the projection is byte-identical to the start.
+  victim.sourceSha256 = trueDigest;
+  assert.equal(context.assertFoldForestValid([...state.folds]), undefined,
+    "A repaired forest did not validate");
+  assert.equal(json.stableStringify(context.projectActiveContext(snapshot, state)), before,
+    "The projection moved across the corruption and repair");
+
+  return {
+    folds: state.folds.length,
+    verdictSurvivesInPlaceCorruption: true,
+    newArrayStillRaises: true,
+    validateFoldForestStillUnmemoized: true,
+  };
+}
+
+/**
  * GATE 158: THE PROJECTION HANDS OUT A VIEW, AND ONLY A WRITE COPIES (2026-08-29).
  *
  * `projectActiveContext` pushed `clone(snapshot.messages[index])` for every message no
@@ -15997,6 +16086,7 @@ const gates = [
   [156, "An image is not measured as text", gateImageIsNotText],
   [157, "The human surface speaks to a human", gateHumanSurface],
   [158, "The projection hands out a view", gateProjectionHandsOutAView],
+  [160, "A forest that validated once is not validated again", gateForestValidatedOnce],
   [150, "The ref key matches the serializer", gateRefKeyMatchesTheSerializer],
   [151, "A growing range stops at the first obstruction", gateGrowingRangeStopsAtTheFirstObstruction],
   [152, "A value already derived is not derived again", gateDerivedOnce],
