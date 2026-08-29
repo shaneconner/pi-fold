@@ -94,6 +94,7 @@ export type ContextEventKind =
   | "context.absorb"
   | "context.recovery"
   | "context.suspend"
+  | "context.settings"
   | "context.rollback"
   | "context.projection"
   | "context.usage"

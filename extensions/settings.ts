@@ -27,6 +27,7 @@ import {
 	ThresholdPolicyError,
 	type ActiveContextThresholds,
 } from "./lib/policy.ts";
+import { applyLiveSettings, liveSettingsReachable } from "./lib/live-settings.ts";
 
 export const DEFAULT_FOLD_SETTINGS_PATH = join(
 	homedir(),
@@ -433,12 +434,19 @@ export class FoldSettingsEditor extends Container {
 		// place a refused file is ever named, so it says so before showing the
 		// defaults that took its place.
 		notice: string | null = null,
+		// THE RUNNING SESSION, when there is one to reach. Given, every saved edit is
+		// pushed into the runtime registered on the same host and takes effect at once;
+		// absent, the file is still written and the next start reads it. The screen SAYS
+		// which of the two it is rather than promising the one it cannot deliver.
+		private readonly live: ((settings: FoldSettingsFile) => void) | null = null,
 	) {
 		super();
 		const theme = this.themeLike;
 		this.addChild(new SettingsBorder((text) => theme.fg("border", text)));
 		this.addChild(new Text(theme.bold(theme.fg("accent", "pi-fold settings")), 0, 0));
-		this.addChild(new Text(theme.fg("muted", "Percentages are of the usable window. Every change saves as you make it."), 0, 0));
+		this.addChild(new Text(theme.fg("muted", live
+			? "Percentages are of the usable window. Every change saves and takes effect at once."
+			: "Percentages are of the usable window. Every change saves now and applies when pi next starts."), 0, 0));
 		if (notice) this.addChild(new Text(theme.fg("error", notice), 0, 0));
 		this.addChild(new Spacer(1));
 		// SettingsList takes its own theme shape; adapt it off the live theme.
@@ -504,6 +512,12 @@ export class FoldSettingsEditor extends Container {
 		if (!result.ok) return result;
 		this.draft = result.draft;
 		saveFoldSettingsFile(this.settingsPath, this.draft);
+		// THE FILE FIRST, THE SESSION SECOND. The draft has already been through
+		// resolveThresholds, which is the same validation the runtime applies, so a refusal
+		// here would be a defect rather than a person's mistake; it is caught anyway,
+		// because a settings screen may not take down the session it configures, and the
+		// durable file is already correct for the next start either way.
+		if (this.live) { try { this.live(this.draft); } catch { } }
 		for (const row of EDITOR_ROWS) {
 			const item = (this.settingsList as any).items.find((candidate: any) => candidate.id === row.id);
 			if (item) item.currentValue = rowDisplayValue(this.draft, row.id, this.budgetTokens);
@@ -552,9 +566,16 @@ export function registerFoldSettings(
 			// experiment harness, which declares a budget so runs stay comparable across
 			// descriptor changes; no person has to know that to read this screen.
 			const budgetTokens = servingBudgetTokens(descriptorWindow);
+			// THE CHANNEL TO THE RUNNING RUNTIME, read HERE rather than at registration: this
+			// module and registerPiFold are registered independently and in either order, and
+			// by the time a person opens this screen both have run. A host with no runtime on
+			// it gets a null, which the screen states plainly.
+			const live = liveSettingsReachable(pi)
+				? (settings: FoldSettingsFile) => { applyLiveSettings(pi, settings, ctx); }
+				: null;
 			await ctx.ui.custom((_tui: unknown, theme: any, _keybindings: unknown, done: (saved: boolean) => void) =>
 				new FoldSettingsEditor(
-					stored.settings, budgetTokens, settingsPath, theme, done, stored.refusal,
+					stored.settings, budgetTokens, settingsPath, theme, done, stored.refusal, live,
 				));
 		},
 	});

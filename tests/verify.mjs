@@ -357,6 +357,10 @@ function makeRuntime(built, {
     },
   };
   const runtime = {
+    // THE HOST ITSELF, because /fold-settings and the runtime reach each other THROUGH it
+    // (extensions/lib/live-settings.ts): a gate that drives the settings screen against
+    // this runtime has to register the screen on the same object the runtime was.
+    pi,
     built, handlers, tools, commands, appended, notifications, statuses, branch, messages,
     steered, labels, abandoned,
     get usage() { return usage; },
@@ -12444,6 +12448,210 @@ async function gateFoldSettingsRoundTrip() {
 }
 
 /**
+ * MECHANISM. WHAT A PERSON SAVES IN /fold-settings REACHES THE RUNNING SESSION.
+ *
+ * THE DEFECT (2026-08-29, live). `registerPiFold` resolved thresholds, toolFoldThreshold
+ * and postFoldNotice ONCE at registration and read them from the closure ever after, so
+ * /fold-settings wrote the file and nothing else. Shane's terminal held both readings at
+ * once: the screen showing "Start folding at 40%" over a status line reading "commit at
+ * 90%", the band pi had booted with 84 seconds before the file was written. Neither
+ * surface was lying and neither said why, which is the contradiction law with its two
+ * halves in different windows.
+ *
+ * THE CHANNEL IS THE HOST OBJECT. The two registrations are independent and arrive in
+ * either order, so the runtime hangs an applier off `pi` under a registry symbol and the
+ * screen looks for it when a person SAVES, long after both have run. This gate drives the
+ * real command, the real screen and the real keys, then reads the change three ways: the
+ * surface says it, the stream records it, and the next projection ACTS on it.
+ *
+ * THE LAST ONE IS THE CLAIM. A status line that updates while the runtime keeps folding
+ * at the old point would be the same defect with better manners, so the gate parks
+ * occupancy between the old trigger and the new one and requires the commit to fire
+ * there, on the projection path, where the trigger is the only thing that can fire it.
+ */
+async function gateSavedSettingsReachTheSession() {
+  const scratch = await mkdtemp(join(tmpdir(), "fold-live-settings-"));
+  const themeLike = { fg: (_role, text) => text, bold: (text) => text };
+  try {
+    const settingsPath = join(scratch, "settings.json");
+    const runtime = makeRuntime(
+      makeFixture({ turns: 8, resultChars: 3_000, sessionId: "live-settings" }),
+      { packageRegistration: true },
+    );
+    settingsModule.registerFoldSettings(runtime.pi, { settingsPath });
+    await startRuntime(runtime);
+
+    // A 100,000-token window serves 90,000, so 60,000 tokens is 67 percent: under the
+    // 80 percent trigger the session boots with, over the 50 percent one it is about to
+    // be given, which is what makes the commit below attributable to the change alone.
+    await measure(runtime, 60_000, 100_000);
+    await project(runtime);
+    await settle();
+    const beforeLine = runtime.statuses.at(-1).text;
+    assert(beforeLine.includes("commit at 80%"),
+      `The session did not start on the registered band: ${beforeLine}`);
+    const firedCommits = (from) => contextEvents(runtime, from)
+      .filter((event) => event.kind === "context.commit" && event.deferred === false);
+    const quiet = runtime.appended.length;
+    await project(runtime);
+    await settle();
+    assert.equal(firedCommits(quiet).length, 0,
+      "a commit fired at 67 percent under an 80 percent trigger, so the later one proves nothing");
+
+    // THE REAL SCREEN, through the real command, on the same host the runtime registered
+    // on. Nothing here reaches past the keys a person has.
+    let screen = null;
+    runtime.ctx.ui.custom = async (factory) => {
+      screen = factory({}, themeLike, {}, () => {});
+    };
+    await runtime.commands.get("fold-settings").handler("", runtime.ctx);
+    assert(screen, "/fold-settings opened no screen");
+    const rendered = () => screen.render(120).join("\n");
+    // THE SUBTITLE STATES WHICH SESSION IT IS IN. A screen that cannot reach a runtime
+    // must not promise an effect it cannot deliver; this one can, so it says so.
+    const subtitleOf = (text) => text.split("\n").find((line) => line.includes("Percentages")) ?? "";
+    assert(rendered().includes("takes effect at once"),
+      `The live screen did not say its changes take effect: ${subtitleOf(rendered())}`);
+
+    // Two steps down the trigger row, 0.80 to 0.70, still above the standing 67 percent
+    // measurement, so the line has to name WHEN rather than say DUE.
+    screen.handleInput("\x1b[D");
+    screen.handleInput("\x1b[D");
+    assert.equal(JSON.parse(readFileSync(settingsPath, "utf8")).thresholds.maxTarget, 0.7,
+      "stepping the trigger row did not reach disk");
+    const steppedLine = runtime.statuses.at(-1).text;
+    assert(steppedLine.includes("commit at 70%"),
+      `The status line kept announcing the band pi booted with: ${steppedLine}`);
+
+    // Four more, to 0.50, which the standing measurement is already past: the same line
+    // must now say the commit is due rather than name a point already gone by. The two
+    // steps above are settled first, so the marker counts these four and only these.
+    await settle();
+    const beforeSettingsEvents = runtime.appended.length;
+    for (let index = 0; index < 4; index += 1) screen.handleInput("\x1b[D");
+    assert.equal(JSON.parse(readFileSync(settingsPath, "utf8")).thresholds.maxTarget, 0.5);
+    // The stream is written through the instrumentation queue, so the records land a
+    // microtask behind the keystroke that caused them.
+    await settle();
+    const dueLine = runtime.statuses.at(-1).text;
+    assert(dueLine.includes("COMMIT DUE"),
+      `Occupancy sat past the new trigger and the line did not say so: ${dueLine}`);
+
+    // THE STREAM RECORDS IT, because from here the session commits at a point no earlier
+    // record explains. One event per change that MOVED something, naming what moved.
+    const settingsEvents = contextEvents(runtime, beforeSettingsEvents)
+      .filter((event) => event.kind === "context.settings");
+    assert.equal(settingsEvents.length, 4,
+      `Four steps wrote ${settingsEvents.length} settings events`);
+    assert.deepEqual(settingsEvents.at(-1).changed, ["maxTarget"],
+      `The event did not name what moved: ${JSON.stringify(settingsEvents.at(-1).changed)}`);
+    assert.equal(settingsEvents.at(-1).max_target, 0.5);
+    assert.equal(settingsEvents.at(-1).min_target, context.DEFAULT_THRESHOLDS.minTarget);
+    assert.equal(settingsEvents.at(-1).tool_fold_threshold, context.DEFAULT_TOOL_FOLD_THRESHOLD);
+    assert.equal(settingsEvents.at(-1).post_fold_notice, false);
+
+    // AND THE RUNTIME ACTS ON IT. Same occupancy, same messages, no boundary: the trigger
+    // is the only thing that moved, so a commit here is the trigger's doing.
+    const beforeCommit = runtime.appended.length;
+    await project(runtime);
+    await settle();
+    const fired = firedCommits(beforeCommit);
+    assert.equal(fired.length, 1,
+      `The lowered trigger fired ${fired.length} commits at an occupancy it now covers`);
+    // It fired BETWEEN the two bands, which is the whole claim in one number: 60,000 of
+    // a 90,000-token budget is past the 50 percent trigger just saved and nowhere near
+    // the 80 percent one the session registered with.
+    const firedShare = fired[0].occupancy_tokens_before / fired[0].budget_tokens;
+    assert(firedShare > 0.5 && firedShare < 0.8,
+      `The commit fired at ${firedShare} of budget, which does not sit between the two bands`);
+    assert.equal(fired[0].target_occupancy_share, context.DEFAULT_THRESHOLDS.minTarget,
+      "the aim moved when only the trigger was edited");
+
+    // A SAVE THAT MOVED NOTHING IS NOT AN EVENT: the screen saves every landed keystroke,
+    // including a row stepped back to where it already was.
+    const beforeIdle = runtime.appended.length;
+    context.applyLiveSettings(runtime.pi, JSON.parse(readFileSync(settingsPath, "utf8")));
+    await settle();
+    assert.equal(contextEvents(runtime, beforeIdle)
+      .filter((event) => event.kind === "context.settings").length, 0,
+      "a settings push that changed nothing still announced itself");
+
+    // A REFUSAL LEAVES THE SESSION WHERE IT WAS. Every value is validated before any is
+    // assigned, so a crossed band cannot half-land, and the message is the registration
+    // path's own, because both go through one resolver.
+    assert.throws(
+      () => context.applyLiveSettings(runtime.pi, {
+        thresholds: { ...context.DEFAULT_THRESHOLDS, maxTarget: 0.5, minTarget: 0.9 },
+      }),
+      /must sit below/,
+      "a crossed band was accepted by the live path",
+    );
+    assert.throws(
+      () => context.applyLiveSettings(runtime.pi, { toolFoldThreshold: 1 }),
+      /share in \[0, 1\)/,
+      "an out-of-range clipping share was accepted by the live path",
+    );
+    const afterRefusal = runtime.appended.length;
+    await project(runtime);
+    await settle();
+    assert(/COMMIT DUE|commit at 50%/.test(runtime.statuses.at(-1).text),
+      `A refused push moved the live band: ${runtime.statuses.at(-1).text}`);
+    assert.equal(contextEvents(runtime, afterRefusal)
+      .filter((event) => event.kind === "context.settings").length, 0,
+      "a refused push announced a change it did not make");
+
+    // A HOST WITH NO RUNTIME IS NOT A FAILURE. The file is still written and the next
+    // start still reads it, which is what every build before this one did; the screen
+    // states that instead of promising an effect it cannot deliver.
+    const bareCommands = new Map();
+    const barePath = join(scratch, "bare.json");
+    const bareHost = { registerCommand: (name, definition) => bareCommands.set(name, definition) };
+    settingsModule.registerFoldSettings(bareHost, { settingsPath: barePath });
+    let bareScreen = null;
+    await bareCommands.get("fold-settings").handler("", {
+      model: { contextWindow: 272_000 },
+      ui: { custom: async (factory) => { bareScreen = factory({}, themeLike, {}, () => {}); } },
+    });
+    const bareText = bareScreen.render(120).join("\n");
+    assert(bareText.includes("applies when pi next starts"),
+      `A screen with no runtime promised an immediate effect: ${subtitleOf(bareText)}`);
+    bareScreen.handleInput("\x1b[D");
+    assert.equal(JSON.parse(readFileSync(barePath, "utf8")).thresholds.maxTarget, 0.75,
+      "a screen with no runtime failed to write the file, which is the durable half");
+
+    // ORDER-INDEPENDENT, WHICH THE DEPLOYMENT NEEDS: it registers the settings command
+    // BEFORE the runtime. The command handler reads the host when a person opens the
+    // screen, so an applier published after registration is still found. Same host, same
+    // already-registered command, an applier arriving late.
+    const late = [];
+    context.publishLiveSettings(bareHost, (settings) => { late.push(settings); });
+    let lateScreen = null;
+    await bareCommands.get("fold-settings").handler("", {
+      model: { contextWindow: 272_000 },
+      ui: { custom: async (factory) => { lateScreen = factory({}, themeLike, {}, () => {}); } },
+    });
+    assert(lateScreen.render(120).join("\n").includes("takes effect at once"),
+      "a runtime registered after the settings command was never found");
+    lateScreen.handleInput("\x1b[D");
+    assert.equal(late.at(-1)?.thresholds?.maxTarget, 0.7,
+      `the late-published applier was not handed the saved settings: ${JSON.stringify(late)}`);
+
+    return {
+      bootBand: beforeLine.match(/commit at \d+%/)[0],
+      steppedTo: JSON.parse(readFileSync(settingsPath, "utf8")).thresholds.maxTarget,
+      settingsEvents: settingsEvents.length,
+      firedAfterChange: fired.length,
+      firedAtShare: Number(firedShare.toFixed(4)),
+      firedTrigger: fired[0].trigger,
+      offlineScreenSaved: true,
+      lateApplierFound: true,
+    };
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
  * MECHANISM. /fold-editor is a READ-ONLY MAP of the working window: committed folds
  * wear COLORED BOOKENDS (theme success opens, theme error closes), staged marks are
  * PROPOSED blocks in the warning/accent color so the user sees what the next commit
@@ -16130,6 +16338,7 @@ const gates = [
   // real boundaries on 2026-08-23 the band never opened once in a three-boundary
   // session, so the agent was never invited at all. The number stays spent.
   [140, "Fold settings round-trip through one validation path", gateFoldSettingsRoundTrip],
+  [161, "A saved setting reaches the running session", gateSavedSettingsReachTheSession],
   [142, "The fold editor", gateFoldEditor],
   [147, "The frontier waits for the batch", gateFrontierWaitsForTheBatch],
   [148, "The tool-call diet", gateToolCallDiet],

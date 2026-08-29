@@ -194,6 +194,7 @@ import type {
 } from "./lib/instrumentation.ts";
 import { buildActiveContextCommands, buildActiveContextTool } from "./lib/tool-surface.ts";
 import { buildFoldEditorData, FoldEditorView } from "./lib/editor-ui.ts";
+import { publishLiveSettings } from "./lib/live-settings.ts";
 import {
   mapActiveContext,
 } from "./lib/transcript.ts";
@@ -212,6 +213,7 @@ export * from "./lib/canonical.ts";
 export * from "./lib/curation.ts";
 export * from "./lib/folding.ts";
 export * from "./lib/instrumentation.ts";
+export * from "./lib/live-settings.ts";
 export * from "./lib/measurement.ts";
 export * from "./lib/persistence.ts";
 export * from "./lib/policy.ts";
@@ -219,6 +221,33 @@ export * from "./lib/rollback.ts";
 export * from "./lib/scheduling.ts";
 export * from "./lib/selection.ts";
 export * from "./lib/transcript.ts";
+
+/**
+ * The two independent scalars, resolved in ONE place because they are resolved TWICE:
+ * once from the registration options and once from every /fold-settings edit that
+ * reaches the running session. Absent means the package default in both directions,
+ * which is the settings file's own law, and the refusal text is the same sentence
+ * wherever the bad value came from.
+ */
+function resolvedPostFoldNotice(value: unknown): boolean {
+  if (value !== undefined && typeof value !== "boolean") {
+    throw new Error("postFoldNotice must be a boolean: true keeps the post-fold invitation " +
+      "notice, false ships every fold with the runtime's deterministic brief and no " +
+      "carrier inviting the agent to improve it");
+  }
+  return value ?? false;
+}
+
+function resolvedToolFoldThreshold(value: unknown): number {
+  const resolved = value ?? DEFAULT_TOOL_FOLD_THRESHOLD;
+  if (typeof resolved !== "number" || !Number.isFinite(resolved) ||
+      resolved < 0 || resolved >= 1) {
+    throw new Error("toolFoldThreshold must be a share in [0, 1): it names the oldest " +
+      "fraction of the projected window whose tool results are clipped in view at each " +
+      "commit, and 0 turns the diet off");
+  }
+  return resolved;
+}
 
 export function registerActiveContext(pi: any, options: {
   toolName?: string;
@@ -252,19 +281,14 @@ export function registerActiveContext(pi: any, options: {
   const brandNoun = options.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN;
   const entryTypePrefix = options.entryTypePrefix ?? DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX;
   const blacklistAutoFoldTools = options.blacklistAutoFoldTools ?? AUTO_FOLD_BLACKLIST_DEFAULT;
-  if (options.postFoldNotice !== undefined && typeof options.postFoldNotice !== "boolean") {
-    throw new Error("postFoldNotice must be a boolean: true keeps the post-fold invitation " +
-      "notice, false ships every fold with the runtime's deterministic brief and no " +
-      "carrier inviting the agent to improve it");
-  }
-  const postFoldNotice = options.postFoldNotice ?? false;
-  const toolFoldThreshold = options.toolFoldThreshold ?? DEFAULT_TOOL_FOLD_THRESHOLD;
-  if (typeof toolFoldThreshold !== "number" || !Number.isFinite(toolFoldThreshold) ||
-      toolFoldThreshold < 0 || toolFoldThreshold >= 1) {
-    throw new Error("toolFoldThreshold must be a share in [0, 1): it names the oldest " +
-      "fraction of the projected window whose tool results are clipped in view at each " +
-      "commit, and 0 turns the diet off");
-  }
+  // THESE THREE ARE THE SETTINGS SURFACE, AND THEY ARE NOT CONSTANTS (2026-08-29). Each
+  // was resolved once here and read from the closure ever after, so a person editing
+  // /fold-settings changed the file and nothing else while the session kept the values
+  // pi booted with. They are `let` so the live applier published below can replace them,
+  // and every reader takes the variable rather than a copy, so a swap reaches the next
+  // snapshot, the next commit decision and the status line without anything else moving.
+  let postFoldNotice = resolvedPostFoldNotice(options.postFoldNotice);
+  let toolFoldThreshold = resolvedToolFoldThreshold(options.toolFoldThreshold);
   for (const removed of ["foldScheduling", "foldPeekResults", "toolActions"]) {
     if (Object.hasOwn(options, removed)) {
       throw new Error(`${removed} is no longer an option: epoch scheduling, peek foldability ` +
@@ -323,7 +347,7 @@ export function registerActiveContext(pi: any, options: {
       commandNames.status === commandNames.fold) {
     throw new Error("Active-context command names must be distinct kebab-case strings");
   }
-  const thresholds = resolveThresholds(options.thresholds);
+  let thresholds = resolveThresholds(options.thresholds);
   assertThresholdsServable(thresholds, providerInputBudget ?? servingBudgetTokens(DEFAULT_CONTEXT_WINDOW));
   const stateEntryType = `${entryTypePrefix}-state`;
   const foldRecordEntryType = `${entryTypePrefix}-fold-record`;
@@ -642,13 +666,18 @@ export function registerActiveContext(pi: any, options: {
       // Unmeasured is stated, never guessed: an estimate rendered as a fact is the habit
       // that cost a live session, and this line is the most-read surface there is.
       parts.push(share === null ? "not measured" : `${Math.round(share * 100)}% full`);
-      const trigger = lifecycle.latestSnapshot?.thresholds.maxTarget ?? null;
+      // THE LIVE BAND, NOT THE LAST SNAPSHOT'S (2026-08-29). This read the threshold off
+      // `lifecycle.latestSnapshot`, which is derived per context event, so a band changed
+      // in /fold-settings went on being announced at its old value until the next event
+      // rebuilt a snapshot. The number this line owes a person is the one that will fire,
+      // and that is the runtime's own variable.
+      const trigger = thresholds.maxTarget;
       // WHEN, not just how full. "68% full" only answers the second question a reader has
       // if they already remember where the trigger sits; naming it answers both.
       //
       // NOT WHILE STOPPED, though: the line rendered "COMMIT DUE" and "FOLDING STOPPED"
       // in one breath, promising the thing it was announcing would not happen.
-      if (share !== null && trigger !== null && !ladder.automaticFailure) {
+      if (share !== null && !ladder.automaticFailure) {
         parts.push(share >= trigger ? "COMMIT DUE" : `commit at ${Math.round(trigger * 100)}%`);
       }
       if (staged > 0) parts.push(`${staged} staged`);
@@ -656,6 +685,59 @@ export function registerActiveContext(pi: any, options: {
       ctx.ui?.setStatus?.(entryTypePrefix, `${brandNoun} ${parts.join(" · ")}`);
     } catch { }
   };
+
+  /**
+   * WHAT A PERSON SAVES IN /fold-settings REACHES THIS SESSION (2026-08-29).
+   *
+   * The screen writes the file and then hands the whole file here, so an absent field
+   * means the package default exactly as it does on disk and at registration; the three
+   * values are resolved through the same functions the options went through, which is
+   * what stops a value meaning one thing at boot and another at an edit.
+   *
+   * ATOMIC: every value is validated before any is assigned, so a refusal leaves the
+   * session on the settings it already had rather than half-moved. It throws the way
+   * registration throws, and the caller decides what that means; the settings screen
+   * catches it, because a screen may not take the session down with it.
+   *
+   * The memo is dropped because `authoritativeSnapshotFor` keys on session, entries and
+   * messages, none of which move when a threshold does, so a cached snapshot would serve
+   * the old band to the next reader that asked.
+   */
+  publishLiveSettings(pi, (settings, ctx) => {
+    const nextThresholds = resolveThresholds(settings?.thresholds);
+    assertThresholdsServable(nextThresholds,
+      providerInputBudget ?? servingBudgetTokens(DEFAULT_CONTEXT_WINDOW));
+    const nextToolFoldThreshold = resolvedToolFoldThreshold(settings?.toolFoldThreshold);
+    const nextPostFoldNotice = resolvedPostFoldNotice(settings?.postFoldNotice);
+    const changed: string[] = [];
+    for (const field of ["maxTarget", "minTarget", "consolidateAfter", "minFoldChars"] as const) {
+      if (nextThresholds[field] !== thresholds[field]) changed.push(field);
+    }
+    if (nextToolFoldThreshold !== toolFoldThreshold) changed.push("toolFoldThreshold");
+    if (nextPostFoldNotice !== postFoldNotice) changed.push("postFoldNotice");
+    // A SAVE THAT MOVED NOTHING IS NOT AN EVENT. The screen saves every keystroke that
+    // lands, including a row stepped back to where it started.
+    if (!changed.length) return;
+    thresholds = nextThresholds;
+    toolFoldThreshold = nextToolFoldThreshold;
+    postFoldNotice = nextPostFoldNotice;
+    dropDerivationMemo();
+    // THE STREAM CARRIES IT, because from here on the session's commits fire at a point
+    // no earlier record explains, and an archive reading this run later has no other way
+    // to know the band moved under it.
+    emit("context.settings", {
+      changed,
+      max_target: thresholds.maxTarget,
+      min_target: thresholds.minTarget,
+      consolidate_after: thresholds.consolidateAfter,
+      min_fold_chars: thresholds.minFoldChars,
+      tool_fold_threshold: toolFoldThreshold,
+      post_fold_notice: postFoldNotice,
+    });
+    // The person is standing in the settings screen, so the line they will look at next
+    // is the status line. Without this it keeps the old number until a context event.
+    if (ctx) { try { updateStatus(ctx); } catch { } }
+  });
 
   const budgetWindowFor = (ctx: any): number | null => {
     measurements.descriptorWindow = contextWindowFor(ctx);
