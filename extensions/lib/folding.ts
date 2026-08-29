@@ -921,7 +921,24 @@ export function projectActiveContext(
       output.push(...replacement.messages);
       index = replacement.end + 1;
     } else {
-      output.push(clone(snapshot.messages[index]));
+      // A PASS-THROUGH MESSAGE IS SHARED, NOT COPIED (gate 158, 2026-08-29). This used to
+      // push `clone(...)`, which was in the first commit of the runtime and never load
+      // bearing: `snapshot.messages` is ALREADY `clone(input.eventMessages)`
+      // (transcript.ts:531), against an array Pi itself structuredClones before it calls
+      // any handler, so the copy was a third generation guarding objects the host never
+      // sees. It cost 54.3ms of a 298.5ms projection, 18 percent, on a sealed 3,364
+      // message session, and it is the only remaining per-message cost of that size.
+      //
+      // What makes sharing indistinguishable from copying: NOTHING writes a field into a
+      // projected message at any depth. Every rewrite builds a fresh object and replaces
+      // an array SLOT, here in `applyToolClips` and in `withdrawConsumedEphemeralPeeks`
+      // and `carryWithdrawalIntoFreeze` one layer up, so a shared element is never the
+      // thing that gets edited. Gate 158 pins that by deep-freezing `snapshot.messages`
+      // and driving the readers against it, so a future in-place write throws in the
+      // suite instead of silently corrupting every later projection through the frozen
+      // prefix. Folded spans keep their own copies: line 796 and `renderFoldParts` still
+      // clone, because those objects are built for the projection rather than read from it.
+      output.push(snapshot.messages[index]);
       index += 1;
     }
   }

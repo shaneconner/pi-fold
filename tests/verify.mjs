@@ -7383,10 +7383,18 @@ async function gatePeekIsAppendOnly() {
   // is the ENTIRE precondition the old reclamation waited for.
   const source = snapshot.messages.find((message) => message?.toolCallId === "call-3");
   assert(source, "The fixture never carried a peek result");
+  // The comparison is against a copy taken BEFORE the projection, not against `source`
+  // itself. Since gate 158 the projection SHARES a pass-through message, so `projected`
+  // and `source` are one object and `deepEqual(projected.content, source.content)` would
+  // compare a value with itself and pass whatever the projection did. Holding the
+  // expected content here keeps the claim ("the projection did not rewrite this result")
+  // able to fail, and keeps it able to fail either way: it is identity-independent, so
+  // it reads the same if the clone is ever restored.
+  const sourceContent = structuredClone(source.content);
   const projected = context.projectActiveContext(snapshot, state)
     .find((message) => message?.toolCallId === "call-3");
   assert(projected, "The peek result vanished from the projection");
-  assert.deepEqual(projected.content, source.content,
+  assert.deepEqual(projected.content, sourceContent,
     "The projection rewrote a consumed peek result in place");
 
   // Protecting or expanding it changes nothing either: there is no lever here any more.
@@ -7396,7 +7404,7 @@ async function gatePeekIsAppendOnly() {
   ]) {
     const again = context.projectActiveContext(snapshot, variant)
       .find((message) => message?.toolCallId === "call-3");
-    assert.deepEqual(again.content, source.content, "A peek result moved under a state variant");
+    assert.deepEqual(again.content, sourceContent, "A peek result moved under a state variant");
   }
 
   // The bytes are still reclaimed, by the mark that folds the read at the NEXT commit.
@@ -14743,6 +14751,137 @@ async function gateClipDeltaCarriesOnlyTheChange() {
  * on an image-bearing projection and the estimator can never learn its way out.
  */
 /**
+ * GATE 158: THE PROJECTION HANDS OUT A VIEW, AND ONLY A WRITE COPIES (2026-08-29).
+ *
+ * `projectActiveContext` pushed `clone(snapshot.messages[index])` for every message no
+ * fold replaced. That clone was in the runtime's FIRST commit (f76024a, lines 1486 and
+ * 2986 of the single-file era, alongside the snapshot's own clone) and was never load
+ * bearing: `snapshot.messages` is already `clone(input.eventMessages)`
+ * (transcript.ts:531), and Pi structuredClones its message array before it invokes any
+ * handler, so the projection was handing out a third generation of objects the host had
+ * already stopped sharing. Measured on a sealed 3,364-message / 681-fold session it cost
+ * 54.3ms of a 298.5ms projection, 18 percent, the largest single per-projection cost left
+ * after the 2026-08-28 sweep, which had DISQUALIFIED it on the belief that dropping it
+ * would share the session's own objects. That belief was wrong by one layer.
+ *
+ * THE INVARIANT: nothing writes a field into a projected message at any depth. Every
+ * rewrite in the whole runtime builds a fresh object and replaces an array SLOT, at
+ * folding.ts (applyToolClips) and at active-context.ts (withdrawConsumedEphemeralPeeks,
+ * carryWithdrawalIntoFreeze), so a shared element is never the thing edited and a
+ * reference is indistinguishable from a copy.
+ *
+ * THIS IS GATE 120'S SHAPE ONE ADDRESS OVER, and it is pinned the same way: deep-freeze
+ * the source, drive every reader against it, and assert IDENTITY rather than a stopwatch.
+ * A future in-place write throws here instead of silently corrupting every later
+ * projection through the retained frozen prefix, which is the failure class gate 122 was
+ * built for and the reason this cannot ship as a deletion alone. The identity assertion
+ * also fails if the clone is ever restored, so the cost cannot come back quietly.
+ *
+ * The freeze must be DEEP. A shallow one catches a write to `message.role` and misses
+ * `message.content[0].text`, which is the whole population that matters, so the gate
+ * asserts the walk reached well past one object per message and PROVES the instrument can
+ * fail by writing through it.
+ */
+async function gateProjectionHandsOutAView() {
+  const built = makeFixture({ turns: 12, resultChars: 9_000, contextWindow: 100_000 });
+  const snapshot = epochSnapshot(built);
+  const empty = context.emptyActiveContextState(built.sessionId);
+  // Several folds, not one: an automatic tool batch here resolves to a single result, so
+  // one commit would leave the replaced arm at a single rendered message and the
+  // pass-through arm carrying everything else. Committing until the selector is dry gives
+  // the projection a real mix of shared and built elements.
+  let state = empty;
+  for (let round = 0; round < 6; round += 1) {
+    const candidate = context.selectAutomaticToolBatch(snapshot, state)[0];
+    if (!candidate) break;
+    state = (await commitCandidate(state, snapshot, candidate, {
+      brief: `A completed batch folded so the projection carries both arms, round ${round}.`,
+      generation: round + 1,
+    })).state;
+  }
+  assert(state.folds.length >= 2,
+    `The fixture committed ${state.folds.length} folds, too few to exercise the replaced arm`);
+
+  // THE INSTRUMENT. Freeze the array, every message, and everything nested inside one.
+  let frozen = 0;
+  const walk = (value) => {
+    if (!value || typeof value !== "object" || Object.isFrozen(value)) return;
+    Object.freeze(value);
+    frozen += 1;
+    for (const inner of Array.isArray(value) ? value : Object.values(value)) walk(inner);
+  };
+  walk(snapshot.messages);
+  assert(Object.isFrozen(snapshot.messages), "The snapshot's message array is not frozen");
+  // Anti-vacuity: a message carries a content array carrying blocks, so the count is well
+  // past one per message. A fixture of bare messages would make the deep half empty and
+  // every no-throw assertion below would be proving nothing.
+  assert(frozen > snapshot.messages.length * 2,
+    `The freeze reached ${frozen} objects for ${snapshot.messages.length} messages, so it never got inside them`);
+
+  // THE INSTRUMENT CAN FAIL. If a write through the freeze does not throw, every
+  // no-throw assertion below is vacuous and the gate would pass over a mutating runtime.
+  const probe = snapshot.messages.find((message) => Array.isArray(message?.content) && message.content.length);
+  assert(probe, "No fixture message carries a content array to probe the freeze with");
+  assert.throws(() => { probe.content[0].text = "written through the freeze"; }, TypeError,
+    "A nested write through the freeze did not throw, so the freeze cannot catch a mutating reader");
+
+  // EVERY READER, AGAINST THE FROZEN SNAPSHOT. A reader that mutates throws here.
+  const projection = context.projectActiveContext(snapshot, state);
+  // The clip arm is driven by the real producer rather than a hand-built clip, so a clip
+  // shape that stops matching the runtime cannot leave this arm silently inert.
+  const additions = context.toolClipAdditions({
+    snapshot, state, threshold: 0.95, blacklist: new Set(),
+  });
+  assert(additions.length > 0, "The clip producer proposed nothing, so applyToolClips never ran");
+  const clipped = context.projectActiveContext(snapshot, { ...state, clips: additions });
+  const expanded = context.projectActiveContext(snapshot, { ...state, expanded: [state.folds[0].id] });
+  context.activeContextStatus(snapshot, state, 0, 32);
+  context.markAccounting(snapshot, state);
+  assert(projection.length > 0 && clipped.length > 0 && expanded.length > 0,
+    "A projection came back empty, so the readers never walked the frozen messages");
+  // Anti-vacuity for the clip arm AND for the expand arm: each must actually change the
+  // view, or freezing the source proves nothing about the path that rewrites it.
+  assert.notEqual(json.stableStringify(clipped), json.stableStringify(projection),
+    "Clipping changed nothing, so applyToolClips never rewrote a slot");
+  assert.notEqual(json.stableStringify(expanded), json.stableStringify(projection),
+    "Expanding the fold changed nothing, so the reveal path never ran");
+
+  // THE POINT: a pass-through message IS the snapshot's own object, not a copy of it.
+  const shared = projection.filter((message) => snapshot.messages.includes(message));
+  assert(shared.length > 0,
+    "No projected message is the snapshot's own object, so the projection is still copying");
+  // Anti-vacuity for that count: the fold replaced part of the window, so sharing must be
+  // partial. All-of-them would mean nothing folded and the replaced arm never ran.
+  assert(shared.length < snapshot.messages.length,
+    `Every message passed through (${shared.length}), so no fold replacement was exercised`);
+  assert(Object.isFrozen(shared[0]),
+    "A shared projection message is not the frozen object, so the mutation check is vacuous");
+
+  // AND ONLY A WRITE COPIES. A rendered fold is built for the projection, so it is never
+  // the snapshot's object; that arm must keep its own copy or a placeholder edit would
+  // reach the source.
+  const replaced = projection.filter((message) => !snapshot.messages.includes(message));
+  assert(replaced.length > 0, "The fold rendered nothing, so the copying arm was never checked");
+  assert(replaced.every((message) => !Object.isFrozen(message) || message === null),
+    "A fold replacement handed back a frozen source object rather than one it built");
+
+  // A CLIP REPLACES A SLOT, IT DOES NOT EDIT THE MESSAGE. The frozen source proves it:
+  // an in-place clip would have thrown above. Here we pin that the source is untouched
+  // and that the clipped view genuinely differs from the shared one.
+  assert.equal(json.stableStringify(projection), json.stableStringify(context.projectActiveContext(snapshot, state)),
+    "Two projections of one state differed, so a reader mutated something between them");
+
+  return {
+    frozenObjects: frozen,
+    messages: snapshot.messages.length,
+    folds: state.folds.length,
+    sharedPassThrough: shared.length,
+    builtReplacements: replaced.length,
+    readersDrivenFrozen: ["projectActiveContext", "applyToolClips", "expanded", "activeContextStatus", "markAccounting"].length,
+  };
+}
+
+/**
  * GATE 157: THE HUMAN SURFACE SPEAKS TO A HUMAN (2026-08-28).
  *
  * Three surfaces a person actually sees, and every one of them used to answer the wrong
@@ -15857,6 +15996,7 @@ const gates = [
   [148, "The tool-call diet", gateToolCallDiet],
   [156, "An image is not measured as text", gateImageIsNotText],
   [157, "The human surface speaks to a human", gateHumanSurface],
+  [158, "The projection hands out a view", gateProjectionHandsOutAView],
   [150, "The ref key matches the serializer", gateRefKeyMatchesTheSerializer],
   [151, "A growing range stops at the first obstruction", gateGrowingRangeStopsAtTheFirstObstruction],
   [152, "A value already derived is not derived again", gateDerivedOnce],
