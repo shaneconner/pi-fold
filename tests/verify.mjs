@@ -309,7 +309,8 @@ function makeRuntime(built, {
   // the runtime must fall back to the appended advisory rather than throw.
   omitSendMessage = false,
   providerInputBudget,
-  postFoldNotice,
+  preCommitNotice,
+  noticeLeadShare,
   packageRegistration = false,
   sessionFile = join(tmpdir(), "pi-fold-test-session.jsonl"),
   // One injection point for a durable write that FAILS. Persistence is the only place
@@ -443,7 +444,8 @@ function makeRuntime(built, {
     // Deleted options, forwarded verbatim so gate 68 can prove they are REFUSED.
     ...(removedOptions ?? {}),
     ...(providerInputBudget === undefined ? {} : { providerInputBudget }),
-    ...(postFoldNotice === undefined ? {} : { postFoldNotice }),
+    ...(preCommitNotice === undefined ? {} : { preCommitNotice }),
+    ...(noticeLeadShare === undefined ? {} : { noticeLeadShare }),
   };
   if (packageRegistration) {
     runtime.registration = piFold.registerPiFold(pi, registrationOptions);
@@ -2784,7 +2786,8 @@ async function epochToolRuntime({ omitSendMessage, ...fixture } = {}) {
   const runtime = makeRuntime(built, {
     ...(omitSendMessage ? { omitSendMessage } : {}),
     ...(fixture.thresholds ? { thresholds: fixture.thresholds } : {}),
-    ...(fixture.postFoldNotice === undefined ? {} : { postFoldNotice: fixture.postFoldNotice }),
+    ...(fixture.preCommitNotice === undefined ? {} : { preCommitNotice: fixture.preCommitNotice }),
+    ...(fixture.noticeLeadShare === undefined ? {} : { noticeLeadShare: fixture.noticeLeadShare }),
   });
   await startRuntime(runtime);
   return runtime;
@@ -8576,14 +8579,17 @@ async function gatePublicOptionSurface() {
   const register = (options) => makeRuntime(built, {
     ...options, packageRegistration: true, retiredOptions: options,
   }).tools;
-  // The whole surface, exercised together: FIVE names, all accepted at once. It was four
+  // The whole surface, exercised together: SIX names, all accepted at once. It was four
   // until `guidance` went with the agent's `fold` verb on 2026-08-23 (the copy it switched
   // taught the agent to choose spans, and the agent does not choose spans), four
   // again since 2026-08-24 with `toolFoldThreshold`, the tool-call diet's one public knob
-  // (gate 148 owns its behaviour; this gate owns its seat on the surface), and five since
-  // 2026-08-27 with `postFoldNotice`, the invitation switch promoted on the
-  // fold-vs-compaction verdict (the silenced condition won the campaign;
-  // gateFoldNoticeSilenced owns its behaviour and its acceptance at the door).
+  // (gate 148 owns its behaviour; this gate owns its seat on the surface), five since
+  // 2026-08-27 with the notice switch promoted on the fold-vs-compaction verdict (the
+  // silenced condition won the campaign; gateFoldNoticeSilenced owns its behaviour and
+  // its acceptance at the door), and SIX since 2026-08-30, when that switch was renamed
+  // `preCommitNotice` and gained `noticeLeadShare`, the distance below the commit trigger
+  // at which it speaks. Six is Shane's own stated bound: "I want as few parameters as
+  // possible, and for them to be user adjustable. So 6."
   // `workingMemory` sat here from 2026-08-26 until it was DELETED on 2026-08-28: one
   // sealed run was offered the channel and never called it once. Gate 149 is retired and
   // its number stays spent; the name is refused below beside the other deletions.
@@ -8594,7 +8600,8 @@ async function gatePublicOptionSurface() {
       providerInputBudget: 90_000,
       blacklistAutoFoldTools: new Set(["repo_stage"]),
       toolFoldThreshold: 0.5,
-      postFoldNotice: false,
+      preCommitNotice: false,
+      noticeLeadShare: 0.10,
     },
   });
   assert.deepEqual(Object.keys(surface.registration), ["projectionCandidates"]);
@@ -8609,6 +8616,10 @@ async function gatePublicOptionSurface() {
     ["autoFoldableTools", new Set(["read", "repo_stage"]),
       /autoFoldableTools is no longer an option: renamed blacklistAutoFoldTools, and the sense is INVERTED/],
     ["providerTotalWindow", 400_000, /providerTotalWindow is no longer an option: renamed providerInputBudget/],
+    // 2026-08-30: the notice switch. The refusal must name the replacement AND say the
+    // carrier changed, because a caller who moves the boolean across verbatim gets a
+    // mechanism that fires on a different occasion and says different words.
+    ["postFoldNotice", true, /postFoldNotice is no longer an option: renamed preCommitNotice on 2026-08-30/],
   ];
   for (const [option, value, message] of renamed) {
     assert.throws(() => register({ [option]: value }), message,
@@ -12451,7 +12462,7 @@ async function gateFoldSettingsRoundTrip() {
  * MECHANISM. WHAT A PERSON SAVES IN /fold-settings REACHES THE RUNNING SESSION.
  *
  * THE DEFECT (2026-08-29, live). `registerPiFold` resolved thresholds, toolFoldThreshold
- * and postFoldNotice ONCE at registration and read them from the closure ever after, so
+ * and the notice settings ONCE at registration and read them from the closure ever after, so
  * /fold-settings wrote the file and nothing else. Shane's terminal held both readings at
  * once: the screen showing "Start folding at 40%" over a status line reading "commit at
  * 90%", the band pi had booted with 84 seconds before the file was written. Neither
@@ -12548,7 +12559,8 @@ async function gateSavedSettingsReachTheSession() {
     assert.equal(settingsEvents.at(-1).max_target, 0.5);
     assert.equal(settingsEvents.at(-1).min_target, context.DEFAULT_THRESHOLDS.minTarget);
     assert.equal(settingsEvents.at(-1).tool_fold_threshold, context.DEFAULT_TOOL_FOLD_THRESHOLD);
-    assert.equal(settingsEvents.at(-1).post_fold_notice, false);
+    assert.equal(settingsEvents.at(-1).pre_commit_notice, false);
+    assert.equal(settingsEvents.at(-1).notice_lead_share, context.DEFAULT_NOTICE_LEAD_SHARE);
 
     // AND THE RUNTIME ACTS ON IT. Same occupancy, same messages, no boundary: the trigger
     // is the only thing that moved, so a commit here is the trigger's doing.
@@ -12687,7 +12699,7 @@ async function gateSavedSettingsReachTheSession() {
 
 /**
  * MECHANISM. THE DETERMINISTIC CONDITION (Shane, 2026-08-24; promoted to the public
- * surface 2026-08-27). `postFoldNotice: false` silences the brief invitation: the
+ * surface 2026-08-27, renamed `preCommitNotice` 2026-08-30). `false` silences the carrier: the
  * frontier still cuts, the commit still lands, and every fold goes out with the
  * runtime's own deterministic words. Born as the experiment arm that priced the
  * annotation lane against the same plan; promoted when that arm won the
@@ -12702,11 +12714,13 @@ async function gateFoldNoticeSilenced() {
   const noticeType = "pi-fold-active-context-fold-notice";
   const notices = (projected) => projected.messages
     .filter((message) => message?.customType === noticeType);
-  const runtime = await epochToolRuntime({ turns: 7, resultChars: 9_000, postFoldNotice: false });
-  await measure(runtime, 20_000, 100_000);
+  const runtime = await epochToolRuntime({ turns: 7, resultChars: 9_000, preCommitNotice: false });
+  // MEASURED INSIDE THE BAND, so silence here is a choice and not an absent occasion.
+  // Budget is 90,000 against this 100,000-token window, the trigger sits at 0.80 of it
+  // and the default lead is 0.10, so 66,000 is past the fire point and below the commit.
+  await measure(runtime, 66_000, 100_000);
   const cut = await frontierCuts(runtime);
-  assert(cut.length >= context.UNBRIEFED_FOLDS_BEFORE_NOTICE,
-    `The frontier cut ${cut.length} folds, under the batch the notice would speak past`);
+  assert(cut.length > 0, `The frontier cut ${cut.length} folds, so there was nothing to report`);
   assert.equal(notices(await project(runtime)).length, 0,
     "The silenced runtime appended a notice anyway");
   // The commit lands and every fold carries the runtime's own words.
@@ -12719,88 +12733,179 @@ async function gateFoldNoticeSilenced() {
   // A DEPLOYMENT OPTION since 2026-08-27 (Shane, on the campaign verdict: the silenced
   // deterministic condition won, so a deployment must be able to run the winning shape).
   // The door accepts the boolean and still refuses a non-boolean by name, so a truthy
-  // string cannot silently keep the invitation on.
-  piFold.registerPiFold(
-    { registerTool() {}, registerCommand() {}, on() {} }, { postFoldNotice: false });
+  // string cannot silently keep the carrier on.
+  const bareHost = () => ({ registerTool() {}, registerCommand() {}, on() {} });
+  piFold.registerPiFold(bareHost(), { preCommitNotice: false });
   assert.throws(
-    () => piFold.registerPiFold(
-      { registerTool() {}, registerCommand() {}, on() {} }, { postFoldNotice: "off" }),
-    /postFoldNotice must be a boolean/,
-    "registerPiFold accepted a non-boolean invitation switch");
+    () => piFold.registerPiFold(bareHost(), { preCommitNotice: "off" }),
+    /preCommitNotice must be a boolean/,
+    "registerPiFold accepted a non-boolean notice switch");
+  // THE RENAMED OPTION IS REFUSED BY NAME (2026-08-30), not accepted and not ignored.
+  // postFoldNotice named a carrier that fired on a fold count, after the cut, and asked
+  // for briefs. Accepting the old name would run the new mechanism under a description
+  // of the old one; dropping it would silently silence a deployment that had chosen the
+  // carrier on purpose. Both readings are wrong, so it throws and says what to write.
+  assert.throws(
+    () => piFold.registerPiFold(bareHost(), { postFoldNotice: true }),
+    /postFoldNotice is no longer an option: renamed preCommitNotice/,
+    "registerPiFold accepted the retired option name");
+  // AND THE SEAM REFUSES IT TOO, in its own words. The package door is what a deployment
+  // meets, but the experiment harness registers the seam directly, so a name refused at
+  // one door and accepted at the other is a name that is only half retired.
+  assert.throws(
+    () => context.registerActiveContext(bareHost(), { postFoldNotice: true }),
+    /postFoldNotice is now preCommitNotice/,
+    "registerActiveContext accepted the retired option name");
+  // The lead is refused by name on its own range, and 0 is refused because a notice on
+  // the same pass as the commit it warns about is not a warning.
+  piFold.registerPiFold(bareHost(), { preCommitNotice: true, noticeLeadShare: 0.25 });
+  for (const bad of [0, 1, -0.1, "0.1"]) {
+    assert.throws(
+      () => piFold.registerPiFold(bareHost(), { noticeLeadShare: bad }),
+      /noticeLeadShare must be a share above 0 and below 1/,
+      `registerPiFold accepted noticeLeadShare ${JSON.stringify(bad)}`);
+  }
   return {
     cutsStaged: cut.length,
     noticesWhileSilenced: 0,
     foldsCommitted: committed.folds.length,
     deterministicProvenance: true,
     publicOption: true,
+    retiredNameRefused: true,
   };
 }
 
-async function gateFoldNoticeInvitesBriefs() {
+/**
+ * THE NOTICE STATES THE APPROACH; IT DOES NOT ASK FOR BRIEFS (2026-08-30).
+ *
+ * WHAT THIS GATE REPLACED, AND WHY. Until 2026-08-30 this was gateFoldNoticeInvitesBriefs
+ * and it pinned a SOLICITATION: the carrier fired on a count of unbriefed folds and its
+ * middle sentence told the model "You know why the span mattered and what you will want
+ * back from it; the automatic brief reads the span alone and does not." sol-20260826-full2
+ * priced that sentence. Agent briefs drew 3 correct against 9 wrong, the worst of every
+ * draw on the campaign, with the errors tracking the annotations, which is why the switch
+ * was defaulted false on 2026-08-28 rather than fixed. Shane, 2026-08-30: agent-provided
+ * briefs "spent tokens to confuse themselves", so the carrier should be "less of a
+ * suggestion to add briefs and more informatory".
+ *
+ * So the assertions invert. The gate now pins that every phrase of the old solicitation is
+ * GONE, that what stands in its place is measured status, and that the occasion is
+ * OCCUPANCY rather than a fold count: it speaks when the window comes within
+ * noticeLeadShare of the commit trigger, once per approach, re-armed by a commit landing
+ * or by the window falling back out of the band.
+ *
+ * The two properties inherited unchanged, because they are what make the carrier
+ * affordable at all: it is an APPEND, so a quiet pass is byte-identical and arriving
+ * material never rewrites the prefix in front of it (gates 110 and 111 caught the first
+ * cut of this moving on a quiet pass and dropping the occupancy anchor); and WHAT IT
+ * CANNOT NAME, IT COUNTS, which is gate 136's law on a carrier the agent acts from.
+ */
+async function gateFoldNoticeStatesTheApproach() {
   const noticeType = "pi-fold-active-context-fold-notice";
   const notices = (projected) => projected.messages
     .filter((message) => message?.customType === noticeType);
+  const spokenText = async (runtime) => {
+    const spoken = notices(await project(runtime));
+    return spoken.length === 1 ? String(spoken[0].content) : null;
+  };
 
-  // BELOW THE BATCH IT SAYS NOTHING. One cut is not worth a turn's attention, and a
-  // carrier that speaks on every cut is one the agent learns to skip.
-  // THE DEFAULT IS SILENT (Shane 2026-08-28). postFoldNotice defaults false, the shape
-  // the campaign measured, so every fixture below asks for the invitation explicitly and
-  // this is the claim that the unasked-for runtime never speaks at all.
+  // The arithmetic every fixture below is sized against, stated once. A 100,000-token
+  // window serves 90,000 (servingBudgetTokens subtracts min(16,384, 10%)); the shipped
+  // trigger is 0.80 of that, 72,000 tokens; the shipped lead is 0.10, so the fire point
+  // is 0.70, 63,000 tokens.
+  const BUDGET = 90_000;
+  const FIRE_POINT_TOKENS = Math.round((context.DEFAULT_THRESHOLDS.maxTarget -
+    context.DEFAULT_NOTICE_LEAD_SHARE) * BUDGET);
+  assert.equal(FIRE_POINT_TOKENS, 63_000,
+    `The fixture's fire point is ${FIRE_POINT_TOKENS}, so its measurements are mis-sized`);
+
+  // THE DEFAULT IS SILENT (Shane 2026-08-28). preCommitNotice defaults false, the shape
+  // the campaign measured, so every fixture below asks for the carrier explicitly and
+  // this is the claim that the unasked-for runtime never speaks at all, even in the band.
   const unasked = await epochToolRuntime({ turns: 7, resultChars: 9_000 });
-  await measure(unasked, 20_000, 100_000);
-  const unaskedCuts = await frontierCuts(unasked);
-  assert(unaskedCuts.length >= context.UNBRIEFED_FOLDS_BEFORE_NOTICE,
-    `The default-silence fixture cut ${unaskedCuts.length} folds, too few to have spoken`);
+  await measure(unasked, 66_000, 100_000);
+  assert((await frontierCuts(unasked)).length > 0,
+    "The default-silence fixture staged nothing, so its silence is untested");
   assert.equal(notices(await project(unasked)).length, 0,
     "The notice spoke on a runtime that never asked for it");
 
-  const thin = await epochToolRuntime({ turns: 2, resultChars: 9_000, postFoldNotice: true });
-  await measure(thin, 20_000, 100_000);
-  const thinCuts = await frontierCuts(thin);
-  assert(thinCuts.length > 0 && thinCuts.length < context.UNBRIEFED_FOLDS_BEFORE_NOTICE,
-    `The quiet fixture cut ${thinCuts.length} folds, so the silence below the batch is untested`);
-  assert.equal(notices(await project(thin)).length, 0,
-    "The notice spoke before a batch of unbriefed folds had built up");
+  // BELOW THE FIRE POINT IT SAYS NOTHING, however much is staged. This is the whole point
+  // of the redesign: the frontier cuts continuously and ungated by occupancy, so a count
+  // of staged folds is reached within a few turns of a session's start and says nothing
+  // about whether a commit is near. 20,000 of 90,000 is 22 percent, deep below the band.
+  const early = await epochToolRuntime({ turns: 7, resultChars: 9_000, preCommitNotice: true });
+  await measure(early, 20_000, 100_000);
+  const earlyCuts = await frontierCuts(early);
+  assert(earlyCuts.length >= 3,
+    `The early fixture staged ${earlyCuts.length} folds, too few to prove a count does not fire it`);
+  assert.equal(notices(await project(early)).length, 0,
+    "The notice spoke a long way below the commit, on a fold count rather than an occasion");
 
-  // PAST IT, IT NAMES EVERY UNBRIEFED FOLD AND ASKS FOR THE ONE THING THE AGENT HAS.
-  // Seven turns is deliberate: the frontier stages at most MAX_FRONTIER_CUTS_PER_PASS in
-  // a pass, so a fixture inside that bound has its whole frontier standing when the
-  // notice first speaks and the naming can be checked for completeness rather than for
-  // overlap.
-  const runtime = await epochToolRuntime({ turns: 7, resultChars: 9_000, postFoldNotice: true });
-  await measure(runtime, 20_000, 100_000);
+  // PAST THE FIRE POINT IT SPEAKS, ONCE, AND STATES THE APPROACH.
+  const runtime = await epochToolRuntime({ turns: 7, resultChars: 9_000, preCommitNotice: true });
+  await measure(runtime, 66_000, 100_000);
   const cut = await frontierCuts(runtime);
-  assert(cut.length >= context.UNBRIEFED_FOLDS_BEFORE_NOTICE &&
-    cut.length <= context.MAX_FRONTIER_CUTS_PER_PASS,
-  `The frontier cut ${cut.length} folds, outside the one-pass window this gate measures`);
-  const spoken = notices(await project(runtime));
-  assert.equal(spoken.length, 1, `The notice appeared ${spoken.length} times, not once`);
-  const text = String(spoken[0].content);
-  for (const fold of cut) {
-    assert(text.includes(fold.id), `The notice does not name unbriefed fold ${fold.id}`);
+  assert(cut.length > 0 && cut.length <= context.MAX_FRONTIER_CUTS_PER_PASS,
+    `The frontier cut ${cut.length} folds, outside the one-pass window this gate measures`);
+  const text = await spokenText(runtime);
+  assert(text !== null, "The notice did not speak once inside the band");
+
+  // IT STATES WHERE THE COMMIT IS AND HOW FAR AWAY, from the provider's own count. The
+  // headroom is the trigger minus the measurement: 72,000 - 66,000 = 6,000.
+  assert(/A commit fires at 80% of the serving budget/.test(text),
+    `The notice does not name the commit point: ${text.slice(0, 200)}`);
+  assert(/6,000 tokens of headroom/.test(text),
+    `The notice does not state the distance to the commit: ${text.slice(0, 200)}`);
+  assert(/provider-measured/.test(text),
+    "The notice does not name the basis of the number it states");
+  assert(new RegExp(`Staged: ${cut.length} folds?, 0 carrying a brief you wrote`).test(text),
+    `The notice miscounts what is staged against the frontier's ${cut.length}: ${text.slice(0, 400)}`);
+
+  // AND IT ASKS FOR NOTHING. Every phrase of the deleted solicitation is named here
+  // rather than described, because a rewrite that reintroduced any one of them would be
+  // the same defect under new words.
+  for (const solicitation of [
+    "Give each one a sentence",
+    "You know why the span mattered",
+    "costs your window nothing",
+    "the automatic brief reads the span alone",
+  ]) {
+    assert(!text.includes(solicitation),
+      `The notice still solicits a brief: ${solicitation}`);
   }
-  const named = new Set(text.match(/fold_[0-9a-f]{16,}/g) ?? []);
-  const standing = new Set(cut.map((fold) => fold.id));
-  for (const id of named) assert(standing.has(id), `The notice named ${id}, which is not a pending fold`);
-  // EACH ROW IDENTIFIES ITS SPAN (2026-08-24). The pending mark carries the
-  // deterministic brief the runtime cut it with, and a notice that withheld it made the
-  // dogfooded agent GUESS which spans its briefs were for ("I need to brief three
-  // pending folds. What are they? Likely: ..."), where a wrong guess writes an
-  // accurate-sounding brief onto the wrong fold. The head is the identification; a row
-  // longer than its bound states the cut.
+  // The verbs stay, as a reference list carrying no argument for using any of them, and
+  // pin and unpin are on it, which the solicitation never named at all.
+  for (const verb of ['"action":"status"', '"action":"brief"', '"action":"reboundary"',
+    '"action":"unmark"', '"action":"pin"', '"action":"unpin"']) {
+    assert(text.includes(verb), `The notice does not offer ${verb}`);
+  }
+  // THE THREE CORRECTIONS OF FACT the old copy could not carry.
+  assert(/still in front of you/.test(text),
+    "The notice does not say the material it names is still raw");
+  assert(/stays exactly recoverable through peek/.test(text),
+    "The notice does not say folding preserves, which is what makes pinning a choice rather than a rescue");
+  assert(/frees nothing toward the commit/.test(text),
+    "The notice does not state what a pin costs, which is how an agent pins its way to a window it cannot fold");
+
+  // EACH ROW IDENTIFIES ITS SPAN (2026-08-24, kept). The pending mark carries the
+  // deterministic brief the runtime cut it with, and a notice that withholds it makes the
+  // agent guess: the dogfooded 1M session answered "I need to brief three pending folds.
+  // What are they? Likely: ..." from memory, and a wrong guess writes an accurate-sounding
+  // brief onto the wrong fold.
   for (const fold of cut) {
     assert(typeof fold.brief === "string" && fold.brief.length > 0,
       `Pending fold ${fold.id} carries no deterministic brief for its row to show`);
     assert(text.includes(`${fold.id} (`) && text.includes(fold.brief.slice(0, 40)),
       `The notice row for ${fold.id} does not carry its own head: ${fold.brief.slice(0, 60)}`);
   }
-  assert(cut.some((fold) => fold.brief.length > 160) &&
-    /\.\.\./.test(text), "No bounded row stated its cut");
-  assert(/"action":"brief"/.test(text), "The notice does not say how to answer it");
-  assert(/costs your window nothing/.test(text),
-    "The notice does not state the price of answering, which is the reason to answer");
-  assert(/still in front of you/.test(text),
-    "The notice does not say the material it names is still raw");
+  const named = new Set(text.match(/fold_[0-9a-f]{16,}/g) ?? []);
+  for (const id of named) {
+    assert(cut.some((fold) => fold.id === id),
+      `The notice named ${id}, which is not a staged fold`);
+  }
+  assert(cut.some((fold) => fold.brief.length > 160) && /\.\.\./.test(text),
+    "No bounded row stated its cut");
+  const spoken = notices(await project(runtime));
   assert.equal(spoken[0].details.ephemeral, true, "The notice is not ephemeral");
 
   // IT IS AN APPEND, which is the property that makes the whole redesign affordable. A
@@ -12811,40 +12916,106 @@ async function gateFoldNoticeInvitesBriefs() {
   const before = (await project(runtime)).messages;
   assert.equal(json.stableStringify((await project(runtime)).messages),
     json.stableStringify(before), "A quiet pass moved a byte, so the notice is not an append");
-  await measure(runtime, 21_000, 100_000);
+
+  // EDGE TRIGGERED: ONE NOTICE PER APPROACH. A window sits in the band for many passes,
+  // and the freeze breaks whenever the prefix changes, so without the latch the carrier
+  // re-admits all the way up the band. A second, higher measurement still inside the band
+  // must not produce a second notice.
+  await measure(runtime, 68_000, 100_000);
   const after = (await project(runtime)).messages;
   assert(after.length > before.length, "The arriving measurement did not reach the projection");
   assert.equal(json.stableStringify(after.slice(0, before.length)),
     json.stableStringify(before),
     "New material rewrote the prefix in front of it, so the notice does not hold its index");
+  assert.equal(notices({ messages: after }).length, 1,
+    "The notice spoke twice on one approach, so the crossing is not edge triggered");
 
-  // AND IT NEVER RE-ASKS FOR A BRIEF THE AGENT ALREADY WROTE. The notice is built from
-  // live state on every pass the projection is rebuilt, so what the agent answered leaves
-  // it: an epoch that applies the whole briefed batch leaves nothing for it to name.
-  for (const fold of cut) {
-    const result = await briefCut(runtime, fold,
-      `Inspection ${fold.id.slice(5, 11)} stays exactly recoverable behind this fold.`);
-    assert(!result.isError, `The brief on ${fold.id} was refused: ${JSON.stringify(result)}`);
-  }
-  assert((await frontierCuts(runtime)).every((fold) => fold.briefed),
-    "A brief did not land on the fold it named");
-  await measureAndCommit(runtime, 86_000, 100_000, "notice-stand-down");
-  const answered = notices(await project(runtime));
-  const stillNamed = new Set(String(answered[0]?.content ?? "").match(/fold_[0-9a-f]{16,}/g) ?? []);
-  for (const id of standing) {
-    assert(!stillNamed.has(id), `The notice kept asking for a brief the agent already wrote on ${id}`);
-  }
+  // A COMMIT RE-ARMS IT, because a commit ends one approach and begins the next. Without
+  // this the latch would hold for the rest of the session whenever a commit lands with
+  // the window still above the fire point.
+  //
+  // THE BAND IS DELIBERATELY SHALLOW HERE, 0.80 over 0.70. The shipped aim of 0.20 sizes
+  // a commit to free more than a fixture this size holds, so the epoch takes every staged
+  // span and leaves the next approach with nothing to report, which would prove the guard
+  // above rather than the latch. A 0.10-deep band frees about 10,000 tokens and retains
+  // the rest, which is the ordinary steady state this latch lives in.
+  const rearm = await epochToolRuntime({
+    turns: 14,
+    resultChars: 9_000,
+    preCommitNotice: true,
+    thresholds: { maxTarget: 0.80, minTarget: 0.70, consolidateAfter: 10, minFoldChars: 8_000 },
+  });
+  await measure(rearm, 66_000, 100_000, "approach-one");
+  assert.equal(notices(await project(rearm)).length, 1, "The re-arm fixture never spoke");
+  const commitsBefore = contextEvents(rearm)
+    .filter((event) => event.kind === "context.commit" && event.deferred === false).length;
+  await measure(rearm, 73_000, 100_000, "band-top");
+  await project(rearm);
+  await settle();
+  const landed = contextEvents(rearm)
+    .filter((event) => event.kind === "context.commit" && event.deferred === false).length;
+  assert(landed > commitsBefore, "The band top did not commit, so no approach ended");
+  await measure(rearm, 66_000, 100_000, "approach-two");
+  const rearmed = notices(await project(rearm));
+  assert((await frontierCuts(rearm)).length > 0,
+    "The commit took every staged span, so the second approach has nothing to report either way");
+  assert.equal(rearmed.length, 1,
+    `After a commit the notice spoke ${rearmed.length} times, so a landed commit does not re-arm one approach`);
 
-  // WHEN IT RUNS OUT OF ROOM, THE LIST GIVES WAY AND SAYS SO. The instruction is fixed
-  // and the fold count is not: the frontier stages faster than the agent answers, so the
-  // pending set outgrows any bound eventually. Probed at the boundary rather than at a
-  // guess, and from both sides, because a notice that silently stops listing reads as a
-  // complete list, which is gate 136's law on a carrier the agent acts from.
+  // FALLING OUT OF THE BAND RE-ARMS IT TOO, which is the other end of the same rule and
+  // the one that covers a window shrinking for a reason that is not a commit.
+  const falling = await epochToolRuntime({ turns: 7, resultChars: 9_000, preCommitNotice: true });
+  await measure(falling, 66_000, 100_000);
+  assert.equal(notices(await project(falling)).length, 1, "The falling fixture never spoke");
+  await measure(falling, 20_000, 100_000, "below-fire-point");
+  await project(falling);
+  await measure(falling, 67_000, 100_000, "back-in-band");
+  assert.equal(notices(await project(falling)).length, 1,
+    "The notice did not re-arm after the window fell back below the fire point");
+
+  // THE LEAD IS A DISTANCE, NOT A POINT, so moving it moves the occasion. At a lead of
+  // 0.50 the fire point is 0.30 of the budget, 27,000 tokens, and a measurement the
+  // shipped lead is silent at speaks.
+  const wideLead = await epochToolRuntime({
+    turns: 7, resultChars: 9_000, preCommitNotice: true, noticeLeadShare: 0.50,
+  });
+  await measure(wideLead, 30_000, 100_000);
+  assert.equal(notices(await project(wideLead)).length, 1,
+    "A wider lead did not move the fire point down the band");
+
+  // THE PINNED SHARE IS STATED, AND AGAINST THE CAP THAT REFUSES IT. The notice quotes
+  // MAX_PINNED_SHARE, and applyProtectionChange refuses past that cap on
+  // explicitProtectedMass, so the two numbers have to be measured the same way or the
+  // notice puts a share beside a cap it is not compared against.
+  const pinned = await epochToolRuntime({ turns: 7, resultChars: 9_000, preCommitNotice: true });
+  await measure(pinned, 40_000, 100_000);
+  await toolCall(pinned, { action: "pin", ids: [pinned.built.turnEntries[2][2]] });
+  await measure(pinned, 66_000, 100_000, "pinned-band");
+  const pinnedText = await spokenText(pinned);
+  assert(pinnedText !== null, "The pinned fixture never spoke");
+  assert(/Pinned: 1 entry held raw, \d+% of the window against a 25% cap\./.test(pinnedText),
+    `The notice does not state the pinned share against its cap: ${pinnedText.slice(0, 600)}`);
+  // AND IT IS OMITTED WHEN THERE IS NOTHING PINNED, rather than printed as a zero: a row
+  // of zeroes spends the carrier's width saying nothing happened.
+  assert(!/Pinned:/.test(text), "The notice printed a pinned row with nothing pinned");
+
+  // WHEN IT RUNS OUT OF ROOM, THE LIST GIVES WAY AND SAYS SO. The status is fixed and the
+  // fold count is not: the frontier stages faster than commits land, so the pending set
+  // outgrows any bound eventually. Probed at the boundary rather than at a guess, and from
+  // both sides, because a notice that silently stops listing reads as a complete list,
+  // which is gate 136's law on a carrier the agent acts from.
   const wideList = (count) => curationModule.foldNoticeText({
-    unbriefed: Array.from({ length: count }, (_, index) => ({
+    staged: Array.from({ length: count }, (_, index) => ({
       id: `fold_${String(index).padStart(24, "0")}`, kind: "tool-result", tokens: 2_130,
     })),
-    pending: count,
+    freedTokens: count * 2_130,
+    briefedCount: 0,
+    pinnedEntries: 0,
+    pinnedShare: 0,
+    maxPinnedShare: context.MAX_PINNED_SHARE,
+    headroomTokens: 6_000,
+    commitAtShare: 0.80,
+    measured: true,
     toolName: "pi_fold_context",
   });
   let seatedWhole = 1;
@@ -12861,9 +13032,10 @@ async function gateFoldNoticeInvitesBriefs() {
   const seatedIds = (cutList.match(/fold_[0-9a-f]{16,}/g) ?? []).length;
   assert(new RegExp(`lists the other ${seatedWhole - seatedIds}\\.`).test(cutList),
     `The notice seated ${seatedIds} of ${seatedWhole} folds and miscounted the rest: ${cutList}`);
-  for (const line of ['"action":"brief"', "costs your window nothing", "still in front of you"]) {
+  // THE STATUS SURVIVES A WIDE BATCH. The list is what gives; the facts are what stay.
+  for (const line of ["A commit fires at", "headroom", '"action":"pin"', "frees nothing toward the commit"]) {
     assert(cutList.includes(line),
-      `A 200-fold batch cost the notice its instruction: ${line} is gone`);
+      `A wide batch cost the notice its status: ${line} is gone`);
   }
 
   // CONSOLIDATION RIDES THE SAME CARRIER. A parent's brief indexes ten children and is
@@ -12882,13 +13054,16 @@ async function gateFoldNoticeInvitesBriefs() {
   }
 
   return {
-    unbriefedBeforeNotice: context.UNBRIEFED_FOLDS_BEFORE_NOTICE,
-    silentAt: thinCuts.length,
+    firePointTokens: FIRE_POINT_TOKENS,
+    silentBelowTheBandWith: earlyCuts.length,
     cutsNamed: cut.length,
-    noticesWhileUnbriefed: 1,
+    noticesPerApproach: 1,
     quietPassIsByteIdentical: true,
     prefixHeldAcrossArrival: true,
-    briefedFoldsStillNamed: 0,
+    reArmedByCommit: true,
+    reArmedByFallingOut: true,
+    leadMovesTheFirePoint: true,
+    pinnedShareStated: true,
     foldsSeatedWhole: seatedWhole - 1,
     consolidationParents: parents.length,
   };
@@ -14038,7 +14213,7 @@ async function gateProjectionFence() {
 async function gateRuntimeSpeech() {
   return {
     contextReceipts: await claim("gateContextReceipts", gateContextReceipts),
-    foldNoticeInvitesBriefs: await claim("gateFoldNoticeInvitesBriefs", gateFoldNoticeInvitesBriefs),
+    foldNoticeStatesTheApproach: await claim("gateFoldNoticeStatesTheApproach", gateFoldNoticeStatesTheApproach),
     foldNoticeSilenced: await claim("gateFoldNoticeSilenced", gateFoldNoticeSilenced),
   };
 }
@@ -15247,7 +15422,7 @@ async function gateProjectionHandsOutAView() {
  *   - The status text answers occupancy, and says so honestly when nothing is measured
  *     rather than rendering an estimate as a fact. This runtime has already paid once
  *     for treating an estimate as though it were the truth (gate 156).
- *   - /fold-settings reaches toolFoldThreshold and postFoldNotice, each refused by name
+ *   - /fold-settings reaches toolFoldThreshold, preCommitNotice and noticeLeadShare, each refused by name
  *     on a bad value through the SAME path the file reader validates with, so a
  *     hand-edited file cannot hold a value the screen would reject.
  *   - A settings file may still never stop the agent (gate 140's law), including one
@@ -15344,8 +15519,10 @@ async function gateHumanSurface() {
       (saved) => { screenClosed = saved; },
     );
     const screenText = () => screen.render(120).join("\n");
-    assert(screenText().includes("Clip old tool results") && screenText().includes("Ask the model for briefs"),
-      `The settings screen has no row for the newly exposed options: ${screenText()}`);
+    assert(screenText().includes("Clip old tool results") &&
+      screenText().includes("Tell the model before folding") &&
+      screenText().includes("How early to tell it"),
+    `The settings screen has no row for the newly exposed options: ${screenText()}`);
     // AND IT DOES NOT TELL A LIE ABOUT ITS OWN KEYS. pi-tui's SettingsList ships the hint
     // "Enter/Space to change · Esc to cancel"; Enter opens an exact-value editor rather
     // than cycling, and nothing is cancelled, because every change is already saved.
@@ -15365,18 +15542,26 @@ async function gateHumanSurface() {
       "stepping the clipping row did not reach disk (0.50 -> 0.65)");
     // The switch has no lattice: either direction is the other value.
     screen.handleInput("\x1bOB");
-    assert(screenText().includes("→ Ask the model for briefs"), "the selection never reached the invitation row");
+    assert(screenText().includes("→ Tell the model before folding"), "the selection never reached the notice row");
     screen.handleInput("\x1bOC");
-    assert.equal(JSON.parse(readFileSync(screenPath, "utf8")).postFoldNotice, true,
-      "stepping the invitation row did not turn it on");
+    assert.equal(JSON.parse(readFileSync(screenPath, "utf8")).preCommitNotice, true,
+      "stepping the notice row did not turn it on");
     screen.handleInput("\x1b[D");
-    assert.equal(JSON.parse(readFileSync(screenPath, "utf8")).postFoldNotice, false,
-      "stepping the invitation row back did not turn it off");
+    assert.equal(JSON.parse(readFileSync(screenPath, "utf8")).preCommitNotice, false,
+      "stepping the notice row back did not turn it off");
+    // THE LEAD STEPS THE SHARE LATTICE, unfiltered: it answers to nothing but its own
+    // range, so it is the one share row with no cross-field neighbour to constrain it.
+    screen.handleInput("\x1bOB");
+    assert(screenText().includes("→ How early to tell it"), "the selection never reached the lead row");
+    screen.handleInput("\x1bOC");
+    assert.equal(JSON.parse(readFileSync(screenPath, "utf8")).noticeLeadShare, 0.15,
+      "stepping the lead row did not reach disk (0.10 -> 0.15)");
     // What the screen saved reloads as itself, through the reader's own validation.
     const back = settingsModule.readFoldSettingsFile(screenPath);
     assert.equal(back.refusal, null);
     assert.equal(back.settings.toolFoldThreshold, 0.65);
-    assert.equal(back.settings.postFoldNotice, false);
+    assert.equal(back.settings.preCommitNotice, false);
+    assert.equal(back.settings.noticeLeadShare, 0.15);
     screen.handleInput("\x1b");
     assert.equal(screenClosed, true, "escape did not close the settings screen");
   } finally {
@@ -15388,7 +15573,9 @@ async function gateHumanSurface() {
   for (const [id, bad, pattern] of [
     ["toolFoldThreshold", "1", /share from 0 up to but not including 1/],
     ["toolFoldThreshold", "-0.2", /share from 0 up to but not including 1/],
-    ["postFoldNotice", "maybe", /postFoldNotice is on or off/],
+    ["preCommitNotice", "maybe", /preCommitNotice is on or off/],
+    ["noticeLeadShare", "0", /noticeLeadShare is a share above 0 and below 1/],
+    ["noticeLeadShare", "1", /noticeLeadShare is a share above 0 and below 1/],
   ]) {
     const refused = settingsModule.applyFoldSettingsEdit({}, id, bad);
     assert.equal(refused.ok, false, `${id}=${bad} was accepted`);
@@ -15399,18 +15586,18 @@ async function gateHumanSurface() {
   const off = settingsModule.applyFoldSettingsEdit({}, "toolFoldThreshold", "0");
   assert.equal(off.ok, true, "toolFoldThreshold 0 was refused, so off cannot be said");
   assert.equal(off.draft.toolFoldThreshold, 0);
-  const on = settingsModule.applyFoldSettingsEdit({}, "postFoldNotice", "true");
-  assert.equal(on.draft.postFoldNotice, true);
+  const on = settingsModule.applyFoldSettingsEdit({}, "preCommitNotice", "true");
+  assert.equal(on.draft.preCommitNotice, true);
 
   // (d) BOTH SURVIVE A ROUND TRIP, and an older thresholds-only file gains neither by
   // accident: absent means the package default and must stay absent on disk.
   const path = join(tmpdir(), `fold-settings-${process.pid}-${Date.now()}.json`);
   try {
-    settingsModule.saveFoldSettingsFile(path, { toolFoldThreshold: 0, postFoldNotice: true });
+    settingsModule.saveFoldSettingsFile(path, { toolFoldThreshold: 0, preCommitNotice: true });
     const round = settingsModule.readFoldSettingsFile(path);
     assert.equal(round.refusal, null);
     assert.equal(round.settings.toolFoldThreshold, 0);
-    assert.equal(round.settings.postFoldNotice, true);
+    assert.equal(round.settings.preCommitNotice, true);
 
     settingsModule.saveFoldSettingsFile(path, { thresholds: context.DEFAULT_THRESHOLDS });
     const old = settingsModule.readFoldSettingsFile(path);
@@ -15418,11 +15605,30 @@ async function gateHumanSurface() {
     assert.equal(old.migrated, false, "A thresholds-only file was migrated by the new keys");
     assert.equal(old.settings.toolFoldThreshold, undefined,
       "An absent scalar was written into the file as a default");
-    assert.equal(old.settings.postFoldNotice, undefined);
+    assert.equal(old.settings.preCommitNotice, undefined);
+    assert.equal(old.settings.noticeLeadShare, undefined);
+
+    // THE RENAMED KEY IS MIGRATED WITH ITS VALUE, not dropped and not refused (2026-08-30).
+    // /fold-settings itself wrote postFoldNotice from 2026-08-27, so refusing it would
+    // revert every other value in a file this package created, and dropping it the way a
+    // retired key is dropped would silently silence a deployment that had turned the
+    // carrier on deliberately. Both readings name the same carrier, so the value moves
+    // and the file is written back whole under the current surface.
+    writeFileSync(path, `${JSON.stringify({ postFoldNotice: true, toolFoldThreshold: 0.25 })}\n`);
+    const renamedLoad = settingsModule.readFoldSettingsFile(path);
+    assert.equal(renamedLoad.refusal, null, "A file carrying the old notice key was refused whole");
+    assert.equal(renamedLoad.migrated, true, "The renamed key did not report itself as a migration");
+    assert.equal(renamedLoad.settings.preCommitNotice, true,
+      "The renamed key lost the value the person had chosen");
+    assert.equal(renamedLoad.settings.toolFoldThreshold, 0.25,
+      "Migrating the renamed key reverted a neighbouring value");
+    const rewritten = JSON.parse(readFileSync(path, "utf8"));
+    assert.equal(rewritten.postFoldNotice, undefined, "The old key survived the write-back");
+    assert.equal(rewritten.preCommitNotice, true, "The write-back did not carry the new key");
 
     // (e) GATE 140'S LAW STILL HOLDS over the new keys: a bad file is refused by name,
     // never thrown, and LEFT AS WRITTEN so the person can fix what they meant.
-    for (const bad of [{ postFoldNotice: "yes" }, { toolFoldThreshold: "half" }, { toolFoldThreshold: 1 }]) {
+    for (const bad of [{ preCommitNotice: "yes" }, { toolFoldThreshold: "half" }, { toolFoldThreshold: 1 }]) {
       writeFileSync(path, `${JSON.stringify(bad)}\n`);
       const before = readFileSync(path, "utf8");
       const load = settingsModule.readFoldSettingsFile(path);
@@ -15545,7 +15751,7 @@ async function gateHumanSurface() {
     statusLine: measuredLine,
     statusTextLines: text.split("\n").length,
     namesTheAgentTool: false,
-    exposedSettings: ["toolFoldThreshold", "postFoldNotice"],
+    exposedSettings: ["toolFoldThreshold", "preCommitNotice", "noticeLeadShare"],
     editorHeader: header.split("\n").at(-1),
   };
 }

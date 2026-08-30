@@ -501,9 +501,15 @@ export function createPiContextExperimentExtension(config) {
             // The deployment fact, when the run config carries one: without it the
             // runtime measures every threshold against the per-request descriptor.
             ...(config.providerInputBudget === undefined ? {} : { providerInputBudget: config.providerInputBudget }),
-            // The deterministic condition: false silences the brief invitation, so
-            // the arm measures the runtime's own words against the same plan.
-            ...(config.postFoldNotice === undefined ? {} : { postFoldNotice: config.postFoldNotice }),
+            // The deterministic condition: false silences the notice, so the arm
+            // measures the runtime's own words against the same plan.
+            //
+            // THE CONFIG KEY KEEPS ITS SEALED NAME AND THE OPTION DOES NOT (2026-08-30).
+            // The runtime option became preCommitNotice when the carrier stopped
+            // soliciting briefs, and registerActiveContext now refuses the old name by
+            // name. Every sealed run-config.json on disk carries postFoldNotice, and a
+            // sealed campaign stays readable, so the key stands and the forwarding moves.
+            ...(config.postFoldNotice === undefined ? {} : { preCommitNotice: config.postFoldNotice }),
             // The band condition: an explicit thresholds object, validated whole by the
             // runtime's own resolveThresholds at registration.
             ...(config.thresholds === undefined ? {} : { thresholds: config.thresholds }),

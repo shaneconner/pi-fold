@@ -34,14 +34,37 @@ export const ACTIVE_CONTEXT_STATE_ENTRY = `${DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_P
 export const ACTIVE_CONTEXT_FOLD_RECORD_ENTRY = `${DEFAULT_ACTIVE_CONTEXT_ENTRY_TYPE_PREFIX}-fold-record`;
 export const PROVIDER_CONTEXT_MEASUREMENT_ENTRY = `${DEFAULT_ENTRY_NAMESPACE}-provider-context-measurement`;
 /**
- * How many unbriefed pending folds stand before the runtime says so.
+ * THE NOTICE'S DEFAULT LEAD, as a share of the serving budget below the commit trigger
+ * (Shane, 2026-08-22: "around 10% from the commit threshold"; built 2026-08-30).
  *
- * A CONSTANT, not a threshold the deployment can turn (Shane's KISS rule): it is a
- * batching size, and the only thing a knob here would buy is a deployment that never
- * speaks. Three is the smallest batch that reads as a batch rather than as a running
- * commentary on every cut.
+ * A DISTANCE, NOT A POINT. Expressed as how far BELOW maxTarget the notice speaks, so it
+ * tracks a band that moves: a deployment that drops its trigger to 0.40 gets its notice
+ * at 0.30 without touching this, where an absolute 0.70 would have put the warning after
+ * the thing it warns about. The fire point is `maxTarget - noticeLeadShare`, floored at
+ * zero, so a lead wider than the trigger means "speak from the first measurement".
+ *
+ * IT REPLACED A COUNT. Until 2026-08-30 the notice fired at UNBRIEFED_FOLDS_BEFORE_NOTICE
+ * = 3 unbriefed pending folds, which is a batching size and not an occasion: the frontier
+ * cuts continuously and ungated by occupancy, so three folds stand within a few turns of
+ * a session's start and the notice spoke a long way from any commit. The share is the
+ * occasion, and the edge latch is what batches it: one notice per approach.
  */
-export const UNBRIEFED_FOLDS_BEFORE_NOTICE = 3;
+export const DEFAULT_NOTICE_LEAD_SHARE = 0.10;
+
+/**
+ * The lead is a share of the serving budget, so it is bounded the way every other share
+ * on this surface is: strictly inside 0 and 1. Zero would mean the notice fires exactly
+ * at the trigger, which is the same pass the commit fires on and therefore never a
+ * warning; 1 and above is not a share.
+ */
+export function resolveNoticeLeadShare(value: unknown): number {
+  if (value === undefined) return DEFAULT_NOTICE_LEAD_SHARE;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value >= 1) {
+    throw new Error("noticeLeadShare must be a share above 0 and below 1: how far below the " +
+      "commit trigger, as a fraction of the serving budget, the notice speaks");
+  }
+  return value;
+}
 
 /**
  * How many spans the frontier cuts on one projection pass.
@@ -287,13 +310,13 @@ export const MAX_CONTEXT_RECEIPTS = 3;
 export const CONTEXT_RECEIPT_BLOCK_BYTES = 900;
 
 /**
- * The post-fold notice's bound, and its own rather than the receipt block's.
+ * The pre-commit notice's bound, and its own rather than the receipt block's.
  *
- * It is larger because it carries a variable-length list the receipt does not: three
- * fixed sentences of instruction plus one entry per unbriefed fold, and the pending set
- * grows past MAX_FRONTIER_CUTS_PER_PASS whenever the frontier stages faster than the
- * agent answers. 1,200 seats the instruction and roughly eight folds; past that the list
- * gives way and states how many it could not name.
+ * It is larger because it carries a variable-length list the receipt does not: the fixed
+ * status and verb block plus one entry per staged fold, and the pending set grows past
+ * MAX_FRONTIER_CUTS_PER_PASS whenever the frontier stages faster than a commit lands.
+ * 1,200 seated the old instruction and roughly eight folds; past the bound the list gives
+ * way and states how many it could not name.
  */
 export const FOLD_NOTICE_BYTES = 2_400;
 export const CONTEXT_STATUS_RESPONSE_BYTES = 24_000;

@@ -11,7 +11,7 @@ export {
 
 const PUBLIC_OPTIONS = Object.freeze([
   "thresholds", "providerInputBudget", "blacklistAutoFoldTools", "toolFoldThreshold",
-  "postFoldNotice",
+  "preCommitNotice", "noticeLeadShare",
 ]);
 
 const GENERATOR_DELETED = "the model brief generator is deleted (2026-08-14): across 15 sealed " +
@@ -32,8 +32,13 @@ const REFUSED_OPTIONS = Object.freeze({
   guidance: "deleted 2026-08-23: it switched the copy that taught the agent to " +
     "CHOOSE SPANS, and the agent does not choose spans. The runtime cuts at the frontier and " +
     "the agent annotates what it cut, so the guidance it switched is replaced wholesale by " +
-    "the post-fold notice. That notice has its own option, postFoldNotice, which defaults " +
+    "the pre-commit notice. That notice has its own option, preCommitNotice, which defaults " +
     "false: the deterministic shape is what the campaign measured",
+  postFoldNotice: "renamed preCommitNotice on 2026-08-30, and the carrier it switches has " +
+    "changed with it: it fires on occupancy approaching a commit rather than on a count of " +
+    "unbriefed folds, and it STATES the window's status rather than asking the model for " +
+    "briefs, which sol-20260826-full2 scored at 3 correct against 9 wrong. The default is " +
+    "still false; noticeLeadShare sets how far ahead of the commit it speaks",
   toolName: "the deployment identity is hardwired to pi-fold: the tool is pi_fold_context",
   toolLabel: "the deployment identity is hardwired to pi-fold",
   brandNoun: "the deployment identity is hardwired to pi-fold",

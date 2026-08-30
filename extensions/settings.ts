@@ -20,6 +20,7 @@ import { dirname, join } from "node:path";
 import { Container, Input, Key, matchesKey, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import {
 	DEFAULT_CONTEXT_WINDOW,
+	DEFAULT_NOTICE_LEAD_SHARE,
 	DEFAULT_THRESHOLDS,
 	DEFAULT_TOOL_FOLD_THRESHOLD,
 	resolveThresholds,
@@ -44,7 +45,8 @@ export interface FoldSettingsFile {
 	// nothing but themselves, so absent simply means the package default, which is what
 	// lets an older file gain them without a migration.
 	toolFoldThreshold?: number;
-	postFoldNotice?: boolean;
+	preCommitNotice?: boolean;
+	noticeLeadShare?: number;
 }
 
 // The four settings, named once. This was a hand-written union until the migration
@@ -59,7 +61,7 @@ const THRESHOLD_FIELDS = [
 
 // The settings that are NOT thresholds. Each is a top-level scalar with its own
 // validation and no relationship to any other value on the screen.
-const SCALAR_FIELDS = ["toolFoldThreshold", "postFoldNotice"] as const;
+const SCALAR_FIELDS = ["toolFoldThreshold", "preCommitNotice", "noticeLeadShare"] as const;
 
 export type FoldSettingId = typeof THRESHOLD_FIELDS[number] | typeof SCALAR_FIELDS[number];
 
@@ -76,12 +78,22 @@ export function applyFoldSettingsEdit(
 	id: FoldSettingId,
 	rawValue: string,
 ): { ok: true; draft: FoldSettingsFile } | { ok: false; error: string } {
-	if (id === "postFoldNotice") {
+	if (id === "preCommitNotice") {
 		const raw = rawValue.trim().toLowerCase();
 		if (raw !== "true" && raw !== "false") {
-			return { ok: false, error: "postFoldNotice is on or off" };
+			return { ok: false, error: "preCommitNotice is on or off" };
 		}
-		return { ok: true, draft: { ...draft, postFoldNotice: raw === "true" } };
+		return { ok: true, draft: { ...draft, preCommitNotice: raw === "true" } };
+	}
+	if (id === "noticeLeadShare") {
+		const value = Number(rawValue.trim());
+		// The runtime's own range, restated here so the screen refuses before the file does:
+		// a share strictly inside 0 and 1. Zero would put the notice on the same pass as the
+		// commit it warns about, which is not a warning.
+		if (!Number.isFinite(value) || value <= 0 || value >= 1) {
+			return { ok: false, error: "noticeLeadShare is a share above 0 and below 1: how far below the commit point the notice speaks" };
+		}
+		return { ok: true, draft: { ...draft, noticeLeadShare: value } };
 	}
 	if (id === "toolFoldThreshold") {
 		const value = Number(rawValue.trim());
@@ -112,6 +124,14 @@ export function applyFoldSettingsEdit(
 // Keys this package's own settings screen used to write. providerInputBudget left the
 // user surface on 2026-08-21 and stayed a registration option for the harness.
 const RETIRED_FILE_KEYS: readonly string[] = ["providerInputBudget"];
+
+// Keys this surface RENAMED, carried across with their VALUE (2026-08-30). postFoldNotice
+// was on the screen from 2026-08-27 and became preCommitNotice when the carrier stopped
+// soliciting briefs and started stating status. Dropping it the way a retired key is
+// dropped would silently revert a deployment that had deliberately turned the carrier ON,
+// and refusing it would revert every other value in the file over a key this package
+// itself wrote. Both readings mean the same thing on the same carrier, so the value moves.
+const RENAMED_FILE_KEYS: Readonly<Record<string, FoldSettingId>> = { postFoldNotice: "preCommitNotice" };
 
 // Threshold fields this package's own surface used to write. freshTail was the fifth
 // setting until 2026-08-23, when fresh-tail protection was deleted outright: nothing
@@ -179,6 +199,15 @@ export function readFoldSettingsFile(path: string = DEFAULT_FOLD_SETTINGS_PATH):
 	// wrote providerInputBudget until 2026-08-21, so refusing it would revert a file
 	// this package created. A key that was never on the surface is still a refusal.
 	let dropped = false;
+	for (const [from, to] of Object.entries(RENAMED_FILE_KEYS)) {
+		if (!Object.prototype.hasOwnProperty.call(parsed, from)) continue;
+		// The new name wins if a hand-edited file somehow carries both, since that is the
+		// one the screen and the runtime read; either way the old key leaves and the file is
+		// written back whole under the current surface.
+		if (parsed[to] === undefined) parsed[to] = parsed[from];
+		delete parsed[from];
+		dropped = true;
+	}
 	for (const key of Object.keys(parsed)) {
 		if (key === "thresholds" || (SCALAR_FIELDS as readonly string[]).includes(key)) continue;
 		if (RETIRED_FILE_KEYS.includes(key)) { delete parsed[key]; dropped = true; continue; }
@@ -195,11 +224,11 @@ export function readFoldSettingsFile(path: string = DEFAULT_FOLD_SETTINGS_PATH):
 		if (!applied.ok) return refused(`fold settings ${field} is invalid: ${applied.error}`);
 		// String("0.5") round-trips, but a JSON string would too, and the file's own type
 		// has to be right or the value means something different on the next read.
-		if (field === "postFoldNotice" && typeof value !== "boolean") {
-			return refused("fold settings postFoldNotice must be true or false");
+		if (field === "preCommitNotice" && typeof value !== "boolean") {
+			return refused("fold settings preCommitNotice must be true or false");
 		}
-		if (field === "toolFoldThreshold" && typeof value !== "number") {
-			return refused("fold settings toolFoldThreshold must be a number");
+		if ((field === "toolFoldThreshold" || field === "noticeLeadShare") && typeof value !== "number") {
+			return refused(`fold settings ${field} must be a number`);
 		}
 		Object.assign(scalars, applied.draft);
 	}
@@ -240,7 +269,8 @@ export function saveFoldSettingsFile(path: string, settings: FoldSettingsFile): 
 	// Written only when SET. An absent scalar means the package default, and writing the
 	// default out would pin today's value into a file that should follow the package.
 	if (settings.toolFoldThreshold !== undefined) clean.toolFoldThreshold = settings.toolFoldThreshold;
-	if (settings.postFoldNotice !== undefined) clean.postFoldNotice = settings.postFoldNotice;
+	if (settings.preCommitNotice !== undefined) clean.preCommitNotice = settings.preCommitNotice;
+	if (settings.noticeLeadShare !== undefined) clean.noticeLeadShare = settings.noticeLeadShare;
 	mkdirSync(dirname(path), { recursive: true });
 	const temporary = `${path}.tmp`;
 	writeFileSync(temporary, `${JSON.stringify(clean, null, 2)}\n`);
@@ -265,7 +295,8 @@ const EDITOR_ROWS: readonly EditorRow[] = [
 	{ id: "consolidateAfter", label: "Folds per group", description: "Once this many folds are visible, pi-fold groups them under one (consolidateAfter)" },
 	{ id: "minFoldChars", label: "Smallest fold", description: "Text this short is not worth folding on its own; it joins the fold beside it instead (minFoldChars)" },
 	{ id: "toolFoldThreshold", label: "Clip old tool results", description: "The oldest share of the window shows tool results shortened, still recoverable in full. Off keeps them whole (toolFoldThreshold)" },
-	{ id: "postFoldNotice", label: "Ask the model for briefs", description: "Invite the model to rewrite a fold's summary. Off is what the measured runs used (postFoldNotice)" },
+	{ id: "preCommitNotice", label: "Tell the model before folding", description: "Show the model the window's status once as a fold approaches: what is staged, what is pinned, what it can change. Off is what the measured runs used (preCommitNotice)" },
+	{ id: "noticeLeadShare", label: "How early to tell it", description: "How far below the folding point that status appears. Only used when the notice is on (noticeLeadShare)" },
 ];
 
 // The cycle lattice for both shares. Shares step in cents so no float drift reaches a
@@ -308,6 +339,11 @@ function shareCandidates(): number[] {
 // only to it: this list is stepped, never shown.
 function allowedValues(id: FoldSettingId, thresholds: ActiveContextThresholds): number[] {
 	if (id === "toolFoldThreshold") return TOOL_FOLD_CHOICES;
+	// THE LEAD STEPS THE ONE SHARE LATTICE, unfiltered. It answers to nothing but its own
+	// range: a lead wider than the trigger is legal and means "speak from the first
+	// measurement", which the runtime floors rather than refuses, so there is no
+	// cross-field invariant here for a filter to enforce.
+	if (id === "noticeLeadShare") return shareCandidates();
 	if (id === "consolidateAfter") return CONSOLIDATE_CHOICES;
 	if (id === "minFoldChars") return MIN_FOLD_CHOICES;
 	const { minTarget, maxTarget } = thresholds;
@@ -324,9 +360,9 @@ function rowRawValue(settings: FoldSettingsFile, id: FoldSettingId): string {
 	// file omits what was never set on purpose, so the screen has to supply the same
 	// value the runtime would, or the row would show a setting nobody chose.
 	if (!isThresholdField(id)) {
-		return id === "toolFoldThreshold"
-			? String(settings.toolFoldThreshold ?? DEFAULT_TOOL_FOLD_THRESHOLD)
-			: String(settings.postFoldNotice ?? false);
+		if (id === "toolFoldThreshold") return String(settings.toolFoldThreshold ?? DEFAULT_TOOL_FOLD_THRESHOLD);
+		if (id === "noticeLeadShare") return String(settings.noticeLeadShare ?? DEFAULT_NOTICE_LEAD_SHARE);
+		return String(settings.preCommitNotice ?? false);
 	}
 	const thresholds = settings.thresholds ?? DEFAULT_THRESHOLDS;
 	return String(thresholds[id]);
@@ -334,7 +370,13 @@ function rowRawValue(settings: FoldSettingsFile, id: FoldSettingId): string {
 
 function rowDisplayValue(settings: FoldSettingsFile, id: FoldSettingId, budgetTokens: number): string {
 	const raw = rowRawValue(settings, id);
-	if (id === "postFoldNotice") return raw === "true" ? "on" : "off";
+	if (id === "preCommitNotice") return raw === "true" ? "on" : "off";
+	if (id === "noticeLeadShare") {
+		// STATED AS THE DISTANCE IT IS, in the same dialect as the two band rows: a share of
+		// the budget, with the tokens it works out to, because "10%" alone reads as a point
+		// on the bar rather than as a gap before one.
+		return `${Math.round(Number(raw) * 100)}% earlier · ${Math.round(Number(raw) * budgetTokens).toLocaleString("en-US")} tokens`;
+	}
 	if (id === "toolFoldThreshold") {
 		// The share is of the window rather than of a budget, so it is stated as the
 		// slice it names instead of the token count the other two shares translate to.
@@ -493,7 +535,7 @@ export class FoldSettingsEditor extends Container {
 	private step(id: FoldSettingId, direction: number): void {
 		// A SWITCH HAS NO LATTICE. Either direction moves to the other value, which is
 		// what a person expects of a two-state row sitting among stepped ones.
-		if (id === "postFoldNotice") {
+		if (id === "preCommitNotice") {
 			this.applyAndSave(id, rowRawValue(this.draft, id) === "true" ? "false" : "true");
 			return;
 		}

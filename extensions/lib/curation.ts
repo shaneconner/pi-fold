@@ -9,68 +9,108 @@ import {
 } from "./policy.ts";
 
 /**
- * THE POST-FOLD NOTICE: THE ONE MOMENT THE AGENT KNOWS SOMETHING THE RUNTIME DOES NOT.
+ * THE PRE-COMMIT NOTICE: STATUS AT THE ONE MOMENT IT CAN STILL BE ACTED ON (2026-08-30).
  *
- * The runtime has just cut folds behind the agent, out of material the agent is still
- * looking at. It knows the spans, the sizes and the staleness; it does not know why any
- * of it mattered. So the notice states what was cut and asks for exactly one thing, a
- * brief, and it states the price of answering, which is nothing: the folds it names are
- * PENDING, so a brief written now is stored outside the projection and reaches the window
- * only when the commit writes that placeholder for the first time.
+ * WHAT THIS REPLACED, AND WHY. Until 2026-08-30 this carrier was a brief SOLICITATION.
+ * It fired on a count of unbriefed folds and its middle sentence read "You know why the
+ * span mattered and what you will want back from it; the automatic brief reads the span
+ * alone and does not." That is flattery in the shape of an instruction: it tells the
+ * model it holds knowledge the runtime lacks at a moment when its actual grounds are a
+ * fold id, a kind and a 160-character head. sol-20260826-full2 priced the result. Agent
+ * briefs drew 3 correct against 9 wrong, the worst of every draw on the campaign, with
+ * the errors tracking the annotations, which is why postFoldNotice was defaulted false
+ * on 2026-08-28 rather than fixed. Shane, 2026-08-30: agent-provided briefs "spent
+ * tokens to confuse themselves", so the carrier should be "less of a suggestion to add
+ * briefs and more informatory".
  *
- * It is batched rather than continuous. One notice per cut is noise, and noise is how
- * guidance gets ignored; this one appears when enough folds are standing unbriefed to be
- * worth a turn's attention, and it is ephemeral, so it never accumulates.
+ * SO IT STATES AND DOES NOT ASK. Every sentence here is a fact the runtime measured:
+ * where the commit fires, how far away it is, what is staged, how much that frees, what
+ * is pinned and what the pin costs. The verbs are a REFERENCE LIST, seated last and
+ * carrying no argument for using any of them. The agent is told what is true and what it
+ * may do; it is not told that it knows something.
+ *
+ * IT SPEAKS ONCE PER APPROACH. The trigger is occupancy, not a fold count, and the caller
+ * latches it on the crossing, so a window that sits in the band for twenty passes gets
+ * one notice rather than twenty. It is ephemeral, so it never accumulates.
+ *
+ * THREE CORRECTIONS OF FACT the old copy could not carry, all of them load-bearing:
+ * pinning is not preservation (folding already preserves; a pin keeps bytes RAW AND IN
+ * VIEW and frees nothing), a staged span has not moved yet, and the headroom figure says
+ * whether it was measured or estimated rather than presenting either as the other.
  */
 export function foldNoticeText(input: {
-  unbriefed: ReadonlyArray<{ id: string; kind: string; tokens: number; brief?: string }>;
-  pending: number;
+  staged: ReadonlyArray<{ id: string; kind: string; tokens: number; brief?: string; briefed?: boolean }>;
+  freedTokens: number;
+  briefedCount: number;
+  pinnedEntries: number;
+  pinnedShare: number;
+  maxPinnedShare: number;
+  headroomTokens: number;
+  commitAtShare: number;
+  measured: boolean;
   toolName: string;
   brandNoun?: string;
 }): string {
   const brand = contextBrand(input.brandNoun ?? DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN);
-  // THE INSTRUCTION IS SEATED BEFORE THE LIST, and the list is what gives when the
-  // notice runs out of room. The first cut of this built one string with the ids in the
-  // opening line and handed the whole thing to the bound, so a seven-fold batch spent its
-  // budget on ids and lost "here is how to answer" off the end: the agent was told which
-  // folds were unbriefed and not told that briefing them was free, which is the only fact
-  // in here it cannot work out for itself. Fold count grows without limit and the
-  // instruction does not, so the instruction is fixed and the ids are the variable part.
-  const head = [
-    `[${brand} folds] ${input.unbriefed.length} of your ${input.pending} pending fold(s) carry ` +
-      "no brief yet. These spans are cut but NOT folded: every byte they cover is still in " +
-      "front of you exactly as it was, and they enter your window only when a commit " +
-      "applies them.",
-    `Give each one a sentence: ${input.toolName} {"action":"brief","id":"<fold-id>","brief":"..."}. ` +
-      "You know why the span mattered and what you will want back from it; the automatic " +
-      "brief reads the span alone and does not. Writing it now costs your window nothing, " +
-      "because the fold is not in your window yet.",
-    `Wrong boundary? ${input.toolName} {"action":"reboundary","ids":[...]} re-cuts it. ` +
-      `Should not be taken at all? ${input.toolName} {"action":"unmark","ids":["<fold-id>"]}.`,
-  ].join("\n");
+  const n = (value: number): string => Math.round(value).toLocaleString("en-US");
+  const pct = (share: number): string => `${Math.round(share * 100)}%`;
+  // THE STATUS IS SEATED BEFORE THE LIST, and the list is what gives when the notice runs
+  // out of room. Inherited unchanged from the solicitation, for the same reason: fold
+  // count grows without limit and the status does not, so a wide batch must not be able
+  // to push the facts off the end and leave a bare row of ids behind.
+  //
+  // MEASURED OR ESTIMATED, NAMED. The runtime's own law is that an estimate may schedule
+  // work and may not veto a request; scheduling this notice off an estimate is squarely
+  // inside that, but presenting an estimate as a count is not, so the basis rides along.
+  const status = [
+    `[${brand} folds] A commit fires at ${pct(input.commitAtShare)} of the serving budget: ` +
+      `about ${n(input.headroomTokens)} tokens of headroom left ` +
+      `(${input.measured ? "provider-measured" : "estimated; no provider count yet"}).`,
+    `Staged: ${n(input.staged.length)} fold${input.staged.length === 1 ? "" : "s"}` +
+      `, ${n(input.briefedCount)} carrying a brief you wrote` +
+      `, freeing about ${n(input.freedTokens)} tokens when the commit applies them.`,
+  ];
+  if (input.pinnedEntries > 0) {
+    status.push(`Pinned: ${n(input.pinnedEntries)} ` +
+      `entr${input.pinnedEntries === 1 ? "y" : "ies"} held raw, ` +
+      `${pct(input.pinnedShare)} of the window against a ${pct(input.maxPinnedShare)} cap.`);
+  }
+  status.push(
+    "Nothing has moved yet: every byte these spans cover is still in front of you, and a " +
+      "staged fold enters your window only when the commit applies it. Folded material " +
+      "stays exactly recoverable through peek. A pin holds an entry raw and in view and " +
+      "frees nothing toward the commit, so pinned mass makes the rest fold sooner.",
+    `Verbs: ${input.toolName} {"action":"status"} · {"action":"brief","id":"<fold-id>","brief":"..."} · ` +
+      '{"action":"reboundary","ids":[...]} · {"action":"unmark","ids":["<fold-id>"]} · ' +
+      '{"action":"pin","ids":["<entry-id>"]} · {"action":"unpin","ids":["<entry-id>"]}.',
+  );
+  const head = status.join("\n");
   // WHAT IT COULD NOT NAME, IT COUNTS (gate 136's law, and gate 115's shape one level
   // out): a list that stops early and says nothing reads as a complete list.
   // EACH ROW IDENTIFIES ITS SPAN. The pending mark carries the deterministic brief the
   // runtime cut it with, and a notice that withholds it makes the agent guess: the
   // dogfooded 1M session answered "I need to brief three pending folds. What are they?
   // Likely: ..." from memory, and a wrong guess writes an accurate-sounding brief onto
-  // the wrong fold. The head is the identification; the agent adds what it cannot know.
+  // the wrong fold. The row is the identification, and it now names EVERY staged fold
+  // rather than only the unbriefed ones, because this is a status: a list that silently
+  // omitted the briefed folds would understate what the commit is about to take.
   const NOTICE_ROW_CHARS = 160;
-  const entries = input.unbriefed
-    .map((fold) => `${fold.id} (${fold.kind}, ~${fold.tokens} tokens)` +
+  const entries = input.staged
+    .map((fold) => `${fold.id} (${fold.kind}, ~${fold.tokens} tokens` +
+      `${fold.briefed ? ", briefed" : ""})` +
       (fold.brief ? `: ${oneLine(fold.brief, NOTICE_ROW_CHARS)}` : ""));
   const overflowText = (seated: number) =>
-    `${input.toolName} {"action":"status"} lists the other ${input.unbriefed.length - seated}.`;
+    `${input.toolName} {"action":"status"} lists the other ${input.staged.length - seated}.`;
   let seated = entries.length;
-  let list = `Unbriefed: ${entries.join("; ")}.`;
+  let list = `Staged spans: ${entries.join("; ")}.`;
   while (seated > 0 && Buffer.byteLength(`${head}\n${list}`, "utf8") > FOLD_NOTICE_BYTES) {
     seated -= 1;
     list = seated === 0
       ? overflowText(0)
-      : `Unbriefed: ${entries.slice(0, seated).join("; ")}. ${overflowText(seated)}`;
+      : `Staged spans: ${entries.slice(0, seated).join("; ")}. ${overflowText(seated)}`;
   }
   return boundReceiptText(`${head}\n${list}`, FOLD_NOTICE_BYTES,
-    `[${brand} folds] Pending folds are waiting for briefs; the list is unavailable this pass.`);
+    `[${brand} folds] A commit is approaching; the staged list is unavailable this pass.`);
 }
 
 export interface ContextReceipt {

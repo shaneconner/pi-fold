@@ -92,7 +92,7 @@ import {
   activeContextSource,
   ACTIVE_CONTEXT_POLICY,
   ACTIVE_CONTEXT_TOOL_ACTIONS,
-  UNBRIEFED_FOLDS_BEFORE_NOTICE,
+  resolveNoticeLeadShare,
   contextBrand,
   DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
   DEFAULT_ACTIVE_CONTEXT_COMMAND_NAMES,
@@ -229,11 +229,11 @@ export * from "./lib/transcript.ts";
  * which is the settings file's own law, and the refusal text is the same sentence
  * wherever the bad value came from.
  */
-function resolvedPostFoldNotice(value: unknown): boolean {
+function resolvedPreCommitNotice(value: unknown): boolean {
   if (value !== undefined && typeof value !== "boolean") {
-    throw new Error("postFoldNotice must be a boolean: true keeps the post-fold invitation " +
-      "notice, false ships every fold with the runtime's deterministic brief and no " +
-      "carrier inviting the agent to improve it");
+    throw new Error("preCommitNotice must be a boolean: true states the window's status to " +
+      "the agent once per approach to a commit, false ships every fold with the runtime's " +
+      "deterministic brief and puts no carrier in the projection at all");
   }
   return value ?? false;
 }
@@ -265,14 +265,21 @@ export function registerActiveContext(pi: any, options: {
    *  [0, 1), where 0 turns the diet off; 0.50 is what every fold repetition from 3 onward
    *  ran, so the default is the value that was measured rather than the absence of one. */
   toolFoldThreshold?: number;
-  /** THE INVITATION SWITCH (public since 2026-08-27; DEFAULT FALSE since 2026-08-28,
-   *  Shane, on the sol-20260826-full2 verdict). false is the deterministic shape the
-   *  campaign measured and the one it recommends: no carrier ever invites a brief and
-   *  every fold goes out with the runtime's own words, which drew 14, 14, 9 and 8 correct
-   *  against the invited condition's 3. true restores the standing invitation for the
-   *  agent to improve a brief. Either way the agent verbs stay on the tool, so an agent
-   *  that finds a fold can still annotate what it reads. */
-  postFoldNotice?: boolean;
+  /** THE NOTICE SWITCH (public since 2026-08-27 as postFoldNotice; DEFAULT FALSE since
+   *  2026-08-28, Shane, on the sol-20260826-full2 verdict; RESHAPED from a brief
+   *  solicitation into a status statement on 2026-08-30). false is the deterministic
+   *  shape the campaign measured: no carrier reaches the projection at all and every fold
+   *  goes out with the runtime's own words, which drew 14, 14, 9 and 8 correct against
+   *  the soliciting condition's 3. true states the window's status once per approach to a
+   *  commit: where the commit fires, how far away it is, what is staged, what that frees,
+   *  what is pinned and what the pin costs, with the verbs listed and no argument made
+   *  for any of them. Either way the agent verbs stay on the tool. */
+  preCommitNotice?: boolean;
+  /** HOW FAR BEFORE THE COMMIT THE NOTICE SPEAKS (2026-08-30, Shane), as a share of the
+   *  serving budget below maxTarget; default DEFAULT_NOTICE_LEAD_SHARE 0.10. A DISTANCE
+   *  rather than a point, so it tracks a band that moves. Read only when preCommitNotice
+   *  is true. */
+  noticeLeadShare?: number;
 }): {
   projectionCandidates: (ctx: any) => Array<Record<string, unknown>>;
 } {
@@ -287,8 +294,22 @@ export function registerActiveContext(pi: any, options: {
   // pi booted with. They are `let` so the live applier published below can replace them,
   // and every reader takes the variable rather than a copy, so a swap reaches the next
   // snapshot, the next commit decision and the status line without anything else moving.
-  let postFoldNotice = resolvedPostFoldNotice(options.postFoldNotice);
+  let preCommitNotice = resolvedPreCommitNotice(options.preCommitNotice);
+  let noticeLeadShare = resolveNoticeLeadShare(options.noticeLeadShare);
   let toolFoldThreshold = resolvedToolFoldThreshold(options.toolFoldThreshold);
+  // THE RENAMED OPTION IS REFUSED BY NAME, not ignored (2026-08-30). postFoldNotice was
+  // public for three days and named a carrier that no longer exists in that shape: it
+  // fired on a fold count, after the cut, and asked for briefs. Silently accepting the
+  // old name would run the new mechanism under a description of the old one, and
+  // silently DROPPING it would turn a deployment that deliberately chose the invitation
+  // into a silent one without saying so.
+  if (Object.hasOwn(options, "postFoldNotice")) {
+    throw new Error("postFoldNotice is now preCommitNotice, and the carrier it switches has " +
+      "changed: it fires on occupancy approaching the commit rather than on a count of " +
+      "unbriefed folds, and it STATES the window's status rather than asking for briefs. " +
+      "The default is still false. noticeLeadShare sets how far ahead of the commit it " +
+      "speaks");
+  }
   for (const removed of ["foldScheduling", "foldPeekResults", "toolActions"]) {
     if (Object.hasOwn(options, removed)) {
       throw new Error(`${removed} is no longer an option: epoch scheduling, peek foldability ` +
@@ -388,6 +409,9 @@ export function registerActiveContext(pi: any, options: {
     bandTopMeasurement: null as unknown,
     /** The snapshot-and-state key whose frontier scan came back empty; see advanceFoldFrontier. */
     frontierEmptyKey: null as string | null,
+    /** The commit count the pre-commit notice last spoke at; null while it is re-armed.
+     *  One notice per approach, and a landed commit begins the next approach. */
+    noticeLatch: null as number | null,
     pendingManual: false,
     preparing: null as { id: string; controller: AbortController; promise: Promise<void> } | null,
     lastPreparationError: null as string | null,
@@ -488,6 +512,8 @@ export function registerActiveContext(pi: any, options: {
   const curation = {
     receipts: [] as ContextReceipt[],
     contextCalls: 0,
+    /** Receipts delivered this session, monotonic; the pre-commit notice's re-arm signal. */
+    commitsDelivered: 0,
     wallEpisodeOpen: false,
     recoveryAttempts: 0,
     pendingRejection: null as { status: number; ordinal: number } | null,
@@ -615,6 +641,10 @@ export function registerActiveContext(pi: any, options: {
 
   const deliverReceipt = (receipt: ContextReceipt): void => {
     curation.receipts = withReceipt(curation.receipts, receipt);
+    // MONOTONIC, unlike `curation.receipts.length`, which saturates at MAX_CONTEXT_RECEIPTS
+    // and would stop distinguishing one approach from the next once the session is long
+    // enough to matter. This is the only counter the notice latch reads.
+    curation.commitsDelivered += 1;
     emit("context.receipt", {
       receipt_kind: receipt.kind,
       trigger: receipt.trigger,
@@ -708,19 +738,22 @@ export function registerActiveContext(pi: any, options: {
     assertThresholdsServable(nextThresholds,
       providerInputBudget ?? servingBudgetTokens(DEFAULT_CONTEXT_WINDOW));
     const nextToolFoldThreshold = resolvedToolFoldThreshold(settings?.toolFoldThreshold);
-    const nextPostFoldNotice = resolvedPostFoldNotice(settings?.postFoldNotice);
+    const nextPreCommitNotice = resolvedPreCommitNotice(settings?.preCommitNotice);
+    const nextNoticeLeadShare = resolveNoticeLeadShare(settings?.noticeLeadShare);
     const changed: string[] = [];
     for (const field of ["maxTarget", "minTarget", "consolidateAfter", "minFoldChars"] as const) {
       if (nextThresholds[field] !== thresholds[field]) changed.push(field);
     }
     if (nextToolFoldThreshold !== toolFoldThreshold) changed.push("toolFoldThreshold");
-    if (nextPostFoldNotice !== postFoldNotice) changed.push("postFoldNotice");
+    if (nextPreCommitNotice !== preCommitNotice) changed.push("preCommitNotice");
+    if (nextNoticeLeadShare !== noticeLeadShare) changed.push("noticeLeadShare");
     // A SAVE THAT MOVED NOTHING IS NOT AN EVENT. The screen saves every keystroke that
     // lands, including a row stepped back to where it started.
     if (!changed.length) return;
     thresholds = nextThresholds;
     toolFoldThreshold = nextToolFoldThreshold;
-    postFoldNotice = nextPostFoldNotice;
+    preCommitNotice = nextPreCommitNotice;
+    noticeLeadShare = nextNoticeLeadShare;
     dropDerivationMemo();
     // THE STREAM CARRIES IT, because from here on the session's commits fire at a point
     // no earlier record explains, and an archive reading this run later has no other way
@@ -732,7 +765,8 @@ export function registerActiveContext(pi: any, options: {
       consolidate_after: thresholds.consolidateAfter,
       min_fold_chars: thresholds.minFoldChars,
       tool_fold_threshold: toolFoldThreshold,
-      post_fold_notice: postFoldNotice,
+      pre_commit_notice: preCommitNotice,
+      notice_lead_share: noticeLeadShare,
     });
     // The person is standing in the settings screen, so the line they will look at next
     // is the status line. Without this it keeps the old number until a context event.
@@ -1710,9 +1744,9 @@ export function registerActiveContext(pi: any, options: {
   };
 
   /**
-   * Tell the agent what was cut, once there is enough of it to be worth a turn.
+   * Tell the agent where the window stands, once per approach to a commit.
    *
-   * It is built from LIVE state, so it names what is unbriefed at the pass it speaks on,
+   * It is built from LIVE state, so it names what is staged at the pass it speaks on,
    * and it is admitted ONCE per frozen projection, so a pass that adds material leaves it
    * buried at its own index rather than moving it to the tail. Those two together mean it
    * is a snapshot rather than a running tally: cuts staged after it spoke wait for the
@@ -1722,19 +1756,54 @@ export function registerActiveContext(pi: any, options: {
    * epoch early. What it must never do is ask twice for a brief the agent has written,
    * and it does not: the rebuild reads the marks, not its own last text.
    */
-  const appendFoldNotice = (projected: unknown[], snapshot: ActiveContextSnapshot): unknown[] => {
+  const appendFoldNotice = (
+    projected: unknown[],
+    snapshot: ActiveContextSnapshot,
+    bodyBytes: number,
+  ): unknown[] => {
     // The deterministic experiment condition: cuts stage and commits land exactly as
-    // ever, but nothing invites a brief, so briefs stay the runtime's own.
-    if (!postFoldNotice) return projected;
+    // ever, but no carrier reaches the projection at all.
+    if (!preCommitNotice) return projected;
     if (!persistence.state) return projected;
     const held = pendingMarks(persistence.state);
-    const unbriefed = held.filter((mark) =>
-      mark.briefProvenance?.kind !== "supplied" && mark.briefProvenance?.kind !== "augmented");
-    // BATCHED, AND APPENDED ONCE. A notice per cut is noise, and noise is how guidance
-    // gets ignored; the frontier cuts often and this speaks only when a batch has built
-    // up. `carrierAdmitted` is what makes it an APPEND rather than a rewrite: once the
-    // carrier is in the frozen projection it is not pushed again, so raw material
-    // arriving afterwards lands after it and the prefix in front of it never moves.
+    const pinnedMass = explicitProtectedMass(snapshot, persistence.state);
+    // NOTHING TO REPORT IS NOT AN OCCASION. With no staged fold and no pin there is no
+    // status: the commit that is coming will apply nothing, and a notice saying so is a
+    // turn's attention spent on the absence of news.
+    if (!held.length && !pinnedMass.refs) return projected;
+    const capacity = servingCapacity(snapshot.contextWindow);
+    if (!(capacity.budgetTokens > 0)) return projected;
+    // THE TRIGGER IS OCCUPANCY, AND IT NAMES ITS OWN BASIS. The provider's count is
+    // ground truth; the estimate is what there is before the first response lands, and
+    // this runtime's standing law is that an estimate MAY SCHEDULE WORK and may not veto
+    // a request. Appending a notice is scheduling. `bodyBytes` is the serialization this
+    // pass already performed for the freeze predicate, so reading a share here adds no
+    // second pass over the window (gate 155's law).
+    const measured = capacity.usedTokens !== null;
+    const usedTokens = measured
+      ? capacity.usedTokens!
+      : Math.ceil(bodyBytes / projectionCharsPerToken());
+    const share = usedTokens / capacity.budgetTokens;
+    // A DISTANCE BELOW THE TRIGGER, floored at zero so a lead wider than the trigger
+    // means "from the first measurement" rather than a negative point nothing crosses.
+    const firePoint = Math.max(0, thresholds.maxTarget - noticeLeadShare);
+    // EDGE TRIGGERED, ONE NOTICE PER APPROACH. A window sits in the band for many passes,
+    // and the freeze breaks whenever the prefix changes, so `carrierAdmitted` alone would
+    // let this re-admit all the way up the band. Two things re-arm it and nothing else:
+    // falling back below the fire point, and a commit landing, which is the event that
+    // ends one approach and begins the next. Without the second, a commit that lands
+    // above the fire point would leave the latch shut for the rest of the session.
+    if (share < firePoint) {
+      ladder.noticeLatch = null;
+      return projected;
+    }
+    if (ladder.noticeLatch !== null && ladder.noticeLatch === curation.commitsDelivered) {
+      return projected;
+    }
+    // APPENDED ONCE PER FROZEN PROJECTION. `carrierAdmitted` is what makes it an APPEND
+    // rather than a rewrite: once the carrier is in the frozen projection it is not
+    // pushed again, so raw material arriving afterwards lands after it and the prefix in
+    // front of it never moves.
     //
     // The first cut of this withdrew the carrier and re-pushed it at the tail every pass,
     // the way the steward band had to because a band must be able to stand down. That is
@@ -1743,23 +1812,42 @@ export function registerActiveContext(pi: any, options: {
     // gates 110 and 111 read the whole projection as rewritten and dropped the occupancy
     // anchor back to the estimate. A carrier that moves on a quiet pass costs the cache,
     // which is the one thing this design exists to avoid.
-    if (unbriefed.length < UNBRIEFED_FOLDS_BEFORE_NOTICE) return projected;
     if (!carrierAdmitted("fold-notice")) return projected;
+    const briefed = (mark: Record<string, unknown>): boolean =>
+      (mark as any).briefProvenance?.kind === "supplied" ||
+      (mark as any).briefProvenance?.kind === "augmented";
+    const staged = held.map((mark) => ({
+      id: mark.id as string,
+      kind: mark.kind as string,
+      tokens: estimatedTokens(markFreedBytes(snapshot, persistence.state!, mark)),
+      brief: typeof mark.brief === "string" ? mark.brief : undefined,
+      briefed: briefed(mark),
+    }));
+    // THE SHARE IS MEASURED THE WAY THE CAP MEASURES IT. The notice states the pinned
+    // share against MAX_PINNED_SHARE, and `applyProtectionChange` refuses past that cap
+    // on `explicitProtectedMass`, so quoting the stale-only figure `windowClaims` reports
+    // would put a number beside a cap it is not compared against.
     const text = foldNoticeText({
-      unbriefed: unbriefed.map((mark) => ({
-        id: mark.id,
-        kind: mark.kind,
-        tokens: estimatedTokens(markFreedBytes(snapshot, persistence.state!, mark)),
-        brief: typeof mark.brief === "string" ? mark.brief : undefined,
-      })),
-      pending: held.length,
+      staged,
+      freedTokens: staged.reduce((total, fold) => total + fold.tokens, 0),
+      briefedCount: staged.filter((fold) => fold.briefed).length,
+      pinnedEntries: pinnedMass.refs,
+      pinnedShare: estimatedTokens(pinnedMass.bytes) / capacity.budgetTokens,
+      maxPinnedShare: MAX_PINNED_SHARE,
+      headroomTokens: Math.max(0, thresholds.maxTarget * capacity.budgetTokens - usedTokens),
+      commitAtShare: thresholds.maxTarget,
+      measured,
       toolName,
       brandNoun,
     });
+    ladder.noticeLatch = curation.commitsDelivered;
     emit("context.frontier", {
       cut: 0,
       pending_marks: held.length,
-      unbriefed: unbriefed.length,
+      briefed: staged.filter((fold) => fold.briefed).length,
+      occupancy_share: Number(share.toFixed(4)),
+      fire_point_share: firePoint,
+      measured,
       notice_chars: text.length,
     });
     projected.push({
@@ -2119,7 +2207,7 @@ export function registerActiveContext(pi: any, options: {
     freeze.body = body;
     freeze.bodyText = bodyText;
     appendReceipts(projected, snapshot);
-    appendFoldNotice(projected, snapshot);
+    appendFoldNotice(projected, snapshot, bodyText.length);
     return holdFrozen(projected);
   };
   const noteProjection = (projected: unknown[], serialized?: string): void => {

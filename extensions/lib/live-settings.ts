@@ -1,8 +1,8 @@
 // THE CHANNEL FROM /fold-settings TO THE RUNNING RUNTIME.
 //
 // THE NEED, from a live session (2026-08-29). /fold-settings wrote the file and nothing
-// else: `registerPiFold` resolves thresholds, toolFoldThreshold and postFoldNotice ONCE
-// at registration, so a session kept the settings pi booted with while the screen showed
+// else: `registerPiFold` resolves thresholds, toolFoldThreshold and the notice settings
+// ONCE at registration, so a session kept the settings pi booted with while the screen showed
 // what the person had just chosen. Shane's terminal held both at once, "Start folding at
 // 40%" on the screen over "commit at 90%" on the status line, and neither surface said
 // why. The file was the durable truth and the running session was not reading it.
@@ -35,7 +35,8 @@ import type { ActiveContextThresholds } from "./policy.ts";
 export interface LiveFoldSettings {
 	thresholds?: ActiveContextThresholds;
 	toolFoldThreshold?: number;
-	postFoldNotice?: boolean;
+	preCommitNotice?: boolean;
+	noticeLeadShare?: number;
 }
 
 /** Refuses by throwing, exactly as registration does, and leaves the runtime untouched. */

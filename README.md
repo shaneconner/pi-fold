@@ -65,7 +65,7 @@ Four papers with figure sources, redacted per-request ledgers and campaign logs 
 
 The one thing worth adding is a long-term memory store. Rotation and retention are different jobs: folding gets stale material out of the window, a store keeps what the session learned. A handoff summary tries to do both in one record, written once under time pressure, bounded by the window it has to fit in. Folding is the rotation half and only that half.
 
-Five options, and every other name is refused.
+Six options, and every other name is refused.
 
 | Option | Default | Effect |
 | --- | --- | --- |
@@ -73,7 +73,8 @@ Five options, and every other name is refused.
 | `providerInputBudget` | the transport's descriptor | The tokens this deployment may actually put in a request, already net of any output reservation. Every ratio, fence and budget on this page is a share of this one number. |
 | `blacklistAutoFoldTools` | `new Set()` | The exception list. Every completed tool batch is foldable without an agent mark; name a tool here and its results stay raw. |
 | `toolFoldThreshold` | `0.50` | The tool-call diet: a share in `[0, 1)` naming the oldest fraction of the window whose tool results are clipped in view. `0` turns it off. |
-| `postFoldNotice` | `false` | The invitation switch. False is the shape that won the campaign above: no carrier invites a brief and every fold ships the runtime's own words. `true` appends a standing invitation to improve a pending brief. |
+| `preCommitNotice` | `false` | The notice switch. False is the shape that won the campaign above: no carrier reaches the projection and every fold ships the runtime's own words. `true` states the window's status to the agent once per approach to a commit: where the commit fires, how far away it is, what is staged, what that frees, what is pinned and what the pin costs, with the verbs listed and no argument made for using any of them. |
+| `noticeLeadShare` | `0.10` | How far below the commit trigger that notice speaks, as a share of the serving budget. A distance rather than a point, so it follows a band that moves. Read only when `preCommitNotice` is on. |
 
 Four commands ship for the human: `/fold-status`, `/fold` (commit every staged mark now), `/fold-editor` (the interactive map of the window) and `/fold-settings` (edit the options above; each change is saved to `~/.config/pi-fold/settings.json` and takes effect in the running session).
 
