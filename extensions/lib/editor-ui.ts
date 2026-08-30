@@ -80,6 +80,11 @@ export interface FoldEditorData {
 const BAR_WIDTH = 24;
 const MAX_VISIBLE_ROWS = 24;
 const EXPANDED_ENTRY_CAP = 40;
+/** How many raw messages one stretch renders. Raw stretches open by default now, so this
+ *  is the bound on the DEFAULT view rather than on a gesture, and it is high because the
+ *  claim the view makes is that it shows the model's window. A stretch that reaches it
+ *  says so on its summary row rather than stopping quietly. */
+const RAW_ENTRY_CAP = 500;
 
 export function occupancyBar(usedTokens: number | null, budgetTokens: number): string {
 	const ratio = usedTokens !== null && budgetTokens > 0
@@ -289,6 +294,10 @@ interface RenderRow {
 	entryId?: string;
 	/** A PROPOSED row: withdrawable with u. */
 	proposedMarkId?: string;
+	/** A RAW-STRETCH summary row. Its open state lives in the INVERTED set, because raw
+	 *  stretches open by default; sniffing the key prefix for this would put the two
+	 *  opposite defaults one typo apart. */
+	rawBlockId?: string;
 	/** A FOLD row: pinnable, expandable into the model's window, dissolvable. Carries the
 	 *  fold's own id, which is not the row key: the key is path-qualified so a nested fold
 	 *  renders once per ancestor chain, and the runtime only ever accepts the bare id. */
@@ -342,6 +351,28 @@ export class FoldEditorView {
 	private actions: FoldEditorActions;
 	private selectedKey: string;
 	private expanded: Set<string> = new Set();
+	/**
+	 * RAW STRETCHES THE READER HAS CLOSED, which is the exception rather than the rule.
+	 *
+	 * THE DEFAULT VIEW IS WHAT THE MODEL SEES (2026-08-30). Raw entries used to hide behind
+	 * a "raw · 14 entries" summary row that had to be opened one stretch at a time, so the
+	 * one surface built to show a person the model's window opened showing almost none of
+	 * it. The model sees every one of those messages in full; it sees a fold as ONE
+	 * placeholder. So the editor now opens the same way: a row per raw message, a row per
+	 * fold, and digging into a fold reveals what the model is NOT being shown. Shane,
+	 * 2026-08-30, on pi's /tree: "I basically want something similar but suited to our
+	 * extension's needs."
+	 *
+	 * The summary row stays as a group label and a collapse target, because a long raw
+	 * stretch a reader has finished with is worth folding away FOR THE READER, which is a
+	 * different act from folding it for the model and costs the model nothing.
+	 */
+	private collapsedRaw: Set<string> = new Set();
+	/** The search term, or null when the reader is not searching. Narrowing NEVER hides a
+	 *  row silently: the count of what it removed is stated in the footer. */
+	private filter: string | null = null;
+	private searchMode = false;
+	private rowCache: { data: FoldEditorData; signature: string; rows: RenderRow[] } | null = null;
 	private detailedEntry: string | null = null;
 	/** Where the open detail is being read from, in characters. THE READER'S POSITION AND
 	 *  NOTHING ELSE: paging it moves no bytes, writes no state and the model never learns
@@ -550,14 +581,28 @@ export class FoldEditorView {
 		});
 	}
 
-	private visibleRows(): RenderRow[] {
+	/**
+	 * ONE PREDICATE FOR TWO OPPOSITE DEFAULTS, so they cannot drift apart.
+	 *
+	 * A FOLD IS CLOSED BY DEFAULT because that is what the model sees: one placeholder.
+	 * A RAW STRETCH IS OPEN BY DEFAULT for exactly the same reason: the model sees every
+	 * message in it. The editor's default view is the model's own window, and opening a
+	 * fold is the one gesture that shows the reader something the model is not being
+	 * shown. Inverting the raw default is what turned this from a map of blocks into a
+	 * map of the window.
+	 */
+	private blockIsOpen(block: FoldEditorBlock): boolean {
+		return block.type === "raw" ? !this.collapsedRaw.has(block.id) : this.expanded.has(block.id);
+	}
+
+	private allRows(): RenderRow[] {
 		const rows: RenderRow[] = [];
 		for (const block of this.data.blocks) {
 			if (block.type === "fold") {
 				this.renderFold(block, 0, rows, "");
 				continue;
 			}
-			const isOpen = this.expanded.has(block.id);
+			const isOpen = this.blockIsOpen(block);
 			const cursor = this.selectedKey === block.id ? "\u276f" : " ";
 			if (block.type === "proposed") {
 				const isLadder = block.origin === "ladder";
@@ -603,17 +648,24 @@ export class FoldEditorView {
 					}
 				}
 			} else {
-				const label = `\u00b7 raw · ${block.sourceCount} ` +
+				// THE MARKER SAYS WHICH WAY THIS ROW GOES, because raw stretches now open by
+				// default and a reader meeting a closed one has to be able to tell it apart from
+				// a stretch that is simply empty. "hidden from this view only" is the whole
+				// distinction the surface rests on, said where it is easiest to get wrong.
+				const marker = isOpen ? "\u25bc" : "\u25b8";
+				const label = `${marker} raw · ${block.sourceCount} ` +
 					`${block.sourceCount === 1 ? "entry" : "entries"}` +
-					`${block.rolesSummary ? ` ${block.rolesSummary}` : ""}`;
+					`${block.rolesSummary ? ` ${block.rolesSummary}` : ""}` +
+					`${isOpen ? "" : " · hidden from this view only"}`;
 				rows.push({
 					key: block.id,
 					text: `${cursor}${this.color("dim", label)}`,
 					toggleId: block.id,
+					rawBlockId: block.id,
 				});
 				if (isOpen) {
 					let ordinal = 0;
-					for (const entry of block.entries.slice(0, 60)) {
+					for (const entry of block.entries.slice(0, RAW_ENTRY_CAP)) {
 						const pinBadge = this.data.pinned.includes(entry.id) ? " \ud83d\udccc" : "";
 						const entryKey = `${block.id}:${entry.id}:r${ordinal}`;
 						ordinal += 1;
@@ -650,6 +702,65 @@ export class FoldEditorView {
 		return rows;
 	}
 
+	/**
+	 * WHAT THE READER IS LOOKING FOR, AND WHAT THAT HID.
+	 *
+	 * pi's /tree narrows by typing and the editor had no way to narrow at all, which is
+	 * survivable at a dozen blocks and useless at the density this view now opens with.
+	 * The term matches a row's rendered text, colour codes and all removed, so what is
+	 * searched is exactly what is on screen.
+	 *
+	 * A ROW KEEPS ITS PARENTS. A matching entry three levels inside a fold, shown alone,
+	 * is a line of text with no statement of where it came from, so every ancestor of a
+	 * match is kept: the reader sees the match seated in the structure that explains it.
+	 *
+	 * AND THE OMISSION IS COUNTED, never silent, which is gate 136's law on a surface a
+	 * person acts from. The footer states how many rows the term removed.
+	 */
+	private filterRows(rows: RenderRow[]): RenderRow[] {
+		const term = this.filter?.trim().toLowerCase();
+		if (!term) return rows;
+		const plain = (text: string): string => text.replace(/\[\/?[a-z]+\]/g, "").toLowerCase();
+		const keep = new Set<number>();
+		for (let index = 0; index < rows.length; index += 1) {
+			if (!plain(rows[index].text).includes(term)) continue;
+			keep.add(index);
+			// Walk back to the ancestors: a row's key is path-qualified, so any earlier row
+			// whose key is a prefix of this one is one of its parents.
+			for (let back = index - 1; back >= 0; back -= 1) {
+				if (rows[index].key.startsWith(rows[back].key)) keep.add(back);
+			}
+		}
+		return rows.filter((_row, index) => keep.has(index));
+	}
+
+	/**
+	 * THE ROW LIST, BUILT ONCE PER STATE. Every keystroke asks for it two or three times
+	 * (the move, the scroll clamp and the render), and the default view is now a row per
+	 * message rather than a row per block, so a session of a few thousand entries would
+	 * rebuild a few thousand strings three times for one arrow key. The signature is every
+	 * piece of view state a row's text reads; `data` is compared by IDENTITY, because
+	 * `refresh` always hands over a freshly built object and a mutated one would be a
+	 * defect one layer up.
+	 */
+	private visibleRows(): RenderRow[] {
+		const signature = [
+			this.selectedKey,
+			this.detailedEntry ?? "",
+			this.detailOffset,
+			this.filter ?? "",
+			this.anchor?.key ?? "",
+			[...this.expanded].sort().join(","),
+			[...this.collapsedRaw].sort().join(","),
+		].join("|");
+		if (this.rowCache && this.rowCache.data === this.data && this.rowCache.signature === signature) {
+			return this.rowCache.rows;
+		}
+		const rows = this.filterRows(this.allRows());
+		this.rowCache = { data: this.data, signature, rows };
+		return rows;
+	}
+
 	private move(delta: number): void {
 		const rows = this.visibleRows();
 		if (!rows.length) return;
@@ -673,6 +784,19 @@ export class FoldEditorView {
 		if (this.closed || !data) return;
 		if (this.briefMode) {
 			this.handleBriefInput(data);
+			return;
+		}
+		// SEARCH IS A MODE, NOT A KEY, because every letter here already means something.
+		// pi's /tree can narrow on any keystroke since it has no single-letter actions;
+		// this view has m, p, e, r and u, so typing has to be entered deliberately. `/`
+		// opens it, which is what a reader coming from less, vim or a browser will try.
+		if (this.searchMode) {
+			this.handleSearchInput(data);
+			return;
+		}
+		if (data === "/") {
+			this.searchMode = true;
+			this.filter = this.filter ?? "";
 			return;
 		}
 		if (data === "u") {
@@ -700,8 +824,17 @@ export class FoldEditorView {
 			return;
 		}
 		if (this.kb.matches(data, "tui.select.cancel")) {
-			// ESCAPE CANCELS WORK FIRST, STEPWISE: the brief line, then the anchor, and
-			// only then the editor. Nothing the user laid down is lost by one press.
+			// ESCAPE CANCELS WORK FIRST, STEPWISE: the search, then the brief line, then the
+			// anchor, and only then the editor. Nothing the user laid down is lost by one
+			// press, and a reader who narrowed the view and forgot gets the window back
+			// before they get the exit.
+			if (this.filter !== null) {
+				this.filter = null;
+				this.searchMode = false;
+				this.selectedKey = this.visibleRows()[0]?.key ?? "";
+				this.scrollToSelection();
+				return;
+			}
 			if (this.anchor !== null) {
 				this.anchor = null;
 				this.notice = null;
@@ -721,6 +854,21 @@ export class FoldEditorView {
 				this.expanded.delete(target);
 				this.selectedKey = target;
 				this.scrollToSelection();
+			} else {
+				// LEFT CLOSES AN OPEN RAW STRETCH for the same reason it collapses a fold:
+				// it is the key that means "less of this". Without it raw stretches could be
+				// closed only from their own summary row, which is off screen for a reader
+				// standing deep inside a long one.
+				const rows = this.visibleRows();
+				const at = rows.findIndex((candidate) => candidate.key === this.selectedKey);
+				for (let back = at; back >= 0; back -= 1) {
+					const owner = rows[back].rawBlockId;
+					if (!owner || !this.selectedKey.startsWith(owner)) continue;
+					this.collapsedRaw.add(owner);
+					this.selectedKey = owner;
+					this.scrollToSelection();
+					break;
+				}
 			}
 		}
 		else if (this.kb.matches(data, "tui.select.confirm") ||
@@ -728,8 +876,7 @@ export class FoldEditorView {
 			const row = this.visibleRows().find((candidate) => candidate.key === this.selectedKey);
 			if (!row) return;
 			if (row.toggleId) {
-				if (this.expanded.has(row.toggleId)) this.expanded.delete(row.toggleId);
-				else this.expanded.add(row.toggleId);
+				this.toggleBlock(row);
 				this.scrollToSelection();
 			} else if (row.entryPreview !== undefined) {
 				this.toggleDetail(row.key);
@@ -739,6 +886,43 @@ export class FoldEditorView {
 	}
 
 	/** The deepest expanded fold named in a row key (keys look like "a>b:c"). */
+	/** Typing while the search line is open. Enter leaves the line with the term standing,
+	 *  so the reader gets their action keys back without losing the narrowing; Escape
+	 *  drops the term as well, one press per thing given up. */
+	private handleSearchInput(data: string): void {
+		if (data === "\r" || data === "\n") {
+			this.searchMode = false;
+			return;
+		}
+		if (data === "\x7f" || data === "\b") {
+			this.filter = (this.filter ?? "").slice(0, -1);
+		} else if (data === "\x1b") {
+			this.filter = null;
+			this.searchMode = false;
+		} else if (!data.startsWith("\x1b") && data >= " ") {
+			this.filter = `${this.filter ?? ""}${data}`;
+		} else {
+			return;
+		}
+		const rows = this.visibleRows();
+		if (!rows.some((row) => row.key === this.selectedKey)) {
+			this.selectedKey = rows[0]?.key ?? "";
+		}
+		this.scroll = 0;
+	}
+
+	/** Open or close one block, in whichever sense that block's default runs. */
+	private toggleBlock(row: RenderRow): void {
+		if (row.rawBlockId) {
+			if (this.collapsedRaw.has(row.rawBlockId)) this.collapsedRaw.delete(row.rawBlockId);
+			else this.collapsedRaw.add(row.rawBlockId);
+			return;
+		}
+		const id = row.toggleId!;
+		if (this.expanded.has(id)) this.expanded.delete(id);
+		else this.expanded.add(id);
+	}
+
 	private innermostOpenFold(key: string): string | null {
 		const chain = key.split(":")[0].split(">");
 		for (let index = chain.length - 1; index >= 0; index -= 1) {
@@ -1003,7 +1187,12 @@ export class FoldEditorView {
 		// object carrying two nouns on adjacent surfaces is a thing to learn for nothing.
 		const staged = [`staged: ${pending.count} fold${pending.count === 1 ? "" : "s"}` +
 			` · frees ~${pending.freedTokens.toLocaleString("en-US")} tokens at commit` +
-			` · ${this.data.pinned.length} pinned`];
+			` · ${this.data.pinned.length} pinned` +
+			// EXPANDED IS A CLAIM ON THE WINDOW and belongs beside pinned, which is the
+			// other one. Both hold raw bytes in front of the model; only one of them is
+			// reclaimed automatically, and a reader cannot tell how much is being held
+			// without seeing both counts together.
+			`${this.data.expandedInContext?.length ? ` · ${this.data.expandedInContext.length} expanded` : ""}`];
 		if (origins) staged.push(`staged by: ${origins}`);
 		return staged;
 	}
@@ -1011,8 +1200,23 @@ export class FoldEditorView {
 	render(width: number): string[] {
 		const header = this.headerLines(width);
 		const rows = this.visibleRows();
+		// WHAT THE SEARCH REMOVED IS COUNTED, never silently absent. A narrowed view that
+		// says nothing reads as the whole window, which is gate 136's law on the surface a
+		// person acts from: they would mark, pin or dissolve believing they had seen
+		// everything. The term is echoed because a filter left standing from three minutes
+		// ago is the other half of the same mistake.
+		if (this.filter !== null) {
+			const total = this.allRows().length;
+			const cursorMark = this.searchMode ? "\u2588" : "";
+			header.push(truncateToWidth(
+				`search: ${this.filter}${cursorMark} \u00b7 ${rows.length} of ${total} rows` +
+				`${this.searchMode ? " \u00b7 Enter:keep \u00b7 Esc:clear" : " \u00b7 Esc:clear"}`,
+				width));
+		}
 		if (!rows.length) {
-			return [...header, "", truncateToWidth("(empty window)", width)];
+			return [...header, "", truncateToWidth(this.filter
+				? `nothing matches "${this.filter}" \u00b7 Esc:clear`
+				: "(empty window)", width)];
 		}
 		this.scroll = Math.max(0, Math.min(this.scroll, Math.max(0, rows.length - MAX_VISIBLE_ROWS)));
 		const body = rows

@@ -9,7 +9,7 @@ authors:
 version: 4.0.0
 date-released: 2026-08-28
 license: MIT
-repository-code: "https://github.com/shaneconner/pi-fold"
+repository-code: "https://github.com/shaneconner/fold"
 url: "https://shaneconner.com/projects/pi-fold/"
 identifiers:
   - type: doi

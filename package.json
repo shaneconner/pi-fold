@@ -18,10 +18,10 @@
   "private": false,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/shaneconner/pi-fold.git"
+    "url": "git+https://github.com/shaneconner/fold.git"
   },
-  "bugs": "https://github.com/shaneconner/pi-fold/issues",
-  "homepage": "https://github.com/shaneconner/pi-fold#readme",
+  "bugs": "https://github.com/shaneconner/fold/issues",
+  "homepage": "https://github.com/shaneconner/fold#readme",
   "author": "Shane Conner",
   "license": "MIT",
   "files": [

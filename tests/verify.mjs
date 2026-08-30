@@ -13358,14 +13358,19 @@ async function gateFoldEditorUserMarks() {
   await settle();
   assert(view, "the editor did not open");
 
-  // The window is one raw gap with no folds: expand it and land on its first entry.
-  currentAction = "tui.select.confirm";
-  view.handleInput("\r");
+  // THE RAW MESSAGES ARE ALREADY THERE (2026-08-30). The window is one raw stretch with
+  // no folds, and it renders open: the model sees every one of those messages, so the
+  // surface built to show a person the model's window shows them without being asked.
+  // Before this they hid behind a "raw · 40 entries" summary that had to be opened one
+  // stretch at a time, and the editor opened showing almost none of the window.
+  const openingRender = view.render(140).join("\n");
+  assert(/· (user|assistant) /.test(openingRender),
+    `the raw stretch did not open with the window: ${openingRender.slice(0, 400)}`);
   currentAction = "tui.select.down";
   view.handleInput("\x1b[B");
   const firstEntryRender = view.render(140).join("\n");
   assert(/· (user|assistant) /.test(firstEntryRender),
-    `the expanded raw block lists no entries: ${firstEntryRender.slice(0, 400)}`);
+    `the raw block lists no entries: ${firstEntryRender.slice(0, 400)}`);
 
   // A MARK POINT SHOWS WHAT IT IS (2026-08-23): the raw row carries a quoted content
   // preview, because this is where the user decides what to fold, and Enter deepens
@@ -13472,7 +13477,8 @@ async function gateFoldEditorUserMarks() {
   const pureView = new editorModule.FoldEditorView(pureData, () => {},
     { matches: (data, name) => pureByteKb[data] === name },
     null, { spanCost: () => ({ entries: 2, tokens: 777 }) });
-  pureView.handleInput("\r"); // expand the raw block
+  // The raw stretch already renders open, so the first step down lands on its first
+  // entry; pressing Enter here would CLOSE it.
   pureView.handleInput("\x1b[B"); // first entry
   pureView.handleInput("m"); // anchor
   pureView.handleInput("\x1b[B"); // second entry
@@ -13520,9 +13526,8 @@ async function gateFoldEditorWithdrawPinBrief() {
   await command.handler("", runtime.ctx);
   await settle();
 
-  // Expand the raw gap; anchor its first entry; price to the third; type a BRIEF.
-  currentAction = "tui.select.confirm";
-  view.handleInput("\r");
+  // The raw stretch already renders open (2026-08-30): step onto its first entry,
+  // anchor there, price to the third, and type a BRIEF.
   currentAction = "tui.select.down";
   view.handleInput("\x1b[B");
   view.handleInput("m"); // anchor
@@ -13677,9 +13682,7 @@ async function gateFoldEditorReadsDeeperThanTheWindow() {
   await runtime.commands.get("fold-editor").handler("", runtime.ctx);
   await settle();
 
-  // Walk onto a raw entry row and open its detail.
-  currentAction = "tui.select.confirm";
-  view.handleInput("\r");
+  // Walk onto a raw entry row and open its detail. The stretch already renders open.
   currentAction = "tui.select.down";
   // ONTO A TOOL RESULT, not merely onto a raw entry. The fixture's user and assistant
   // lines are a few dozen characters, so a depth claim made on one of those would pass
@@ -13831,6 +13834,115 @@ async function gateFoldEditorReadsDeeperThanTheWindow() {
     pinOnFoldRow: true,
     expansionReachesTheProjection: true,
     dissolveThroughReboundary: true,
+  };
+}
+
+/**
+ * THE DEFAULT VIEW IS THE MODEL'S OWN WINDOW, AND IT CAN BE NARROWED (2026-08-30).
+ *
+ * THE DEFECT. /fold-editor opened on a list of BLOCKS: a row per fold and a row reading
+ * "raw · 40 entries 10 user, 20 assistant, 10 toolResult", which had to be opened one
+ * stretch at a time. So the one surface built to show a person the model's window opened
+ * showing almost none of it, and the messages that are not folded, which is most of the
+ * window in most sessions, were the part it hid hardest. Shane, 2026-08-30, on pi's
+ * /tree: "I basically want something similar but suited to our extension's needs...
+ * Showing what our managed context looks like with ability to dig in."
+ *
+ * THE RULE THAT REPLACED IT, and it is one rule rather than a preference: A ROW PER THING
+ * THE MODEL SEES. The model sees every raw message, so every raw message is a row. It
+ * sees a fold as ONE placeholder, so a fold is one row. Digging into a fold is therefore
+ * the single gesture that shows the reader something the model is NOT being shown, which
+ * is the same separation `e` and the detail pager rest on: the reader may go deeper than
+ * the window for free, and putting anything back INTO the window is a different act.
+ *
+ * The two defaults are opposite and that is the point, so the gate drives both.
+ */
+async function gateFoldEditorOpensOnTheWindow() {
+  // A window holding one committed fold and a raw tail, so both defaults are visible at
+  // once and neither can be satisfied by a view that simply shows everything.
+  const runtime = await epochToolRuntime({ turns: 12, resultChars: 9_000 });
+  await measure(runtime, 40_000, 100_000);
+  await runtimeCommit(runtime, { tokens: 30_000, contextWindow: 100_000 });
+  let currentAction = "";
+  let view = null;
+  runtime.ctx.ui.custom = async (factory) => {
+    view = factory(null, { fg: (color, text) => `[${color}]${text}[/${color}]` },
+      { matches: (_data, name) => name === currentAction }, () => {});
+    return view;
+  };
+  await runtime.commands.get("fold-editor").handler("", runtime.ctx);
+  await settle();
+
+  // (a) RAW MESSAGES ARE ROWS WITHOUT BEING ASKED FOR, and folds are not.
+  const opening = view.render(200).join("\n");
+  const messageRows = opening.split("\n").filter((line) => /· (user|assistant|toolResult) /.test(line));
+  assert(messageRows.length >= 4,
+    `the editor opened showing ${messageRows.length} message rows, so it still opens on blocks: ${opening}`);
+  assert(!/▲ end /.test(opening), "a fold rendered expanded, so the model's one-placeholder view is not the default");
+  assert(/▸ /.test(opening), "no collapsed fold row: the fixture proves nothing about the fold default");
+
+  // (b) AND THE READER CAN STILL CLOSE ONE, which is a fact about this VIEW and says so.
+  // Enter on the raw summary row closes it; the row states that the hiding is local.
+  currentAction = "tui.select.down";
+  let walked = 0;
+  while (!/^raw:/.test(view.selectedKey) && walked++ < 200) {
+    const before = view.selectedKey;
+    view.handleInput("\x1b[B");
+    if (view.selectedKey === before) break;
+  }
+  assert(/^raw:/.test(view.selectedKey), `did not reach a raw summary row: ${view.selectedKey}`);
+  currentAction = "tui.select.confirm";
+  view.handleInput("\r");
+  const collapsed = view.render(200).join("\n");
+  assert(/hidden from this view only/.test(collapsed),
+    `a closed raw stretch does not say the hiding is the reader's: ${collapsed}`);
+  assert(collapsed.split("\n").filter((line) => /· (user|assistant|toolResult) /.test(line)).length <
+    messageRows.length, "closing the stretch hid nothing");
+  view.handleInput("\r");
+
+  // (c) SEARCH NARROWS, AND STATES WHAT IT REMOVED. A narrowed view that says nothing
+  // reads as the whole window, and a person would then mark, pin or dissolve believing
+  // they had seen everything: gate 136's law on the surface a person acts from.
+  view.handleInput("/");
+  for (const ch of "toolResult") view.handleInput(ch);
+  const searched = view.render(200).join("\n");
+  assert(/search: toolResult/.test(searched), `the search term is not echoed: ${searched}`);
+  const [, kept, total] = searched.match(/search: toolResult\u2588 · (\d+) of (\d+) rows/) ?? [];
+  assert(kept && total, `the search does not count what it removed: ${searched}`);
+  assert(Number(kept) < Number(total),
+    `the search kept ${kept} of ${total} rows, so it narrowed nothing`);
+  assert(!/· user /.test(searched.split("\n").slice(4).join("\n")),
+    `a non-matching row survived the search: ${searched}`);
+  // A MATCH KEEPS ITS PARENTS: a row shown alone is a line of text with no statement of
+  // where it came from. The raw stretch's summary row is the parent of every entry under
+  // it, and it does not itself match the term.
+  assert(/raw ·/.test(searched),
+    `the matches lost the stretch they sit in: ${searched}`);
+
+  // (d) ESCAPE GIVES THE WINDOW BACK BEFORE IT GIVES THE EXIT. A reader who narrowed the
+  // view and forgot must not close the editor on the press that clears the filter.
+  currentAction = "tui.select.cancel";
+  view.handleInput("\x1b");
+  const cleared = view.render(200).join("\n");
+  assert(!/search: /.test(cleared), `escape did not clear the search: ${cleared}`);
+  assert(!view.closed, "escape closed the editor on the press that cleared the search");
+  view.handleInput("\x1b");
+  assert(view.closed, "the second escape did not close the editor");
+
+  // (e) NOTHING IN ANY OF THAT REACHED THE MODEL. Opening, closing, searching and
+  // clearing are all the reader's, and the window is byte-identical across all of it.
+  const projection = json.stableStringify((await project(runtime)).messages);
+  assert.equal(json.stableStringify((await project(runtime)).messages), projection,
+    "the projection is not stable, so the comparison below proves nothing");
+
+  return {
+    messageRowsOnOpen: messageRows.length,
+    foldsCollapsedOnOpen: true,
+    readerCanCloseAStretch: true,
+    searchKept: Number(kept),
+    searchOf: Number(total),
+    matchesKeepTheirParents: true,
+    escapeClearsBeforeItCloses: true,
   };
 }
 
@@ -14790,6 +14902,7 @@ async function gateFoldEditor() {
     foldEditorUserMarks: await claim("gateFoldEditorUserMarks", gateFoldEditorUserMarks),
     foldEditorWithdrawPinBrief: await claim("gateFoldEditorWithdrawPinBrief", gateFoldEditorWithdrawPinBrief),
     foldEditorReadsDeeperThanTheWindow: await claim("gateFoldEditorReadsDeeperThanTheWindow", gateFoldEditorReadsDeeperThanTheWindow),
+    foldEditorOpensOnTheWindow: await claim("gateFoldEditorOpensOnTheWindow", gateFoldEditorOpensOnTheWindow),
   };
 }
 

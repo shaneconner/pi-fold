@@ -4,7 +4,7 @@
 
 **Rotate stale text out of the context window without losing it, and spend the prefix cache once per commit instead of continuously.** The oldest part of a session collapses into short briefs while the exact originals stay on disk, one tool call away. Folding is automatic and needs no agent participation. The shipped shape is deterministic briefs paired with a durable memory store, which is the cheapest configuration measured that kept recall intact.
 
-![pi-fold folding a session in place: marks outline completed spans as the session works, and the marks commit together at a fold event](https://raw.githubusercontent.com/shaneconner/pi-fold/main/media/fold-demo.gif)
+![pi-fold folding a session in place: marks outline completed spans as the session works, and the marks commit together at a fold event](https://raw.githubusercontent.com/shaneconner/fold/main/media/fold-demo.gif)
 
 *Marks outline spans as they complete and move nothing; the next commit applies every standing mark in one rewrite. Expanding a brief brings the exact messages back byte for byte. Illustrative animation drawn on the 2.x surface, where the agent laid the marks; since 3.0 the runtime lays them.*
 
@@ -23,8 +23,8 @@ Folding does not require a memory store, but every best result measured came fro
 Compaction replaces the transcript with a summary and discards the originals. Folding replaces stale spans with briefs and keeps the originals retrievable.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/shaneconner/pi-fold/main/media/fold-vs-compaction-dark.svg">
-  <img alt="Compaction turns the transcript into a summary and discards the originals, so the session starts over. pi-fold turns it into a brief and keeps the exact originals on disk, one peek or expand away, so the session keeps going." src="https://raw.githubusercontent.com/shaneconner/pi-fold/main/media/fold-vs-compaction-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/shaneconner/fold/main/media/fold-vs-compaction-dark.svg">
+  <img alt="Compaction turns the transcript into a summary and discards the originals, so the session starts over. pi-fold turns it into a brief and keeps the exact originals on disk, one peek or expand away, so the session keeps going." src="https://raw.githubusercontent.com/shaneconner/fold/main/media/fold-vs-compaction-light.svg">
 </picture>
 
 A fold takes a contiguous span of session entries and replaces it, in the window only, with a short brief. The entries go to a fold store byte for byte, addressed by their SHA-256 hash. The brief carries a handle, the handle resolves to the original, and expansion restores the exact bytes after verifying the hash.
@@ -51,7 +51,7 @@ Compaction alone abstained nine times and was wrong three, so its dominant failu
 
 Agent-written briefs scored worst of anything measured, which is why that invitation ships off.
 
-Four papers with figure sources, redacted per-request ledgers and campaign logs are on Zenodo: [design and trace evaluation](https://doi.org/10.5281/zenodo.21856873), [working memory under context shedding](https://doi.org/10.5281/zenodo.21980746), [ephemeral retrieval](https://doi.org/10.5281/zenodo.22142454), and [rotation and retention](https://doi.org/10.5281/zenodo.22142456), which is the campaign above. Narrative versions on [Medium](https://medium.com/@shane.conner/a-compaction-summary-is-one-record-doing-a-stores-job-3f46212ef059), interactive versions at [shaneconner.com](https://shaneconner.com/projects/pi-fold/), and the full chronology in [the experiment log](https://github.com/shaneconner/pi-fold/blob/main/docs/fold_vs_compaction/experiment-log.md).
+Four papers with figure sources, redacted per-request ledgers and campaign logs are on Zenodo: [design and trace evaluation](https://doi.org/10.5281/zenodo.21856873), [working memory under context shedding](https://doi.org/10.5281/zenodo.21980746), [ephemeral retrieval](https://doi.org/10.5281/zenodo.22142454), and [rotation and retention](https://doi.org/10.5281/zenodo.22142456), which is the campaign above. Narrative versions on [Medium](https://medium.com/@shane.conner/a-compaction-summary-is-one-record-doing-a-stores-job-3f46212ef059), interactive versions at [shaneconner.com](https://shaneconner.com/projects/pi-fold/), and the full chronology in [the experiment log](https://github.com/shaneconner/fold/blob/main/docs/fold_vs_compaction/experiment-log.md).
 
 ## Limits
 
@@ -89,8 +89,8 @@ Four commands ship for the human: `/fold-status`, `/fold` (commit every staged m
 ### Marks and commits
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/shaneconner/pi-fold/main/media/marks-and-commits-dark.svg">
-  <img alt="A completed unit becomes a pending mark that leaves the window and its cached prefix untouched. Marks repeat for free below maxTarget; at maxTarget one commit applies every standing mark in a single rewrite. From the brief, peek appends the exact bytes and expand restores them in place, both after verifying the SHA-256." src="https://raw.githubusercontent.com/shaneconner/pi-fold/main/media/marks-and-commits-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/shaneconner/fold/main/media/marks-and-commits-dark.svg">
+  <img alt="A completed unit becomes a pending mark that leaves the window and its cached prefix untouched. Marks repeat for free below maxTarget; at maxTarget one commit applies every standing mark in a single rewrite. From the brief, peek appends the exact bytes and expand restores them in place, both after verifying the SHA-256." src="https://raw.githubusercontent.com/shaneconner/fold/main/media/marks-and-commits-light.svg">
 </picture>
 
 A mark moves nothing. The moment a tool batch or chapter closes, the runtime cuts it into a pending mark, up to eight cuts per pass, stalest first. The mark lives in durable state outside the window, so the projection stays byte-identical and the cached prefix survives. Marks accumulate for free until one commit applies all of them in a single rewrite.
