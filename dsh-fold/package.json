@@ -1,0 +1,34 @@
+{
+  "name": "dsh-fold",
+  "version": "0.1.0",
+  "description": "Lossless context folding for DeepSeek Harness: the oldest span is replaced by a brief, and the originals stay in the session log.",
+  "keywords": ["dsh-plugin", "dsh", "context", "context-management", "compaction", "folding"],
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": { "types": "./lib/index.d.ts", "default": "./lib/index.js" },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": ["lib", "src", "cordis.patch.yml", "README.md", "LICENSE"],
+  "license": "MIT",
+  "author": "Shane Conner",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shaneconner/fold.git",
+    "directory": "dsh-fold"
+  },
+  "engines": { "node": "^22.19.0 || >=24.0.0" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-compaction": "*",
+    "@deepseek-ai/dsh-compaction-basic": "*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noCheck",
+    "check": "tsc -p tsconfig.json --noEmit 2>&1 | grep \"^src/\" && exit 1 || exit 0",
+    "prepack": "npm run check && npm run build"
+  }
+}

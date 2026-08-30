@@ -1,0 +1,11 @@
+# fold replaces the compaction engine rather than sitting beside it: the seam
+# admits one implementation per context as ctx.compaction. The basic engine
+# steps aside, and fold inherits its replay and durable mutation strategy,
+# overriding only what the replacement node contains.
+
+- id: compaction-basic
+  disabled: true
+
+- insert:
+    - id: fold
+      name: 'dsh-fold'
