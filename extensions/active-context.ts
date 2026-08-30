@@ -732,8 +732,25 @@ export function registerActiveContext(pi: any, options: {
       //
       // NOT WHILE STOPPED, though: the line rendered "COMMIT DUE" and "FOLDING STOPPED"
       // in one breath, promising the thing it was announcing would not happen.
+      // DUE MEANS ABOUT TO HAPPEN, NOT MERELY OVER THE LINE (2026-08-30). This read
+      // `share >= trigger`, which is true of the BAND and says nothing about the
+      // DECISION. A band-top commit runs ONCE per provider count, so once it has run
+      // against the current one, nothing further will happen until a new count arrives,
+      // whatever it applied. Live session 01a052b1 sat on `COMMIT DUE` through 48
+      // consecutive evaluations that all declined for a recorded reason, and a person
+      // reasonably read a line promising an imminent commit as a runtime that had hung.
+      //
+      // The latch is the whole test and no new state is kept: it already holds the
+      // measurement the last band-top commit ran against, for the cache reason documented
+      // at its own site, and "a commit has already been weighed against this count" is
+      // exactly what a reader needs. Held is lower case because it is not urgent; DUE
+      // keeps its shout because it is the one that is about to cost a rewrite.
       if (share !== null && !ladder.automaticFailure) {
-        parts.push(share >= trigger ? "COMMIT DUE" : `commit at ${Math.round(trigger * 100)}%`);
+        const weighed = ladder.bandTopMeasurement !== null &&
+          ladder.bandTopMeasurement === measurements.lastProviderMeasurement;
+        parts.push(share < trigger
+          ? `commit at ${Math.round(trigger * 100)}%`
+          : weighed ? "commit held" : "COMMIT DUE");
       }
       if (staged > 0) parts.push(`${staged} staged`);
       if (roots > 0) parts.push(`${roots} fold${roots === 1 ? "" : "s"}`);

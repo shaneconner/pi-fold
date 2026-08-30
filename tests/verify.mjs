@@ -12708,7 +12708,11 @@ async function gateSavedSettingsReachTheSession() {
     const afterRefusal = runtime.appended.length;
     await project(runtime);
     await settle();
-    assert(/COMMIT DUE|commit at 50%/.test(runtime.statuses.at(-1).text),
+    // THREE RENDERINGS, ONE FACT. At 67 percent against a 50 percent band the line reads
+    // either "COMMIT DUE" or, once a commit has been weighed against this same provider
+    // count, "commit held"; both say the band is BELOW us, which is only true if the
+    // refusal left it at 50. A push that had landed would name a higher point instead.
+    assert(/COMMIT DUE|commit held|commit at 50%/.test(runtime.statuses.at(-1).text),
       `A refused push moved the live band: ${runtime.statuses.at(-1).text}`);
     assert.equal(contextEvents(runtime, afterRefusal)
       .filter((event) => event.kind === "context.settings").length, 0,
@@ -15887,6 +15891,29 @@ async function gateHumanSurface() {
   // remember where their own trigger sits to know whether 67 percent is close to it.
   assert(/commit at \d+%|COMMIT DUE/.test(measuredLine),
     `The status line never says when a commit happens: ${measuredLine}`);
+
+  // AND "DUE" MEANS ABOUT TO HAPPEN, NOT MERELY OVER THE LINE (2026-08-30). The band top
+  // runs ONCE per provider count, so once it has been weighed against the current one
+  // nothing further happens until a new count arrives, whatever it applied. Live session
+  // 01a052b1 held "COMMIT DUE" through 48 consecutive evaluations that every one declined
+  // for a recorded reason, and the line promising an imminent commit was read, reasonably,
+  // as a runtime that had hung. Both readings are driven here, on one session, with the
+  // measurement the only thing that moves between them.
+  const banded = makeRuntime(makeFixture({ turns: 8, resultChars: 3_000, sessionId: "status-band" }));
+  await startRuntime(banded);
+  await measure(banded, 80_000, 100_000);
+  const dueBeforeWeighing = banded.statuses.at(-1).text;
+  assert(dueBeforeWeighing.includes("COMMIT DUE"),
+    `A crossed band with no commit weighed against it did not say so: ${dueBeforeWeighing}`);
+  await project(banded);
+  await settle();
+  const heldAfterWeighing = banded.statuses.at(-1).text;
+  assert(!heldAfterWeighing.includes("COMMIT DUE"),
+    `The line still promised a commit that had already been weighed and settled: ${heldAfterWeighing}`);
+  assert(heldAfterWeighing.includes("commit held"),
+    `A weighed band did not say the commit is held: ${heldAfterWeighing}`);
+  assert(/\d+% full/.test(heldAfterWeighing),
+    `The held line dropped the occupancy it exists to report: ${heldAfterWeighing}`);
   // FAILURE LEADS, because the line is cut to the host's width and the last segment is
   // the first one lost. Folding having stopped is the only state here a person must act
   // on, and it used to be appended after everything else. Driven through a REAL
