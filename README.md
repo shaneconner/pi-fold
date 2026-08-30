@@ -16,7 +16,7 @@ pi install npm:pi-fold
 
 Node 22 or later, Pi 0.83 or later. MIT licensed.
 
-Folding does not require a memory store, but every best result measured came from pairing it with one. The campaigns used [pi-canon](https://github.com/shaneconner/pi-canon), installed separately. The two began as a single working setup and were split into separate extensions for modularity, and the experiments are what established that they work better as complements than either does alone. Only that pairing has been measured. Any durable long-term memory store is expected to compose the same way, though that is a suspicion rather than a result.
+Folding does not require a memory store, but every best result measured came from pairing it with one. The campaigns used [pi-canon](https://github.com/shaneconner/canon), installed separately. The two began as a single working setup and were split into separate extensions for modularity, and the experiments are what established that they work better as complements than either does alone. Only that pairing has been measured. Any durable long-term memory store is expected to compose the same way, though that is a suspicion rather than a result.
 
 ## What it does
 
