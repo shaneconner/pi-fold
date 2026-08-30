@@ -1,6 +1,6 @@
 import type { EvidenceRef } from "../json.ts";
-import { boundedSubject, oneLine, toolClipHead } from "./brief-text.ts";
-export { oneLine, toolClipHead };
+import { boundedSubject, oneLine, seatSubjects, toolClipHead } from "./brief-text.ts";
+export { oneLine, seatSubjects, toolClipHead };
 import {
   denseOwnArrayValues,
   objectRefKey,
@@ -462,29 +462,16 @@ export function deterministicConsolidationBrief(
   const noteCount = notes.length;
   const subjects = [...childSubjects, ...notes];
   if (!subjects.length) return "Grouped completed context covering no readable folds.";
-  const separator = " | ";
   const lead = noteCount
     ? `Grouped completed context covering ${foldCount} folds and ${noteCount} agent notes: `
     : `Grouped completed context covering ${subjects.length} folds: `;
-  const room = ACTIVE_CONTEXT_POLICY.maxBriefChars - lead.length - 1;
-  const named = Math.max(1, Math.min(subjects.length,
-    Math.floor((room + separator.length) / (MIN_SUBJECT_CHARS + separator.length))));
-  const omitted = subjects.length - named;
-  // With notes in the division, what the slice drops may be a note rather than
-  // a fold, so the tail only claims folds when folds are all it holds.
-  const tail = omitted ? `${separator}${omitted} more ${noteCount ? "in this group" : "folds in this group"}` : "";
-  const budget = room - tail.length - separator.length * (named - 1);
-  const order = subjects.slice(0, named).map((text, index) => ({ text, index })).sort((a, b) =>
-    a.text.length - b.text.length || a.index - b.index);
-  const bounded = new Array<string>(named);
-  let left = budget;
-  for (let taken = 0; taken < order.length; taken += 1) {
-    const owed = Math.max(1, Math.floor(left / (order.length - taken)));
-    const kept = boundedSubject(order[taken].text, owed);
-    bounded[order[taken].index] = kept;
-    left -= kept.length;
-  }
-  return `${lead}${bounded.join(separator)}${tail}.`.replace(/\s+/g, " ").trim();
+  // With notes in the division, what the count-slice drops may be a note rather
+  // than a fold, so the tail only claims folds when folds are all it holds.
+  return seatSubjects(subjects, lead, {
+    total: ACTIVE_CONTEXT_POLICY.maxBriefChars,
+    minSubjectChars: MIN_SUBJECT_CHARS,
+    omittedNoun: noteCount ? "in this group" : "folds in this group",
+  });
 }
 
 export const ALL_FOLD_KINDS: ReadonlySet<FoldKind> =

@@ -11927,6 +11927,102 @@ async function gateBriefTruncationIsExplicit() {
   };
 }
 
+// GATE 163 - a brief that cannot name every subject counts the ones it dropped
+//
+// The companion to 136 one level up. 136 refuses a silent cut INSIDE a value;
+// this refuses a silent loss OF a value. A brief naming several subjects is
+// built by division, not by concatenate-and-slice: a slice at the policy cap
+// drops whole subjects and says nothing, so a reader has no way to know the
+// index is partial, which is exactly the defect 136 exists to prevent applied
+// to a subject rather than to a character.
+//
+// Two bounds and one conservation law. The count-slice admits at most one
+// subject per minSubjectChars, because a share below that names nothing a
+// reader can act on; the char division then splits what the lead left over
+// the subjects that seated, ASCENDING BY LENGTH so a short subject claims
+// only what it needs and hands the rest back, which is what lets an agent
+// note shorter than its fair share ride whole rather than be truncated to an
+// equal split (the sol-20260814-traps rep 2 loss, one level up). The law is
+// the conservation: named + omitted equals the count handed in, the omitted
+// are stated in the tail, and every cut inside a seated subject still carries
+// 136's marker.
+//
+// Extracted to extensions/lib/brief-text.ts on 2026-08-30 when the DeepSeek
+// Harness build became a second consumer of the division. It is pinned here on
+// the primitive directly, so the law survives a consumer that has no folds.
+async function gateDroppedSubjectsAreCounted() {
+  const TOTAL = 200;
+  const MIN = 24;
+  const LEAD = "Index: ";
+  const seat = (subjects, omittedNoun = "folds in this group") =>
+    context.seatSubjects(subjects, LEAD, { total: TOTAL, minSubjectChars: MIN, omittedNoun });
+
+  // THE CONSERVATION. Ten subjects into room that seats seven: the three that
+  // did not seat are counted by number and by noun, and the brief still ends
+  // inside its total.
+  const ten = Array.from({ length: 10 }, (_, index) => `subject ${index} of the group`);
+  const many = seat(ten);
+  assert(many.includes("3 more folds in this group"),
+    "subjects were dropped from the index without being counted");
+  assert(many.length <= TOTAL, "the seated brief escaped the total it was given");
+  assert(many.endsWith("."), "the seated brief does not close");
+  const named = ten.filter((subject) => many.includes(subject.slice(0, 9))).length;
+  assert.equal(named + 3, ten.length,
+    "the count in the tail does not account for every subject that did not seat");
+
+  // ASCENDING DIVISION, not an equal split. Two short subjects and one long
+  // one: both short ones ride WHOLE, and the long one is bounded against what
+  // they handed back rather than against an equal third.
+  const SHORT = "short one";
+  const MEDIUM = "medium subject here";
+  const LONG = `long subject ${"x".repeat(400)}`;
+  const mixed = seat([SHORT, MEDIUM, LONG]);
+  assert(mixed.includes(SHORT), "a subject well inside its share was cut anyway");
+  assert(mixed.includes(MEDIUM), "a second subject inside its share was cut anyway");
+  assert(mixed.includes("..."), "the subject that could not seat whole does not state its cut");
+  assert(!mixed.includes("more folds in this group"),
+    "three subjects that all seated were reported as partly omitted");
+  assert(mixed.length <= TOTAL, "the divided brief escaped the total it was given");
+  // The equal split is the counterexample: under it the long subject would be
+  // bounded at the room divided three ways, and it is bounded well past that.
+  const equalShare = Math.floor((TOTAL - LEAD.length - 1 - 3 * 2) / 3);
+  const seatedLong = mixed.slice(mixed.lastIndexOf(" | ") + 3, -1);
+  assert(seatedLong.length > equalShare,
+    "the longest subject was held to an equal share, so the short subjects' surplus was lost");
+
+  // SOURCE ORDER SURVIVES THE SORT. The division sorts ascending to allocate,
+  // then seats each subject back at the index it arrived on, so a reader sees
+  // the group in its own order and the output is deterministic.
+  const reordered = seat([LONG, SHORT, MEDIUM]);
+  assert(reordered.indexOf(SHORT) < reordered.indexOf(MEDIUM),
+    "the ascending allocation reordered the subjects a reader sees");
+  assert(reordered.startsWith(`${LEAD}long subject `),
+    "the subject handed in first is not the subject named first");
+
+  // AT LEAST ONE SUBJECT ALWAYS SEATS, and when room admits only one the other
+  // four are still counted rather than silently gone.
+  const tiny = context.seatSubjects(ten.slice(0, 5), LEAD,
+    { total: 40, minSubjectChars: MIN, omittedNoun: "folds in this group" });
+  assert(tiny.includes("4 more folds in this group"),
+    "a brief with room for one subject did not count the four it dropped");
+  assert(tiny.length <= 40, "the one-subject brief escaped its total");
+
+  // The caller owns the noun, because what was dropped is the caller's to name.
+  assert(seat(ten, "in this group").includes("3 more in this group"),
+    "the tail does not take the noun the caller states");
+
+  return {
+    subjectsHandedIn: ten.length,
+    subjectsNamed: named,
+    subjectsCounted: ten.length - named,
+    seatedBriefChars: many.length,
+    equalShareChars: equalShare,
+    longestSeatedChars: seatedLong.length,
+    oneSubjectBriefChars: tiny.length,
+  };
+}
+
+
 // GATE 137 - cache accounting names the topology point a request follows.
 //
 // Marks and peeks do not move old projection bytes, while expand and refold switch
@@ -16997,6 +17093,7 @@ const gates = [
   [128, "The user's commit announces a persistence failure", gateUserCommitAnnouncesPersistenceFailure],
 
   [136, "A brief's cut is stated, never silent", gateBriefTruncationIsExplicit],
+  [163, "A brief that cannot name every subject counts the ones it dropped", gateDroppedSubjectsAreCounted],
   // 138 is retired with the steward band (Shane 2026-08-23). It pinned a PRE-COMMIT
   // invitation, timed one band before the epoch so the agent was asked while marking
   // could still matter. The ask moves to fold time, where the agent has just seen the
