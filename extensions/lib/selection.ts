@@ -1,4 +1,6 @@
 import type { EvidenceRef } from "../json.ts";
+import { boundedSubject, oneLine, toolClipHead } from "./brief-text.ts";
+export { oneLine, toolClipHead };
 import {
   denseOwnArrayValues,
   objectRefKey,
@@ -397,13 +399,6 @@ function assistantNoteText(message: unknown): string {
 // "content continues in the exact source", and a reader never mistakes a cut
 // value for a complete one. oneLine collapses whitespace then delegates;
 // factualValue sanitizes then delegates through oneLine. No other site slices.
-function boundedSubject(text: string, budget: number): string {
-  if (text.length <= budget) return text;
-  let kept = text.slice(0, Math.max(0, budget - 3)).trimEnd();
-  const finalCode = kept.charCodeAt(kept.length - 1);
-  if (finalCode >= 0xd800 && finalCode <= 0xdbff) kept = kept.slice(0, -1);
-  return `${kept}...`;
-}
 
 export function deterministicConsolidationBrief(
   candidate: FoldCandidate,
@@ -1106,23 +1101,7 @@ export function manualFoldCandidate(
 // blank line is kept whole up to the cap; a result that is bulk from line one keeps its
 // first cap's worth. The caller states the cut, per gate 136: the marker rides beside
 // the count of what it hides, never silently.
-export function toolClipHead(text: string, cap: number): string {
-  const lines = String(text ?? "").split(/\r?\n/);
-  const kept: string[] = [];
-  for (const line of lines) {
-    if (line.trim()) kept.push(line);
-    else if (kept.length) break;
-  }
-  const paragraph = kept.join("\n");
-  const head = paragraph.length > 0 && paragraph.length <= cap
-    ? paragraph
-    : String(text ?? "").slice(0, cap);
-  return head;
-}
 
-export function oneLine(value: string, maximum: number): string {
-  return boundedSubject(value.replace(/\s+/g, " ").trim(), maximum);
-}
 
 export function deterministicChapterBrief(
   refs: EvidenceRef[],

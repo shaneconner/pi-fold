@@ -120,6 +120,7 @@ export const HARNESS_SOURCE = Object.freeze([
   "extensions/index.js",
   "extensions/json.ts",
   "extensions/settings.ts",
+  "extensions/lib/brief-text.ts",
   "extensions/lib/canonical.ts",
   "extensions/lib/curation.ts",
   "extensions/lib/editor-ui.ts",

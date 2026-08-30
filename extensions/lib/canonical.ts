@@ -5,6 +5,7 @@ import {
   stableStringify,
 } from "../json.ts";
 import { ACTIVE_CONTEXT_POLICY, DEFAULT_ACTIVE_CONTEXT_TOOL_NAME } from "./policy.ts";
+import { structurallyValidBriefWithin, usefulBriefWithin } from "./brief-text.ts";
 import type { ActiveContextState } from "./policy.ts";
 
 export function clone<T>(value: T): T {
@@ -185,25 +186,9 @@ export function usefulBrief(
   maximum = ACTIVE_CONTEXT_POLICY.maxBriefChars,
   toolName = DEFAULT_ACTIVE_CONTEXT_TOOL_NAME,
 ): value is string {
-  if (typeof value !== "string") return false;
-  const brief = value.trim();
-  if (!brief || brief.length > maximum) return false;
-  const factualLines: string[] = [];
-  const lines = brief.split(/\r?\n/);
-  for (let index = 0; index < lines.length; index += 1) {
-    const text = lines[index].trim();
-    if (!text || text.toLowerCase().includes(toolName.toLowerCase()) ||
-        /^\[[^\]]*(?:fold|active-context)[^\]]*\]$/i.test(text)) continue;
-    if (/^(?:topology\b|expand\b|refold\b|list(?:\/page)?\b|page\b|action\b|fold(?:ed)?\s+(?:placeholder|uid|id)\b|(?:this\s+)?fold\b.*\b(?:expand|refold|placeholder|topology|uid|id)\b|(?:parent|children?|previous|next|navigation)\s*[:=])/i.test(text)) continue;
-    factualLines.push(text);
-  }
-  const factual = factualLines.join(" ").trim();
-  return /[A-Za-z0-9]{3,}/.test(factual);
+  return usefulBriefWithin(value, maximum, toolName);
 }
 
 export function structurallyValidBrief(value: unknown, maximum = ACTIVE_CONTEXT_POLICY.maxBriefChars): value is string {
-  if (typeof value !== "string") return false;
-  const brief = value.trim();
-  return Boolean(brief) && brief.length <= maximum &&
-    (brief.match(/[A-Za-z0-9]/g)?.length ?? 0) >= 3;
+  return structurallyValidBriefWithin(value, maximum);
 }
