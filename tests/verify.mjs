@@ -12076,7 +12076,6 @@ async function gateMirroredCoreMatchesItsSource() {
   return { mirroredFiles: checked, targets: targets.length, filesPerTarget: files.length };
 }
 
-
 // GATE 137 - cache accounting names the topology point a request follows.
 //
 // Marks and peeks do not move old projection bytes, while expand and refold switch

@@ -21,6 +21,17 @@ export default [
       // entry once the harness is conformed. tests/ is deliberately NOT here:
       // verify.mjs is the contract, it predates the adoption, and it lints clean.
       "scripts/**",
+      // A SEPARATE PACKAGE WITH ITS OWN CONVENTIONS (2026-08-30). dsh-fold is the
+      // DeepSeek Harness plugin: `lib/**` is compiled output (.js/.d.ts/.map), and
+      // its own source writes single quotes where this config demands double. It is
+      // not pi-fold source and nothing here ships in pi-fold's npm `files`.
+      //
+      // `src/core` MUST be ignored for a second and stronger reason: gate 164 pins it
+      // byte for byte against extensions/lib, and the ORIGINAL is linted as part of
+      // extensions/, so ignoring the copy loses no coverage at all. Linting it here
+      // instead would put this config in direct conflict with that gate, since any
+      // fix applied to the copy is a byte the gate requires it not to have.
+      "dsh-fold/**",
     ],
   },
   js.configs.recommended,

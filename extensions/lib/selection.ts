@@ -1089,7 +1089,6 @@ export function manualFoldCandidate(
 // first cap's worth. The caller states the cut, per gate 136: the marker rides beside
 // the count of what it hides, never silently.
 
-
 export function deterministicChapterBrief(
   refs: EvidenceRef[],
   messages: unknown[],
