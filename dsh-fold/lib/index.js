@@ -18,14 +18,61 @@
  * @module dsh-fold
  */
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic';
+import { boundedSubject, oneLine, seatSubjects } from "./core/brief-text.js";
 /** Fold makes no provider call, so the envelope records the mechanism instead. */
 const FOLD_PROVIDER = 'fold';
 const FOLD_MODEL = 'deterministic-brief';
 /**
- * Longest a single subject line may run before it is cut. A brief exists to let
- * the reader decide whether to go and read the original, not to replace it.
+ * Longest a single subject may run before it is cut. A brief exists to let the
+ * reader decide whether to go and read the original, not to replace it.
  */
 const SUBJECT_CHARS = 160;
+/**
+ * Narrowest share worth seating. Below this a subject names nothing a reader can
+ * act on, so the subject is dropped and counted rather than seated as a stub.
+ */
+const MIN_SUBJECT_CHARS = 24;
+/**
+ * The recoverability sentence, which is the whole difference between this brief
+ * and a summary. It rides WHOLE or the brief is not built at all: it is sized out
+ * of the seating budget up front rather than appended and sliced, because a brief
+ * that loses the sentence telling the reader the originals are still there is
+ * exactly the silent cut the bounding rules exist to refuse.
+ */
+const RECOVERY_NOTE = ' The originals are unchanged in the session log and can be read back by their shadowed seqs.';
+/** Visible text of a block set, with reasoning and images left out by kind. */
+const textOf = (content) => content
+    .filter((block) => block.type === 'text')
+    .map(block => block.text)
+    .join('\n');
+/**
+ * One subject, bounded and ready to seat.
+ *
+ * The seating closes the sentence, so a subject that already ends in a period
+ * would double it. A cut marker is left alone: its three dots are the statement
+ * that content continues, not punctuation to tidy.
+ */
+const asSubject = (text) => {
+    const bounded = oneLine(text, SUBJECT_CHARS);
+    return bounded.endsWith('...') || !bounded.endsWith('.') ? bounded : bounded.slice(0, -1);
+};
+/**
+ * The leading paragraph, read as the writer's own note.
+ *
+ * An unterminated block is KEPT, unlike a tool result's opening prose: the whole
+ * message is the writer's words, so a note with no blank line is a one-paragraph
+ * note rather than bulk to refuse.
+ */
+const leadingParagraph = (text) => {
+    const kept = [];
+    for (const line of text.split(/\r?\n/)) {
+        if (line.trim())
+            kept.push(line.trim());
+        else if (kept.length)
+            break;
+    }
+    return kept.join(' ');
+};
 /**
  * Compaction that folds rather than summarizes.
  *
@@ -60,28 +107,65 @@ export class FoldCompactionEngine extends BasicCompactionEngine {
     }
     /**
      * Describe a folded span in terms of what it contained, so a reader can tell
-     * whether the original is worth recovering.
+     * whether an original is worth recovering.
      *
-     * TODO: this is the seam-proving placeholder. The real generator is the one in
-     * the fold core, which seats each subject in a divided budget rather than
-     * concatenating and slicing, so a group too wide to seat names how many it
-     * could not name. Port it here once the seam is confirmed end to end.
+     * Two carriers, in surface order. A TOOL RESULT is named by the tool that
+     * produced it, correlated back through the call id in the same span, so the
+     * subject says what ran rather than only what came back. An AGENT NOTE is the
+     * leading paragraph of an assistant message: sol-20260814-traps rep 2 showed
+     * that a value the agent derives and records once, in its own words between
+     * two tool batches, reaches no other carrier at all, so the note is a
+     * first-class subject rather than something a neighbouring subject is trusted
+     * to mention. User messages ride for the same reason.
+     *
+     * The subjects are then seated by division rather than concatenated and
+     * sliced: what does not fit is counted in the tail, so the brief never
+     * silently claims to be a full index of the span.
      */
     brief(messages) {
-        const roles = new Map();
+        const toolNames = new Map();
         for (const message of messages) {
-            const role = String(message.role ?? 'unknown');
-            roles.set(role, (roles.get(role) ?? 0) + 1);
+            for (const block of message.content) {
+                if (block.type === 'tool-call')
+                    toolNames.set(String(block.id), block.name);
+            }
         }
-        const census = [...roles.entries()]
-            .map(([role, count]) => `${count} ${role}`)
-            .join(', ');
-        const head = `[fold] ${messages.length} messages folded (${census}).`;
-        const note = 'The originals are unchanged in the session log and can be read back by their shadowed seqs.';
-        return `${head} ${note}`.slice(0, this.maxBriefChars);
+        const subjects = [];
+        let results = 0;
+        let notes = 0;
+        for (const message of messages) {
+            const result = message.content.find(block => block.type === 'tool-result');
+            if (result !== undefined && result.type === 'tool-result') {
+                const named = toolNames.get(String(result.toolCallId)) ?? 'tool';
+                const outcome = result.isError === true ? 'failed' : 'returned';
+                const head = oneLine(textOf(result.content), SUBJECT_CHARS);
+                subjects.push(asSubject(boundedSubject(`${named} ${outcome}: ${head}`, SUBJECT_CHARS)));
+                results += 1;
+                continue;
+            }
+            if (message.role === 'system')
+                continue;
+            const paragraph = leadingParagraph(textOf(message.content));
+            if (!paragraph)
+                continue;
+            subjects.push(asSubject(paragraph));
+            if (message.role === 'assistant')
+                notes += 1;
+        }
+        if (subjects.length === 0) {
+            return `Folded ${messages.length} messages holding no readable text.${RECOVERY_NOTE}`;
+        }
+        const count = (n, noun) => `${n} ${noun}${n === 1 ? '' : 's'}`;
+        const lead = `Folded ${count(messages.length, 'message')} covering `
+            + `${count(results, 'tool result')} and ${count(notes, 'agent note')}: `;
+        return seatSubjects(subjects, lead, {
+            total: this.maxBriefChars - RECOVERY_NOTE.length,
+            minSubjectChars: MIN_SUBJECT_CHARS,
+            omittedNoun: 'more in this span',
+        }) + RECOVERY_NOTE;
     }
 }
 export default FoldCompactionEngine;
-/** Exported for the gate suite, which pins the cut rather than trusting it. */
-export const FOLD_LIMITS = { SUBJECT_CHARS };
+/** Exported for the gate suite, which pins the cuts rather than trusting them. */
+export const FOLD_LIMITS = { SUBJECT_CHARS, MIN_SUBJECT_CHARS };
 //# sourceMappingURL=index.js.map

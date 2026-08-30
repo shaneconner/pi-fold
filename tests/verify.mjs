@@ -12022,6 +12022,60 @@ async function gateDroppedSubjectsAreCounted() {
   };
 }
 
+// GATE 164 - a mirrored core file is byte-identical to its source
+//
+// There were no verbatim copies left to drift, and the service verifier that
+// used to catch that drift was retired for exactly that reason. The DeepSeek
+// Harness build reintroduces one: dsh-fold cannot import from extensions/lib,
+// because a package manager installs only its own directory, so the bounding
+// primitives are mirrored into dsh-fold/src/core by scripts/sync-plugin-core.mjs.
+//
+// A verbatim copy that is ALLOWED to drift is worse than no copy: two runtimes
+// would each cut briefs by their own rules while both claiming the marker means
+// the same thing. So the mirror is pinned byte for byte rather than by review,
+// and the failure names the command that repairs it. The gate reads the file
+// list off the sync script rather than restating it, so adding a target or a
+// file to the sync cannot leave this gate pinning a stale set.
+async function gateMirroredCoreMatchesItsSource() {
+  const syncPath = join(projectRoot, "scripts", "sync-plugin-core.mjs");
+  const sync = await readFile(syncPath, "utf8");
+  const filesLine = /^const files = \[(.*)\];$/m.exec(sync);
+  assert(filesLine, "the sync script no longer declares its file list where this gate reads it");
+  const files = [...filesLine[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+  assert(files.length > 0, "the sync script mirrors no files, so the gate proves nothing");
+  const targetBlock = /^const targets = \[([\s\S]*?)^\];$/m.exec(sync);
+  assert(targetBlock, "the sync script no longer declares its targets where this gate reads it");
+  const targets = [...targetBlock[1].matchAll(/join\(root, ([^)]*)\)/g)]
+    .map((match) => [...match[1].matchAll(/"([^"]+)"/g)].map((part) => part[1]));
+  assert(targets.length > 0, "the sync script has no targets, so nothing is mirrored");
+
+  const checked = [];
+  for (const segments of targets) {
+    for (const file of files) {
+      const sourcePath = join(projectRoot, "extensions", "lib", file);
+      const mirrorPath = join(projectRoot, ...segments, file);
+      const source = await readFile(sourcePath, "utf8");
+      const mirror = await readFile(mirrorPath, "utf8").catch(() => null);
+      assert(mirror !== null,
+        `${segments.join("/")}/${file} is missing: run node scripts/sync-plugin-core.mjs`);
+      assert.equal(mirror, source,
+        `${segments.join("/")}/${file} has drifted from extensions/lib/${file}: `
+        + "run node scripts/sync-plugin-core.mjs");
+      checked.push(`${segments.join("/")}/${file}`);
+    }
+  }
+
+  // The mirror carries the primitives it exists to carry. A sync that copied an
+  // empty or unrelated file would satisfy equality and pin nothing.
+  const mirrored = await readFile(join(projectRoot, ...targets[0], files[0]), "utf8");
+  for (const symbol of ["boundedSubject", "oneLine", "seatSubjects"]) {
+    assert(mirrored.includes(`export function ${symbol}(`),
+      `the mirrored core does not export ${symbol}, so the second runtime cannot hold the rule`);
+  }
+
+  return { mirroredFiles: checked, targets: targets.length, filesPerTarget: files.length };
+}
+
 
 // GATE 137 - cache accounting names the topology point a request follows.
 //
@@ -17094,6 +17148,7 @@ const gates = [
 
   [136, "A brief's cut is stated, never silent", gateBriefTruncationIsExplicit],
   [163, "A brief that cannot name every subject counts the ones it dropped", gateDroppedSubjectsAreCounted],
+  [164, "A mirrored core file is byte-identical to its source", gateMirroredCoreMatchesItsSource],
   // 138 is retired with the steward band (Shane 2026-08-23). It pinned a PRE-COMMIT
   // invitation, timed one band before the epoch so the agent was asked while marking
   // could still matter. The ask moves to fold time, where the agent has just seen the

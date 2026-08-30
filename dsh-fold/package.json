@@ -24,7 +24,8 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
     "@deepseek-ai/dsh-compaction": "*",
-    "@deepseek-ai/dsh-compaction-basic": "*"
+    "@deepseek-ai/dsh-compaction-basic": "*",
+    "@deepseek-ai/dsh-llm": "*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json --noCheck",
