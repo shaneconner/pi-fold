@@ -319,6 +319,26 @@ export const CONTEXT_RECEIPT_BLOCK_BYTES = 900;
  * way and states how many it could not name.
  */
 export const FOLD_NOTICE_BYTES = 2_400;
+/**
+ * WHAT ONE /fold-editor ROW SUMMARIZES, and what one page of its detail serves
+ * (2026-08-30).
+ *
+ * The editor's whole reading of a message was 300 characters of its first text block,
+ * with a detail row that sliced to 480 and therefore could never bind. Two numbers replace
+ * it because they answer two different questions. EDITOR_ROW_PREVIEW_CHARS is a SUMMARY
+ * on a line that also carries a role, an id and a badge, so it is generous enough that a
+ * reader can tell two rows apart and no more. EDITOR_DETAIL_PAGE_CHARS is a READ, served
+ * a page at a time by an injected accessor with `total` and `hasMore` travelling beside
+ * it, so depth is bounded by the reader's patience rather than by a constant: there is no
+ * ceiling on what the editor can reach, only on what it hands over at once.
+ *
+ * THIS IS A READER'S BOUND, NOT A WINDOW'S. Nothing here reaches the projection: paging
+ * an entry to its end in the editor moves no bytes and the model never learns it
+ * happened. `maxSourceChars` 200,000 is the bound on a read that DOES reach the agent.
+ */
+export const EDITOR_ROW_PREVIEW_CHARS = 240;
+export const EDITOR_DETAIL_PAGE_CHARS = 4_000;
+
 export const CONTEXT_STATUS_RESPONSE_BYTES = 24_000;
 export const MAX_UNMARKED_CANDIDATES = 3;
 

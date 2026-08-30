@@ -93,6 +93,8 @@ import {
   ACTIVE_CONTEXT_POLICY,
   ACTIVE_CONTEXT_TOOL_ACTIONS,
   resolveNoticeLeadShare,
+  EDITOR_DETAIL_PAGE_CHARS,
+  EDITOR_ROW_PREVIEW_CHARS,
   contextBrand,
   DEFAULT_ACTIVE_CONTEXT_BRAND_NOUN,
   DEFAULT_ACTIVE_CONTEXT_COMMAND_NAMES,
@@ -171,6 +173,7 @@ import {
 } from "./lib/scheduling.ts";
 import {
   manualFoldCandidate,
+  oneLine,
   peekedSourceFoldIds,
   snapFoldCandidate,
   snapToFoldBoundaries,
@@ -196,6 +199,7 @@ import { buildActiveContextCommands, buildActiveContextTool } from "./lib/tool-s
 import { buildFoldEditorData, FoldEditorView } from "./lib/editor-ui.ts";
 import { publishLiveSettings } from "./lib/live-settings.ts";
 import {
+  entryText,
   mapActiveContext,
 } from "./lib/transcript.ts";
 import {
@@ -229,6 +233,20 @@ export * from "./lib/transcript.ts";
  * which is the settings file's own law, and the refusal text is the same sentence
  * wherever the bad value came from.
  */
+/**
+ * ONE ENTRY AS ONE ROW: whitespace collapsed, bounded, and the cut STATED.
+ *
+ * Shared by the three places /fold-editor builds an entry row, which each carried their
+ * own inline reading of `content` until 2026-08-30 and each got it wrong the same way:
+ * `content.find((part) => part.type === "text")` sliced to 300 characters, so a message
+ * whose first block was not text rendered as an empty row and everything past the first
+ * block was unreachable at any depth. `entryText` accounts for every block and
+ * `entryDetail` serves the rest; this is the summary that sits on the row.
+ */
+function rowPreview(message: unknown): string {
+  return oneLine(entryText(message), EDITOR_ROW_PREVIEW_CHARS);
+}
+
 function resolvedPreCommitNotice(value: unknown): boolean {
   if (value !== undefined && typeof value !== "boolean") {
     throw new Error("preCommitNotice must be a boolean: true states the window's status to " +
@@ -3501,6 +3519,94 @@ export function registerActiveContext(pi: any, options: {
   };
 
   /**
+   * THE DISSOLVE PATH, shared by the tool's single-id reboundary and the editor's re-cut
+   * (2026-08-30). Returning a fold to raw is the first half of re-cutting it, and the
+   * editor already has the second half: `m` on two raw entries stages the span the person
+   * meant. Extracted rather than reimplemented, because the editor's own law is that
+   * every edit is a skin over an existing validated path, and this one carries the nested
+   * refusal, the brief and lease cleanup and the parent re-derivation with it.
+   */
+  const dissolveFold = async (
+    snapshot: ActiveContextSnapshot,
+    id: string,
+    ctx: any,
+  ): Promise<{ children: string[]; startId: string | null; endId: string | null }> => {
+    const fold = requireActiveFold(snapshot, persistence.state!, id);
+    if (fold.parentId) {
+      throw new Error(
+        `Fold ${id} is nested under ${fold.parentId}; dissolve ${fold.parentId} first so ${id} is a root`,
+      );
+    }
+    const refs = flattenFoldRefs(fold, persistence.state!);
+    const children = childFoldIds(fold);
+    const briefs = { ...(persistence.state!.briefs ?? {}) };
+    delete briefs[id];
+    const next: ActiveContextState = {
+      ...persistence.state!,
+      revision: persistence.state!.revision + 1,
+      folds: deriveFoldParents(persistence.state!.folds.filter((item) => item.id !== id)),
+      expanded: persistence.state!.expanded.filter((expandedId) => expandedId !== id),
+      ...(Object.keys(briefs).length ? { briefs } : {}),
+    };
+    if (!Object.keys(briefs).length) delete next.briefs;
+    const leases = { ...next.leases };
+    delete leases[id];
+    await persistManual({ ...next, leases }, ctx);
+    updateStatus(ctx);
+    return { children, startId: refs[0]?.entryId ?? null, endId: refs.at(-1)?.entryId ?? null };
+  };
+
+  /**
+   * THE EXPANSION PATH, shared by the tool's expand/refold actions and the editor's
+   * promote-to-context intent (2026-08-30).
+   *
+   * THIS IS THE ACT THE EDITOR'S OWN EXPANSION IS NOT. Opening a fold row in /fold-editor
+   * moves a key in a Set the view owns: it reveals the fold to the READER and the model
+   * never learns it happened. This restores the fold's raw bytes to the PROJECTION, which
+   * costs the window and is what the lease exists to reclaim. Shane, 2026-08-30: the user
+   * should "page through/expand for their own viewing purposes" while "setting an expanded
+   * fold is a different choice". Two acts, two paths, and this is the one that spends.
+   */
+  const setFoldExpansion = async (
+    snapshot: ActiveContextSnapshot,
+    id: string,
+    expand: boolean,
+    ctx: any,
+  ): Promise<unknown[]> => {
+    let epochApplied: unknown[] = [];
+    if (expand && pendingMarks(persistence.state!).length) {
+      const result = await commitPendingMarks({
+        snapshot,
+        state: persistence.state!,
+        generation: lifecycle.generation,
+        retainIneligible: true,
+      });
+      persistence.state = result.state;
+      epochApplied = result.applied;
+    }
+    const expanding = requireActiveFold(snapshot, persistence.state!, id);
+    if (expand) {
+      admit({
+        action: "expand",
+        ctx,
+        foldId: id,
+        requestedBytes: Math.max(0, expanding.sourceChars - expanding.placeholderChars),
+        children: childFoldIds(expanding),
+      });
+    }
+    let next = setFoldProjectionState(persistence.state!, id, expand ? "expanded" : "folded");
+    if (expand) next = withExpandLease(next, id);
+    else {
+      const leases = { ...next.leases };
+      delete leases[id];
+      next = { ...next, leases };
+    }
+    await persistManual(next, ctx);
+    updateStatus(ctx);
+    return epochApplied;
+  };
+
+  /**
    * THE PIN CHANGE PATH, shared by the tool's pin/unpin actions and the editor's
    * pin toggle: the pinned-share cap, protectEvidence, the canonical event, persist.
    */
@@ -3984,36 +4090,15 @@ export function registerActiveContext(pi: any, options: {
       }
       const id = String(params.id ?? "").trim();
       if (!id) throw new Error("reboundary requires id, or ids naming the span to re-cut");
-      const fold = requireActiveFold(snapshot, persistence.state, id);
-      if (fold.parentId) {
-        throw new Error(
-          `Fold ${id} is nested under ${fold.parentId}; dissolve ${fold.parentId} first so ${id} is a root`,
-        );
-      }
-      const refs = flattenFoldRefs(fold, persistence.state);
-      const children = childFoldIds(fold);
-      const briefs = { ...(persistence.state.briefs ?? {}) };
-      delete briefs[id];
-      const next: ActiveContextState = {
-        ...persistence.state,
-        revision: persistence.state.revision + 1,
-        folds: deriveFoldParents(persistence.state.folds.filter((item) => item.id !== id)),
-        expanded: persistence.state.expanded.filter((expandedId) => expandedId !== id),
-        ...(Object.keys(briefs).length ? { briefs } : {}),
-      };
-      if (!Object.keys(briefs).length) delete next.briefs;
-      const leases = { ...next.leases };
-      delete leases[id];
-      await persistManual({ ...next, leases }, ctx);
-      updateStatus(ctx);
+      const dissolved = await dissolveFold(snapshot, id, ctx);
       return toolPayload({
         version: 1,
         action,
         id,
         dissolved: true,
-        releasedChildren: children,
-        startId: refs[0]?.entryId ?? null,
-        endId: refs.at(-1)?.entryId ?? null,
+        releasedChildren: dissolved.children,
+        startId: dissolved.startId,
+        endId: dissolved.endId,
         durableRevision: persistence.state.revision,
         activation: `the span ${id} held is raw again and its boundary is yours to re-cut; ` +
           "fold the endpoints you meant, or two sub-spans to split it. No evidence moved.",
@@ -4022,36 +4107,7 @@ export function registerActiveContext(pi: any, options: {
     if (action === "expand" || action === "refold") {
       const id = String(params.id ?? "").trim();
       if (!id) throw new Error(`${action} requires id`);
-      let epochApplied: unknown[] = [];
-      if (action === "expand" && pendingMarks(persistence.state).length) {
-        const result = await commitPendingMarks({
-          snapshot,
-          state: persistence.state,
-          generation: lifecycle.generation,
-          retainIneligible: true,
-        });
-        persistence.state = result.state;
-        epochApplied = result.applied;
-      }
-      const expanding = requireActiveFold(snapshot, persistence.state, id);
-      if (action === "expand") {
-        admit({
-          action: "expand",
-          ctx,
-          foldId: id,
-          requestedBytes: Math.max(0, expanding.sourceChars - expanding.placeholderChars),
-          children: childFoldIds(expanding),
-        });
-      }
-      let next = setFoldProjectionState(persistence.state, id, action === "expand" ? "expanded" : "folded");
-      if (action === "expand") next = withExpandLease(next, id);
-      else {
-        const leases = { ...next.leases };
-        delete leases[id];
-        next = { ...next, leases };
-      }
-      await persistManual(next, ctx);
-      updateStatus(ctx);
+      const epochApplied = await setFoldExpansion(snapshot, id, action === "expand", ctx);
       return toolPayload({
         version: 1,
         action,
@@ -4382,6 +4438,37 @@ export function registerActiveContext(pi: any, options: {
       tokens: estimatedTokens(spanBytes(snapshot, Math.min(from, to), Math.max(from, to) + 1)),
     });
 
+    /**
+     * THE READER'S OWN DEPTH, AND IT COSTS THE AGENT NOTHING (2026-08-30).
+     *
+     * A row preview is bounded at EDITOR_ROW_PREVIEW_CHARS because it is a SUMMARY, and
+     * the editor used to have nothing behind it: the whole surface stopped at 300
+     * characters of the first text block. This is the way past that. It is an INJECTED
+     * accessor, like `spanCost`, so the view still holds no runtime reference and still
+     * computes nothing it was not handed, and it is a pure READ: it moves no bytes,
+     * writes no state and never touches the projection, so paging an entry to its end
+     * changes nothing the agent will ever see. That separation is the whole point. A
+     * person auditing the window needs to read further than the model is being shown,
+     * and expanding a fold INTO the model's window is a different act with a different
+     * verb (`expand`) and a different cost.
+     *
+     * The cut is STATED rather than silent, which is gate 136's law carried to a surface
+     * a person reads: `total` and `hasMore` travel with the slice.
+     */
+    const entryDetail = (entryId: string, offset = 0, chars = EDITOR_DETAIL_PAGE_CHARS) => {
+      const item = snapshot.mapped.find((candidate) => candidate.ref?.entryId === entryId);
+      if (!item) return null;
+      const whole = entryText(item.message);
+      const from = Math.max(0, Math.min(offset, whole.length));
+      const width = Math.max(1, Math.min(chars, EDITOR_DETAIL_PAGE_CHARS));
+      return {
+        text: whole.slice(from, from + width),
+        offset: from,
+        total: whole.length,
+        hasMore: from + width < whole.length,
+      };
+    };
+
     // Marks move no bytes until the commit, so window geometry cannot change while
     // the editor holds it open; only pending state grows. Rebuilding against the SAME
     // snapshot with fresh state keeps PROPOSED rows honest without re-deriving indices.
@@ -4411,14 +4498,16 @@ export function registerActiveContext(pi: any, options: {
                 const item = exactMapped(snapshot, ref);
                 const message = item?.message as Record<string, unknown> | undefined;
                 const role = String(item?.ref?.role ?? message?.role ?? "entry");
-                const content = message?.content;
-                let preview = "";
-                if (typeof content === "string") preview = content.slice(0, 300);
-                else if (Array.isArray(content)) {
-                  const firstText = content.find((part) => part?.type === "text");
-                  preview = typeof firstText?.text === "string" ? firstText.text.slice(0, 300) : "";
-                }
-                return { id: ref.entryId, role, preview: preview.replace(/\s+/g, " ") };
+                // A FOLD'S ENTRY IS A MARK POINT AND A PIN POINT TOO (2026-08-30). It
+                // carried no index and no entry id the view could act on, so `p` was
+                // inert on every row inside an expanded fold while working one row over
+                // in a raw gap, for no reason a reader could see.
+                return {
+                  id: ref.entryId,
+                  role,
+                  preview: rowPreview(item?.message),
+                  ...(item ? { index: item.index } : {}),
+                };
               });
             return {
               id: String(row.id),
@@ -4427,6 +4516,16 @@ export function registerActiveContext(pi: any, options: {
               sourceCount: Number(row.sourceCount ?? 0),
               startPosition: Number(row.startPosition),
               endPosition: Number(row.endPosition),
+              // WHAT THE AGENT IS ACTUALLY LOOKING AT (2026-08-30). A fold the agent has
+              // expanded is standing RAW in its window, and the editor rendered it
+              // identically to one that is still a placeholder, so the one surface built
+              // to show a person the model's window could not show them this about it.
+              expandedInContext: (state.expanded ?? []).includes(String(row.id)),
+              // WHERE THE BRIEF CAME FROM. Given the campaign verdict on agent-written
+              // briefs, which sentence is the runtime's and which is the model's is the
+              // fact a person auditing this window most needs, and it was not on the
+              // surface at all.
+              provenance: String((fold as any).briefProvenance?.kind ?? "deterministic"),
               entries,
             };
           }),
@@ -4452,21 +4551,12 @@ export function registerActiveContext(pi: any, options: {
               if (!item) continue;
               const message = item.message as Record<string, unknown> | undefined;
               const role = String(item.ref?.role ?? message?.role ?? "entry");
-              const content = message?.content;
-              // 300 chars, same as fold entries: the view shows 48 on the row and
-              // deepens to 240 on Enter, so a 48-char preview made detail a no-op.
-              let preview = "";
-              if (typeof content === "string") preview = content.slice(0, 300);
-              else if (Array.isArray(content)) {
-                const firstText = content.find((part) => part?.type === "text");
-                preview = typeof firstText?.text === "string" ? firstText.text.slice(0, 300) : "";
-              }
               // THE INDEX IS THE MARK POINT: raw entries carry their mapped position so
               // the view can price a span and name its two boundary ids.
               out.push({
                 id: item.ref?.entryId ?? String(index),
                 role,
-                preview: preview.replace(/\s+/g, " "),
+                preview: rowPreview(message),
                 ...(item.ref?.entryId ? { index } : {}),
               });
             }
@@ -4482,6 +4572,9 @@ export function registerActiveContext(pi: any, options: {
           freedTokens: accounting.freedTokens,
         },
         pinned: state.protected.map((ref) => ref.entryId),
+        // THE FOLDS THE AGENT HAS STANDING RAW IN ITS WINDOW, so the editor can say which
+        // rows are placeholders and which are already costing the projection.
+        expandedInContext: [...(state.expanded ?? [])],
       };
     };
 
@@ -4496,6 +4589,35 @@ export function registerActiveContext(pi: any, options: {
     };
     const editorActions = {
       spanCost,
+      entryDetail,
+      // THE READER'S EXPANSION AND THE WINDOW'S ARE DIFFERENT ACTS, and this is the second
+      // one: it restores the fold's raw bytes to the model's projection and takes the
+      // lease that reclaims them at the next commit. The view's own open/close key never
+      // reaches here.
+      onSetExpanded: async (foldId: string, expand: boolean): Promise<void> => {
+        await runQueued(async () => {
+          await setFoldExpansion(authoritativeSnapshotFor(ctx), foldId, expand, ctx);
+        });
+        safeNotify(ctx, expand
+          ? "Expanded in the model's window: its exact bytes are back in the projection, " +
+            "reclaimed at the next commit unless pinned."
+          : "Refolded: the placeholder stands where the bytes were, still peek-recoverable.",
+        "info");
+        refreshAfter();
+      },
+      // RE-CUT IS DISSOLVE PLUS MARK, and the editor already has the second half: `m` on
+      // two raw entries stages the span the person meant. This is the first half, through
+      // the tool's own validated path.
+      onDissolveFold: async (foldId: string): Promise<void> => {
+        let released: string[] = [];
+        await runQueued(async () => {
+          released = (await dissolveFold(authoritativeSnapshotFor(ctx), foldId, ctx)).children;
+        });
+        safeNotify(ctx,
+          `The span is raw again${released.length ? `, releasing ${released.length} nested fold(s)` : ""}; ` +
+          "no evidence moved. Mark the boundary you meant with m.", "info");
+        refreshAfter();
+      },
       onStageMark: async (fromId: string, toId: string, brief?: string): Promise<void> => {
         await runQueued(async () => {
           const fresh = authoritativeSnapshotFor(ctx);
@@ -4520,11 +4642,24 @@ export function registerActiveContext(pi: any, options: {
           `Withdrew ${removed.length} staged mark(s); no context bytes moved.`, "info");
         refreshAfter();
       },
-      onTogglePin: async (entryId: string): Promise<void> => {
-        const pinnedAlready = persistence.state!.protected
-          .some((ref: any) => ref.entryId === entryId);
+      onTogglePin: async (id: string): Promise<void> => {
+        // A TOGGLE HAS TO ASK THE SAME QUESTION THE PIN PATH ANSWERS (2026-08-30). This
+        // read `protected.some((ref) => ref.entryId === id)`, which is only ever true for
+        // an ENTRY id, and `protectEvidence` has always taken a FOLD id too, holding
+        // every ref underneath it. So the moment the editor started offering p on a fold
+        // row, the second press pinned the same refs again instead of releasing them: the
+        // question was asked about an id that is never in the set being searched.
+        const state = persistence.state!;
+        const fold = state.folds.find((item: any) => item.id === id);
+        const held = new Set(state.protected.map((ref: any) => objectRefKey(ref)));
+        const refs = fold
+          ? flattenFoldRefs(fold, state)
+          : state.protected.filter((ref: any) => ref.entryId === id);
+        const pinnedAlready = fold
+          ? refs.length > 0 && refs.every((ref: any) => held.has(objectRefKey(ref)))
+          : refs.length > 0;
         await runQueued(async () => {
-          await applyProtectionChange(authoritativeSnapshotFor(ctx), [entryId], !pinnedAlready, ctx);
+          await applyProtectionChange(authoritativeSnapshotFor(ctx), [id], !pinnedAlready, ctx);
         });
         safeNotify(ctx, pinnedAlready
           ? "Unpinned: the released entries rejoin the next commit's candidates."

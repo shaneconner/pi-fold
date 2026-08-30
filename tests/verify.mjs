@@ -13617,6 +13617,224 @@ async function gateFoldEditorWithdrawPinBrief() {
 }
 
 /**
+ * THE READER SEES FURTHER THAN THE MODEL, AND IT COSTS THE MODEL NOTHING (2026-08-30).
+ *
+ * THE DEFECT, in one number: 300. Every entry row in /fold-editor was built by an inline
+ * `content.find((part) => part.type === "text")` sliced to 300 characters, and the detail
+ * row under it sliced to 480, a bound the shorter one could never reach. So a message
+ * whose first block was not text rendered as an empty row, everything after the first
+ * block was unreachable at any depth, and 300 characters was the whole depth the surface
+ * had. Shane, 2026-08-30: "the amount of detail we can expand out to is a bit limited."
+ *
+ * THE LAW THIS GATE EXISTS FOR is the one that makes the depth safe to have. Opening and
+ * paging in this view is a PURE READ: it moves no bytes, writes no state and never
+ * reaches the projection, so the reader can walk an entry to its end and the model's
+ * window is byte-identical afterwards. Putting a fold's bytes back in front of the model
+ * is a DIFFERENT ACT with a different key and a real cost. Shane: the user should "page
+ * through/expand for their own viewing purposes" while "setting an expanded fold is a
+ * different choice". The gate proves both halves against the same fixture, because
+ * either one alone is satisfiable by a surface that has quietly merged them.
+ *
+ * It also pins the three edits the view was narrower than its own paths for: p on a fold
+ * row and on a fold's interior entry (the tool has always taken either id), e for the
+ * expansion that does cost, and r for the re-cut half the editor never had.
+ */
+async function gateFoldEditorReadsDeeperThanTheWindow() {
+  const transcriptModule = await jiti.import(join(projectRoot, "extensions", "lib", "transcript.ts"));
+
+  // (a) EVERY BLOCK IS ACCOUNTED FOR, and the ones that are not text are NAMED. The old
+  // reading returned "" for the first of these and the first block alone for the second.
+  assert.equal(transcriptModule.entryText({ content: "plain" }), "plain");
+  const multi = transcriptModule.entryText({
+    content: [
+      { type: "image", source: {} },
+      { type: "text", text: "first" },
+      { type: "toolCall", name: "read", arguments: { path: "/x" } },
+      { type: "text", text: "second" },
+    ],
+  });
+  assert(multi.includes("first") && multi.includes("second"),
+    `entryText dropped a text block after the first: ${multi}`);
+  assert(multi.includes("[image]"), `entryText dropped a non-text block silently: ${multi}`);
+  assert(multi.includes("[calls read") && multi.includes("/x"),
+    `entryText dropped a tool call's arguments, which are why the result below it exists: ${multi}`);
+
+  // A fixture whose entries are far longer than any preview bound, so "deeper" is a
+  // measurable claim rather than a shape. The fold floor is above the fixture for gate
+  // 145's reason: the editor has to open on a raw window the user can act inside.
+  const runtime = await epochToolRuntime({
+    turns: 10, resultChars: 9_000,
+    thresholds: { ...context.DEFAULT_THRESHOLDS, minFoldChars: 400_000 },
+  });
+  await measure(runtime, 40_000, 100_000);
+  let currentAction = "";
+  let view = null;
+  runtime.ctx.ui.custom = async (factory) => {
+    view = factory(null, { fg: (color, text) => `[${color}]${text}[/${color}]` },
+      { matches: (_data, name) => name === currentAction }, () => {});
+    return view;
+  };
+  await runtime.commands.get("fold-editor").handler("", runtime.ctx);
+  await settle();
+
+  // Walk onto a raw entry row and open its detail.
+  currentAction = "tui.select.confirm";
+  view.handleInput("\r");
+  currentAction = "tui.select.down";
+  // ONTO A TOOL RESULT, not merely onto a raw entry. The fixture's user and assistant
+  // lines are a few dozen characters, so a depth claim made on one of those would pass
+  // against the 300-character reading this replaced; the 9,000-character results are the
+  // rows where "deeper" is a measurable fact.
+  const selectedLine = () => view.render(140).join("\n").split("\n")
+    .find((line) => line.includes("\u276f")) ?? "";
+  let walked = 0;
+  while ((!/:r\d+$/.test(view.selectedKey) || !selectedLine().includes("toolResult")) && walked++ < 200) {
+    const before = view.selectedKey;
+    view.handleInput("\x1b[B");
+    if (view.selectedKey === before) break;
+  }
+  assert(/:r\d+$/.test(view.selectedKey) && selectedLine().includes("toolResult"),
+    `did not reach a raw tool-result row: ${view.selectedKey}`);
+
+  // THE PROJECTION IS PHOTOGRAPHED BEFORE ANY READING and compared after all of it. This
+  // is the claim, and it is asserted on bytes rather than on intent.
+  const projectionBefore = json.stableStringify((await project(runtime)).messages);
+
+  currentAction = "tui.select.confirm";
+  view.handleInput("\r");
+  const firstPage = view.render(140).join("\n");
+  // (b) THE DETAIL READS PAST THE OLD CEILING, and states where it is.
+  const positionLine = firstPage.split("\n").find((line) => /characters 0-/.test(line));
+  assert(positionLine, `the open detail does not state its position: ${firstPage.slice(-700)}`);
+  const [, shown, total] = positionLine.match(/characters 0-([\d,]+) of ([\d,]+)/) ?? [];
+  const shownChars = Number(String(shown).replace(/,/g, ""));
+  const totalChars = Number(String(total).replace(/,/g, ""));
+  assert(totalChars > context.EDITOR_ROW_PREVIEW_CHARS,
+    `the fixture entry is ${totalChars} chars, too short to prove the row preview is not the ceiling`);
+  assert(shownChars > 300,
+    `the detail served ${shownChars} characters, no deeper than the 300 this replaced`);
+  assert(/\]:more/.test(firstPage),
+    "the detail did not offer the rest, so a cut list reads as a complete one");
+
+  // (c) ] PAGES FORWARD AND [ PAGES BACK, and the position moves with it.
+  view.handleInput("]");
+  const secondPage = view.render(140).join("\n");
+  const secondLine = secondPage.split("\n").find((line) => /characters /.test(line));
+  assert(new RegExp(`characters ${shownChars.toLocaleString("en-US")}-`).test(secondLine ?? ""),
+    `] did not advance the read from ${shownChars}: ${secondLine}`);
+  assert(/\[:back/.test(secondPage), "a paged detail does not offer the way back");
+  view.handleInput("[");
+  assert(/characters 0-/.test(view.render(140).join("\n")), "[ did not page back");
+
+  // (d) AND THE MODEL SAW NONE OF IT. Opening a fold row for the reader, opening an
+  // entry, and paging it are all pure reads: the projection is byte-identical.
+  assert.equal(json.stableStringify((await project(runtime)).messages), projectionBefore,
+    "reading in the editor changed the model's window, so the reader's depth is not free");
+
+  // (e) p WORKS ON A FOLD'S INTERIOR ENTRY, which it did not: the row carried no id the
+  // view could act on, so p was inert inside an expanded fold and worked one row over in
+  // a raw gap. Commit a fold first so there is an interior to reach.
+  const folded = await epochToolRuntime({ turns: 10, resultChars: 9_000 });
+  await measure(folded, 40_000, 100_000);
+  await runtimeCommit(folded, { tokens: 30_000, contextWindow: 100_000 });
+  let foldView = null;
+  folded.ctx.ui.custom = async (factory) => {
+    foldView = factory(null, { fg: (color, text) => `[${color}]${text}[/${color}]` },
+      { matches: (_data, name) => name === currentAction }, () => {});
+    return foldView;
+  };
+  await folded.commands.get("fold-editor").handler("", folded.ctx);
+  await settle();
+  // Onto the fold row. A top-level fold row's key is its bare id; raw gaps sort in
+  // between, so the first row is whichever block starts earliest.
+  currentAction = "tui.select.down";
+  let foldWalk = 0;
+  while (!/^fold_[0-9a-f]+$/.test(foldView.selectedKey) && foldWalk++ < 200) {
+    const before = foldView.selectedKey;
+    foldView.handleInput("\x1b[B");
+    if (foldView.selectedKey === before) break;
+  }
+  assert(/^fold_[0-9a-f]+$/.test(foldView.selectedKey),
+    `did not reach a fold row: ${foldView.selectedKey}`);
+
+  const durable = () => folded.branch.filter((entry) =>
+    entry.customType === context.ACTIVE_CONTEXT_STATE_ENTRY).at(-1).data;
+
+  // p ON THE FOLD ROW ITSELF. The tool's pin action has always taken a fold id or an
+  // entry id; the view required `markable`, which is a fact about MARKING a raw span and
+  // has nothing to do with holding one.
+  const pinFrom = folded.appended.length;
+  foldView.handleInput("p");
+  const pinDeadline = Date.now() + 10_000;
+  while (foldView.staging && Date.now() < pinDeadline) await new Promise((r) => setTimeout(r, 5));
+  await settle();
+  const foldPinEvents = contextEvents(folded, pinFrom).filter((record) => record.kind === "context.pin");
+  assert(foldPinEvents.length === 1 && foldPinEvents[0].pin === true,
+    `p on a fold row recorded ${foldPinEvents.length} pin events: ${JSON.stringify(foldPinEvents)}`);
+  assert(/📌/.test(foldView.render(140).join("\n")), "the pinned fold row wears no badge");
+  foldView.handleInput("p");
+  while (foldView.staging) await new Promise((r) => setTimeout(r, 5));
+  await settle();
+  // AND THE SECOND PRESS RELEASES IT. The toggle asked whether the pinned set contained
+  // the row's id, which is only ever true of an ENTRY id, so on a fold row the second
+  // press pinned the same refs again and the badge never cleared. A pinned span is also
+  // revealed raw in the projection, so a stuck pin here would have made the expansion
+  // claim below vacuous: the window was already showing what e was meant to add.
+  assert.equal(durable().protected.length, 0,
+    "the second p on a fold row did not release its hold");
+
+  // (f) e IS THE OTHER EXPANSION: it reaches state.expanded and therefore the projection,
+  // and the row says so. This is the half that costs, and it must be provably distinct
+  // from the reader's own open/close above.
+  assert.deepEqual(durable().expanded, [], "the fixture began with a fold already expanded");
+  const beforeExpand = json.stableStringify((await project(folded)).messages);
+  foldView.handleInput("e");
+  const expandDeadline = Date.now() + 10_000;
+  while (foldView.staging && Date.now() < expandDeadline) await new Promise((r) => setTimeout(r, 5));
+  await settle();
+  assert.equal(durable().expanded.length, 1,
+    `e did not reach the runtime's expanded set: ${JSON.stringify(durable().expanded)}`);
+  assert(json.stableStringify((await project(folded)).messages) !== beforeExpand,
+    "e left the model's window unchanged, so it is the reader's expansion under another name");
+  assert(/raw in the model's window/.test(foldView.render(140).join("\n")),
+    "an expanded fold renders identically to a placeholder, which is the fact the surface exists to show");
+  foldView.handleInput("e");
+  while (foldView.staging) await new Promise((r) => setTimeout(r, 5));
+  await settle();
+  assert.deepEqual(durable().expanded, [], "e did not refold what it expanded");
+
+  // (g) r RETURNS THE FOLD TO RAW through the reboundary path, which is the half of
+  // re-cutting the editor never had: m on two raw entries is the other half.
+  const foldsBefore = materialized(folded).folds.length;
+  foldView.handleInput("r");
+  const dissolveDeadline = Date.now() + 10_000;
+  while (foldView.staging && Date.now() < dissolveDeadline) await new Promise((r) => setTimeout(r, 5));
+  await settle();
+  const foldsAfter = materialized(folded).folds.length;
+  assert(foldsAfter < foldsBefore, `r left ${foldsAfter} folds standing against ${foldsBefore}`);
+  assert(folded.notifications.some((notice) => /raw again/.test(notice.message)),
+    "the re-cut did not say the span is raw again");
+
+  // (h) EVERY KEY THAT CHANGES SOMETHING IS NAMED, including the two that are easy to
+  // confuse, and they are worded apart.
+  const footer = foldView.render(140).join("\n");
+  for (const hint of ["enter:open", "]/[:page", "p:pin", "e:show model", "r:re-cut", "u:withdraw"]) {
+    assert(footer.includes(hint), `the footer does not name ${hint}`);
+  }
+
+  return {
+    entryTextNamesEveryBlock: true,
+    detailCharsServed: shownChars,
+    entryChars: totalChars,
+    pagedBothWays: true,
+    readingIsFreeToTheModel: true,
+    pinOnFoldRow: true,
+    expansionReachesTheProjection: true,
+    dissolveThroughReboundary: true,
+  };
+}
+
+/**
  * REGISTRATION, PARSE AND DEPLOYMENT BRANDING
  *
  * One law: the runtime ships no identity of its own. Registration is where a deployment's
@@ -14571,6 +14789,7 @@ async function gateFoldEditor() {
     foldEditorRendersReadOnly: await claim("gateFoldEditorRendersReadOnly", gateFoldEditorRendersReadOnly),
     foldEditorUserMarks: await claim("gateFoldEditorUserMarks", gateFoldEditorUserMarks),
     foldEditorWithdrawPinBrief: await claim("gateFoldEditorWithdrawPinBrief", gateFoldEditorWithdrawPinBrief),
+    foldEditorReadsDeeperThanTheWindow: await claim("gateFoldEditorReadsDeeperThanTheWindow", gateFoldEditorReadsDeeperThanTheWindow),
   };
 }
 

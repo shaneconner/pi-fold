@@ -31,6 +31,49 @@ import type {
   MappedMessage,
 } from "./policy.ts";
 
+/**
+ * ONE MESSAGE, AS THE TEXT A PERSON WOULD READ (2026-08-30).
+ *
+ * WHAT THIS REPLACED. `/fold-editor` built its entry previews inline, and the reading was
+ * `content.find((part) => part.type === "text")` sliced to 300 characters. So a message
+ * whose first block is not text previewed as the empty string, a tool result carrying its
+ * body in a later block previewed as its first block alone, and everything past 300
+ * characters was unreachable from the editor at any depth: the detail row sliced to 480,
+ * a bound the 300-character preview could never reach, so the deeper number was dead.
+ * Shane, 2026-08-30: "the amount of detail we can expand out to is a bit limited".
+ *
+ * EVERY BLOCK IS ACCOUNTED FOR, and the ones that are not text are NAMED rather than
+ * dropped. A window a person is auditing may not show them an empty row where an image or
+ * a tool call stands; naming it is how the row stays honest about what it could not
+ * render. The result is UNBOUNDED here on purpose. Bounding belongs to the caller, which
+ * knows whether it is drawing a one-line row or serving a paged read, and a cut applied
+ * here would be a cut nobody could state.
+ */
+export function entryText(message: unknown): string {
+  const content = ownValue(message, "content");
+  if (typeof content === "string") return content;
+  const parts = denseOwnArrayValues(content);
+  if (!parts) return "";
+  const out: string[] = [];
+  for (const part of parts) {
+    if (typeof part === "string") { out.push(part); continue; }
+    const type = ownValue(part, "type");
+    const text = ownValue(part, "text");
+    if (typeof text === "string" && text) { out.push(text); continue; }
+    if (type === "toolCall") {
+      const name = ownValue(part, "name");
+      // The ARGUMENTS are the content of a tool call, and they are what a person auditing
+      // a window needs to see: the call is why the result below it exists.
+      const args = ownValue(part, "arguments");
+      out.push(`[calls ${typeof name === "string" ? name : "a tool"}` +
+        `${args === undefined ? "" : ` ${stableStringify(args)}`}]`);
+      continue;
+    }
+    out.push(`[${typeof type === "string" && type ? type : "content"}]`);
+  }
+  return out.join("\n");
+}
+
 export function terminalAssistant(message: unknown): boolean {
   if (messageRole(message) !== "assistant") return false;
   const stop = ownValue(message, "stopReason");

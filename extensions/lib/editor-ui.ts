@@ -33,6 +33,14 @@ export interface FoldEditorBlock {
 	kind?: string;
 	origin?: string;
 	brief?: string;
+	/** Where this fold's brief came from: deterministic, supplied or augmented. Given the
+	 *  campaign verdict on agent-written briefs, which sentence is the runtime's and which
+	 *  is the model's is the fact a person auditing this window most needs. */
+	provenance?: string;
+	/** The fold is EXPANDED IN THE MODEL'S WINDOW: its raw bytes are in the projection
+	 *  right now, reclaimed at the next commit unless pinned. Distinct in every way from
+	 *  the view's own open/closed state, which the reader owns and the model never sees. */
+	expandedInContext?: boolean;
 	sourceCount?: number;
 	rolesSummary?: string;
 	/** Estimated tokens this staged mark frees at the next commit; proposed blocks only. */
@@ -64,6 +72,9 @@ export interface FoldEditorData {
 		freedTokens: number;
 	};
 	pinned: string[];
+	/** Fold ids the AGENT has standing raw in its window (state.expanded), not the view's
+	 *  own open rows. Absent on a host that predates the field. */
+	expandedInContext?: string[];
 }
 
 const BAR_WIDTH = 24;
@@ -120,6 +131,7 @@ export function buildFoldEditorData(
 		foldRows: () => Array<{
 			id: string; kind: string; brief: string; sourceCount: number;
 			startPosition: number; endPosition: number;
+			provenance?: string; expandedInContext?: boolean;
 			entries: FoldEditorEntry[];
 		}>;
 		pendingMarkRefs: () => Array<{ id: string; origin: string; brief: string; entryIds: string[] }>;
@@ -137,6 +149,8 @@ export function buildFoldEditorData(
 			endPosition: row.endPosition,
 			kind: row.kind,
 			brief: row.brief,
+			provenance: row.provenance,
+			expandedInContext: row.expandedInContext,
 			sourceCount: row.sourceCount,
 			entries: row.entries,
 			children: [],
@@ -250,11 +264,16 @@ function briefChunks(brief: string): string[] {
 	return chunks;
 }
 
-/** Detail rows: the full preview (to 480 chars) wrapped like a brief, under the
- *  entry's own row. One long truncated line plus a mid-word continuation hid the
- *  middle of the text; wrapping shows all of it in reading order. */
+/** Detail rows: the entry's text wrapped like a brief, under its own row. One long
+ *  truncated line plus a mid-word continuation hid the middle of the text; wrapping shows
+ *  all of it in reading order.
+ *
+ *  NO SECOND BOUND OF ITS OWN (2026-08-30). This sliced to 480 characters against a
+ *  preview the data layer had already cut to 300, so the deeper number could never bind
+ *  and the whole surface stopped at 300 characters of one text block. What arrives here is
+ *  now whatever the caller chose to hand over, and the caller states its own cut. */
 function detailChunks(preview: string): string[] {
-	return briefChunks(preview.slice(0, 480));
+	return briefChunks(preview);
 }
 
 interface RenderRow {
@@ -270,6 +289,12 @@ interface RenderRow {
 	entryId?: string;
 	/** A PROPOSED row: withdrawable with u. */
 	proposedMarkId?: string;
+	/** A FOLD row: pinnable, expandable into the model's window, dissolvable. Carries the
+	 *  fold's own id, which is not the row key: the key is path-qualified so a nested fold
+	 *  renders once per ancestor chain, and the runtime only ever accepts the bare id. */
+	foldId?: string;
+	/** The fold is expanded IN THE MODEL'S WINDOW right now, which is what e toggles. */
+	foldExpandedInContext?: boolean;
 }
 
 /** What laying a mark over a span WOULD commit: the size the user sees before staging. */
@@ -278,16 +303,33 @@ export interface SpanCost {
 	tokens: number;
 }
 
+/** One page of an entry's exact text, with the cut STATED rather than silent. */
+export interface EntryDetailPage {
+	text: string;
+	offset: number;
+	total: number;
+	hasMore: boolean;
+}
+
 export interface FoldEditorActions {
 	/** Live would-be fold size for a span of mapped indices, any order. */
 	spanCost?: (from: number, to: number) => SpanCost;
+	/** One page of an entry's exact text. A PURE READ: it moves no bytes, writes no state
+	 *  and never touches the projection, so paging an entry to its end is invisible to the
+	 *  model. This is the reader's depth, and it is not the window's. */
+	entryDetail?: (entryId: string, offset?: number, chars?: number) => EntryDetailPage | null;
 	/** Stage a USER mark over two raw entry ids through the validated path. The
 	 *  brief is what the user typed; empty means the deterministic brief. */
 	onStageMark?: (fromId: string, toId: string, brief?: string) => Promise<void>;
 	/** Withdraw one staged mark by id (the tool's unmark path). */
 	onWithdrawMark?: (markId: string) => Promise<void>;
-	/** Pin or unpin one raw entry; the handler decides which from current state. */
+	/** Pin or unpin one raw entry or one fold; the handler decides which from current state. */
 	onTogglePin?: (entryId: string) => Promise<void>;
+	/** Put a fold's raw bytes back into the MODEL's window, or take them out again. The
+	 *  view's own open/close key is a different act and never reaches this. */
+	onSetExpanded?: (foldId: string, expand: boolean) => Promise<void>;
+	/** Return a fold to raw so its boundary can be re-marked (the tool's reboundary path). */
+	onDissolveFold?: (foldId: string) => Promise<void>;
 }
 
 type ThemeFn = (color: string, text: string) => string;
@@ -301,6 +343,11 @@ export class FoldEditorView {
 	private selectedKey: string;
 	private expanded: Set<string> = new Set();
 	private detailedEntry: string | null = null;
+	/** Where the open detail is being read from, in characters. THE READER'S POSITION AND
+	 *  NOTHING ELSE: paging it moves no bytes, writes no state and the model never learns
+	 *  it happened. Reset whenever the open entry changes, so a short entry cannot inherit
+	 *  a long one's offset and render blank. */
+	private detailOffset = 0;
 	private scroll = 0;
 	/** The anchored mark point: first boundary of a span the user is laying down. */
 	private anchor: { key: string; id: string; index: number } | null = null;
@@ -346,6 +393,76 @@ export class FoldEditorView {
 		return this.data.pinned.includes(entryId) ? " 📌" : "";
 	}
 
+	/**
+	 * A FOLD IS PINNED THROUGH ITS MEMBERS, so its badge is counted rather than looked up.
+	 *
+	 * `protectEvidence` takes a fold id and holds every ref underneath it, so the pinned set
+	 * only ever contains ENTRY ids and a fold id is never in it. Reading the fold's own id
+	 * against that set is how a fold pinned by this very view rendered unpinned.
+	 *
+	 * PARTIAL IS STATED, not rounded to either end. A fold whose entries were pinned
+	 * individually, or one that lost some of its hold to an unpin, is neither held nor free,
+	 * and a badge that showed nothing there would hide exactly the state a person opened
+	 * this surface to find.
+	 */
+	private foldPinBadge(block: FoldEditorBlock): string {
+		const entries = block.entries ?? [];
+		if (!entries.length) return "";
+		const held = entries.filter((entry) => this.data.pinned.includes(entry.id)).length;
+		if (!held) return "";
+		return held === entries.length ? " 📌" : ` 📌 ${held}/${entries.length}`;
+	}
+
+	/**
+	 * THE OPEN ENTRY'S TEXT, ONE PAGE AT A TIME, AND THE CUT IS STATED (2026-08-30).
+	 *
+	 * Three sites rendered detail rows and all three read `entry.preview`, which the data
+	 * layer had cut to 300 characters of the first text block; `detailChunks` then sliced
+	 * to 480, a bound the shorter one could never reach. So this is the whole depth the
+	 * editor had. It now asks the injected accessor, which reads the exact message and
+	 * hands back a page with `total` and `hasMore` beside it, and falls back to the row
+	 * preview on a host that supplies no accessor.
+	 *
+	 * PAGING HERE IS NOT EXPANDING. Nothing on this path touches the projection: the
+	 * reader walks the entry to its end and the model's window is byte-identical
+	 * afterwards. Putting a fold's bytes back in front of the model is `e`, a different
+	 * key on a different path with a different cost.
+	 */
+	private pushDetail(rows: RenderRow[], entryKey: string, entry: FoldEditorEntry, pad: string): void {
+		const page = this.actions.entryDetail?.(entry.id, this.detailOffset) ?? null;
+		const body = page ? page.text : entry.preview;
+		let ordinal = 0;
+		for (const chunk of detailChunks(body)) {
+			rows.push({
+				key: `${entryKey}:d${ordinal}`,
+				text: `${pad}      ${this.color("dim", chunk)}`,
+				toggleId: null,
+			});
+			ordinal += 1;
+		}
+		if (!page) return;
+		const shown = page.offset + page.text.length;
+		if (shown >= page.total && page.offset === 0) return;
+		// A LIST THAT STOPS EARLY AND SAYS NOTHING READS AS A COMPLETE LIST (gate 136's
+		// law, on a surface a person reads rather than a brief a model reads). The
+		// position is stated in characters because that is the unit the keys move in.
+		rows.push({
+			key: `${entryKey}:more`,
+			text: `${pad}      ${this.color("warning",
+				`characters ${page.offset.toLocaleString("en-US")}-${shown.toLocaleString("en-US")} ` +
+				`of ${page.total.toLocaleString("en-US")}` +
+				`${page.hasMore ? " · ]:more" : ""}${page.offset > 0 ? " · [:back" : ""}`)}`,
+			toggleId: null,
+		});
+	}
+
+	/** Open, close or re-target the detail rows under one entry row. The offset resets on
+	 *  every change of subject, so a short entry never inherits a long one's position. */
+	private toggleDetail(rowKey: string): void {
+		this.detailedEntry = this.detailedEntry === rowKey ? null : rowKey;
+		this.detailOffset = 0;
+	}
+
 	private renderFold(block: FoldEditorBlock, depth: number, rows: RenderRow[], keyPrefix: string): void {
 		// COLLAPSED = ONE ROW (Shane, 2026-08-22): "fold {id}" alone, no END bookend.
 		// Start/end bookends exist only in the EXPANDED state. ROW KEYS ARE UNIQUE PER
@@ -371,11 +488,26 @@ export class FoldEditorView {
 		const marker = isOpen ? "\u25bc" : "\u25b8";
 		const foldCursor = this.selectedKey === foldKey ? "\u276f" : " ";
 		const [foldHead] = briefChunks(block.brief ?? "");
+		// WHAT THE MODEL IS ACTUALLY HOLDING (2026-08-30). Two facts the row could not
+		// carry, and both are what a person opens this surface to learn. A fold the agent
+		// has EXPANDED is standing raw in its window and costing it, and rendered
+		// identically to a placeholder; and a brief the MODEL wrote is a different kind of
+		// claim from one the runtime derived, which is the fact the campaign verdict made
+		// load-bearing. Neither is stated with an id: the badge is the word.
+		const contextBadge = block.expandedInContext
+			? ` ${this.color("warning", "· raw in the model's window")}`
+			: "";
+		const provenanceBadge = block.provenance && block.provenance !== "deterministic"
+			? ` ${this.color("accent", `· brief ${block.provenance}`)}`
+			: "";
 		rows.push({
 			key: foldKey,
 			text: `${foldCursor}${this.color("success", `${pad}${marker} ${kindLabel}`)}` +
+				`${this.foldPinBadge(block)}${contextBadge}${provenanceBadge}` +
 				`${foldHead ? ` · ${foldHead}` : ""}`,
 			toggleId: foldKey,
+			foldId: block.id,
+			foldExpandedInContext: Boolean(block.expandedInContext),
 		});
 		if (!isOpen) return;
 		let ordinal = 0;
@@ -396,23 +528,19 @@ export class FoldEditorView {
 				? this.color("dim", ` \u201c${entry.preview.slice(0, 48)}\u201d`)
 				: "";
 			const entryCursor = this.selectedKey === entryKey ? "\u276f" : " ";
+			// AN ENTRY IS AN ENTRY WHEREVER IT SITS (2026-08-30). These rows carried no id
+			// the view could act on, so `p` was inert on every row inside an expanded fold
+			// while working one row over in a raw gap, for no reason a reader could see.
+			// They are not mark points: their span is already inside a fold, and gate 112
+			// refuses that by name, so `markable` stays off and only the pin id travels.
 			rows.push({
 				key: entryKey,
 				text: `${entryCursor}${pad}    ${this.color("dim", `\u00b7 ${entry.role} ${shortId(entry.id)}${this.pinnedBadge(entry.id)}`)}${quoted}`,
 				toggleId: null,
 				entryPreview: entry.preview,
+				entryId: entry.id,
 			});
-			if (detailed) {
-				let detailOrdinal = 0;
-				for (const chunk of detailChunks(entry.preview)) {
-					rows.push({
-						key: `${entryKey}:d${detailOrdinal}`,
-						text: `${pad}      ${this.color("dim", chunk)}`,
-						toggleId: null,
-					});
-					detailOrdinal += 1;
-				}
-			}
+			if (detailed) this.pushDetail(rows, entryKey, entry, pad);
 		}
 		const endCursor = this.selectedKey === `${foldKey}:end` ? "\u276f" : " ";
 		rows.push({
@@ -461,13 +589,17 @@ export class FoldEditorView {
 						// resolves them); an entry that fell off the map renders id-only.
 						const label = ["\u00b7", entry.role, `${shortId(entry.id)}${this.pinnedBadge(entry.id)}`]
 							.filter(Boolean).join(" ");
-						const quoted = entry.preview ? ` \u201c${entry.preview.slice(0, 48)}\u201d` : "";
+						const detailed = this.detailedEntry === entryKey;
+						const quoted = !detailed && entry.preview
+							? ` \u201c${entry.preview.slice(0, 48)}\u201d` : "";
 						rows.push({
 							key: entryKey,
 							text: `${this.selectedKey === entryKey ? "\u276f" : " "}    ${this.color("dim", `${label}${quoted}`)}`,
 							toggleId: null,
 							entryPreview: entry.preview,
+							entryId: entry.id,
 						});
+						if (detailed) this.pushDetail(rows, entryKey, entry, "");
 					}
 				}
 			} else {
@@ -505,18 +637,11 @@ export class FoldEditorView {
 							text: `${cursor}    ${this.color("dim", `\u00b7 ${entry.role} ${shortId(entry.id)}${pinBadge}`)}${badge}${quoted}`,
 							toggleId: null,
 							entryPreview: entry.preview,
-							...(markable ? { markable: true, entryIndex: entry.index, entryId: entry.id } : {}),
+							entryId: entry.id,
+							...(markable ? { markable: true, entryIndex: entry.index } : {}),
 						});
 						if (detailed) {
-							let detailOrdinal = 0;
-							for (const chunk of detailChunks(entry.preview)) {
-								rows.push({
-									key: `${entryKey}:d${detailOrdinal}`,
-									text: `      ${this.color("dim", chunk)}`,
-									toggleId: null,
-								});
-								detailOrdinal += 1;
-							}
+							this.pushDetail(rows, entryKey, entry, "");
 						}
 					}
 				}
@@ -558,6 +683,18 @@ export class FoldEditorView {
 			this.handlePinKey();
 			return;
 		}
+		if (data === "e") {
+			this.handleExpandKey();
+			return;
+		}
+		if (data === "r") {
+			this.handleDissolveKey();
+			return;
+		}
+		if (data === "]" || data === "[") {
+			this.handlePageKey(data === "]" ? 1 : -1);
+			return;
+		}
 		if (data === "m") {
 			this.handleMarkKey();
 			return;
@@ -595,7 +732,7 @@ export class FoldEditorView {
 				else this.expanded.add(row.toggleId);
 				this.scrollToSelection();
 			} else if (row.entryPreview !== undefined) {
-				this.detailedEntry = this.detailedEntry === row.key ? null : row.key;
+				this.toggleDetail(row.key);
 				this.scrollToSelection();
 			}
 		}
@@ -701,18 +838,90 @@ export class FoldEditorView {
 			});
 	}
 
-	/** p ON A RAW ENTRY toggles its pin (the tool's pin/unpin path). */
+	/**
+	 * p TOGGLES A PIN, on any row that names something the runtime can hold.
+	 *
+	 * IT USED TO REQUIRE `markable` (2026-08-30). That flag means "this raw entry can be a
+	 * mark point", which is a fact about FOLDING a span, and it has nothing to do with
+	 * holding one. The effect was that `p` worked on a raw entry inside a raw gap, did
+	 * nothing at all on the identical entry inside an expanded fold, and did nothing on a
+	 * fold row, while the tool's own pin action has always taken either an entry id or a
+	 * fold id. The view was narrower than the path it is a skin over, for no reason a
+	 * reader could see.
+	 */
 	private handlePinKey(): void {
 		if (this.staging || this.briefMode) return;
 		const row = this.visibleRows().find((candidate) => candidate.key === this.selectedKey);
-		if (!row || !row.markable || !row.entryId) return;
+		const target = row?.entryId ?? row?.foldId;
+		if (!target) return;
 		if (!this.actions.onTogglePin) {
 			this.notice = "pinning is not wired in this view";
 			return;
 		}
+		this.runAction(this.actions.onTogglePin(target));
+	}
+
+	/**
+	 * e PUTS A FOLD'S BYTES BACK IN FRONT OF THE MODEL, or takes them out again.
+	 *
+	 * THE OTHER EXPANSION, and the distinction is the point (Shane, 2026-08-30: the reader
+	 * should be able to "page through/expand for their own viewing purposes" while
+	 * "setting an expanded fold is a different choice"). Enter and the arrow keys open a
+	 * fold FOR THE READER: they move a key in a Set this view owns, cost nothing and are
+	 * invisible to the model. This restores the fold's raw source to the PROJECTION, which
+	 * costs the window and is reclaimed at the next commit unless the fold is pinned. Two
+	 * acts, two keys, and the row says which state it is in.
+	 */
+	private handleExpandKey(): void {
+		if (this.staging || this.briefMode) return;
+		const row = this.visibleRows().find((candidate) => candidate.key === this.selectedKey);
+		if (!row?.foldId) return;
+		if (!this.actions.onSetExpanded) {
+			this.notice = "expanding into the window is not wired in this view";
+			return;
+		}
+		this.runAction(this.actions.onSetExpanded(row.foldId, !row.foldExpandedInContext));
+	}
+
+	/** r RETURNS A FOLD TO RAW so its boundary can be re-marked (the tool's reboundary
+	 *  path). Re-cutting is this plus `m` on the two entries the person meant, which the
+	 *  view already has, so this is the half that was missing. */
+	private handleDissolveKey(): void {
+		if (this.staging || this.briefMode) return;
+		const row = this.visibleRows().find((candidate) => candidate.key === this.selectedKey);
+		if (!row?.foldId) return;
+		if (!this.actions.onDissolveFold) {
+			this.notice = "re-cutting is not wired in this view";
+			return;
+		}
+		this.runAction(this.actions.onDissolveFold(row.foldId));
+	}
+
+	/** ] and [ page the OPEN DETAIL. A pure read: the offset is the reader's position and
+	 *  nothing on this path reaches the projection. */
+	private handlePageKey(direction: number): void {
+		if (this.staging || this.briefMode || !this.detailedEntry) return;
+		const row = this.visibleRows().find((candidate) => candidate.key === this.detailedEntry);
+		const entryId = row?.entryId;
+		if (!entryId || !this.actions.entryDetail) return;
+		const page = this.actions.entryDetail(entryId, this.detailOffset);
+		if (!page) return;
+		if (direction > 0) {
+			if (!page.hasMore) return;
+			this.detailOffset = page.offset + page.text.length;
+		} else {
+			if (page.offset === 0) return;
+			this.detailOffset = Math.max(0, page.offset - Math.max(1, page.text.length));
+		}
+		this.scrollToSelection();
+	}
+
+	/** One in-flight edit at a time, with the refusal shown rather than thrown: every
+	 *  action here is a skin over a validated path, and those refuse by name. */
+	private runAction(work: Promise<void>): void {
 		this.staging = true;
 		this.notice = null;
-		void this.actions.onTogglePin(row.entryId)
+		void work
 			.then(() => {
 				this.staging = false;
 			})
@@ -838,10 +1047,18 @@ export class FoldEditorView {
 			"",
 			...body,
 			...footers,
-			// p AND u CHANGE STATE AND WERE NAMED NOWHERE, while the header prints a pin count
-			// on every render. "raw span" stays: it is the word explaining why m does
-			// nothing on a fold row. The width comes out of enter and arrows instead.
-			truncateToWidth("enter:open · arrows:move · m:mark raw span · p:pin · u:withdraw · esc:close", width),
+			// EVERY KEY THAT CHANGES SOMETHING IS NAMED. p and u changed state and were named
+			// nowhere while the header printed a pin count on every render; e and r joined
+			// them on 2026-08-30. "raw span" stays: it is the word explaining why m does
+			// nothing on a fold row.
+			//
+			// ORDERED BY WHAT TRUNCATION SHOULD COST LEAST, and the ordering carries the
+			// distinction the surface is built on: enter opens a fold FOR THE READER and e
+			// opens it INTO THE MODEL'S WINDOW, so "open" and "show model" sit apart and are
+			// worded apart. A reader who learns only that enter opens things has learned the
+			// free one, which is the safe half to learn first.
+			truncateToWidth("enter:open · ]/[:page · arrows:move · m:mark raw span · p:pin · " +
+				"e:show model · r:re-cut · u:withdraw · esc:close", width),
 		];
 	}
 }
