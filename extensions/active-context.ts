@@ -211,7 +211,7 @@ import {
   unansweredToolCalls,
 } from "./lib/rollback.ts";
 
-export type ProjectionReadingBasis = "anchored" | "rewritten" | "unmeasured";
+export type ProjectionReadingBasis = "anchored" | "rewritten" | "unmeasured" | "refused";
 
 export * from "./lib/canonical.ts";
 export * from "./lib/curation.ts";
@@ -467,6 +467,13 @@ export function registerActiveContext(pi: any, options: {
       sessionId: string;
       generation: number;
     } | null,
+    // A REFUSED ANCHOR IS NOT AN ABSENT ONE (2026-08-30). The plausibility floor below
+    // rejects a provider count the projected TEXT cannot explain, which is the earliest
+    // and cheapest evidence that what we project is not what reaches the wire. It set
+    // `projectionAnchor = null` and said nothing, and the reading then called itself
+    // "unmeasured", the same word a session uses before its first provider response.
+    // Those are opposite states: one has no number yet, the other has one it disbelieves.
+    anchorRefusal: null as { consecutive: number } | null,
     estimatorErrors: [] as number[],
     inflowSteps: [] as number[],
     wallInflowSteps: [] as number[],
@@ -738,7 +745,7 @@ export function registerActiveContext(pi: any, options: {
    * WHAT A PERSON SAVES IN /fold-settings REACHES THIS SESSION (2026-08-29).
    *
    * The screen writes the file and then hands the whole file here, so an absent field
-   * means the package default exactly as it does on disk and at registration; the three
+   * means the package default exactly as it does on disk and at registration; all four
    * values are resolved through the same functions the options went through, which is
    * what stops a value meaning one thing at boot and another at an edit.
    *
@@ -914,6 +921,10 @@ export function registerActiveContext(pi: any, options: {
     measurements.lastProviderMeasurement = null;
     measurements.wallInflowSteps.length = 0;
     measurements.projectionAnchor = null;
+    // A RESET IS NOT A RESTORATION. The refusal is dropped without a record because the
+    // session it described is gone; emitting "restored" here would report a recovery that
+    // never happened.
+    measurements.anchorRefusal = null;
     measurements.lastProjectedEstimateBasis = "unmeasured";
     ladder.pendingManual = false;
     if (!preserveThresholdDecision) nativeCompaction.lastThresholdDecision = null;
@@ -1512,6 +1523,41 @@ export function registerActiveContext(pi: any, options: {
     );
   };
 
+  /**
+   * THE REFUSAL SPEAKS ONCE PER EPISODE, NOT ONCE PER PASS (2026-08-30).
+   *
+   * Every request in a divergent stretch refuses the anchor for the same reason, and a
+   * record per pass would be 48 identical lines in the one session that found this. The
+   * edge is what carries information: entering the state, and leaving it with a count of
+   * what it cost. Same shape as `context.suspend`, which repeats only when its message
+   * changes rather than once per pass.
+   */
+  const noteAnchorRefusal = (
+    measurement: ProviderContextMeasurement,
+    textChars: number,
+    images: number,
+  ): void => {
+    const previous = measurements.anchorRefusal;
+    measurements.anchorRefusal = { consecutive: (previous?.consecutive ?? 0) + 1 };
+    if (previous) return;
+    emit("context.anchor", {
+      state: "refused",
+      reason: "text-cannot-explain-count",
+      text_chars: textChars,
+      images,
+      provider_tokens: measurement.tokens,
+      chars_per_token: measurement.tokens > 0 ? textChars / measurement.tokens : null,
+      floor: PROJECTION_CHARS_PER_TOKEN_FLOOR,
+    });
+  };
+
+  const clearAnchorRefusal = (): void => {
+    const refusal = measurements.anchorRefusal;
+    measurements.anchorRefusal = null;
+    if (!refusal) return;
+    emit("context.anchor", { state: "restored", refused_requests: refusal.consecutive });
+  };
+
   const noteProviderProjectionAnchor = (measurement: ProviderContextMeasurement): void => {
     if (measurements.projectionAnchor?.messageSha256 === measurement.messageSha256) return;
     const text = instrumentation.previousText;
@@ -1533,8 +1579,14 @@ export function registerActiveContext(pi: any, options: {
           textChars / (measurement.tokens - images * IMAGE_ESTIMATED_TOKENS) <
             PROJECTION_CHARS_PER_TOKEN_FLOOR)) {
       measurements.projectionAnchor = null;
+      // ONLY A COUNT WE DISBELIEVE IS A REFUSAL. A zero or absent count is simply nothing
+      // to anchor on and stays silent; the floor failing on a positive count is the state
+      // worth announcing, because it means the provider is billing for mass our own
+      // projection does not contain.
+      if (measurement.tokens > 0) noteAnchorRefusal(measurement, textChars, images);
       return;
     }
+    clearAnchorRefusal();
     measurements.projectionAnchor = {
       tokens: measurement.tokens,
       chars,
@@ -1580,7 +1632,16 @@ export function registerActiveContext(pi: any, options: {
     const imageTokens = mass.images * IMAGE_ESTIMATED_TOKENS;
     const estimate = Math.ceil(textChars / charsPerToken) + imageTokens;
     const anchor = measurements.projectionAnchor;
-    if (!anchor || anchor.generation !== lifecycle.generation ||
+    // REFUSED AND UNMEASURED READ THE SAME NUMBER AND MEAN OPPOSITE THINGS. Both fall back
+    // to the character estimate, so the tokens are identical and only the BASIS separates
+    // them: "unmeasured" is a session that has not been told yet, "refused" is one that was
+    // told something its own projection cannot account for. Reading 48 consecutive
+    // "unmeasured" projections as a quiet session is what hid a 19x divergence.
+    if (!anchor) {
+      const basis: ProjectionReadingBasis = measurements.anchorRefusal ? "refused" : "unmeasured";
+      return { tokens: estimate, basis, chars, sizeTokens: estimate, images: mass.images, anchorTokens: null, deltaChars: null, text };
+    }
+    if (anchor.generation !== lifecycle.generation ||
         anchor.sessionId !== persistence.state?.sessionId) {
       return { tokens: estimate, basis: "unmeasured", chars, sizeTokens: estimate, images: mass.images, anchorTokens: null, deltaChars: null, text };
     }
@@ -2918,6 +2979,7 @@ export function registerActiveContext(pi: any, options: {
     measurements.lastProviderMeasurement = null;
     measurements.wallInflowSteps.length = 0;
     measurements.projectionAnchor = null;
+    measurements.anchorRefusal = null;
     nativeCompaction.lastThresholdDecision = null;
     updateStatus(ctx);
   };

@@ -9797,6 +9797,108 @@ async function gateAnchoredOccupancy() {
 }
 
 /**
+ * A REFUSED ANCHOR IS NOT AN ABSENT ONE (2026-08-30).
+ *
+ * `noteProviderProjectionAnchor` holds a plausibility floor: a provider count the projected
+ * TEXT cannot explain at PROJECTION_CHARS_PER_TOKEN_FLOOR is refused rather than anchored
+ * on. That guard is right, and it fires on the earliest and cheapest evidence there is that
+ * what we project is not what reaches the wire. It set the anchor to null, said NOTHING,
+ * and the reading then called itself "unmeasured", which is the word a session uses before
+ * its first provider response. Opposite states, one name.
+ *
+ * Live session 01a052b1 spent 48 consecutive requests there. Its projection held 30 to 46
+ * messages and 49,524 to 67,959 chars while the provider billed 472,853 to 476,670 tokens:
+ * 0.14 chars per token against a floor of 2, up to 19x apart. The runtime committed five
+ * times into that stretch (23, 36, 11, 6 and 8 marks) without the billed count moving,
+ * because the folded projection was not what was being sent, and 48 band-top commits then
+ * declined below the reclaim floor because the mass they wanted was already folded. Nothing
+ * in the stream named the state; it was found by reading 1,005 event records by hand.
+ *
+ * The gate pins the DISTINCTION, the BOUND, the ARITHMETIC and the EXIT: refused and
+ * unmeasured are separable at the point where only one of them has happened; the episode
+ * speaks on its edges rather than once per pass; every reading inside it says "refused"
+ * while returning exactly the estimate it always did; and leaving reports what it cost.
+ *
+ * ANTI-VACUITY: the fixture is proved to breach the runtime's OWN floor, read back off the
+ * emitted record rather than restated here, before anything asserts a refusal; and the
+ * refused reading is proved numerically identical to the unmeasured one it replaces, so
+ * this build is shown to have changed the NAME and not the number.
+ */
+async function gateAnchorRefusalIsStated() {
+  const window = 400_000;
+  const runtime = makeRuntime(
+    makeFixture({ turns: 24, resultChars: 6_000, contextWindow: window }),
+    { providerInputBudget: 360_000 },
+  );
+  await startRuntime(runtime);
+  const projections = () => contextEvents(runtime).filter((event) => event.kind === "context.projection");
+  const anchorEvents = () => contextEvents(runtime).filter((event) => event.kind === "context.anchor");
+
+  // SEPARABLE WHERE ONLY ONE OF THEM HAS HAPPENED. Before any count exists the reading is
+  // unmeasured and the stream is silent; a build that simply renamed the fallback fails here.
+  assert.equal(projections().at(-1).estimate_basis, "unmeasured",
+    "A session with no provider count did not read as unmeasured");
+  assert.equal(anchorEvents().length, 0, "A session that was never told anything announced a refusal");
+
+  // A COUNT THE TEXT CANNOT EXPLAIN: half a char per token, against a floor of two.
+  const before = projections().at(-1);
+  const implausible = before.chars * 2;
+  const fixtureRatio = before.chars / implausible;
+  const passes = 5;
+  for (let step = 0; step < passes; step += 1) {
+    await measure(runtime, implausible + step, window);
+    await project(runtime);
+    await settle();
+  }
+
+  const refusals = anchorEvents().filter((event) => event.state === "refused");
+  assert.equal(refusals.length, 1,
+    `${passes} refusing passes wrote ${refusals.length} records; the edge is what carries information`);
+  const [refusal] = refusals;
+  assert.equal(refusal.reason, "text-cannot-explain-count");
+  assert(fixtureRatio < refusal.floor,
+    `The fixture ratio ${fixtureRatio} does not breach the runtime's own floor ${refusal.floor}, so this gate proves nothing`);
+  assert(refusal.chars_per_token < refusal.floor,
+    "The refusal recorded a ratio that does not breach the floor it names");
+  assert.equal(refusal.provider_tokens, implausible, "The refusal names a count the provider did not report");
+  assert(refusal.text_chars > 0, "The refusal reported no text to weigh the count against");
+
+  // AND EVERY READING INSIDE THE EPISODE SAYS SO, not just the pass that announced it.
+  const inside = projections().slice(-passes);
+  assert.equal(inside.length, passes);
+  for (const record of inside) {
+    assert.equal(record.estimate_basis, "refused",
+      "A projection under a refused anchor still called itself unmeasured");
+    assert.equal(record.anchor_tokens, null, "A refused reading claimed an anchor");
+    // THE NAME MOVED AND THE NUMBER DID NOT. This is the same whole-projection estimate the
+    // pre-build runtime returned; if it were not, the build would have changed a decision.
+    assert.equal(record.estimated_tokens, Math.ceil(record.chars / record.chars_per_token),
+      "A refused reading is not the whole-projection estimate it was before this build");
+  }
+
+  // LEAVING THE STATE REPORTS WHAT IT COST, once.
+  const current = projections().at(-1);
+  await measure(runtime, Math.ceil(current.chars / 4), window);
+  await project(runtime);
+  await settle();
+  const restorations = anchorEvents().filter((event) => event.state === "restored");
+  assert.equal(restorations.length, 1, "Recovering from a refused anchor was not announced exactly once");
+  assert(restorations[0].refused_requests >= passes,
+    `The episode reported ${restorations[0].refused_requests} refused requests across at least ${passes} refusing passes`);
+  assert.equal(projections().at(-1).estimate_basis, "anchored",
+    "A plausible count after a refusal did not restore the anchor");
+
+  return {
+    fixtureRatio,
+    floor: refusal.floor,
+    refusalRecords: refusals.length,
+    refusedReadings: inside.length,
+    refusedRequestsReported: restorations[0].refused_requests,
+    basisAfterRecovery: projections().at(-1).estimate_basis,
+  };
+}
+
+/**
  * THE CALIBRATION HAZARD THIS BUILD DOES NOT FIX.
  *
  * The rate the fence divides by is the MINIMUM serialized chars per token over a window of
@@ -16672,7 +16774,7 @@ async function gateProjectionSerializedOnce() {
 		"The projection's reported chars stopped matching an independent serialization of it");
 	assert(typeof last.estimated_tokens === "number" && last.estimated_tokens > 0,
 		"The projection event carries no token estimate");
-	assert(["measured", "unmeasured", "anchored", "rewritten"].includes(last.estimate_basis),
+	assert(["measured", "unmeasured", "anchored", "rewritten", "refused"].includes(last.estimate_basis),
 		`The projection basis is not one the reading produces: ${last.estimate_basis}`);
 	return { boundaries, projectionChars: last.chars, basis: last.estimate_basis };
 }
@@ -16877,6 +16979,7 @@ const gates = [
   // session, so the agent was never invited at all. The number stays spent.
   [140, "Fold settings round-trip through one validation path", gateFoldSettingsRoundTrip],
   [161, "A saved setting reaches the running session", gateSavedSettingsReachTheSession],
+  [162, "A refused anchor is not an absent one", gateAnchorRefusalIsStated],
   [142, "The fold editor", gateFoldEditor],
   [147, "The frontier waits for the batch", gateFrontierWaitsForTheBatch],
   [148, "The tool-call diet", gateToolCallDiet],
