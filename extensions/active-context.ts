@@ -823,7 +823,10 @@ export function registerActiveContext(pi: any, options: {
       }
       if (staged > 0) parts.push(`${staged} staged`);
       if (roots > 0) parts.push(`${roots} fold${roots === 1 ? "" : "s"}`);
-      ctx.ui?.setStatus?.(entryTypePrefix, `${brandNoun} ${parts.join(" · ")}`);
+      // ONE SURFACE, NOT TWO (Shane 2026-09-02, from a screenshot showing both). Where
+      // the fold bar widget is installed it carries every fact this string carries, so
+      // the string is withdrawn; a host without widgets keeps the string exactly as it was.
+      ctx.ui?.setStatus?.(entryTypePrefix, foldBar.installed ? undefined : `${brandNoun} ${parts.join(" · ")}`);
     } catch { }
   };
 

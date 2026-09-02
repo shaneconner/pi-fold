@@ -152,8 +152,12 @@ export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBar
   if (model.share < model.commitShare) parts.push(theme.fg("muted", `commit at ${Math.round(model.commitShare * 100)}%`));
   else if (model.weighed) parts.push(theme.fg("muted", "commit held"));
   else parts.push(theme.fg("warning", "COMMIT DUE"));
+  // A staged count with nothing priced behind it reads "0 to free", which is a
+  // contradiction on the face of the row; state the count alone until the marks price.
   if (model.stagedMarks > 0) {
-    parts.push(ink.staged(`${model.stagedMarks} staged, ${formatTokens(model.stagedTokens)} to free`));
+    parts.push(ink.staged(model.stagedTokens > 0
+      ? `${model.stagedMarks} staged, ${formatTokens(model.stagedTokens)} to free`
+      : `${model.stagedMarks} staged`));
   }
   if (model.folds > 0) {
     parts.push(ink.folded(`${model.folds} fold${model.folds === 1 ? "" : "s"} hold ${formatTokens(model.hiddenTokens)}`));
