@@ -1,0 +1,163 @@
+/**
+ * THE FOLD BAR: one widget row above the footer, drawn by us rather than by the host.
+ *
+ * The always-on status line is a STRING handed to `ctx.ui.setStatus`, and everything a
+ * bar would need is denied to a string: the host sorts statuses by key and joins them,
+ * collapses runs of spaces, truncates from the right, and bakes ANSI that goes stale on a
+ * theme switch. `ctx.ui.setWidget` hands us a component instead: `render(width)` receives
+ * the terminal width, the row is ours alone, and the theme is read at render time so a
+ * `/theme` switch repaints it. Placed below the editor it sits directly above the footer,
+ * which is where Claude Code draws the same bar.
+ *
+ * WHAT THE BAR ARGUES: how full the window is against the two points where something
+ * happens to it. The fill is read against ticks ON the bar at the aim (minTarget) and the
+ * commit point (maxTarget). Inside the fill, oldest on the left: `▂` for the placeholders
+ * of standing folds, `▓` for staged raw spans (what the next commit collapses), `▇` for
+ * raw the ladder has not claimed. The label states what folding has already bought.
+ *
+ * THE BAR IS A FIXED WIDTH. A bar sized to the leftover width moves the commit tick
+ * between renders, and the tick is the landmark the whole row exists to place the fill
+ * against. What varies with the terminal is the label, cut from the right.
+ *
+ * WHAT IT WILL NOT DRAW: an unmeasured window (an empty bar is a guess drawn; law 2 of
+ * the human surfaces), a suspended session (no bar promising a commit beside FOLDING
+ * STOPPED; law 5), fold positions (a placeholder is a few hundred tokens against cells of
+ * tens of thousands), and fold depth, which /fold-editor shows with a row per fold.
+ *
+ * COLOUR: raw, staged and folded form an ordered ladder of how much of the window each
+ * state costs, so they are three classes sampled off Crameri's batlow, a perceptually
+ * uniform, colour-vision-deficiency-safe sequential map; on a 256-colour terminal they
+ * fall back to the theme's own names. Scaffolding (empty cells, the aim tick, the brand)
+ * stays on the theme's dim ink; the commit tick takes the theme's warning colour, which
+ * is what the host uses for its own context percentage past 70.
+ */
+
+import { truncateToWidth } from "@earendil-works/pi-tui";
+
+export const FOLD_BAR_WIDTH = 40;
+
+/** Everything the row reads. Built by the runtime on every status update. */
+export interface FoldBarModel {
+  brand: string;
+  /** The provider's own count against the serving budget, or null when unmeasured. */
+  share: number | null;
+  /** maxTarget and minTarget of the live thresholds, as shares. */
+  commitShare: number;
+  aimShare: number;
+  /** Share of the budget standing marks would free at the next commit (estimated). */
+  stagedShare: number;
+  stagedMarks: number;
+  stagedTokens: number;
+  /** Share of the budget the standing folds' placeholders occupy (estimated). */
+  foldedShare: number;
+  folds: number;
+  /** Tokens the standing folds hide: source minus placeholder, summed over the forest. */
+  hiddenTokens: number;
+  /** Whether a band-top commit has already been weighed against the current count. */
+  weighed: boolean;
+  /** The suspension message when automatic folding has stopped, else null. */
+  stopped: string | null;
+}
+
+/** The subset of pi's Theme the row uses. */
+export interface FoldBarTheme {
+  fg(color: "dim" | "muted" | "text" | "warning" | "error", text: string): string;
+  bold(text: string): string;
+  getColorMode?(): "truecolor" | "256color";
+}
+
+// Crameri batlow10, classes 3, 6 and 8 (0-indexed). The two darkest classes are unusable
+// as fill on a dark terminal, and the lightest washes out on a light one.
+const BATLOW = { raw: "#3C6D56", staged: "#D29343", folded: "#FDB7BC" } as const;
+
+const truecolor = (hex: string, text: string): string => {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `\x1b[38;2;${r};${g};${b}m${text}\x1b[39m`;
+};
+
+export function formatTokens(count: number): string {
+  if (count < 1000) return String(count);
+  if (count < 10_000) return `${(count / 1000).toFixed(1)}k`;
+  if (count < 1_000_000) return `${Math.round(count / 1000)}k`;
+  return `${(count / 1_000_000).toFixed(1)}M`;
+}
+
+type Cell = "folded" | "staged" | "raw" | "empty";
+const GLYPH: Record<Cell, string> = { folded: "▂", staged: "▓", raw: "▇", empty: "░" };
+
+/** The bar's cells, oldest on the left, before any tick is laid over them. */
+export function foldBarCells(model: FoldBarModel, width: number = FOLD_BAR_WIDTH): Cell[] {
+  const share = model.share ?? 0;
+  const filled = Math.max(0, Math.min(width, Math.round(share * width)));
+  const folded = Math.min(filled, Math.round(model.foldedShare * width));
+  const staged = Math.min(filled - folded, Math.round(model.stagedShare * width));
+  const cells: Cell[] = [];
+  for (let i = 0; i < width; i += 1) {
+    if (i < folded) cells.push("folded");
+    else if (i < folded + staged) cells.push("staged");
+    else if (i < filled) cells.push("raw");
+    else cells.push("empty");
+  }
+  return cells;
+}
+
+/** Tick positions: the cell whose right edge is the share. */
+export function foldBarTicks(model: FoldBarModel, width: number = FOLD_BAR_WIDTH): Map<number, "aim" | "commit"> {
+  const at = (share: number): number => Math.max(0, Math.min(width - 1, Math.round(share * width) - 1));
+  const ticks = new Map<number, "aim" | "commit">();
+  ticks.set(at(model.aimShare), "aim");
+  ticks.set(at(model.commitShare), "commit");
+  return ticks;
+}
+
+/** The row without colour, for tests and for a host that strips ANSI. */
+export function foldBarPlainText(model: FoldBarModel): string {
+  return renderFoldBar(model, Number.POSITIVE_INFINITY, {
+    fg: (_c, t) => t, bold: (t) => t,
+  });
+}
+
+export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBarTheme): string {
+  const brand = theme.fg("dim", model.brand);
+  if (model.stopped) {
+    const line = `${brand} ${theme.fg("error", theme.bold("FOLDING STOPPED"))}` +
+      (model.share === null ? "" : theme.fg("text", ` · ${Math.round(model.share * 100)}% full`));
+    return truncateToWidth(line, width, theme.fg("dim", "..."));
+  }
+  if (model.share === null) {
+    return truncateToWidth(
+      `${brand} ${theme.fg("muted", `not measured yet · folds automatically at ${Math.round(model.commitShare * 100)}%`)}`,
+      width, theme.fg("dim", "..."));
+  }
+  const rich = theme.getColorMode?.() === "truecolor";
+  const ink: Record<Cell, (text: string) => string> = {
+    raw: (t) => rich ? truecolor(BATLOW.raw, t) : theme.fg("muted", t),
+    staged: (t) => rich ? truecolor(BATLOW.staged, t) : theme.fg("text", t),
+    folded: (t) => rich ? truecolor(BATLOW.folded, t) : theme.fg("dim", t),
+    empty: (t) => theme.fg("dim", t),
+  };
+  const cells = foldBarCells(model);
+  const ticks = foldBarTicks(model);
+  let bar = "";
+  for (let i = 0; i < cells.length; i += 1) {
+    const tick = ticks.get(i);
+    if (tick === "commit") bar += theme.fg("warning", "│");
+    else if (tick === "aim") bar += theme.fg("dim", "│");
+    else bar += ink[cells[i]](GLYPH[cells[i]]);
+  }
+  const pct = Math.round(model.share * 100);
+  const parts: string[] = [theme.fg("text", `${pct}%`)];
+  if (model.share < model.commitShare) parts.push(theme.fg("muted", `commit at ${Math.round(model.commitShare * 100)}%`));
+  else if (model.weighed) parts.push(theme.fg("muted", "commit held"));
+  else parts.push(theme.fg("warning", "COMMIT DUE"));
+  if (model.stagedMarks > 0) {
+    parts.push(ink.staged(`${model.stagedMarks} staged, ${formatTokens(model.stagedTokens)} to free`));
+  }
+  if (model.folds > 0) {
+    parts.push(ink.folded(`${model.folds} fold${model.folds === 1 ? "" : "s"} hold ${formatTokens(model.hiddenTokens)}`));
+  }
+  const line = `${brand} ${bar} ${parts.join(theme.fg("dim", " · "))}`;
+  return truncateToWidth(line, width, theme.fg("dim", "..."));
+}

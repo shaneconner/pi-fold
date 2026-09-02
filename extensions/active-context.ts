@@ -61,6 +61,7 @@ import {
   stringIds,
   toolPayload,
 } from "./lib/measurement.ts";
+import { renderFoldBar, type FoldBarModel } from "./lib/status-widget.ts";
 import type {
   NativeCompactionCompletionReceipt,
   NativeCompactionDecisionReceipt,
@@ -706,6 +707,63 @@ export function registerActiveContext(pi: any, options: {
    * leads now, occupancy is a percentage of the serving budget, and the commit point is
    * named only when it is close enough to matter.
    */
+  /**
+   * THE FOLD BAR (2026-09-02, dogfooding). One widget row directly above the footer,
+   * drawn by `renderFoldBar` from a model this function rebuilds on every status update.
+   * The component reads the model and the LIVE theme at render time, so it repaints on
+   * a theme switch, which the status string cannot; the host is asked to render after
+   * each rebuild. Installed once per host UI, on the first update that finds one.
+   */
+  const foldBar = {
+    model: null as FoldBarModel | null,
+    installed: false,
+    requestRender: null as (() => void) | null,
+  };
+  const installFoldBar = (ctx: any): void => {
+    if (foldBar.installed || typeof ctx.ui?.setWidget !== "function") return;
+    foldBar.installed = true;
+    ctx.ui.setWidget(entryTypePrefix, (tui: any) => {
+      foldBar.requestRender = () => { try { tui.requestRender(); } catch { } };
+      return {
+        render(width: number): string[] {
+          if (!foldBar.model) return [];
+          try { return [renderFoldBar(foldBar.model, width, ctx.ui.theme)]; }
+          catch { return []; }
+        },
+        invalidate() { },
+      };
+    }, { placement: "belowEditor" });
+  };
+  const foldBarModel = (input: {
+    share: number | null; budgetTokens: number; staged: number; roots: number; weighed: boolean;
+  }): FoldBarModel => {
+    const state = persistence.state;
+    const snapshot = lifecycle.latestSnapshot;
+    let stagedTokens = 0;
+    let placeholderChars = 0;
+    let hiddenChars = 0;
+    if (state && snapshot) {
+      for (const mark of pendingMarks(state)) stagedTokens += estimatedTokens(markFreedBytes(snapshot, state, mark));
+      for (const root of orderedRoots(state, snapshot)) placeholderChars += root.fold.placeholderChars;
+      for (const fold of state.folds) hiddenChars += Math.max(0, fold.sourceChars - fold.placeholderChars);
+    }
+    const budget = input.budgetTokens > 0 ? input.budgetTokens : 1;
+    return {
+      brand: brandNoun,
+      share: input.share,
+      commitShare: thresholds.maxTarget,
+      aimShare: thresholds.minTarget,
+      stagedShare: stagedTokens / budget,
+      stagedMarks: input.staged,
+      stagedTokens,
+      foldedShare: estimatedTokens(placeholderChars) / budget,
+      folds: input.roots,
+      hiddenTokens: estimatedTokens(hiddenChars),
+      weighed: input.weighed,
+      stopped: ladder.automaticFailure?.message ?? null,
+    };
+  };
+
   const updateStatus = (ctx: any): void => {
     try {
       const roots = persistence.state && lifecycle.latestSnapshot ? orderedRoots(persistence.state, lifecycle.latestSnapshot).length : 0;
@@ -713,6 +771,17 @@ export function registerActiveContext(pi: any, options: {
       const capacity = currentCapacity(ctx);
       const used = measurements.lastProviderMeasurement?.tokens ?? null;
       const share = used !== null && capacity.budgetTokens > 0 ? used / capacity.budgetTokens : null;
+      try {
+        installFoldBar(ctx);
+        if (foldBar.installed) {
+          foldBar.model = foldBarModel({
+            share, budgetTokens: capacity.budgetTokens, staged, roots,
+            weighed: ladder.bandTopMeasurement !== null &&
+              ladder.bandTopMeasurement === measurements.lastProviderMeasurement,
+          });
+          foldBar.requestRender?.();
+        }
+      } catch { }
       const parts: string[] = [];
       // FAILURE LEADS. This line is cut to whatever width the host gives it, so the last
       // segment is the first one a narrow terminal removes, and folding having stopped is
@@ -4791,6 +4860,8 @@ export function registerActiveContext(pi: any, options: {
     lifecycle.latestSnapshot = null;
     curation.receipts = [];
     try { ctx.ui?.setStatus?.(entryTypePrefix, undefined); } catch { }
+    foldBar.model = null;
+    foldBar.requestRender?.();
   });
 
   return { projectionCandidates };

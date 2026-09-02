@@ -127,6 +127,9 @@ export const HARNESS_SOURCE = Object.freeze([
   "extensions/lib/folding.ts",
   "extensions/lib/instrumentation.ts",
   "extensions/lib/live-settings.ts",
+  // The fold bar widget row (2026-09-02); imported by active-context.ts, so a worker
+  // without it dies at startup exactly as gate 113 says.
+  "extensions/lib/status-widget.ts",
   "extensions/lib/measurement.ts",
   "extensions/lib/persistence.ts",
   "extensions/lib/policy.ts",
