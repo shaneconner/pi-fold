@@ -31,6 +31,16 @@ A fold takes a contiguous span of session entries and replaces it, in the window
 
 The package registers one tool, `pi_fold_context`, with nine actions over the transcript: `status`, `peek`, `brief`, `expand`, `refold`, `pin`, `unpin`, `reboundary` and `unmark`. A session that never calls the tool still folds; it degrades into lossless hierarchical compaction.
 
+### The fold bar
+
+In an interactive session one row sits directly above Pi's footer and shows the window against the two points where something happens to it:
+
+```
+▂▓▓▓▓▓▇│▇▇▇▇▇▇▇▇▇░░░░░░░░░░░░░░│░░░░░░░░ 42% · commit at 80% · 12 staged, 118k to free · 3 folds hold 412k
+```
+
+The bar is the serving budget, forty cells wide, oldest material on the left. The two ticks are the band: the left one is `minTarget`, where a commit aims to land, and the right one is `maxTarget`, where the commit fires. The fill is the provider's own count of what is in the window, never an estimate, so before the first response the row says `not measured yet` and draws nothing. Inside the fill, `▓` cells are staged spans, the raw material the next commit collapses; `▇` cells are raw material the runtime has not claimed yet; `▂` cells are the placeholders of standing folds, which are small by design. The label repeats the percentage, names the commit point (or reads `COMMIT DUE` once the fill has crossed it and `commit held` once that count has been weighed), states how many spans are staged and what they free, and ends with what folding has already bought: the tokens the standing folds hide. If automatic folding ever stops, the row reads `FOLDING STOPPED` in place of the bar. On a truecolor terminal the three fill classes take three steps of Crameri's batlow colour map; elsewhere they use the theme's own colours.
+
 ## Results
 
 One 64-stage assignment over the curl C repository, run as a single agentic turn. Same model, same 251,520-token serving budget, every run. After all 64 stages landed, one withheld message asked sixteen questions about material from across the whole session.

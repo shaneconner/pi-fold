@@ -162,6 +162,8 @@ export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBar
   if (model.folds > 0) {
     parts.push(ink.folded(`${model.folds} fold${model.folds === 1 ? "" : "s"} hold ${formatTokens(model.hiddenTokens)}`));
   }
-  const line = `${brand} ${bar} ${parts.join(theme.fg("dim", " · "))}`;
+  // NO BRAND IN FRONT OF THE BAR (Shane 2026-09-02): the bar identifies itself, and the
+  // two prose states above keep the brand because nothing else on them says whose they are.
+  const line = `${bar} ${parts.join(theme.fg("dim", " · "))}`;
   return truncateToWidth(line, width, theme.fg("dim", "..."));
 }
