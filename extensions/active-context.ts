@@ -35,6 +35,7 @@ import {
   selectAutomaticRung,
   setFoldProjectionState,
   withExpandLease,
+  renderFoldParts,
 } from "./lib/folding.ts";
 import {
   admissionVerdict,
@@ -54,6 +55,7 @@ import {
   parseNativeCompactionDecision,
   parseProviderContextMeasurementReceipt,
   persistenceProjection,
+  pricedBytes,
   protectedStaleMass,
   providerContextMeasurement,
   providerTokens,
@@ -178,7 +180,6 @@ import {
   peekedSourceFoldIds,
   snapFoldCandidate,
   snapToFoldBoundaries,
-  spanBytes,
 } from "./lib/selection.ts";
 import type { SpanCorrection } from "./lib/selection.ts";
 import {
@@ -727,6 +728,8 @@ export function registerActiveContext(pi: any, options: {
     /** The provider measurement the last landed commit ran against; the reading is
      *  stale while it is still the latest one. */
     staleSince: null as unknown,
+    /** Each standing fold's source priced by the image law, keyed by the fold object. */
+    pricedSource: new WeakMap<ActiveFold, number>(),
   };
   const installFoldBar = (ctx: any): void => {
     if (foldBar.installed || typeof ctx.ui?.setWidget !== "function") return;
@@ -754,7 +757,20 @@ export function registerActiveContext(pi: any, options: {
     if (state && snapshot) {
       for (const mark of pendingMarks(state)) stagedTokens += estimatedTokens(markFreedBytes(snapshot, state, mark));
       for (const root of orderedRoots(state, snapshot)) placeholderChars += root.fold.placeholderChars;
-      for (const fold of state.folds) hiddenChars += Math.max(0, fold.sourceChars - fold.placeholderChars);
+      // WHAT FOLDING BOUGHT, IN WINDOW TERMS. `sourceChars` is the transcript count, base64
+      // and all, and read as tokens it said "8.6M" over a 1M window. Each standing fold's
+      // source is priced by the image law once per fold OBJECT (folds are immutable and
+      // replaced, never mutated, so a WeakMap memo is exact) and summed over the whole
+      // forest, which is additive because a parent's source is its children's placeholders.
+      for (const fold of state.folds) {
+        let priced = foldBar.pricedSource.get(fold);
+        if (priced === undefined) {
+          const source = renderFoldParts(fold.parts, state, snapshot);
+          priced = source ? pricedBytes(source) : fold.sourceChars;
+          foldBar.pricedSource.set(fold, priced);
+        }
+        hiddenChars += Math.max(0, priced - fold.placeholderChars);
+      }
     }
     const budget = input.budgetTokens > 0 ? input.budgetTokens : 1;
     return {
@@ -2663,7 +2679,7 @@ export function registerActiveContext(pi: any, options: {
       });
       return null;
     }
-    const bytesBefore = bytes(projectActiveContext(snapshot, state));
+    const bytesBefore = pricedBytes(projectActiveContext(snapshot, state));
     // THE COMMIT CUTS ONLY AS DEEP AS THE BUDGET ASKS (Shane, 2026-08-23). The frontier
     // stages as material arrives, so by now the pending set is most of the window; without
     // this bound the first commit would fold all of it. `freeingTarget` is a share of the
@@ -2746,7 +2762,7 @@ export function registerActiveContext(pi: any, options: {
       }
     }
     persistence.state = result.state;
-    const bytesAfter = bytes(projectActiveContext(snapshot, persistence.state));
+    const bytesAfter = pricedBytes(projectActiveContext(snapshot, persistence.state));
     const freedBytes = Math.max(0, bytesBefore - bytesAfter);
     const pinHeld = protectedStaleMass(snapshot, result.state);
     const commitEvent = emit("context.commit", {
@@ -4601,7 +4617,7 @@ export function registerActiveContext(pi: any, options: {
     // what the staged mark answers with after it.
     const spanCost = (from: number, to: number) => ({
       entries: Math.abs(to - from) + 1,
-      tokens: estimatedTokens(spanBytes(snapshot, Math.min(from, to), Math.max(from, to) + 1)),
+      tokens: estimatedTokens(pricedBytes(snapshot.messages.slice(Math.min(from, to), Math.max(from, to) + 1))),
     });
 
     /**

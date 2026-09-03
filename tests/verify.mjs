@@ -17108,8 +17108,8 @@ async function gateCommitSurfacesTellTheTruth() {
     `the bar showed the pre-commit count as a live reading: ${after}`);
   assert(!/commit at|COMMIT DUE|commit held/.test(after),
     `a reading from before the commit still placed the next one: ${after}`);
-  assert(/\d+ folds? hide \S+ of transcript/.test(after),
-    `the folds clause does not name its figure as transcript mass: ${after}`);
+  assert(/\d+ folds? hide \S+ tokens/.test(after),
+    `the folds clause does not state its unit: ${after}`);
 
   await measure(runtime, 100_000, 1_000_000);
   await project(runtime);
@@ -17119,6 +17119,77 @@ async function gateCommitSurfacesTellTheTruth() {
   assert(/\b10% · commit at 80%/.test(fresh), `the fresh count did not render as a live reading: ${fresh}`);
   assert(renders > 0, "the bar never asked the host to repaint");
   return { appliedMarks: commit.applied_marks, said: Number(said[1]), before, after, fresh };
+}
+
+/**
+ * GATE 166: WHAT A FOLD FREES IS PRICED BY THE IMAGE LAW (2026-09-03).
+ *
+ * Gate 156 taught the OCCUPANCY estimate that a screenshot is one image, not a quarter
+ * million characters of text. The pricing of what a fold FREES never learned it: a
+ * staged span holding a pasted screenshot was worth its base64 length over four, so a
+ * session with 83 screenshots (67.3M base64 characters against 1.5M of text) showed
+ * "5.8M to free" against a 1M window and recorded 8.6M tokens freed by a commit that
+ * moved the window 280,000 (Shane, session 01a06746). One primitive prices every such
+ * figure now, `pricedBytes` in extensions/lib/measurement.ts, and this gate pins it at
+ * the primitive AND at the staged-mark reading a person sees.
+ */
+async function gateFreedMassIsPricedByTheImageLaw() {
+  const payload = "A".repeat(240_000);
+  const text = { role: "user", content: [{ type: "text", text: "x".repeat(4_000) }] };
+  const image = { role: "user", content: [{ type: "image", data: payload }] };
+  const nested = { role: "user", content: [{ type: "image", source: { data: payload } }] };
+  const imageWorth = context.IMAGE_ESTIMATED_TOKENS * context.ESTIMATED_BYTES_PER_TOKEN;
+  // Text is its bytes; an image is its flat price in either shape; the payload never counts.
+  assert.equal(measurementModule.pricedBytes([text]), context.bytes([text]));
+  for (const shape of [image, nested]) {
+    const priced = measurementModule.pricedBytes([shape]);
+    assert(priced < payload.length / 4, `the base64 payload was priced as text: ${priced}`);
+    assert(priced >= imageWorth && priced <= imageWorth + 400,
+      `an image is not priced at its flat cost: ${priced} against ${imageWorth}`);
+  }
+  // A second image adds one more flat price, give or take the array's own separator.
+  const second = measurementModule.pricedBytes([image, image]) - measurementModule.pricedBytes([image]);
+  const first = measurementModule.pricedBytes([image]) - measurementModule.pricedBytes([]);
+  assert(Math.abs(second - first) <= 8, `a second image is not one more flat price: ${second} against ${first}`);
+
+  // The reading a person sees, through the registered command: a session whose only
+  // foldable span is a tool result carrying a screenshot says a commit frees about one
+  // image's worth, never the payload's. The fixture's own results sit under minFoldChars
+  // so the screenshot batch is the only thing staged. Falsified on the pre-fix runtime,
+  // where this read over 60,000 tokens.
+  const runtime = makeRuntime(
+    makeFixture({ turns: 3, resultChars: 1_000, sessionId: "priced-mass" }),
+    { thresholds: { maxTarget: 0.80, minTarget: 0.20, consolidateAfter: 10, minFoldChars: 8_000 } },
+  );
+  await startRuntime(runtime);
+  runtime.appendMessage({
+    role: "assistant", stopReason: "toolUse", timestamp: 9_000,
+    content: [{ type: "toolCall", id: "shot", name: "read", arguments: { path: "shot.png" } }],
+  });
+  runtime.appendMessage({
+    role: "toolResult", toolCallId: "shot", toolName: "read", isError: false, timestamp: 9_001,
+    content: [{ type: "text", text: "Read image file [image/png]" }, { type: "image", data: payload }],
+  });
+  runtime.appendMessage({ role: "assistant", stopReason: "stop", timestamp: 9_002, content: [{ type: "text", text: "Seen." }] });
+  for (let turn = 0; turn < 4; turn += 1) {
+    runtime.appendMessage({ role: "user", content: [{ type: "text", text: `After ${turn}` }], timestamp: 9_010 + turn });
+    runtime.appendMessage({ role: "assistant", stopReason: "stop", timestamp: 9_020 + turn, content: [{ type: "text", text: `Done ${turn}.` }] });
+  }
+  await measure(runtime, 300_000, 1_000_000);
+  await project(runtime);
+  await settle();
+  const before = runtime.notifications.length;
+  await runtime.commands.get("fold-status").handler("", runtime.ctx);
+  const status = runtime.notifications.slice(before).map((item) => item.message).join("\n");
+  const staged = /Staged\s+(\d+) fold/.exec(status);
+  assert(staged && Number(staged[1]) >= 1, `nothing staged for the screenshot: ${status}`);
+  const frees = /frees about ([\d,]+) tokens/.exec(status);
+  assert(frees, `the status did not price the staged spans: ${status}`);
+  const tokens = Number(frees[1].replace(/,/g, ""));
+  assert(tokens < 20_000, `the screenshot's span is priced as text: ${tokens} tokens`);
+  // One image less the placeholder the fold leaves behind (brief plus overhead).
+  assert(tokens >= context.IMAGE_ESTIMATED_TOKENS - 400, `the image went unpriced: ${tokens} tokens`);
+  return { pricedImage: measurementModule.pricedBytes([image]), stagedTokens: tokens, staged: Number(staged[1]) };
 }
 
 const gates = [
@@ -17234,6 +17305,7 @@ const gates = [
   [163, "A brief that cannot name every subject counts the ones it dropped", gateDroppedSubjectsAreCounted],
   [164, "A mirrored core file is byte-identical to its source", gateMirroredCoreMatchesItsSource],
   [165, "The command and the bar tell the truth about a commit", gateCommitSurfacesTellTheTruth],
+  [166, "What a fold frees is priced by the image law", gateFreedMassIsPricedByTheImageLaw],
   // 138 is retired with the steward band (Shane 2026-08-23). It pinned a PRE-COMMIT
   // invitation, timed one band before the epoch so the agent was asked while marking
   // could still matter. The ask moves to fold time, where the agent has just seen the

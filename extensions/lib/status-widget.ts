@@ -170,14 +170,13 @@ export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBar
     else if (model.weighed) parts.push(theme.fg("muted", "commit held"));
     else parts.push(theme.fg("warning", "COMMIT DUE"));
   }
-  // COUNTS, NOT TOKENS, FOR WHAT IS STAGED. A span is priced from its transcript bytes,
-  // and the transcript is far larger than the request: the tool-call diet clips old
-  // results in view while the session file keeps them whole, so "5.8M to free" stood
-  // beside a 1M window (Shane 2026-09-03). The folds clause keeps its figure and names
-  // what it measures.
+  // A COUNT FOR WHAT IS STAGED, TOKENS FOR WHAT FOLDING BOUGHT. Both figures are priced
+  // by the image law now (measurement.ts pricedBytes): "5.8M to free" beside a 1M window
+  // was 83 screenshots' base64 counted as text (Shane 2026-09-03). The unit is written
+  // out because pi's k/M format read as megabytes.
   if (model.stagedMarks > 0) parts.push(ink.staged(`${model.stagedMarks} staged`));
   if (model.folds > 0) {
-    parts.push(ink.folded(`${model.folds} fold${model.folds === 1 ? "" : "s"} hide ${formatTokens(model.hiddenTokens)} of transcript`));
+    parts.push(ink.folded(`${model.folds} fold${model.folds === 1 ? "" : "s"} hide ${formatTokens(model.hiddenTokens)} tokens`));
   }
   // NO BRAND IN FRONT OF THE BAR (Shane 2026-09-02): the bar identifies itself, and the
   // two prose states above keep the brand because nothing else on them says whose they are.

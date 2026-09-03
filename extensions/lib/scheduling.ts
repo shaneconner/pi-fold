@@ -27,6 +27,7 @@ import {
   orderedRoots,
   protectedStaleMass,
   refsProtected,
+  pricedBytes,
 } from "./measurement.ts";
 import {
   childFoldIds,
@@ -179,13 +180,15 @@ export function markFreedBytes(
       ...state,
       expanded: state.expanded.filter((id) => id !== mark.id),
     }, snapshot);
-    return expanded && folded ? Math.max(0, bytes(expanded) - bytes(folded)) : 0;
+    return expanded && folded ? Math.max(0, pricedBytes(expanded) - pricedBytes(folded)) : 0;
   }
   const source = renderFoldParts(mark.parts, state, snapshot);
   if (!source) return 0;
   const placeholders = mark.kind === "tool-result" ? mark.parts.length : 1;
   const placeholder = placeholders * (mark.brief.length + ESTIMATED_PLACEHOLDER_OVERHEAD_BYTES);
-  return Math.max(0, bytes(source) - placeholder);
+  // PRICED, NOT COUNTED: a span holding a screenshot is worth one image to the
+  // window, not its base64 length (measurement.ts, pricedBytes).
+  return Math.max(0, pricedBytes(source) - placeholder);
 }
 
 export function markSpanStart(

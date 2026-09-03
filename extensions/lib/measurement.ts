@@ -23,6 +23,8 @@ import {
 import {
   ACTIVE_CONTEXT_POLICY,
   DEFAULT_CONTEXT_WINDOW,
+  ESTIMATED_BYTES_PER_TOKEN,
+  IMAGE_ESTIMATED_TOKENS,
   servingBudgetTokens,
 } from "./policy.ts";
 import type {
@@ -594,6 +596,25 @@ export function parseNativeCompactionCompletion(value: unknown, expectedSessionI
  * needs to be the right order of magnitude instead of wrong by seventy times, and the
  * provider anchor corrects the remainder the moment a real measurement lands.
  */
+/**
+ * WHAT A SPAN COSTS THE WINDOW, in the byte unit every estimator already speaks.
+ *
+ * `bytes()` counts a message's serialized characters, and a pasted screenshot serializes
+ * as hundreds of thousands of base64 characters the provider prices as one image. The
+ * occupancy estimate has applied that law since gate 156; the pricing of what a fold
+ * FREES had not, so a session holding 83 screenshots (67.3M base64 characters against
+ * 1.5M of text) told its owner a commit had "5.8M to free" against a 1M window, and a
+ * commit that moved the window 280,000 tokens recorded 8.6M freed (Shane, 2026-09-03,
+ * session 01a06746). Text is counted as its bytes; each image is counted as the bytes
+ * that estimate to IMAGE_ESTIMATED_TOKENS, so `estimatedTokens(pricedBytes(m))` is the
+ * same reading gate 156 gives the projection. Every "frees N" figure derives from this.
+ */
+export function pricedBytes(messages: unknown[]): number {
+  const images = imageMass(messages);
+  return Math.max(0, bytes(messages) - images.base64Chars) +
+    images.images * IMAGE_ESTIMATED_TOKENS * ESTIMATED_BYTES_PER_TOKEN;
+}
+
 export function imageMass(projected: unknown[]): { base64Chars: number; images: number } {
   let base64Chars = 0;
   let images = 0;
