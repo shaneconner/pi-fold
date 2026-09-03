@@ -85,7 +85,13 @@ export function formatTokens(count: number): string {
 }
 
 type Cell = "folded" | "staged" | "raw" | "empty";
-const GLYPH: Record<Cell, string> = { folded: "▂", staged: "▓", raw: "▇", empty: "░" };
+// SCORED CELLS (Shane 2026-09-03): the README figure draws every cell as its own rectangle
+// with a hairline gap, and the full-width block fused adjacent cells into one solid run,
+// so the terminal read as a different figure. The left seven-eighths block leaves an
+// eighth of each cell empty on the right, which is the same score in a glyph. Staged and
+// raw share the glyph and differ by colour; the shade glyph is gone because at a small
+// font its texture read as a solid block anyway.
+const GLYPH: Record<Cell, string> = { folded: "▂", staged: "▉", raw: "▉", empty: "░" };
 
 /** The bar's cells, oldest on the left, before any tick is laid over them. */
 export function foldBarCells(model: FoldBarModel, width: number = FOLD_BAR_WIDTH): Cell[] {
