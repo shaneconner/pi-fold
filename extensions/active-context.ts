@@ -667,6 +667,12 @@ export function registerActiveContext(pi: any, options: {
 
   const deliverReceipt = (receipt: ContextReceipt): void => {
     curation.receipts = withReceipt(curation.receipts, receipt);
+    // THE BAR'S READING GOES STALE AT A COMMIT. Occupancy is the provider's last count,
+    // which does not move until the next response, so after a commit the bar went on
+    // showing the pre-commit number as if it were current (38% beside "10 folds hold
+    // 8.6M", Shane 2026-09-03). Remember which measurement the commit landed against;
+    // while it is still the latest, the bar says the number is from before the commit.
+    if (receipt.foldsCommitted > 0) foldBar.staleSince = measurements.lastProviderMeasurement;
     // MONOTONIC, unlike `curation.receipts.length`, which saturates at MAX_CONTEXT_RECEIPTS
     // and would stop distinguishing one approach from the next once the session is long
     // enough to matter. This is the only counter the notice latch reads.
@@ -718,6 +724,9 @@ export function registerActiveContext(pi: any, options: {
     model: null as FoldBarModel | null,
     installed: false,
     requestRender: null as (() => void) | null,
+    /** The provider measurement the last landed commit ran against; the reading is
+     *  stale while it is still the latest one. */
+    staleSince: null as unknown,
   };
   const installFoldBar = (ctx: any): void => {
     if (foldBar.installed || typeof ctx.ui?.setWidget !== "function") return;
@@ -760,6 +769,8 @@ export function registerActiveContext(pi: any, options: {
       folds: input.roots,
       hiddenTokens: estimatedTokens(hiddenChars),
       weighed: input.weighed,
+      staleAfterCommit: input.share !== null && foldBar.staleSince !== null &&
+        foldBar.staleSince === measurements.lastProviderMeasurement,
       stopped: ladder.automaticFailure?.message ?? null,
     };
   };
@@ -4499,7 +4510,11 @@ export function registerActiveContext(pi: any, options: {
         safeNotify(
           ctx,
           committed
-            ? `Committed ${ownValue(committed, "applied_marks") ?? 0} mark(s)${topUp ? " with automatic top-up" : ""}. ` +
+            // THE EPOCH RECORD IS camelCase; `applied_marks` is the EVENT's spelling. Reading
+            // the event's name off the record printed "Committed 0 mark(s)" after a /fold that
+            // had just applied forty (Shane, 2026-09-03, session 01a06746: 378,216 tokens to
+            // 97,577 with the notice saying nothing happened).
+            ? `Committed ${ownValue(committed, "appliedMarks") ?? 0} mark(s)${topUp ? " with automatic top-up" : ""}. ` +
               "Exact source remains expandable."
             : "Nothing to commit: no staged mark could apply (pinned or already-folded spans hold).",
           "info",

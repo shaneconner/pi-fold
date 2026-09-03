@@ -55,6 +55,8 @@ export interface FoldBarModel {
   hiddenTokens: number;
   /** Whether a band-top commit has already been weighed against the current count. */
   weighed: boolean;
+  /** A commit landed after the count `share` reads; the number is from before it. */
+  staleAfterCommit: boolean;
   /** The suspension message when automatic folding has stopped, else null. */
   stopped: string | null;
 }
@@ -154,19 +156,28 @@ export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBar
     else bar += ink[cells[i]](GLYPH[cells[i]]);
   }
   const pct = Math.round(model.share * 100);
-  const parts: string[] = [theme.fg("text", `${pct}%`)];
-  if (model.share < model.commitShare) parts.push(theme.fg("muted", `commit at ${Math.round(model.commitShare * 100)}%`));
-  else if (model.weighed) parts.push(theme.fg("muted", "commit held"));
-  else parts.push(theme.fg("warning", "COMMIT DUE"));
-  // A staged count with nothing priced behind it reads "0 to free", which is a
-  // contradiction on the face of the row; state the count alone until the marks price.
-  if (model.stagedMarks > 0) {
-    parts.push(ink.staged(model.stagedTokens > 0
-      ? `${model.stagedMarks} staged, ${formatTokens(model.stagedTokens)} to free`
-      : `${model.stagedMarks} staged`));
+  const parts: string[] = [];
+  // A READING FROM BEFORE THE COMMIT SAYS SO. The count only moves when the provider
+  // answers, so right after a commit the bar showed the pre-commit percentage in the
+  // same type as a live one and read as a commit that did nothing. No estimate is
+  // drawn in its place: the freed bytes are transcript mass and the arithmetic would
+  // go negative against the window.
+  if (model.staleAfterCommit) {
+    parts.push(theme.fg("muted", `${pct}% before the commit`));
+  } else {
+    parts.push(theme.fg("text", `${pct}%`));
+    if (model.share < model.commitShare) parts.push(theme.fg("muted", `commit at ${Math.round(model.commitShare * 100)}%`));
+    else if (model.weighed) parts.push(theme.fg("muted", "commit held"));
+    else parts.push(theme.fg("warning", "COMMIT DUE"));
   }
+  // COUNTS, NOT TOKENS, FOR WHAT IS STAGED. A span is priced from its transcript bytes,
+  // and the transcript is far larger than the request: the tool-call diet clips old
+  // results in view while the session file keeps them whole, so "5.8M to free" stood
+  // beside a 1M window (Shane 2026-09-03). The folds clause keeps its figure and names
+  // what it measures.
+  if (model.stagedMarks > 0) parts.push(ink.staged(`${model.stagedMarks} staged`));
   if (model.folds > 0) {
-    parts.push(ink.folded(`${model.folds} fold${model.folds === 1 ? "" : "s"} hold ${formatTokens(model.hiddenTokens)}`));
+    parts.push(ink.folded(`${model.folds} fold${model.folds === 1 ? "" : "s"} hide ${formatTokens(model.hiddenTokens)} of transcript`));
   }
   // NO BRAND IN FRONT OF THE BAR (Shane 2026-09-02): the bar identifies itself, and the
   // two prose states above keep the brand because nothing else on them says whose they are.

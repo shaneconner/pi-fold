@@ -17036,6 +17036,91 @@ async function gateForestValidatedOncePerPass() {
 	};
 }
 
+/**
+ * GATE 165: THE COMMAND AND THE BAR TELL THE TRUTH ABOUT A COMMIT (2026-09-03).
+ *
+ * Shane pressed /fold at 38% on a 0.55 / 0.10 band and read "Committed 0 mark(s)" over a
+ * bar still showing 38%, and concluded the core function had not run. The session record
+ * (01a06746) says it ran exactly: forty marks applied, 378,216 tokens before, 97,577 at
+ * the next provider count, the 10% aim hit. Two surfaces lied about one true event.
+ *
+ *   - The notice read `applied_marks` off the epoch RECORD, whose field is `appliedMarks`
+ *     (`applied_marks` is the EVENT's spelling), so it had said 0 after every commit since
+ *     it was written. The count it states must be the count the commit event carries.
+ *   - The bar's percentage is the provider's last count, which cannot move until the next
+ *     response, so it went on showing the pre-commit number in the type of a live one.
+ *     It now says the number is from before the commit and promises no commit point,
+ *     and the next count clears it. No estimate is drawn in its place, because what a
+ *     commit frees is measured in TRANSCRIPT bytes and the arithmetic would go negative
+ *     against the window (34.5 MB freed to move the window by 280k tokens).
+ *   - That same inflation put "5.8M to free" beside a 1M window. The staged clause states
+ *     a count only, and the folds clause names its figure as transcript.
+ *
+ * Driven through the registered /fold command on a host that offers widgets, reading the
+ * commit off the canonical event stream and the row off the widget's own render.
+ */
+async function gateCommitSurfacesTellTheTruth() {
+  const runtime = makeRuntime(
+    makeFixture({ turns: 30, resultChars: 12_000, sessionId: "commit-surfaces" }),
+    { thresholds: { maxTarget: 0.80, minTarget: 0.20, consolidateAfter: 10, minFoldChars: 8_000 } },
+  );
+  // A host with widgets: the bar installs on the first status update that finds one, and
+  // renders against the host's live theme, which this fixture keeps plain.
+  let widget = null;
+  let renders = 0;
+  runtime.ctx.ui.theme = { fg: (_colour, text) => text, bold: (text) => text, getColorMode: () => "256color" };
+  runtime.ctx.ui.setWidget = (_key, factory, options) => {
+    widget = factory({ requestRender() { renders += 1; } }, runtime.ctx.ui.theme);
+    widget.options = options;
+  };
+  await startRuntime(runtime);
+  const row = () => widget.render(200).join("\n");
+  assert.equal(widget?.options?.placement, "belowEditor", "the bar is not the footer's top row");
+  assert(/not measured yet/.test(row()) && !/[▉░]/.test(row()),
+    `an unmeasured window drew a bar, which is a guess drawn: ${row()}`);
+  assert.equal(runtime.statuses.at(-1).text, undefined,
+    "the status string is still set beside a bar that carries every fact it carried");
+
+  await measure(runtime, 420_000, 1_000_000);
+  await project(runtime);
+  await settle();
+  const before = row();
+  assert(/\b4\d% · commit at 80%/.test(before), `a measured window below the band misread: ${before}`);
+  const staged = /(\d+) staged/.exec(before);
+  assert(staged && Number(staged[1]) > 0, `the fixture staged nothing for /fold to commit: ${before}`);
+  assert(!/to free/.test(before), `the staged clause priced transcript bytes as window tokens: ${before}`);
+
+  const from = runtime.appended.length;
+  const notices = runtime.notifications.length;
+  await runtime.commands.get("fold").handler("", runtime.ctx);
+  await settle();
+  const commit = contextEvents(runtime, from)
+    .find((record) => record.kind === "context.commit" && record.deferred === false);
+  assert(commit && commit.applied_marks > 0, "the fixture's /fold applied nothing, so nothing here is tested");
+  const notice = runtime.notifications.slice(notices).map((item) => item.message).join("\n");
+  const said = /Committed (\d+) mark/.exec(notice);
+  assert(said, `the command did not state a count: ${notice}`);
+  assert.equal(Number(said[1]), commit.applied_marks,
+    `the command's count is not the commit's (${notice} against ${commit.applied_marks})`);
+
+  const after = row();
+  assert(/\b4\d% before the commit/.test(after),
+    `the bar showed the pre-commit count as a live reading: ${after}`);
+  assert(!/commit at|COMMIT DUE|commit held/.test(after),
+    `a reading from before the commit still placed the next one: ${after}`);
+  assert(/\d+ folds? hide \S+ of transcript/.test(after),
+    `the folds clause does not name its figure as transcript mass: ${after}`);
+
+  await measure(runtime, 100_000, 1_000_000);
+  await project(runtime);
+  await settle();
+  const fresh = row();
+  assert(!/before the commit/.test(fresh), `a new count did not clear the stale marker: ${fresh}`);
+  assert(/\b10% · commit at 80%/.test(fresh), `the fresh count did not render as a live reading: ${fresh}`);
+  assert(renders > 0, "the bar never asked the host to repaint");
+  return { appliedMarks: commit.applied_marks, said: Number(said[1]), before, after, fresh };
+}
+
 const gates = [
   [1, "Registration, parse and deployment branding", gateRegistrationAndBranding],
   [2, "The durable record: lattice, chain and rollback", gateDurableRecord],
@@ -17148,6 +17233,7 @@ const gates = [
   [136, "A brief's cut is stated, never silent", gateBriefTruncationIsExplicit],
   [163, "A brief that cannot name every subject counts the ones it dropped", gateDroppedSubjectsAreCounted],
   [164, "A mirrored core file is byte-identical to its source", gateMirroredCoreMatchesItsSource],
+  [165, "The command and the bar tell the truth about a commit", gateCommitSurfacesTellTheTruth],
   // 138 is retired with the steward band (Shane 2026-08-23). It pinned a PRE-COMMIT
   // invitation, timed one band before the epoch so the agent was asked while marking
   // could still matter. The ask moves to fold time, where the agent has just seen the
