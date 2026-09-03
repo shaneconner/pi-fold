@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="884" height="52" viewBox="0 0 884 52" role="img" aria-label="The fold bar: forty cells of the serving budget, oldest on the left, with ticks at the aim and the commit point. Staged spans, raw material and fold placeholders fill it in three colours, and the label states the percentage, the commit point, what is staged and what the folds hide.">
+<rect width="884" height="52" fill="#ffffff"/>
+<rect x="12" y="25" width="8" height="5" fill="#D29343"/>
+<rect x="21" y="14" width="8" height="16" fill="#9D892B"/>
+<rect x="30" y="14" width="8" height="16" fill="#9D892B"/>
+<rect x="39" y="14" width="8" height="16" fill="#9D892B"/>
+<rect x="48" y="14" width="8" height="16" fill="#9D892B"/>
+<rect x="57" y="14" width="8" height="16" fill="#9D892B"/>
+<rect x="66" y="14" width="8" height="16" fill="#1C5A62"/>
+<rect x="75" y="14" width="8" height="16" fill="#1C5A62"/>
+<rect x="78" y="11" width="2" height="22" fill="#8c959f"/>
+<rect x="84" y="14" width="8" height="16" fill="#1C5A62"/>
+<rect x="93" y="14" width="8" height="16" fill="#1C5A62"/>
+<rect x="102" y="14" width="8" height="16" fill="#1C5A62"/>
+<rect x="111" y="14" width="8" height="16" fill="#1C5A62"/>
+<rect x="120" y="14" width="8" height="16" fill="#1C5A62"/>
+<rect x="129" y="14" width="8" height="16" fill="#1C5A62"/>
+<rect x="138" y="14" width="8" height="16" fill="#1C5A62"/>
+<rect x="147" y="14" width="8" height="16" fill="#1C5A62"/>
+<rect x="156" y="14" width="8" height="16" fill="#1C5A62"/>
+<rect x="165" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="174" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="183" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="192" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="201" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="210" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="219" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="228" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="237" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="246" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="255" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="264" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="273" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="282" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="291" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="294" y="11" width="2" height="22" fill="#9a6700"/>
+<rect x="300" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="309" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="318" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="327" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="336" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="345" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="354" y="14" width="8" height="16" fill="#eaeef2"/>
+<rect x="363" y="14" width="8" height="16" fill="#eaeef2"/>
+<text x="382" y="26" font-size="12" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,Liberation Mono,monospace" xml:space="preserve"><tspan fill="#1f2328">42%</tspan><tspan fill="#656d76"> · </tspan><tspan fill="#656d76">commit at 80%</tspan><tspan fill="#656d76"> · </tspan><tspan fill="#9D892B">12 staged, 118k to free</tspan><tspan fill="#656d76"> · </tspan><tspan fill="#D29343">3 folds hold 412k</tspan></text>
+<text x="79" y="46" font-size="10" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" fill="#656d76" text-anchor="middle">aim 20%</text>
+<text x="295" y="46" font-size="10" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" fill="#9a6700" text-anchor="middle">commit 80%</text>
+<text x="12" y="46" font-size="10" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" fill="#656d76" text-anchor="start">oldest</text>
+<text x="371" y="46" font-size="10" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" fill="#656d76" text-anchor="end">newest</text>
+</svg>
