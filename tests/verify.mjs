@@ -17073,6 +17073,7 @@ async function gateCommitSurfacesTellTheTruth() {
     widget = factory({ requestRender() { renders += 1; } }, runtime.ctx.ui.theme);
     widget.options = options;
   };
+
   await startRuntime(runtime);
   const row = () => widget.render(200).join("\n");
   assert.equal(widget?.options?.placement, "belowEditor", "the bar is not the footer's top row");
@@ -17118,6 +17119,29 @@ async function gateCommitSurfacesTellTheTruth() {
   assert(!/before the commit/.test(fresh), `a new count did not clear the stale marker: ${fresh}`);
   assert(/\b10% · commit at 80%/.test(fresh), `the fresh count did not render as a live reading: ${fresh}`);
   assert(renders > 0, "the bar never asked the host to repaint");
+
+  // THE PALETTE FOLLOWS THE BACKGROUND, read off the theme's own text colour. A theme
+  // whose body text is dark is drawn on a light terminal, where batlow's light pink is
+  // 1.7:1 against white; the row steps two classes darker there. Pinned on the exact
+  // truecolor escapes, both ways, because a name heuristic would miss a custom theme.
+  const truecolor = (hex) => `38;2;${parseInt(hex.slice(1, 3), 16)};${parseInt(hex.slice(3, 5), 16)};${parseInt(hex.slice(5, 7), 16)}`;
+  const themed = (textHex) => ({
+    fg: (_colour, text) => text, bold: (text) => text, getColorMode: () => "truecolor",
+    getFgAnsi: () => `\x1b[${truecolor(textHex)}m`,
+  });
+  const model = {
+    brand: "pi-fold", share: 0.43, commitShare: 0.80, aimShare: 0.20, stagedShare: 0.10, stagedMarks: 3,
+    stagedTokens: 1_000, foldedShare: 0.02, folds: 2, hiddenTokens: 5_000, weighed: false,
+    staleAfterCommit: false, stopped: null,
+  };
+  const onDark = context.renderFoldBar(model, 200, themed("#e6edf3"));
+  const onLight = context.renderFoldBar(model, 200, themed("#1f2328"));
+  assert(onDark.includes(truecolor("#3C6D56")) && !onDark.includes(truecolor("#1C5A62")),
+    "a dark theme did not get the dark-background batlow classes");
+  assert(onLight.includes(truecolor("#1C5A62")) && !onLight.includes(truecolor("#FDB7BC")),
+    "a light theme kept the light-background pink that vanishes on white");
+  assert.equal(context.lightBackground({ fg: (_c, t) => t, bold: (t) => t, name: "gruvbox-light" }), true,
+    "a theme without a text escape did not fall back to its name");
   return { appliedMarks: commit.applied_marks, said: Number(said[1]), before, after, fresh };
 }
 

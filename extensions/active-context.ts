@@ -225,6 +225,7 @@ export * from "./lib/persistence.ts";
 export * from "./lib/policy.ts";
 export * from "./lib/rollback.ts";
 export * from "./lib/scheduling.ts";
+export * from "./lib/status-widget.ts";
 export * from "./lib/selection.ts";
 export * from "./lib/transcript.ts";
 
@@ -746,11 +747,18 @@ export function registerActiveContext(pi: any, options: {
       };
     }, { placement: "belowEditor" });
   };
-  const foldBarModel = (input: {
+  const foldBarModel = (ctx: any, input: {
     share: number | null; budgetTokens: number; staged: number; roots: number; weighed: boolean;
   }): FoldBarModel => {
     const state = persistence.state;
-    const snapshot = lifecycle.latestSnapshot;
+    // THE SAME SNAPSHOT /fold-status PRICES AGAINST. `markFreedBytes` answers ZERO, silently,
+    // for a span it cannot locate contiguously in the snapshot it is handed, and the last
+    // context event's snapshot can trail the branch the marks were cut from; the bar read
+    // "5 staged, 0 to free" beside a status command pricing the same marks at 41,877
+    // tokens (Shane, 2026-09-02, session 01a06272). The authoritative snapshot is memoized
+    // on the branch length, so reading it here costs nothing while nothing has changed.
+    let snapshot = lifecycle.latestSnapshot;
+    try { snapshot = authoritativeSnapshotFor(ctx); } catch { }
     let stagedTokens = 0;
     let placeholderChars = 0;
     let hiddenChars = 0;
@@ -801,7 +809,7 @@ export function registerActiveContext(pi: any, options: {
       try {
         installFoldBar(ctx);
         if (foldBar.installed) {
-          foldBar.model = foldBarModel({
+          foldBar.model = foldBarModel(ctx, {
             share, budgetTokens: capacity.budgetTokens, staged, roots,
             weighed: ladder.bandTopMeasurement !== null &&
               ladder.bandTopMeasurement === measurements.lastProviderMeasurement,

@@ -66,11 +66,33 @@ export interface FoldBarTheme {
   fg(color: "dim" | "muted" | "text" | "warning" | "error", text: string): string;
   bold(text: string): string;
   getColorMode?(): "truecolor" | "256color";
+  getFgAnsi?(color: "text"): string;
+  name?: string;
 }
 
-// Crameri batlow10, classes 3, 6 and 8 (0-indexed). The two darkest classes are unusable
-// as fill on a dark terminal, and the lightest washes out on a light one.
-const BATLOW = { raw: "#3C6D56", staged: "#D29343", folded: "#FDB7BC" } as const;
+// Crameri batlow10, three classes per background. Classes 3, 6 and 8 (0-indexed) read on
+// a dark terminal; the lightest of them is 1.7:1 against white, so a light terminal steps
+// two classes darker (2, 5 and 6), the same triple the README's light figure uses.
+const BATLOW_ON_DARK = { raw: "#3C6D56", staged: "#D29343", folded: "#FDB7BC" } as const;
+const BATLOW_ON_LIGHT = { raw: "#1C5A62", staged: "#9D892B", folded: "#D29343" } as const;
+
+/**
+ * WHICH WAY THE BACKGROUND GOES, read off the theme's own text colour rather than its
+ * name: a theme whose body text is dark is drawn on a light background. pi hands the
+ * text colour out as a truecolor escape, and a theme that does not (256-colour mode,
+ * or a host without the accessor) falls back to the name, then to dark.
+ */
+export function lightBackground(theme: FoldBarTheme): boolean {
+  try {
+    const ansi = theme.getFgAnsi?.("text") ?? "";
+    const match = /38;2;(\d+);(\d+);(\d+)/.exec(ansi);
+    if (match) {
+      const [r, g, b] = match.slice(1).map((v) => Number(v) / 255);
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.5;
+    }
+  } catch { }
+  return /light/i.test(theme.name ?? "");
+}
 
 const truecolor = (hex: string, text: string): string => {
   const r = parseInt(hex.slice(1, 3), 16);
@@ -140,6 +162,7 @@ export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBar
       width, theme.fg("dim", "..."));
   }
   const rich = theme.getColorMode?.() === "truecolor";
+  const BATLOW = lightBackground(theme) ? BATLOW_ON_LIGHT : BATLOW_ON_DARK;
   const ink: Record<Cell, (text: string) => string> = {
     raw: (t) => rich ? truecolor(BATLOW.raw, t) : theme.fg("muted", t),
     staged: (t) => rich ? truecolor(BATLOW.staged, t) : theme.fg("text", t),
