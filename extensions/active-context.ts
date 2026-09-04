@@ -89,6 +89,7 @@ import {
   sameStateProjection,
   semanticStateSha256,
   topologySha256,
+  adoptDurableFoldRecords,
 } from "./lib/persistence.ts";
 import type { MaterializedStatePersistence } from "./lib/persistence.ts";
 import {
@@ -2528,6 +2529,11 @@ export function registerActiveContext(pi: any, options: {
       state: persistence.state!,
       generation: generationAtStart,
     });
+    const adoption = adoptDurableFoldRecords(nextState.folds, persistence.persistedFoldRecords);
+    if (adoption.adopted.length) {
+      emit("context.adopt", { adopted: adoption.adopted.length, fold_ids: adoption.adopted.slice(0, 64) });
+      return { preparedFold, nextState: { ...nextState, folds: adoption.folds } };
+    }
     return { preparedFold, nextState };
   };
 
@@ -2769,6 +2775,16 @@ export function registerActiveContext(pi: any, options: {
           clips: [...(result.state.clips ?? []), ...clipAdditions] } };
       }
     }
+    // A RE-CUT SPAN ADOPTS ITS DURABLE RECORD (persistence.ts, adoptDurableFoldRecords):
+    // a fold minted here under an id the store already holds, with the same source, takes
+    // the record's bytes before the projection is measured, so the persist path finds
+    // equal digests where session 01a06746 found "Conflicting durable active-context
+    // fold" and stopped folding for good.
+    const adoption = adoptDurableFoldRecords(result.state.folds, persistence.persistedFoldRecords);
+    if (adoption.adopted.length) {
+      result = { ...result, state: { ...result.state, folds: adoption.folds } };
+      emit("context.adopt", { adopted: adoption.adopted.length, fold_ids: adoption.adopted.slice(0, 64) });
+    }
     persistence.state = result.state;
     const bytesAfter = pricedBytes(projectActiveContext(snapshot, persistence.state));
     const freedBytes = Math.max(0, bytesBefore - bytesAfter);
@@ -2804,6 +2820,7 @@ export function registerActiveContext(pi: any, options: {
       closing_consolidation_marks: closingAdded,
       absorbed_wedges: wedges.absorbed.length,
       clipped_results: clippedResults,
+      adopted_records: adoption.adopted.length,
       freed_bytes: freedBytes,
       freed_tokens: estimatedTokens(freedBytes),
       rewrite_tokens: rewriteTokens,

@@ -17216,6 +17216,63 @@ async function gateFreedMassIsPricedByTheImageLaw() {
   return { pricedImage: measurementModule.pricedBytes([image]), stagedTokens: tokens, staged: Number(staged[1]) };
 }
 
+/**
+ * GATE 167: A RE-CUT SPAN ADOPTS ITS DURABLE RECORD (2026-09-04).
+ *
+ * Session 01a06746 died this way: on the first pass after a restart the persistence
+ * projection could not seat one consolidation root and dropped it with its 30 children,
+ * the spans read as raw, the frontier cut them again under the same ids (an id is
+ * derived from the parts), the re-cut folds differed from their durable records by 25
+ * bytes of placeholder text, and "Conflicting durable active-context fold" suspended
+ * folding. Every restart walked into the same refusal, because the durable state had
+ * already lost the folds and the store still held their records.
+ *
+ * The fixture builds the same shape without waiting for a restart to misbehave: a
+ * second runtime inherits the first one's RECORDS and none of its STATE, and registers
+ * under a LONGER tool name so its placeholders differ by a few bytes (a name of the
+ * same length renders byte-equal placeholders and never reaches the conflict). It must commit,
+ * not suspend; announce what it adopted; write no second record under a durable id; and
+ * carry the record's brief in the state it persists. Falsified on the pre-fix runtime,
+ * where the second commit suspends by name.
+ */
+async function gateRecutSpanAdoptsItsDurableRecord() {
+  const built = makeFixture({ turns: 30, resultChars: 12_000, sessionId: "adopt-durable" });
+  const band = { thresholds: { maxTarget: 0.80, minTarget: 0.20, consolidateAfter: 10, minFoldChars: 8_000 } };
+  const first = makeRuntime(built, band);
+  await startRuntime(first);
+  const committed = await runtimeCommit(first, { tokens: 830_000, contextWindow: 1_000_000 });
+  assert(committed.fired && committed.appliedMarks > 0, "the first runtime folded nothing");
+  const isRecord = (entry) => entry.type === "custom" && /-fold-record$/.test(entry.customType ?? "");
+  const isState = (entry) => entry.type === "custom" && /-state$/.test(entry.customType ?? "");
+  const records = first.branch.filter(isRecord);
+  assert(records.length > 0, "no durable fold records were written");
+  const inherited = first.branch.filter((entry) => !isState(entry));
+  const second = makeRuntime(built, { ...band, initialEntries: inherited, toolName: "other_context_folding_tool" });
+  await startRuntime(second);
+  const from = second.appended.length;
+  const recut = await runtimeCommit(second, { tokens: 830_000, contextWindow: 1_000_000 });
+  const suspended = contextEvents(second, from).filter((event) => event.kind === "context.suspend");
+  assert.equal(suspended.length, 0,
+    `the re-cut suspended folding: ${JSON.stringify(suspended[0] ?? null).slice(0, 300)}`);
+  assert(recut.fired && recut.appliedMarks > 0, "the second runtime committed nothing");
+  const adoptions = contextEvents(second, from).filter((event) => event.kind === "context.adopt");
+  const adopted = adoptions.reduce((total, event) => total + event.adopted, 0);
+  assert(adopted > 0, "nothing was adopted, so the fixture did not reach the conflict");
+  assert.equal(recut.commit.adopted_records, adopted, "the commit event does not carry the adoption count");
+  const durableIds = new Set(records.map((entry) => entry.data.foldId));
+  const written = second.appended.filter(isRecord);
+  assert(written.every((entry) => !durableIds.has(entry.data.foldId)),
+    "an adopted fold wrote a second record under a durable id");
+  const state = materialized(second);
+  const byId = new Map(records.map((entry) => [entry.data.foldId, entry.data.fold]));
+  for (const id of adoptions.flatMap((event) => event.fold_ids)) {
+    const fold = state.folds.find((item) => item.id === id);
+    assert(fold, `adopted fold ${id} is not in the durable state`);
+    assert.equal(fold.brief, byId.get(id).brief, `adopted fold ${id} did not take the record's brief`);
+  }
+  return { firstApplied: committed.appliedMarks, recutApplied: recut.appliedMarks, adopted, records: records.length };
+}
+
 const gates = [
   [1, "Registration, parse and deployment branding", gateRegistrationAndBranding],
   [2, "The durable record: lattice, chain and rollback", gateDurableRecord],
@@ -17330,6 +17387,7 @@ const gates = [
   [164, "A mirrored core file is byte-identical to its source", gateMirroredCoreMatchesItsSource],
   [165, "The command and the bar tell the truth about a commit", gateCommitSurfacesTellTheTruth],
   [166, "What a fold frees is priced by the image law", gateFreedMassIsPricedByTheImageLaw],
+  [167, "A re-cut span adopts its durable record", gateRecutSpanAdoptsItsDurableRecord],
   // 138 is retired with the steward band (Shane 2026-08-23). It pinned a PRE-COMMIT
   // invitation, timed one band before the epoch so the agent was asked while marking
   // could still matter. The ask moves to fold time, where the agent has just seen the

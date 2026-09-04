@@ -789,11 +789,44 @@ export function parseActiveContextStateV2(value: unknown, sessionId: string): Ac
   return parsed;
 }
 
+/**
+ * A RE-CUT SPAN ADOPTS ITS DURABLE RECORD (2026-09-04).
+ *
+ * A fold's id is derived from its parts, so the same span cut twice mints the same id,
+ * and a durable record under an id is immutable by design. Those two facts met in
+ * session 01a06746: a persistence projection on the first pass after a restart could
+ * not seat one consolidation root and dropped it with its 30 children, the spans read
+ * as raw, the frontier cut them again, and the re-cut folds differed from their records
+ * by 25 bytes of placeholder text. `normalizeFoldsForPersistedRecords` and the persist
+ * path both refused the conflict, folding suspended, and every restart walked into the
+ * same refusal because the durable state had already lost the folds.
+ *
+ * The record is the canonical fold for its source. A fold whose id has a record with
+ * the SAME kind and SAME source hash takes the record's bytes (brief, provenance,
+ * placeholder size, createdAt) and keeps only its own parent link, so the persist path
+ * finds equal digests and the session goes on. A record under the same id with a
+ * DIFFERENT source is a corrupt store and still refuses by name.
+ */
+export function adoptDurableFoldRecords(
+  folds: ActiveFold[],
+  records: Map<string, FoldRecordEntry>,
+): { folds: ActiveFold[]; adopted: string[] } {
+  const adopted: string[] = [];
+  const next = folds.map((fold) => {
+    const record = records.get(fold.id);
+    if (!record || sameFoldRecordIdentity(fold, record.fold)) return fold;
+    if (record.fold.kind !== fold.kind || record.fold.sourceSha256 !== fold.sourceSha256) return fold;
+    adopted.push(fold.id);
+    return { ...clone(record.fold), parentId: fold.parentId };
+  });
+  return { folds: next, adopted };
+}
+
 export function normalizeFoldsForPersistedRecords(
   folds: ActiveFold[],
   records: Map<string, FoldRecordEntry>,
 ): ActiveFold[] {
-  const normalized = folds.map((fold) => {
+  const normalized = adoptDurableFoldRecords(folds, records).folds.map((fold) => {
     const record = records.get(fold.id);
     if (!record) return clone(fold);
     if (!sameFoldRecordIdentity(fold, record.fold)) {
