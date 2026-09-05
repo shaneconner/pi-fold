@@ -741,6 +741,8 @@ export function registerActiveContext(pi: any, options: {
     ctx.ui.setWidget(entryTypePrefix, (tui: any) => {
       foldBar.requestRender = () => { try { tui.requestRender(); } catch { } };
       return {
+        /** The model behind the row, for the lab and the gates. */
+        get model(): FoldBarModel | null { return foldBar.model; },
         render(width: number): string[] {
           if (!foldBar.model) return [];
           try { return [renderFoldBar(foldBar.model, width, ctx.ui.theme)]; }
@@ -791,7 +793,12 @@ export function registerActiveContext(pi: any, options: {
     }
     const rootAt = new Map<number, { fold: ActiveFold; end: number }>();
     for (const root of orderedRoots(state, snapshot)) {
-      rootAt.set(root.start, { fold: root.fold, end: root.end });
+      // A REVEALED ROOT IS RAW ON THE MAP, as it is in the window: renderFold shows a fold's
+      // source when it is expanded or when any of its refs is pinned, so those indices are
+      // walked as messages (pinned or raw) rather than skipped as a placeholder.
+      const revealed = state.expanded.includes(root.fold.id) ||
+        refsProtected(flattenFoldRefs(root.fold, state), state, snapshot);
+      if (!revealed) rootAt.set(root.start, { fold: root.fold, end: root.end });
       if (root.fold.kind === "chapter") model.foldSpans += 1;
       else if (root.fold.kind === "tool-result") model.foldTruncations += 1;
       else model.foldConsolidations += 1;
@@ -832,7 +839,9 @@ export function registerActiveContext(pi: any, options: {
       if (!mark || index >= mark.end) mark = markAt.get(index) ?? null;
       const item = snapshot.mapped[index];
       const pinned = item?.ref ? pinnedKeys.has(objectRefKey(item.ref)) : false;
-      const kind: SegmentKind = mark ? (mark.kind as SegmentKind) : pinned ? "pinned" : "raw";
+      // A PIN OUTRANKS THE MARK COVERING IT: a pinned entry inside a staged span holds the
+      // mark rather than folding with it, so the map shows the hold.
+      const kind: SegmentKind = pinned ? "pinned" : mark ? (mark.kind as SegmentKind) : "raw";
       const ends = mark !== null && index === mark.end - 1;
       push(kind, prices[index] ?? 0, ends);
       if (ends) mark = null;

@@ -160,7 +160,15 @@ export function foldBarCells(model: FoldBarModel, width: number = FOLD_BAR_WIDTH
   const filled = Math.max(0, Math.min(width, Math.round(share * width)));
   const cells: BarCell[] = Array.from({ length: width }, () => ({ kind: "empty", scored: false }));
   const total = model.segments.reduce((sum, segment) => sum + Math.max(0, segment.tokens), 0);
-  if (filled === 0 || total <= 0) return cells;
+  if (filled === 0) return cells;
+  // THE MEASURED FILL IS DRAWN WHATEVER THE WALK FOUND. Before the first context event
+  // there is no snapshot to walk, and a session reloaded at 55% drew one sliver and
+  // thirty-nine empty cells (Shane, 2026-09-05): the provider's count is a fact and an
+  // empty bar beside it is a guess drawn. With nothing to class, the fill is raw.
+  if (total <= 0) {
+    for (let cell = 0; cell < filled; cell += 1) cells[cell].kind = "raw";
+    return cells;
+  }
   const scale = filled / total;
   const coverage: Array<Map<SegmentKind, number>> = Array.from({ length: filled }, () => new Map());
   let position = 0;
@@ -179,10 +187,17 @@ export function foldBarCells(model: FoldBarModel, width: number = FOLD_BAR_WIDTH
       cells[cell].scored = true;
     }
   }
+  // THE MARKS WIN THE CELL. A cell is tens of thousands of tokens and a mark a few
+  // thousand, so "the kind covering most of the cell" painted every marked cell raw and
+  // the truncations Shane asked to see were scored but green (2026-09-05). Raw fills only
+  // a cell nothing else touches; among the rest, the widest coverage wins.
   for (let cell = 0; cell < filled; cell += 1) {
     let best: SegmentKind = "raw";
     let bestCover = -1;
-    for (const [kind, cover] of coverage[cell]) if (cover > bestCover) { best = kind; bestCover = cover; }
+    for (const [kind, cover] of coverage[cell]) {
+      if (kind === "raw") continue;
+      if (cover > bestCover) { best = kind; bestCover = cover; }
+    }
     cells[cell].kind = best;
   }
   const pinnedTokens = model.segments.filter((segment) => segment.kind === "pinned")
@@ -269,8 +284,10 @@ export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBar
   } else {
     parts.push(theme.fg("text", `${pct}%`));
     if (model.share < model.commitShare) parts.push(theme.fg("muted", `commit at ${Math.round(model.commitShare * 100)}%`));
+    // NOT AN ALARM (Shane 2026-09-05: "reads as the user should do something"). The commit
+    // is the runtime's to make; the row states where the window stands, in muted ink.
     else if (model.weighed) parts.push(theme.fg("muted", "commit held"));
-    else parts.push(theme.fg("warning", "COMMIT DUE"));
+    else parts.push(theme.fg("muted", "at commit point"));
   }
   // THE COUNT, ITS KINDS AND ITS TOKENS. Spans are chapters of the conversation and
   // truncations are tool results (Shane's word for the tool compression, 2026-09-05);

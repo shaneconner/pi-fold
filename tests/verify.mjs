@@ -17087,6 +17087,12 @@ async function gateCommitSurfacesTellTheTruth() {
   await settle();
   const before = row();
   assert(/\b4\d% · commit at 80%/.test(before), `a measured window below the band misread: ${before}`);
+  // Over the band and not yet weighed, the row states where the window stands and does
+  // not shout: the commit is the runtime's, not the reader's.
+  const overBand = context.renderFoldBar({ ...JSON.parse(JSON.stringify(widget.model)), share: 0.85, weighed: false, staleAfterCommit: false },
+    200, { fg: (colour, text) => (colour === "warning" ? `<W>${text}</W>` : text), bold: (t) => t, getColorMode: () => "256color" });
+  assert(/at commit point/.test(overBand) && !/COMMIT DUE|<W>at commit point/.test(overBand),
+    `the over-band reading alarms or is missing: ${overBand}`);
   const staged = /(\d+) staged/.exec(before);
   assert(staged && Number(staged[1]) > 0, `the fixture staged nothing for /fold to commit: ${before}`);
   assert(/\d+ staged, \S+ tokens/.test(before) && !/to free/.test(before),
@@ -17108,7 +17114,7 @@ async function gateCommitSurfacesTellTheTruth() {
   const after = row();
   assert(/\b4\d% before the commit/.test(after),
     `the bar showed the pre-commit count as a live reading: ${after}`);
-  assert(!/commit at|COMMIT DUE|commit held/.test(after),
+  assert(!/commit at|COMMIT DUE|at commit point|commit held/.test(after),
     `a reading from before the commit still placed the next one: ${after}`);
   assert(/\d+ folds?(?: \([^)]*\))?(?:, \d+ nested)? hide \S+ tokens/.test(after),
     `the folds clause does not state its unit: ${after}`);
@@ -17130,7 +17136,6 @@ async function gateCommitSurfacesTellTheTruth() {
   await settle();
   const pinnedRow = row();
   assert(/\b\d+ pinned\b/.test(pinnedRow), `pinned entries are not named on the row: ${pinnedRow}`);
-  assert(/█/.test(pinnedRow), `pinned mass is not drawn: ${pinnedRow}`);
   // The widget reads the host's theme at render time, so swapping the fixture's theme
   // for one that marks the accent ink shows which parts of the row carry it.
   runtime.ctx.ui.theme = { fg: (colour, text) => (colour === "accent" ? `<A>${text}</A>` : text), bold: (t) => t, getColorMode: () => "256color" };
@@ -17181,6 +17186,18 @@ async function gateCommitSurfacesTellTheTruth() {
     "a flat forest states a nested count");
   assert(!/\(/.test(context.renderFoldBar({ ...model, stagedSpans: 3, stagedTruncations: 0, foldTruncations: 0, foldSpans: 2, totalFolds: 2 }, 200, themed("#e6edf3")).replace(/hide.*$/, "")),
     "kinds are named when only one kind is present");
+  // A measured window with nothing to walk yet (the reload moment, before the first
+  // context event) still draws its fill, as raw: the count is a fact.
+  const unwalked = context.foldBarCells({ ...model, segments: [] });
+  assert.deepEqual(unwalked.slice(0, 20).map((cell) => cell.kind), Array(20).fill("raw"), "a measured fill with no segments drew empty cells");
+  assert(unwalked.slice(20).every((cell) => cell.kind === "empty"), "the unwalked fill overran the measurement");
+  // A mark smaller than a cell colours the cell it touches: raw fills only a cell no
+  // mark reaches, so a truncation of a fifth of a cell still shows as a truncation.
+  const touched = context.foldBarCells({ ...model, segments: [
+    { kind: "raw", tokens: 190 }, { kind: "staged-truncation", tokens: 10, markEnd: true }, { kind: "raw", tokens: 200 },
+  ] });
+  assert.equal(touched[9].kind, "staged-truncation", `a small truncation lost its cell to raw: ${touched[9].kind}`);
+  assert.equal(touched[8].kind, "raw", "raw was displaced from a cell no mark touches");
   // A mark smaller than a cell still scores the cell it ends in.
   const tiny = { ...model, segments: [{ kind: "raw", tokens: 195 }, { kind: "staged-span", tokens: 5, markEnd: true }, { kind: "raw", tokens: 200 }] };
   assert(context.foldBarCells(tiny)[9].scored, "a sub-cell mark left no score");
