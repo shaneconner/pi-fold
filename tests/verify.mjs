@@ -17302,6 +17302,38 @@ async function gateFreedMassIsPricedByTheImageLaw() {
  * carry the record's brief in the state it persists. Falsified on the pre-fix runtime,
  * where the second commit suspends by name.
  */
+/**
+ * GATE 168 (2026-09-05). The status page carries an `actions` index the model is meant
+ * to copy from, and it named a "fold" action with a 1,000-character brief long after the
+ * schema had replaced fold with reboundary and the brief cap had moved to the policy's
+ * 2,000. The model followed the page and was refused by the schema in a live session.
+ * Every action the page advertises, on the index and on an eligible chapter's own
+ * action, must be one the schema's enum accepts, and the brief cap the page states
+ * must be the policy's number.
+ */
+async function gateStatusPageAdvertisesSchemaActions() {
+  const built = makeFixture({ turns: 12, resultChars: 9_000 });
+  const runtime = makeRuntime(built);
+  await startRuntime(runtime);
+  await measure(runtime, 120_000, 1_000_000);
+  await project(runtime);
+  const tool = runtime.tools.get("pi_fold_context");
+  const allowed = new Set(tool.parameters.properties.action.enum);
+  const page = JSON.parse((await toolStatus(runtime)).content[0].text);
+  const advertised = Object.entries(page.actions);
+  assert(advertised.length >= 3, "the status page advertises no action index");
+  for (const [name, spec] of advertised) {
+    assert(allowed.has(spec.action), `the status page advertises "${name}" as action "${spec.action}", which the schema refuses; allowed: ${[...allowed].join(", ")}`);
+  }
+  assert(!("fold" in page.actions), "the deleted fold action is still advertised");
+  const cap = String(context.ACTIVE_CONTEXT_POLICY.maxBriefChars);
+  assert(page.actions.brief.brief.includes(cap), `the advertised brief cap is not the policy's ${cap}: ${page.actions.brief.brief}`);
+  if (page.eligibleChapter) {
+    assert(allowed.has(page.eligibleChapter.action.action), `the eligible chapter advertises "${page.eligibleChapter.action.action}"`);
+  }
+  return { advertised: advertised.map(([, spec]) => spec.action), allowed: allowed.size };
+}
+
 async function gateRecutSpanAdoptsItsDurableRecord() {
   const built = makeFixture({ turns: 30, resultChars: 12_000, sessionId: "adopt-durable" });
   const band = { thresholds: { maxTarget: 0.80, minTarget: 0.20, consolidateAfter: 10, minFoldChars: 8_000 } };
@@ -17455,6 +17487,7 @@ const gates = [
   [165, "The command and the bar tell the truth about a commit", gateCommitSurfacesTellTheTruth],
   [166, "What a fold frees is priced by the image law", gateFreedMassIsPricedByTheImageLaw],
   [167, "A re-cut span adopts its durable record", gateRecutSpanAdoptsItsDurableRecord],
+  [168, "The status page advertises only actions the schema accepts", gateStatusPageAdvertisesSchemaActions],
   // 138 is retired with the steward band (Shane 2026-08-23). It pinned a PRE-COMMIT
   // invitation, timed one band before the epoch so the agent was asked while marking
   // could still matter. The ask moves to fold time, where the agent has just seen the

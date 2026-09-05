@@ -1181,12 +1181,17 @@ export function activeContextStatus(
       sourceIdsTruncated: eligibleSourceIds.length > 64,
       startId: eligibleSourceIds[0],
       endId: eligibleSourceIds.at(-1),
-      action: { action: "fold", ids: eligibleEndpoints, brief: "<factual brief, at most 1000 characters>" },
+      action: { action: "reboundary", ids: eligibleEndpoints },
     } : null,
     currentTurnRequiresBoundary: false,
+    // EVERY ACTION ADVERTISED HERE IS ONE THE SCHEMA ACCEPTS (gate 168). This block named a
+    // "fold" action with a 1,000-character brief long after the schema had replaced it
+    // with reboundary and the cap had moved to the policy's; the model followed the page,
+    // was refused by the schema, and had to read the schema to learn the real name.
     actions: {
       status: { action: "status", offset, limit },
-      fold: { action: "fold", ids: ["<source-or-fold-id>"], brief: "<optional factual brief, at most 1000 characters>" },
+      reboundary: { action: "reboundary", ids: ["<source-or-fold-id>"] },
+      brief: { action: "brief", id: "<pending-fold-id>", brief: `<factual brief, at most ${ACTIVE_CONTEXT_POLICY.maxBriefChars} characters>` },
       pin: { action: "pin", ids: ["<source-or-fold-id>"] },
     },
   };
