@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import baseAssert from "node:assert/strict";
+import { visibleWidth } from "@earendil-works/pi-tui";
 
 // EVERY ASSERTION IS COUNTED, because wall clock alone cannot tell a gate that proves
 // something expensive from one that builds an expensive fixture and then proves nothing.
@@ -17093,10 +17094,11 @@ async function gateCommitSurfacesTellTheTruth() {
     200, { fg: (colour, text) => (colour === "warning" ? `<W>${text}</W>` : text), bold: (t) => t, getColorMode: () => "256color" });
   assert(/at commit point/.test(overBand) && !/COMMIT DUE|<W>at commit point/.test(overBand),
     `the over-band reading alarms or is missing: ${overBand}`);
-  const staged = /(\d+) staged/.exec(before);
+  const staged = /(\d+) pending/.exec(before);
   assert(staged && Number(staged[1]) > 0, `the fixture staged nothing for /fold to commit: ${before}`);
-  assert(/\d+ staged, \S+ tokens/.test(before) && !/to free/.test(before),
-    `the staged clause does not carry its priced tokens beside the count: ${before}`);
+  assert(/\d+ pending \(\d+ tools\)/.test(before) && !/tokens|nested|to free/.test(before),
+    `the compact inventory lost its kinds or retained the removed detail: ${before}`);
+  assert.equal(widget.render(200).length, 2, "the usage and item readings are not separate rows");
 
   const from = runtime.appended.length;
   const notices = runtime.notifications.length;
@@ -17116,8 +17118,10 @@ async function gateCommitSurfacesTellTheTruth() {
     `the bar showed the pre-commit count as a live reading: ${after}`);
   assert(!/commit at|COMMIT DUE|at commit point|commit held/.test(after),
     `a reading from before the commit still placed the next one: ${after}`);
-  assert(/\d+ folds?(?: \([^)]*\))?(?:, \d+ nested)? hide \S+ tokens/.test(after),
-    `the folds clause does not state its unit: ${after}`);
+  assert(after.includes(`${widget.model.folds} folded`) && !/tokens|nested|hide/.test(after),
+    `the folded item count is absent or the compact row retained removed detail: ${after}`);
+  assert.equal(widget.model.folds, widget.model.segments.filter((segment) => segment.foldId).length,
+    "the inventory counts edges rather than actual collapsed items");
 
   await measure(runtime, 100_000, 1_000_000);
   await project(runtime);
@@ -17139,107 +17143,173 @@ async function gateCommitSurfacesTellTheTruth() {
   // The widget reads the host's theme at render time, so swapping the fixture's theme
   // for one that marks the accent ink shows which parts of the row carry it.
   runtime.ctx.ui.theme = { fg: (colour, text) => (colour === "accent" ? `<A>${text}</A>` : text), bold: (t) => t, getColorMode: () => "256color" };
-  const accentRow = row();
-  assert(/<A>[█▊]+<\/A>/.test(accentRow) && /<A>\d+ pinned<\/A>/.test(accentRow),
+  const accentRow = widget.render(800).join("\n");
+  assert(/<A>██<\/A>/.test(accentRow) && /<A>\d+ pinned<\/A>/.test(accentRow),
     `pinned cells and clause do not take the accent ink: ${accentRow}`);
   assert(renders > 0, "the bar never asked the host to repaint");
 
-  // THE PALETTE FOLLOWS THE BACKGROUND, read off the theme's own text colour. A theme
-  // whose body text is dark is drawn on a light terminal, where batlow's light pink is
-  // 1.7:1 against white; the row steps two classes darker there. Pinned on the exact
-  // truecolor escapes, both ways, because a name heuristic would miss a custom theme.
-  const truecolor = (hex) => `38;2;${parseInt(hex.slice(1, 3), 16)};${parseInt(hex.slice(3, 5), 16)};${parseInt(hex.slice(5, 7), 16)}`;
-  const themed = (textHex) => ({
-    fg: (_colour, text) => text, bold: (text) => text, getColorMode: () => "truecolor",
-    getFgAnsi: () => `\x1b[${truecolor(textHex)}m`,
-  });
-  // THE BAR IS A MAP: segments in window order, a score only where a staged mark ends.
-  // Forty cells over a window measured at half the budget, so twenty cells fill; each
-  // segment below is exactly ten cells.
+  // One scale for usage, one diagram for items. Changing tokenisation must never
+  // coalesce neighbouring folds or remove their separators from the item diagram.
+  const plain = { fg: (_c, t) => t, bold: (t) => t };
+  const boundary = { id: "parent", kind: "staged-consolidation" };
   const model = {
-    brand: "pi-fold", share: 0.50, commitShare: 0.80, aimShare: 0.20,
+    brand: "pi-fold", share: 0.50, commitShare: 0.80, aimShare: 0.20, mapped: true,
     segments: [
-      { kind: "fold-span", tokens: 0 },
-      { kind: "staged-span", tokens: 100, markEnd: true },
-      { kind: "raw", tokens: 100 },
-      { kind: "staged-truncation", tokens: 50, markEnd: true },
-      { kind: "staged-truncation", tokens: 50, markEnd: true },
-      { kind: "pinned", tokens: 100 },
+      { kind: "fold-span", foldId: "a", starts: [boundary], ends: [] },
+      { kind: "fold-span", foldId: "b", starts: [], ends: [] },
+      { kind: "staged-consolidation", starts: [], ends: [boundary] },
+      { kind: "fold-consolidation", foldId: "c", starts: [], ends: [] },
+      { kind: "staged-span", starts: [{ id: "span", kind: "staged-span" }], ends: [{ id: "span", kind: "staged-span" }] },
+      { kind: "staged-truncation", starts: [{ id: "tool", kind: "staged-truncation" }], ends: [{ id: "tool", kind: "staged-truncation" }] },
+      { kind: "pinned", starts: [], ends: [] },
+      { kind: "raw", starts: [], ends: [] },
     ],
-    stagedMarks: 3, stagedSpans: 1, stagedTruncations: 2, stagedTokens: 200,
-    folds: 2, foldSpans: 1, foldTruncations: 1, foldConsolidations: 0, totalFolds: 27,
-    hiddenTokens: 5_000, pinnedRefs: 2, weighed: false, staleAfterCommit: false, stopped: null,
+    stagedMarks: 3, stagedSpans: 1, stagedTruncations: 1, stagedConsolidations: 1,
+    folds: 3, foldSpans: 2, foldTruncations: 0, foldConsolidations: 1,
+    unplacedItems: 0, pinnedRefs: 1, weighed: false, staleAfterCommit: false, stopped: null,
   };
-  const cells = context.foldBarCells(model);
-  const kinds = cells.map((cell) => cell.kind);
-  assert.deepEqual(kinds.slice(0, 5), Array(5).fill("staged-span"), `the first stretch is not the staged span: ${kinds.slice(0, 5)}`);
-  assert.deepEqual(kinds.slice(5, 10), Array(5).fill("raw"), `the raw stretch is out of place: ${kinds.slice(5, 10)}`);
-  assert.deepEqual(kinds.slice(10, 15), Array(5).fill("staged-truncation"), `the truncations are out of place: ${kinds.slice(10, 15)}`);
-  assert.deepEqual(kinds.slice(15, 20), Array(5).fill("pinned"), `the pinned stretch is out of place: ${kinds.slice(15, 20)}`);
-  assert.deepEqual(kinds.slice(20), Array(20).fill("empty"), "the empty stretch is wrong");
-  const scored = cells.map((cell, index) => (cell.scored ? index : -1)).filter((index) => index >= 0);
-  assert.deepEqual(scored, [4, 12, 14], `scores are not at the mark ends: ${scored}`);
-  // A FOLD'S EDGE SCORES TOO (Shane 2026-09-05): a placeholder segment flagged at its
-  // end scores its cell, and the scored glyphs are the quarter-gap block and the quadrant.
-  // At a full window forty cells hold 200 tokens, five to a cell, so the fixtures below
-  // place segments on exact cell edges.
-  const edged = context.foldBarCells({ ...model, share: 1, segments: [
-    { kind: "fold-span", tokens: 5, markEnd: true }, { kind: "fold-span", tokens: 5, markEnd: true }, { kind: "raw", tokens: 190 },
-  ] });
-  assert(edged[0].scored && edged[1].scored && !edged[2].scored, `fold edges are not scored: ${edged.slice(0, 3).map((c) => c.scored)}`);
-  const edgedRow = context.foldBarPlainText({ ...model, share: 1, segments: [
-    { kind: "fold-span", tokens: 5, markEnd: true }, { kind: "fold-consolidation", tokens: 10 }, { kind: "raw", tokens: 10 },
-    { kind: "staged-span", tokens: 5, markEnd: true }, { kind: "raw", tokens: 170 },
-  ] });
-  assert(/^▖▃▃██▊/.test(edgedRow), `the scored glyphs are not the quadrant and the quarter-gap block: ${edgedRow}`);
-  assert(!/▉/.test(edgedRow), `the eighth-gap glyph is still drawn: ${edgedRow}`);
-  assert(/┆/.test(edgedRow) && /┃/.test(edgedRow) && !/│/.test(edgedRow), `the ticks are not the dotted aim and the heavy commit: ${edgedRow}`);
-  const mapped = context.renderFoldBar(model, 200, themed("#e6edf3"));
-  // Read without ink: the kind words carry their cell colours, so the wording is judged
-  // on the plain rendering and the inks are judged below.
-  const mappedPlain = mapped.replace(/\x1b\[[0-9;]*m/g, "");
-  assert(/3 staged \(1 span, 2 truncations\), 200 tokens/.test(mappedPlain), `staged kinds are not named: ${mappedPlain}`);
-  assert(/2 folds \(1 span, 1 truncation\), 27 nested hide/.test(mappedPlain), `fold kinds and nesting are not named: ${mappedPlain}`);
-  assert(!/nested/.test(context.renderFoldBar({ ...model, totalFolds: 2 }, 200, themed("#e6edf3"))),
-    "a flat forest states a nested count");
-  assert(!/\(/.test(context.renderFoldBar({ ...model, stagedSpans: 3, stagedTruncations: 0, foldTruncations: 0, foldSpans: 2, totalFolds: 2 }, 200, themed("#e6edf3")).replace(/hide.*$/, "")),
-    "kinds are named when only one kind is present");
-  // A measured window with nothing to walk yet (the reload moment, before the first
-  // context event) still draws its fill, as raw: the count is a fact.
-  const unwalked = context.foldBarCells({ ...model, segments: [] });
-  assert.deepEqual(unwalked.slice(0, 20).map((cell) => cell.kind), Array(20).fill("raw"), "a measured fill with no segments drew empty cells");
-  assert(unwalked.slice(20).every((cell) => cell.kind === "empty"), "the unwalked fill overran the measurement");
-  // A mark smaller than a cell colours the cell it touches: raw fills only a cell no
-  // mark reaches, so a truncation of a fifth of a cell still shows as a truncation.
-  const touched = context.foldBarCells({ ...model, segments: [
-    { kind: "raw", tokens: 190 }, { kind: "staged-truncation", tokens: 10, markEnd: true }, { kind: "raw", tokens: 200 },
-  ] });
-  assert.equal(touched[9].kind, "staged-truncation", `a small truncation lost its cell to raw: ${touched[9].kind}`);
-  assert.equal(touched[8].kind, "raw", "raw was displaced from a cell no mark touches");
-  // A mark smaller than a cell still scores the cell it ends in.
-  const tiny = { ...model, segments: [{ kind: "raw", tokens: 195 }, { kind: "staged-span", tokens: 5, markEnd: true }, { kind: "raw", tokens: 200 }] };
-  assert(context.foldBarCells(tiny)[9].scored, "a sub-cell mark left no score");
-  const onDark = context.renderFoldBar(model, 200, themed("#e6edf3"));
-  const onLight = context.renderFoldBar(model, 200, themed("#1f2328"));
-  assert(onDark.includes(truecolor("#3C6D56")) && !onDark.includes(truecolor("#1C5A62")),
-    "a dark theme did not get the dark-background batlow classes");
-  assert(onLight.includes(truecolor("#1C5A62")) && !onLight.includes(truecolor("#3C6D56")),
-    "a light theme kept the dark-background ladder");
-  // THE TEXT IS THE LEGEND (Shane 2026-09-05): each kind word on the label wears the ink
-  // of its cells, the pairs sit a rung apart with a rung between, and a consolidation
-  // sliver stands a step taller than a span's.
-  const legend = context.renderFoldBar({ ...model, segments: [
-    { kind: "fold-span", tokens: 2 }, { kind: "raw", tokens: 18 }, { kind: "fold-consolidation", tokens: 6 }, { kind: "raw", tokens: 94 },
-    { kind: "staged-truncation", tokens: 20, markEnd: true }, { kind: "staged-span", tokens: 30, markEnd: true }, { kind: "raw", tokens: 30 },
-  ], stagedMarks: 2, stagedSpans: 1, stagedTruncations: 1, folds: 2, foldSpans: 1, foldTruncations: 0, foldConsolidations: 1 }, 400, themed("#e6edf3"));
-  for (const [word, hex] of [["1 span", "#F8A17B"], ["1 truncation", "#9D892B"], ["1 consolidation", "#FACCFA"]]) {
-    assert(legend.includes(`${truecolor(hex)}m${word}`), `"${word}" does not wear its cell ink ${hex}: ${legend}`);
+  assert.deepEqual(context.foldBarCells(model), [...Array(20).fill(true), ...Array(20).fill(false)]);
+  const [gauge, items] = context.renderFoldBar(model, 220, plain).split("\n");
+  assert(/^usage /.test(gauge) && /^items /.test(items), "the two scales are not explicitly named");
+  assert.equal(gauge.split("┆").length - 1, 2, "both targets must use the same dashed style");
+  assert(!/[│┃]/.test(gauge), "one target kept a different line style");
+  assert(items.startsWith("items [▆▆ ▆▆ ▆▆] ▅▅ [▆▆] [▇▇] ██ ██"),
+    `items lost their bodies, separation, or both ends of a pending range: ${items}`);
+  assert(!/[▂▃▄▖▉▊]/.test(items), "a scored edge shrank an item into a sliver");
+  assert(items.includes("3 pending (1 span, 1 tool, 1 group)"));
+  assert(items.includes("3 folded (2 spans, 1 group)"));
+  assert(!/tokens|nested|hide/.test(items), "removed detail still clutters the compact row");
+  for (const share of [0.001, 0.17, 0.26, 0.99]) {
+    assert.equal(context.renderFoldBar({ ...model, share }, 220, plain).split("\n")[1], items,
+      "changing occupancy repositions or merges item bodies");
   }
-  assert(legend.includes(`${truecolor("#FACCFA")}m▃`) && legend.includes(`${truecolor("#FDB7BC")}m▂`),
-    `the consolidation sliver is not a step taller than the span's: ${legend}`);
-  assert.equal(context.lightBackground({ fg: (_c, t) => t, bold: (t) => t, name: "gruvbox-light" }), true,
-    "a theme without a text escape did not fall back to its name");
+  const held = context.renderFoldBar({ ...model, mapped: false, segments: [] }, 120, plain);
+  assert(held.includes("items not mapped yet"), "reload inferred no marks from no snapshot");
+  assert(held.includes("█"), "a restored measurement with no diagram lost its gauge");
+  const missing = context.renderFoldBar({ ...model, unplacedItems: 1 }, 220, plain);
+  assert(missing.includes("1 not mapped"), "unplaced items disappeared silently");
+  const crowded = { ...model, segments: Array.from({ length: 60 }, (_, n) => ({
+    kind: "fold-span", foldId: `fold-${n}`, starts: [], ends: [],
+  })) };
+  const cropped = context.renderFoldBar(crowded, 80, plain).split("\n")[1];
+  const visible = (cropped.match(/▆▆/g) ?? []).length;
+  const omitted = Number(/\+(\d+) sections/.exec(cropped)?.[1]);
+  assert(visible > 0 && visible + omitted === 60, `overflow merged or silently lost folds: ${cropped}`);
+  for (const width of [1, 6, 20, 40, 80, 120, 220]) {
+    for (const line of context.renderFoldBar(model, width, plain).split("\n")) {
+      assert(visibleWidth(line) <= width, `row overruns terminal width ${width}: ${line}`);
+    }
+  }
+
+  // Body and label ink must agree, including pins and pending consolidations. Palette
+  // foreground contrast is measured against both reference backgrounds, not eyeballed.
+  const colours = {
+    dark: ["#858A90", "#668DB3", "#68936F", "#948B31", "#CF9340", "#FBA689", "#FDB9C2", "#FACCFA"],
+    light: ["#697078", "#0F3C5F", "#477150", "#80761F", "#A0691B", "#AA624A", "#9E656E", "#8F6891"],
+  };
+  const escape = (hex) => `\x1b[38;2;${[1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(";")}m`;
+  const luminance = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+    .map((v) => v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)
+    .reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0);
+  for (const [name, palette] of Object.entries(colours)) {
+    const theme = { ...plain, getColorMode: () => "truecolor",
+      getFgAnsi: () => escape(name === "dark" ? "#e6edf3" : "#1f2328") };
+    const text = context.renderFoldBar(model, 400, theme);
+    for (const [word, index] of [["1 pinned", 1], ["1 tool", 2], ["1 span", 3], ["1 group", 4], ["2 spans", 6]]) {
+      assert(text.includes(escape(palette[index]) + word), `the ${name} label's ${word} lost its item ink`);
+    }
+    for (const [body, index] of [["██", 1], ["▇▇", 2], ["▆▆", 3], ["▆▆", 4], ["▆▆", 6], ["▅▅", 7]]) {
+      assert(text.includes(escape(palette[index]) + body), `the ${name} item lost its body or ink`);
+    }
+    const bg = luminance(name === "dark" ? "#202122" : "#FFFFFF");
+    for (const hex of palette) {
+      const fg = luminance(hex);
+      assert((Math.max(bg, fg) + 0.05) / (Math.min(bg, fg) + 0.05) >= 4.5,
+        `${name} ${hex} vanishes against its reference background`);
+    }
+  }
+  assert.equal(context.lightBackground({ ...plain, name: "gruvbox-light" }), true);
   return { appliedMarks: commit.applied_marks, said: Number(said[1]), before, after, fresh };
+}
+
+/** The registered widget must draw a pending parent beginning at an existing root.
+ * A literal renderer fixture cannot catch either the skipped-start bug or the inclusive
+ * endpoint bug. Two adjacent roots prove the endpoint, raw gaps (including a custom
+ * message) prove the parent's reach, and real IDs distinguish six items from twelve edges.
+ */
+async function gateFoldDiagramPreservesItemsAndPendingParents() {
+  const thresholds = { maxTarget: 0.80, minTarget: 0.20, consolidateAfter: 6, minFoldChars: 24_000 };
+  const built = makeFixture({ turns: 16, tools: false, chapterChars: 6_000,
+    contextWindow: 1_000_000, thresholds: TINY_FOLD_FLOOR, sessionId: "diagram-parent" });
+  const gapAt = built.entries.findIndex((entry) => entry.id === built.turnEntries[2][0]) + 1;
+  const note = { type: "custom_message", id: "diagram-note", parentId: built.entries[gapAt - 1].id,
+    customType: "test-note", display: false, content: "A custom note in a raw gap belongs to the pending parent.",
+    timestamp: "2026-09-05T00:00:00.000Z" };
+  built.entries.splice(gapAt, 0, note);
+  built.entries[gapAt + 1].parentId = note.id;
+  built.messages = built.entries.flatMap(context.sessionEntryMessages);
+  built.snapshot = context.mapActiveContext({ sessionId: built.sessionId,
+    eventMessages: built.messages, contextEntries: built.entries, contextWindow: 1_000_000, thresholds: TINY_FOLD_FLOOR });
+  let state = context.emptyActiveContextState(built.sessionId);
+  for (const turn of [0, 1, 3, 5, 7, 9]) {
+    const ids = [built.turnEntries[turn][0], built.turnEntries[turn].at(-1)];
+    state = (await commitCandidate(state, built.snapshot, context.manualFoldCandidate(built.snapshot, state, ids), {
+      brief: `Chapter ${turn} stays independently addressable beneath a future parent.`, now: turn + 1,
+    })).state;
+  }
+  const snapshot = context.mapActiveContext({ sessionId: built.sessionId, eventMessages: built.messages,
+    contextEntries: built.entries, contextWindow: 1_000_000, thresholds });
+  const roots = context.orderedRoots(state, snapshot);
+  assert.equal(roots.length, 6);
+  assert.equal(roots[0].end + 1, roots[1].start, "the endpoint fixture has no adjacent roots");
+  const parents = context.consolidationMarks({ state, snapshot, ordinal: 1 });
+  assert.equal(parents.length, 1, "the fixture owes no pending parent");
+  const parent = parents[0];
+  assert(parent.parts.some((part) => part.kind === "raw" && part.ref.entryId === note.id),
+    "the fixture did not include the custom-message gap");
+  state = context.withPendingMarks(state, parents);
+  const runtime = makeRuntime(built, { thresholds, initialEntries: [
+    ...built.entries, stateEntry(built.sessionId, state, "diagram-state", built.entries.at(-1).id),
+  ] });
+  runtime.ctx.sessionManager.buildSessionContext = () => ({ messages: runtime.branch.flatMap(context.sessionEntryMessages) });
+  let widget;
+  runtime.ctx.ui.theme = { fg: (_c, t) => t, bold: (t) => t, getColorMode: () => "256color" };
+  runtime.ctx.ui.setWidget = (_key, factory) => { widget = factory({ requestRender() {} }, runtime.ctx.ui.theme); };
+  await startRuntime(runtime);
+  await measure(runtime, 200_000, 1_000_000);
+  await project(runtime);
+  await settle();
+  const model = structuredClone(widget.model);
+  const segments = model.segments;
+  assert.equal(model.stagedConsolidations, 1, "a pending consolidation is still mislabeled as a span");
+  const first = segments.findIndex((segment) => segment.foldId === roots[0].fold.id);
+  assert(first >= 0 && segments[first].starts.some((edge) => edge.id === parent.id),
+    "the parent's start was skipped by the first child's root jump");
+  assert.equal(segments[first + 1].foldId, roots[1].fold.id,
+    "an inclusive root endpoint was visited again as raw between adjacent roots");
+  assert(segments.some((segment) => segment.kind === "staged-consolidation" && !segment.foldId),
+    "raw gaps inside a pending parent were left unclaimed in the diagram");
+  assert(segments.some((segment) => segment.ends.some((edge) => edge.id === parent.id)),
+    "a pending parent ending on a folded child lost its closing boundary");
+  assert.deepEqual(segments.filter((segment) => segment.foldId).map((segment) => segment.foldId),
+    roots.map((root) => root.fold.id), "visible folds were merged, duplicated, or reordered");
+  assert.equal(model.folds, 6, "fold count came from boundaries rather than items");
+  assert.equal(model.unplacedItems, 0, "a properly reconstructed custom entry failed to map");
+  const text = widget.render(600).join("\n");
+  assert(text.includes("1 group") && text.includes("6 folded"));
+  const stateBefore = materialized(runtime);
+  await project(runtime);
+  await settle();
+  assert.deepEqual(widget.model.segments, segments, "an unchanged context moved diagram items");
+  assert.deepEqual(materialized(runtime).folds, stateBefore.folds, "drawing the diagram changed durable folds");
+  await toolCall(runtime, { action: "pin", ids: [roots[0].fold.id] });
+  await project(runtime);
+  await settle();
+  assert(widget.model.segments.some((segment) => segment.kind === "pinned"), "a pinned fold never reveals pinned items");
+  assert(!widget.model.segments.some((segment) => segment.foldId === roots[0].fold.id),
+    "a revealed fold was still drawn as a collapsed item");
+  assert.equal(widget.model.folds, 5, "the displayed folded count includes an item now shown raw");
+  return { folds: model.folds, pendingParents: model.stagedConsolidations, segments: segments.length };
 }
 
 /**
@@ -17518,6 +17588,7 @@ const gates = [
   [166, "What a fold frees is priced by the image law", gateFreedMassIsPricedByTheImageLaw],
   [167, "A re-cut span adopts its durable record", gateRecutSpanAdoptsItsDurableRecord],
   [168, "The status page advertises only actions the schema accepts", gateStatusPageAdvertisesSchemaActions],
+  [169, "The fold diagram preserves items and pending parents", gateFoldDiagramPreservesItemsAndPendingParents],
   // 138 is retired with the steward band (Shane 2026-08-23). It pinned a PRE-COMMIT
   // invitation, timed one band before the epoch so the agent was asked while marking
   // could still matter. The ask moves to fold time, where the agent has just seen the

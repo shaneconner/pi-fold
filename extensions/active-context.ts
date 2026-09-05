@@ -35,7 +35,6 @@ import {
   selectAutomaticRung,
   setFoldProjectionState,
   withExpandLease,
-  renderFoldParts,
 } from "./lib/folding.ts";
 import {
   admissionVerdict,
@@ -52,6 +51,7 @@ import {
   orderedRoots,
   parseNativeCompactionCompletion,
   exactMapped,
+  foldInterval,
   parseNativeCompactionDecision,
   parseProviderContextMeasurementReceipt,
   persistenceProjection,
@@ -63,7 +63,7 @@ import {
   stringIds,
   toolPayload,
 } from "./lib/measurement.ts";
-import { renderFoldBar, type FoldBarModel, type SegmentKind } from "./lib/status-widget.ts";
+import { renderFoldBar, type BarBoundary, type BarSegment, type FoldBarModel, type SegmentKind } from "./lib/status-widget.ts";
 import type {
   NativeCompactionCompletionReceipt,
   NativeCompactionDecisionReceipt,
@@ -717,7 +717,7 @@ export function registerActiveContext(pi: any, options: {
    * named only when it is close enough to matter.
    */
   /**
-   * THE FOLD BAR (2026-09-02, dogfooding). One widget row directly above the footer,
+   * THE FOLD BAR. Two widget rows directly above the footer, usage then items,
    * drawn by `renderFoldBar` from a model this function rebuilds on every status update.
    * The component reads the model and the LIVE theme at render time, so it repaints on
    * a theme switch, which the status string cannot; the host is asked to render after
@@ -730,10 +730,7 @@ export function registerActiveContext(pi: any, options: {
     /** The provider measurement the last landed commit ran against; the reading is
      *  stale while it is still the latest one. */
     staleSince: null as unknown,
-    /** Each standing fold's source priced by the image law, keyed by the fold object. */
-    pricedSource: new WeakMap<ActiveFold, number>(),
-    /** Per-message priced tokens, keyed by the snapshot object. */
-    pricedMessages: new WeakMap<object, number[]>(),
+
   };
   const installFoldBar = (ctx: any): void => {
     if (foldBar.installed || typeof ctx.ui?.setWidget !== "function") return;
@@ -745,7 +742,7 @@ export function registerActiveContext(pi: any, options: {
         get model(): FoldBarModel | null { return foldBar.model; },
         render(width: number): string[] {
           if (!foldBar.model) return [];
-          try { return [renderFoldBar(foldBar.model, width, ctx.ui.theme)]; }
+          try { return renderFoldBar(foldBar.model, width, ctx.ui.theme).split("\n"); }
           catch { return []; }
         },
         invalidate() { },
@@ -753,7 +750,7 @@ export function registerActiveContext(pi: any, options: {
     }, { placement: "belowEditor" });
   };
   const foldBarModel = (ctx: any, input: {
-    share: number | null; budgetTokens: number; staged: number; roots: number; weighed: boolean;
+    share: number | null; staged: number; weighed: boolean;
   }): FoldBarModel => {
     const state = persistence.state;
     // THE SAME SNAPSHOT /fold-status PRICES AGAINST. `markFreedBytes` answers ZERO, silently,
@@ -769,11 +766,10 @@ export function registerActiveContext(pi: any, options: {
       share: input.share,
       commitShare: thresholds.maxTarget,
       aimShare: thresholds.minTarget,
-      segments: [],
-      stagedMarks: input.staged, stagedSpans: 0, stagedTruncations: 0, stagedTokens: 0,
-      folds: input.roots, foldSpans: 0, foldTruncations: 0, foldConsolidations: 0,
-      totalFolds: state ? state.folds.length : 0,
-      hiddenTokens: 0,
+      mapped: false, segments: [],
+      stagedMarks: input.staged, stagedSpans: 0, stagedTruncations: 0, stagedConsolidations: 0,
+      folds: 0, foldSpans: 0, foldTruncations: 0, foldConsolidations: 0,
+      unplacedItems: 0,
       pinnedRefs: state ? state.protected.length : 0,
       weighed: input.weighed,
       staleAfterCommit: input.share !== null && foldBar.staleSince !== null &&
@@ -781,90 +777,84 @@ export function registerActiveContext(pi: any, options: {
       stopped: ladder.automaticFailure?.message ?? null,
     };
     if (!state || !snapshot) return model;
-    // THE WINDOW IN ORDER (Shane 2026-09-05: the scores are to show the marks). Walk the
-    // snapshot oldest first: a standing root costs its placeholder, a raw message costs its
-    // priced tokens, and each stretch is classed by what covers it: a staged mark (span or
-    // truncation), a pin, or nothing. Per-message prices are memoized on the snapshot
-    // OBJECT, which is replaced whenever the branch moves, so one walk per branch state.
-    let prices = foldBar.pricedMessages.get(snapshot);
-    if (!prices) {
-      prices = snapshot.messages.map((message) => estimatedTokens(pricedBytes([message])));
-      foldBar.pricedMessages.set(snapshot, prices);
-    }
-    const rootAt = new Map<number, { fold: ActiveFold; end: number }>();
-    for (const root of orderedRoots(state, snapshot)) {
-      // A REVEALED ROOT IS RAW ON THE MAP, as it is in the window: renderFold shows a fold's
-      // source when it is expanded or when any of its refs is pinned, so those indices are
-      // walked as messages (pinned or raw) rather than skipped as a placeholder.
-      const revealed = state.expanded.includes(root.fold.id) ||
-        refsProtected(flattenFoldRefs(root.fold, state), state, snapshot);
-      if (!revealed) rootAt.set(root.start, { fold: root.fold, end: root.end });
-      if (root.fold.kind === "chapter") model.foldSpans += 1;
-      else if (root.fold.kind === "tool-result") model.foldTruncations += 1;
+    model.mapped = true;
+    // The diagram is schematic, so there is no token pricing here. Match the projection's
+    // inclusive intervals, retaining each visible fold as an independent item. Revealing
+    // a parent reveals its parts, NOT necessarily every descendant's exact source.
+    const visibleAt = new Map<number, { fold: ActiveFold; end: number }>();
+    const byId = new Map(state.folds.map((fold) => [fold.id, fold]));
+    const visit = (fold: ActiveFold, interval: { start: number; end: number } | null): void => {
+      if (!interval) { model.unplacedItems += 1; return; }
+      const revealed = state.expanded.includes(fold.id) || refsProtected(flattenFoldRefs(fold, state), state, snapshot);
+      if (revealed) {
+        for (const part of fold.parts) {
+          if (part.kind !== "fold") continue;
+          const child = byId.get(part.foldId);
+          if (child) visit(child, foldInterval(child, state, snapshot));
+        }
+        return;
+      }
+      visibleAt.set(interval.start, { fold, end: interval.end });
+      model.folds += 1;
+      if (fold.kind === "chapter") model.foldSpans += 1;
+      else if (fold.kind === "tool-result") model.foldTruncations += 1;
       else model.foldConsolidations += 1;
-    }
-    const markAt = new Map<number, { kind: string; end: number }>();
-    for (const mark of pendingMarks(state)) {
-      const tokens = estimatedTokens(markFreedBytes(snapshot, state, mark));
-      model.stagedTokens += tokens;
-      if (mark.kind === "tool-result") model.stagedTruncations += 1;
-      else model.stagedSpans += 1;
-      if (mark.mark !== "fold") continue;
-      const span = markSpanRefs(state, mark);
-      if (span.unresolved) continue;
-      const indices = span.refs.map((ref) => exactMapped(snapshot, ref)?.index ?? -1);
-      if (indices.some((index) => index < 0)) continue;
-      const start = Math.min(...indices);
-      const end = Math.max(...indices) + 1;
-      const existing = markAt.get(start);
-      markAt.set(start, { kind: mark.kind === "tool-result" ? "staged-truncation" : "staged-span",
-        end: existing ? Math.max(existing.end, end) : end });
-    }
-    const pinnedKeys = new Set(state.protected.map((ref) => objectRefKey(ref)));
-    const push = (kind: SegmentKind, tokens: number, markEnd = false): void => {
-      const last = model.segments.at(-1);
-      if (last && last.kind === kind && !last.markEnd) { last.tokens += tokens; last.markEnd = markEnd; return; }
-      model.segments.push({ kind, tokens, ...(markEnd ? { markEnd } : {}) });
     };
-    let mark: { kind: string; end: number } | null = null;
-    for (let index = 0; index < snapshot.messages.length; index += 1) {
-      const root = rootAt.get(index);
-      if (root) {
-        const kind: SegmentKind = root.fold.kind === "chapter" ? "fold-span"
-          : root.fold.kind === "tool-result" ? "fold-truncation" : "fold-consolidation";
-        // A FOLD'S EDGE IS SCORED LIKE A MARK'S (Shane 2026-09-05: "the scores help define
-        // the boundaries"): the placeholder segment carries the end flag, so a root's last
-        // cell draws the gap and two roots in neighbouring cells read as two.
-        push(kind, estimatedTokens(root.fold.placeholderChars), true);
-        index = root.end - 1;
+    const roots = orderedRoots(state, snapshot);
+    const placedRoots = new Set(roots.map((root) => root.fold.id));
+    model.unplacedItems += state.folds.filter((fold) => !fold.parentId && !placedRoots.has(fold.id)).length;
+    for (const root of roots) visit(root.fold, root);
+
+    type Range = BarBoundary & { start: number; end: number };
+    const ranges: Range[] = [];
+    for (const mark of pendingMarks(state)) {
+      const kind: SegmentKind = mark.kind === "tool-result" ? "staged-truncation"
+        : mark.kind === "consolidation" ? "staged-consolidation" : "staged-span";
+      if (mark.kind === "tool-result") model.stagedTruncations += 1;
+      else if (mark.kind === "consolidation") model.stagedConsolidations += 1;
+      else model.stagedSpans += 1;
+      const span = markSpanRefs(state, mark);
+      const indices = span.refs.map((ref) => exactMapped(snapshot, ref)?.index ?? -1);
+      if (span.unresolved || !indices.length || indices.some((index) => index < 0)) {
+        model.unplacedItems += 1;
         continue;
       }
-      if (!mark || index >= mark.end) mark = markAt.get(index) ?? null;
+      ranges.push({ id: mark.id, kind, start: Math.min(...indices), end: Math.max(...indices) });
+    }
+    // Parent ranges open before children at the same position. The nearest containing
+    // mark colours a raw stretch; its parent's boundary remains independently present.
+    ranges.sort((a, b) => a.start - b.start || b.end - a.end || a.id.localeCompare(b.id));
+    const pinnedKeys = new Set(state.protected.map(objectRefKey));
+    let nextRange = 0;
+    let active: Range[] = [];
+    for (let index = 0; index < snapshot.messages.length; index += 1) {
+      active = active.filter((range) => range.end >= index);
+      const starts: BarBoundary[] = [];
+      // This MUST precede the fold jump: a consolidation starts at its first child root.
+      while (nextRange < ranges.length && ranges[nextRange].start <= index) {
+        const range = ranges[nextRange++];
+        if (range.end < index) { model.unplacedItems += 1; continue; }
+        active.push(range);
+        starts.push({ id: range.id, kind: range.kind });
+      }
+      const root = visibleAt.get(index);
+      const end = root ? root.end : index;
+      const mark = active.at(-1);
       const item = snapshot.mapped[index];
       const pinned = item?.ref ? pinnedKeys.has(objectRefKey(item.ref)) : false;
-      // A PIN OUTRANKS THE MARK COVERING IT: a pinned entry inside a staged span holds the
-      // mark rather than folding with it, so the map shows the hold.
-      const kind: SegmentKind = pinned ? "pinned" : mark ? (mark.kind as SegmentKind) : "raw";
-      const ends = mark !== null && index === mark.end - 1;
-      push(kind, prices[index] ?? 0, ends);
-      if (ends) mark = null;
+      const kind: SegmentKind = root
+        ? root.fold.kind === "chapter" ? "fold-span" : root.fold.kind === "tool-result" ? "fold-truncation" : "fold-consolidation"
+        : pinned ? "pinned" : mark?.kind ?? "raw";
+      const ends = active.filter((range) => range.end <= end)
+        .sort((a, b) => a.end - b.end || b.start - a.start)
+        .map(({ id, kind }) => ({ id, kind }));
+      const segment: BarSegment = { kind, starts, ends, ...(root ? { foldId: root.fold.id } : {}) };
+      const last = model.segments.at(-1);
+      if (last && !root && !last.foldId && last.kind === kind && !last.ends.length && !starts.length) {
+        last.ends = ends;
+      } else model.segments.push(segment);
+      index = end; // inclusive root end: the for-loop advances PAST its last hidden message
     }
-    // WHAT FOLDING BOUGHT, IN WINDOW TERMS. `sourceChars` is the transcript count, base64
-    // and all, and read as tokens it said "8.6M" over a 1M window. Each standing fold's
-    // source is priced by the image law once per fold OBJECT (folds are immutable and
-    // replaced, never mutated, so a WeakMap memo is exact) and summed over the whole
-    // forest, which is additive because a parent's source is its children's placeholders.
-    let hiddenChars = 0;
-    for (const fold of state.folds) {
-      let priced = foldBar.pricedSource.get(fold);
-      if (priced === undefined) {
-        const source = renderFoldParts(fold.parts, state, snapshot);
-        priced = source ? pricedBytes(source) : fold.sourceChars;
-        foldBar.pricedSource.set(fold, priced);
-      }
-      hiddenChars += Math.max(0, priced - fold.placeholderChars);
-    }
-    model.hiddenTokens = estimatedTokens(hiddenChars);
     return model;
   };
 
@@ -879,7 +869,7 @@ export function registerActiveContext(pi: any, options: {
         installFoldBar(ctx);
         if (foldBar.installed) {
           foldBar.model = foldBarModel(ctx, {
-            share, budgetTokens: capacity.budgetTokens, staged, roots,
+            share, staged,
             weighed: ladder.bandTopMeasurement !== null &&
               ladder.bandTopMeasurement === measurements.lastProviderMeasurement,
           });
