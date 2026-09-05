@@ -193,11 +193,17 @@ export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBar
     else if (model.weighed) parts.push(theme.fg("muted", "commit held"));
     else parts.push(theme.fg("warning", "COMMIT DUE"));
   }
-  // A COUNT FOR WHAT IS STAGED, TOKENS FOR WHAT FOLDING BOUGHT. Both figures are priced
-  // by the image law now (measurement.ts pricedBytes): "5.8M to free" beside a 1M window
-  // was 83 screenshots' base64 counted as text (Shane 2026-09-03). The unit is written
-  // out because pi's k/M format read as megabytes.
-  if (model.stagedMarks > 0) parts.push(ink.staged(`${model.stagedMarks} staged`));
+  // THE COUNT AND THE TOKENS, BOTH, FOR WHAT IS STAGED. The staged cells draw the spans'
+  // share of the budget and the count says how many spans, and a reader took the cells
+  // for a count ("33 staged" over seven cells, Shane 2026-09-04); the token figure is
+  // what joins them, and it is honest now that pricing follows the image law
+  // (measurement.ts pricedBytes; "5.8M to free" beside a 1M window was 83 screenshots'
+  // base64 counted as text). The unit is written out because pi's k/M read as megabytes.
+  if (model.stagedMarks > 0) {
+    parts.push(ink.staged(model.stagedTokens > 0
+      ? `${model.stagedMarks} staged, ${formatTokens(model.stagedTokens)} tokens`
+      : `${model.stagedMarks} staged`));
+  }
   if (model.folds > 0) {
     parts.push(ink.folded(`${model.folds} fold${model.folds === 1 ? "" : "s"} hide ${formatTokens(model.hiddenTokens)} tokens`));
   }

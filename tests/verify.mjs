@@ -17089,7 +17089,8 @@ async function gateCommitSurfacesTellTheTruth() {
   assert(/\b4\d% · commit at 80%/.test(before), `a measured window below the band misread: ${before}`);
   const staged = /(\d+) staged/.exec(before);
   assert(staged && Number(staged[1]) > 0, `the fixture staged nothing for /fold to commit: ${before}`);
-  assert(!/to free/.test(before), `the staged clause priced transcript bytes as window tokens: ${before}`);
+  assert(/\d+ staged, \S+ tokens/.test(before) && !/to free/.test(before),
+    `the staged clause does not carry its priced tokens beside the count: ${before}`);
 
   const from = runtime.appended.length;
   const notices = runtime.notifications.length;
