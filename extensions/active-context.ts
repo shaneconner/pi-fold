@@ -29,6 +29,7 @@ import {
   peekFoldSource,
   prepareFold,
   projectActiveContext,
+  renderFold,
   projectionSlateCandidates,
   protectEvidence,
   requireActiveFold,
@@ -63,7 +64,7 @@ import {
   stringIds,
   toolPayload,
 } from "./lib/measurement.ts";
-import { renderFoldBar, type BarBoundary, type BarSegment, type FoldBarModel, type SegmentKind } from "./lib/status-widget.ts";
+import { emptyFoldBarMass, renderFoldBar, type FoldBarKind, type FoldBarModel } from "./lib/status-widget.ts";
 import type {
   NativeCompactionCompletionReceipt,
   NativeCompactionDecisionReceipt,
@@ -717,7 +718,7 @@ export function registerActiveContext(pi: any, options: {
    * named only when it is close enough to matter.
    */
   /**
-   * THE FOLD BAR. Two widget rows directly above the footer, usage then items,
+   * THE FOLD BAR. One coloured composition row directly above the footer,
    * drawn by `renderFoldBar` from a model this function rebuilds on every status update.
    * The component reads the model and the LIVE theme at render time, so it repaints on
    * a theme switch, which the status string cannot; the host is asked to render after
@@ -742,7 +743,7 @@ export function registerActiveContext(pi: any, options: {
         get model(): FoldBarModel | null { return foldBar.model; },
         render(width: number): string[] {
           if (!foldBar.model) return [];
-          try { return renderFoldBar(foldBar.model, width, ctx.ui.theme).split("\n"); }
+          try { return [renderFoldBar(foldBar.model, width, ctx.ui.theme)]; }
           catch { return []; }
         },
         invalidate() { },
@@ -766,8 +767,8 @@ export function registerActiveContext(pi: any, options: {
       share: input.share,
       commitShare: thresholds.maxTarget,
       aimShare: thresholds.minTarget,
-      mapped: false, segments: [],
-      stagedMarks: input.staged, stagedSpans: 0, stagedTruncations: 0, stagedConsolidations: 0,
+      mapped: false, mass: emptyFoldBarMass(),
+      stagedMarks: input.staged,
       folds: 0, foldSpans: 0, foldTruncations: 0, foldConsolidations: 0,
       unplacedItems: 0,
       pinnedRefs: state ? state.protected.length : 0,
@@ -778,9 +779,9 @@ export function registerActiveContext(pi: any, options: {
     };
     if (!state || !snapshot) return model;
     model.mapped = true;
-    // The diagram is schematic, so there is no token pricing here. Match the projection's
-    // inclusive intervals, retaining each visible fold as an independent item. Revealing
-    // a parent reveals its parts, NOT necessarily every descendant's exact source.
+    // Price the visible projection once per category, never a hidden fold's original
+    // source. Revealing a parent reveals its parts, not necessarily every descendant.
+    // Correct inclusive intervals prevent the last hidden message being priced as raw.
     const visibleAt = new Map<number, { fold: ActiveFold; end: number }>();
     const byId = new Map(state.folds.map((fold) => [fold.id, fold]));
     const visit = (fold: ActiveFold, interval: { start: number; end: number } | null): void => {
@@ -805,55 +806,33 @@ export function registerActiveContext(pi: any, options: {
     model.unplacedItems += state.folds.filter((fold) => !fold.parentId && !placedRoots.has(fold.id)).length;
     for (const root of roots) visit(root.fold, root);
 
-    type Range = BarBoundary & { start: number; end: number };
-    const ranges: Range[] = [];
+    // Resolve all marks before walking roots: a pending consolidation can begin at a
+    // root and include raw gaps farther on. Membership, not an encountered start edge,
+    // determines Mark. A set also prevents overlapping marks charging a message twice.
+    const marked = new Set<number>();
     for (const mark of pendingMarks(state)) {
-      const kind: SegmentKind = mark.kind === "tool-result" ? "staged-truncation"
-        : mark.kind === "consolidation" ? "staged-consolidation" : "staged-span";
-      if (mark.kind === "tool-result") model.stagedTruncations += 1;
-      else if (mark.kind === "consolidation") model.stagedConsolidations += 1;
-      else model.stagedSpans += 1;
       const span = markSpanRefs(state, mark);
       const indices = span.refs.map((ref) => exactMapped(snapshot, ref)?.index ?? -1);
       if (span.unresolved || !indices.length || indices.some((index) => index < 0)) {
         model.unplacedItems += 1;
         continue;
       }
-      ranges.push({ id: mark.id, kind, start: Math.min(...indices), end: Math.max(...indices) });
+      for (const index of indices) marked.add(index);
     }
-    // Parent ranges open before children at the same position. The nearest containing
-    // mark colours a raw stretch; its parent's boundary remains independently present.
-    ranges.sort((a, b) => a.start - b.start || b.end - a.end || a.id.localeCompare(b.id));
     const pinnedKeys = new Set(state.protected.map(objectRefKey));
-    let nextRange = 0;
-    let active: Range[] = [];
     for (let index = 0; index < snapshot.messages.length; index += 1) {
-      active = active.filter((range) => range.end >= index);
-      const starts: BarBoundary[] = [];
-      // This MUST precede the fold jump: a consolidation starts at its first child root.
-      while (nextRange < ranges.length && ranges[nextRange].start <= index) {
-        const range = ranges[nextRange++];
-        if (range.end < index) { model.unplacedItems += 1; continue; }
-        active.push(range);
-        starts.push({ id: range.id, kind: range.kind });
-      }
       const root = visibleAt.get(index);
-      const end = root ? root.end : index;
-      const mark = active.at(-1);
-      const item = snapshot.mapped[index];
-      const pinned = item?.ref ? pinnedKeys.has(objectRefKey(item.ref)) : false;
-      const kind: SegmentKind = root
-        ? root.fold.kind === "chapter" ? "fold-span" : root.fold.kind === "tool-result" ? "fold-truncation" : "fold-consolidation"
-        : pinned ? "pinned" : mark?.kind ?? "raw";
-      const ends = active.filter((range) => range.end <= end)
-        .sort((a, b) => a.end - b.end || b.start - a.start)
-        .map(({ id, kind }) => ({ id, kind }));
-      const segment: BarSegment = { kind, starts, ends, ...(root ? { foldId: root.fold.id } : {}) };
-      const last = model.segments.at(-1);
-      if (last && !root && !last.foldId && last.kind === kind && !last.ends.length && !starts.length) {
-        last.ends = ends;
-      } else model.segments.push(segment);
-      index = end; // inclusive root end: the for-loop advances PAST its last hidden message
+      if (root) {
+        const kind: FoldBarKind = root.fold.kind === "chapter" ? "span"
+          : root.fold.kind === "tool-result" ? "tool" : "consolidated";
+        model.mass[kind] += pricedBytes(renderFold(root.fold, state, snapshot) ?? []);
+        index = root.end; // inclusive: advance PAST the final hidden message
+        continue;
+      }
+      const ref = snapshot.mapped[index]?.ref;
+      const kind: FoldBarKind = ref && pinnedKeys.has(objectRefKey(ref)) ? "pinned"
+        : marked.has(index) ? "marked" : "raw";
+      model.mass[kind] += pricedBytes([snapshot.messages[index]]);
     }
     return model;
   };

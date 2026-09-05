@@ -33,20 +33,18 @@ The package registers one tool, `pi_fold_context`, with nine actions over the tr
 
 ### The fold bar
 
-In an interactive session two compact rows sit directly above Pi's footer: a usage gauge and a separate diagram of context items.
+In an interactive session one compact, full-height bar sits directly above Pi's footer.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/shaneconner/fold/main/media/fold-bar-dark.svg">
-  <img alt="Two separate scales: a forty-cell usage gauge at 42 percent with matching dashed aim and commit targets, then individually separated context items. Brackets surround pending ranges, including a consolidation around existing folds. Labels count pending and folded items by kind." src="https://raw.githubusercontent.com/shaneconner/fold/main/media/fold-bar-light.svg">
+  <img alt="A single full-height usage bar. Batlow colours group consolidated folds, span folds, tool folds, pinned content, marked content, and raw context in that order. The suffix shows percentage, commit point, and fold, pin, and mark counts." src="https://raw.githubusercontent.com/shaneconner/fold/main/media/fold-bar-light.svg">
 </picture>
 
-**Usage** is a forty-cell gauge of the provider's measured count against the serving budget. Matching dashed guides show `minTarget`, where a commit aims to land, and `maxTarget`, where automatic folding is triggered. Before a measurement it says `not measured yet`; after a commit it identifies the old reading until the provider measures again. Crossing the target is routine work for the runtime, not an action item for the reader.
+The forty-cell fill follows the provider's measured count against the serving budget. Within that fill, colours show the estimated visible composition, grouped in this order: **Consolidated Folds, Span Folds, Tool Folds, Pinned, Marked, Raw**. Compressed content uses the first half of [Crameri's Batlow palette](https://www.fabiocrameri.ch/colourmaps/); still-raw content uses the second half. Foreground lightness is adjusted for dark and light backgrounds, and label colours match the bar. Tiny shares can round away at this resolution; there are no individual fold edges, scores, or height differences.
 
-**Items** is a schematic in context order, not a token scale. Every displayed fold has its own substantial body and separator, even when small. Brackets mark both ends of a pending range; a pending consolidation can surround several existing folds and the raw gaps between them. Shorter bodies distinguish compressed content without reducing it to tiny slivers. A narrow terminal shows complete sections and states how many remain off-screen, rather than merging folds into one block.
+The suffix reads `34% · commit at 55% · N Folds (X Cons., Y Span, Z Tool, X Pin, Y Mark)`. `N Folds` counts visible compressed folds; `Pin` counts protected entries and `Mark` counts pending marks, not additional compressed folds. A tool fold is lossless compression of tool-result context, not a count of tool calls. `/fold-status` retains the detailed token and nesting figures.
 
-The labels count actual pending and folded items, not their edges: **spans** are conversation chapters, **tools** are lossless tool-result folds, and **groups** are consolidations. Pins have their own colour. The compact display omits token savings and nested totals; `/fold-status` retains that detail. If the diagram is not available yet, it says so. If automatic folding stops, `FOLDING STOPPED` replaces both rows.
-
-On truecolor terminals, each kind and its label share a discrete colour derived from [Crameri's Batlow palette](https://www.fabiocrameri.ch/colourmaps/), with foreground lightness adjusted for dark and light backgrounds. The usage gauge and targets remain neutral. Other terminals use the theme's own colours.
+Matching dashed guides show `minTarget`, where a commit aims to land, and `maxTarget`, where automatic folding is triggered. Before a measurement the row says `not measured yet`; after a commit it identifies the old reading until the provider measures again. Crossing the target is routine runtime work, not a user action item. Unavailable composition is stated as `mapping`; if folding stops, `FOLDING STOPPED` replaces the bar. Non-truecolor terminals use the theme's own colours.
 
 ## Results
 

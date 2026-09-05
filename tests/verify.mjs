@@ -17094,11 +17094,11 @@ async function gateCommitSurfacesTellTheTruth() {
     200, { fg: (colour, text) => (colour === "warning" ? `<W>${text}</W>` : text), bold: (t) => t, getColorMode: () => "256color" });
   assert(/at commit point/.test(overBand) && !/COMMIT DUE|<W>at commit point/.test(overBand),
     `the over-band reading alarms or is missing: ${overBand}`);
-  const staged = /(\d+) pending/.exec(before);
+  const staged = /(\d+) Mark/.exec(before);
   assert(staged && Number(staged[1]) > 0, `the fixture staged nothing for /fold to commit: ${before}`);
-  assert(/\d+ pending \(\d+ tools\)/.test(before) && !/tokens|nested|to free/.test(before),
-    `the compact inventory lost its kinds or retained the removed detail: ${before}`);
-  assert.equal(widget.render(200).length, 2, "the usage and item readings are not separate rows");
+  assert(/\d+ Folds \(\d+ Cons\., \d+ Span, \d+ Tool, \d+ Pin, \d+ Mark\)/.test(before) && !/tokens|nested|to free/.test(before),
+    `the compact inventory lost its requested format: ${before}`);
+  assert.equal(widget.render(200).length, 1, "the removed second row returned");
 
   const from = runtime.appended.length;
   const notices = runtime.notifications.length;
@@ -17118,10 +17118,10 @@ async function gateCommitSurfacesTellTheTruth() {
     `the bar showed the pre-commit count as a live reading: ${after}`);
   assert(!/commit at|COMMIT DUE|at commit point|commit held/.test(after),
     `a reading from before the commit still placed the next one: ${after}`);
-  assert(after.includes(`${widget.model.folds} folded`) && !/tokens|nested|hide/.test(after),
+  assert(after.includes(`${widget.model.folds} Folds`) && !/tokens|nested|hide/.test(after),
     `the folded item count is absent or the compact row retained removed detail: ${after}`);
-  assert.equal(widget.model.folds, widget.model.segments.filter((segment) => segment.foldId).length,
-    "the inventory counts edges rather than actual collapsed items");
+  assert.equal(widget.model.folds, widget.model.foldSpans + widget.model.foldTruncations + widget.model.foldConsolidations,
+    "the inventory counts pins/marks as additional compressed folds");
 
   await measure(runtime, 100_000, 1_000_000);
   await project(runtime);
@@ -17129,7 +17129,7 @@ async function gateCommitSurfacesTellTheTruth() {
   const fresh = row();
   assert(!/before the commit/.test(fresh), `a new count did not clear the stale marker: ${fresh}`);
   assert(/\b10% · commit at 80%/.test(fresh), `the fresh count did not render as a live reading: ${fresh}`);
-  assert(!/pinned/.test(fresh), `a pinned clause appeared with nothing pinned: ${fresh}`);
+  assert(/0 Pin/.test(fresh), `pins were counted with nothing pinned: ${fresh}`);
 
   // WHAT IS HELD IS NAMED AND DRAWN (Shane 2026-09-04): pin the newest turn's entries
   // through the real tool and the row gains a pinned clause and pinned cells; the cells
@@ -17139,73 +17139,53 @@ async function gateCommitSurfacesTellTheTruth() {
   await project(runtime);
   await settle();
   const pinnedRow = row();
-  assert(/\b\d+ pinned\b/.test(pinnedRow), `pinned entries are not named on the row: ${pinnedRow}`);
+  assert(/\b2 Pin\b/.test(pinnedRow), `pinned entries are not counted on the row: ${pinnedRow}`);
+  assert(widget.model.mass.pinned > 0, "pinned content contributed no mass");
   // The widget reads the host's theme at render time, so swapping the fixture's theme
   // for one that marks the accent ink shows which parts of the row carry it.
   runtime.ctx.ui.theme = { fg: (colour, text) => (colour === "accent" ? `<A>${text}</A>` : text), bold: (t) => t, getColorMode: () => "256color" };
   const accentRow = widget.render(800).join("\n");
-  assert(/<A>██<\/A>/.test(accentRow) && /<A>\d+ pinned<\/A>/.test(accentRow),
-    `pinned cells and clause do not take the accent ink: ${accentRow}`);
+  assert(/<A>2 Pin<\/A>/.test(accentRow), `the pin label did not follow the live theme: ${accentRow}`);
   assert(renders > 0, "the bar never asked the host to repaint");
 
-  // One scale for usage, one diagram for items. Changing tokenisation must never
-  // coalesce neighbouring folds or remove their separators from the item diagram.
+  // The simplified surface is one full-height composition bar, not an item diagram.
   const plain = { fg: (_c, t) => t, bold: (t) => t };
-  const boundary = { id: "parent", kind: "staged-consolidation" };
+  const order = ["consolidated", "span", "tool", "pinned", "marked", "raw"];
+  assert.deepEqual([...context.FOLD_BAR_KINDS], order);
   const model = {
-    brand: "pi-fold", share: 0.50, commitShare: 0.80, aimShare: 0.20, mapped: true,
-    segments: [
-      { kind: "fold-span", foldId: "a", starts: [boundary], ends: [] },
-      { kind: "fold-span", foldId: "b", starts: [], ends: [] },
-      { kind: "staged-consolidation", starts: [], ends: [boundary] },
-      { kind: "fold-consolidation", foldId: "c", starts: [], ends: [] },
-      { kind: "staged-span", starts: [{ id: "span", kind: "staged-span" }], ends: [{ id: "span", kind: "staged-span" }] },
-      { kind: "staged-truncation", starts: [{ id: "tool", kind: "staged-truncation" }], ends: [{ id: "tool", kind: "staged-truncation" }] },
-      { kind: "pinned", starts: [], ends: [] },
-      { kind: "raw", starts: [], ends: [] },
-    ],
-    stagedMarks: 3, stagedSpans: 1, stagedTruncations: 1, stagedConsolidations: 1,
-    folds: 3, foldSpans: 2, foldTruncations: 0, foldConsolidations: 1,
+    brand: "pi-fold", share: 0.60, commitShare: 0.80, aimShare: 0.20, mapped: true,
+    mass: Object.fromEntries(order.map((kind) => [kind, 10])),
+    stagedMarks: 1, folds: 3, foldSpans: 1, foldTruncations: 1, foldConsolidations: 1,
     unplacedItems: 0, pinnedRefs: 1, weighed: false, staleAfterCommit: false, stopped: null,
   };
-  assert.deepEqual(context.foldBarCells(model), [...Array(20).fill(true), ...Array(20).fill(false)]);
-  const [gauge, items] = context.renderFoldBar(model, 220, plain).split("\n");
-  assert(/^usage /.test(gauge) && /^items /.test(items), "the two scales are not explicitly named");
-  assert.equal(gauge.split("┆").length - 1, 2, "both targets must use the same dashed style");
-  assert(!/[│┃]/.test(gauge), "one target kept a different line style");
-  assert(items.startsWith("items [▆▆ ▆▆ ▆▆] ▅▅ [▆▆] [▇▇] ██ ██"),
-    `items lost their bodies, separation, or both ends of a pending range: ${items}`);
-  assert(!/[▂▃▄▖▉▊]/.test(items), "a scored edge shrank an item into a sliver");
-  assert(items.includes("3 pending (1 span, 1 tool, 1 group)"));
-  assert(items.includes("3 folded (2 spans, 1 group)"));
-  assert(!/tokens|nested|hide/.test(items), "removed detail still clutters the compact row");
-  for (const share of [0.001, 0.17, 0.26, 0.99]) {
-    assert.equal(context.renderFoldBar({ ...model, share }, 220, plain).split("\n")[1], items,
-      "changing occupancy repositions or merges item bodies");
-  }
-  const held = context.renderFoldBar({ ...model, mapped: false, segments: [] }, 120, plain);
-  assert(held.includes("items not mapped yet"), "reload inferred no marks from no snapshot");
-  assert(held.includes("█"), "a restored measurement with no diagram lost its gauge");
-  const missing = context.renderFoldBar({ ...model, unplacedItems: 1 }, 220, plain);
-  assert(missing.includes("1 not mapped"), "unplaced items disappeared silently");
-  const crowded = { ...model, segments: Array.from({ length: 60 }, (_, n) => ({
-    kind: "fold-span", foldId: `fold-${n}`, starts: [], ends: [],
-  })) };
-  const cropped = context.renderFoldBar(crowded, 80, plain).split("\n")[1];
-  const visible = (cropped.match(/▆▆/g) ?? []).length;
-  const omitted = Number(/\+(\d+) sections/.exec(cropped)?.[1]);
-  assert(visible > 0 && visible + omitted === 60, `overflow merged or silently lost folds: ${cropped}`);
+  assert.deepEqual(context.foldBarCells(model), [...order.flatMap((kind) => Array(4).fill(kind)), ...Array(16).fill("empty")],
+    "the six equal shares are not in the requested order");
+  const rendered = context.renderFoldBar(model, 220, plain);
+  assert(!rendered.includes("\n") && !/usage|items|sections|tokens|nested|hide/.test(rendered));
+  assert(!/[▁▂▃▄▅▆▇▖▉▊]/.test(rendered) && !rendered.includes("[") && !rendered.includes("]"),
+    "the removed heights, scores, or brackets returned");
+  assert.equal(rendered.split("┆").length - 1, 2, "both targets must retain the same dashed style");
+  assert(rendered.endsWith("60% · commit at 80% · 3 Folds (1 Cons., 1 Span, 1 Tool, 1 Pin, 1 Mark)"), rendered);
+  const mostlyRaw = { ...model, share: .5, mass: { ...context.emptyFoldBarMass(), marked: 5, raw: 95 } };
+  assert.deepEqual(context.foldBarCells(mostlyRaw), ["marked", ...Array(19).fill("raw"), ...Array(20).fill("empty")],
+    "category widths are counts instead of proportional visible mass");
+  const tiny = { ...model, share: .5, mass: { ...context.emptyFoldBarMass(), consolidated: 1, raw: 9999 } };
+  assert.deepEqual(context.foldBarCells(tiny), [...Array(20).fill("raw"), ...Array(20).fill("empty")],
+    "a tiny fold was forced to a misleading minimum width");
+  const held = context.renderFoldBar({ ...model, mapped: false }, 120, plain);
+  assert(held.includes("mapping") && held.includes("█"), "reload lost either the measured fill or the unmapped notice");
+  assert(context.foldBarCells({ ...model, mapped: false }).slice(0, 24).every((kind) => kind === "unknown"));
+  assert(context.renderFoldBar({ ...model, unplacedItems: 1 }, 220, plain).includes("1 not mapped"));
   for (const width of [1, 6, 20, 40, 80, 120, 220]) {
-    for (const line of context.renderFoldBar(model, width, plain).split("\n")) {
-      assert(visibleWidth(line) <= width, `row overruns terminal width ${width}: ${line}`);
-    }
+    const line = context.renderFoldBar(model, width, plain);
+    assert(!line.includes("\n") && visibleWidth(line) <= width, `row overruns terminal width ${width}: ${line}`);
   }
 
   // Body and label ink must agree, including pins and pending consolidations. Palette
   // foreground contrast is measured against both reference backgrounds, not eyeballed.
   const colours = {
-    dark: ["#858A90", "#668DB3", "#68936F", "#948B31", "#CF9340", "#FBA689", "#FDB9C2", "#FACCFA"],
-    light: ["#697078", "#0F3C5F", "#477150", "#80761F", "#A0691B", "#AA624A", "#9E656E", "#8F6891"],
+    dark: ["#6C89C7", "#5B919F", "#729261", "#B38E2F", "#FBA689", "#FACCFA"],
+    light: ["#011959", "#185562", "#577647", "#927012", "#AA624A", "#8F6891"],
   };
   const escape = (hex) => `\x1b[38;2;${[1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(";")}m`;
   const luminance = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
@@ -17215,11 +17195,11 @@ async function gateCommitSurfacesTellTheTruth() {
     const theme = { ...plain, getColorMode: () => "truecolor",
       getFgAnsi: () => escape(name === "dark" ? "#e6edf3" : "#1f2328") };
     const text = context.renderFoldBar(model, 400, theme);
-    for (const [word, index] of [["1 pinned", 1], ["1 tool", 2], ["1 span", 3], ["1 group", 4], ["2 spans", 6]]) {
+    for (const [word, index] of [["1 Cons.", 0], ["1 Span", 1], ["1 Tool", 2], ["1 Pin", 3], ["1 Mark", 4]]) {
       assert(text.includes(escape(palette[index]) + word), `the ${name} label's ${word} lost its item ink`);
     }
-    for (const [body, index] of [["██", 1], ["▇▇", 2], ["▆▆", 3], ["▆▆", 4], ["▆▆", 6], ["▅▅", 7]]) {
-      assert(text.includes(escape(palette[index]) + body), `the ${name} item lost its body or ink`);
+    for (const hex of palette) {
+      assert(text.includes(escape(hex) + "█"), `the ${name} category lost its full-height ink`);
     }
     const bg = luminance(name === "dark" ? "#202122" : "#FFFFFF");
     for (const hex of palette) {
@@ -17232,13 +17212,13 @@ async function gateCommitSurfacesTellTheTruth() {
   return { appliedMarks: commit.applied_marks, said: Number(said[1]), before, after, fresh };
 }
 
-/** The registered widget must draw a pending parent beginning at an existing root.
- * A literal renderer fixture cannot catch either the skipped-start bug or the inclusive
- * endpoint bug. Two adjacent roots prove the endpoint, raw gaps (including a custom
- * message) prove the parent's reach, and real IDs distinguish six items from twelve edges.
+/** Count visible mass once, even when a pending parent covers existing folded children.
+ * Real runtime, adjacent roots and a custom-message gap: the same root-start/inclusive-end
+ * regressions as before, now judged as disjoint composition rather than diagram edges.
  */
-async function gateFoldDiagramPreservesItemsAndPendingParents() {
-  const thresholds = { maxTarget: 0.80, minTarget: 0.20, consolidateAfter: 6, minFoldChars: 24_000 };
+async function gateFoldCompositionCountsVisibleMass() {
+  // Keep the unrelated raw tail below the chapter floor so the parent is the only mark.
+  const thresholds = { maxTarget: 0.80, minTarget: 0.20, consolidateAfter: 6, minFoldChars: 100_000 };
   const built = makeFixture({ turns: 16, tools: false, chapterChars: 6_000,
     contextWindow: 1_000_000, thresholds: TINY_FOLD_FLOOR, sessionId: "diagram-parent" });
   const gapAt = built.entries.findIndex((entry) => entry.id === built.turnEntries[2][0]) + 1;
@@ -17280,36 +17260,39 @@ async function gateFoldDiagramPreservesItemsAndPendingParents() {
   await project(runtime);
   await settle();
   const model = structuredClone(widget.model);
-  const segments = model.segments;
-  assert.equal(model.stagedConsolidations, 1, "a pending consolidation is still mislabeled as a span");
-  const first = segments.findIndex((segment) => segment.foldId === roots[0].fold.id);
-  assert(first >= 0 && segments[first].starts.some((edge) => edge.id === parent.id),
-    "the parent's start was skipped by the first child's root jump");
-  assert.equal(segments[first + 1].foldId, roots[1].fold.id,
-    "an inclusive root endpoint was visited again as raw between adjacent roots");
-  assert(segments.some((segment) => segment.kind === "staged-consolidation" && !segment.foldId),
-    "raw gaps inside a pending parent were left unclaimed in the diagram");
-  assert(segments.some((segment) => segment.ends.some((edge) => edge.id === parent.id)),
-    "a pending parent ending on a folded child lost its closing boundary");
-  assert.deepEqual(segments.filter((segment) => segment.foldId).map((segment) => segment.foldId),
-    roots.map((root) => root.fold.id), "visible folds were merged, duplicated, or reordered");
-  assert.equal(model.folds, 6, "fold count came from boundaries rather than items");
+  assert.equal(model.stagedMarks, 1, "the fixture gained an unrelated mark");
+  const current = context.mapActiveContext({ sessionId: built.sessionId, eventMessages: runtime.messages,
+    contextEntries: runtime.branch, contextWindow: 1_000_000, thresholds });
+  const hidden = new Set(roots.flatMap((root) =>
+    context.flattenFoldRefs(root.fold, state).map((ref) => context.exactMapped(current, ref).index)));
+  const claimed = new Set(context.markSpanRefs(state, parent).refs.map((ref) => context.exactMapped(current, ref).index));
+  const rawCosts = current.messages.map((message) => context.pricedBytes([message]));
+  const expectedMarked = rawCosts.reduce((sum, cost, i) => sum + (!hidden.has(i) && claimed.has(i) ? cost : 0), 0);
+  const expectedRaw = rawCosts.reduce((sum, cost, i) => sum + (!hidden.has(i) && !claimed.has(i) ? cost : 0), 0);
+  const expectedSpan = roots.reduce((sum, root) => sum + context.pricedBytes(context.renderFold(root.fold, state, current)), 0);
+  assert(expectedMarked > 0 && expectedRaw > 0, "the fixture lacks marked gaps or a raw tail");
+  assert.deepEqual(model.mass, { consolidated: 0, span: expectedSpan, tool: 0, pinned: 0,
+    marked: expectedMarked, raw: expectedRaw },
+    "visible mass was skipped or charged twice (including a hidden inclusive root endpoint)");
+  assert.equal(model.folds, 6, "fold count came from edges or pending marks");
   assert.equal(model.unplacedItems, 0, "a properly reconstructed custom entry failed to map");
   const text = widget.render(600).join("\n");
-  assert(text.includes("1 group") && text.includes("6 folded"));
+  assert(text.includes("6 Folds (0 Cons., 6 Span, 0 Tool, 0 Pin, 1 Mark)"));
   const stateBefore = materialized(runtime);
   await project(runtime);
   await settle();
-  assert.deepEqual(widget.model.segments, segments, "an unchanged context moved diagram items");
-  assert.deepEqual(materialized(runtime).folds, stateBefore.folds, "drawing the diagram changed durable folds");
+  assert.deepEqual(widget.model.mass, model.mass, "an unchanged context changed composition");
+  assert.deepEqual(materialized(runtime).folds, stateBefore.folds, "reading composition changed durable folds");
   await toolCall(runtime, { action: "pin", ids: [roots[0].fold.id] });
   await project(runtime);
   await settle();
-  assert(widget.model.segments.some((segment) => segment.kind === "pinned"), "a pinned fold never reveals pinned items");
-  assert(!widget.model.segments.some((segment) => segment.foldId === roots[0].fold.id),
-    "a revealed fold was still drawn as a collapsed item");
-  assert.equal(widget.model.folds, 5, "the displayed folded count includes an item now shown raw");
-  return { folds: model.folds, pendingParents: model.stagedConsolidations, segments: segments.length };
+  const firstRefs = context.flattenFoldRefs(roots[0].fold, state);
+  const pinMass = firstRefs.reduce((sum, ref) => sum + rawCosts[context.exactMapped(current, ref).index], 0);
+  assert.equal(widget.model.mass.pinned, pinMass, "pinning did not move the revealed source into Pin");
+  assert.equal(widget.model.mass.marked, expectedMarked, "pinning also charged the same source to Mark");
+  assert.equal(widget.model.foldSpans, 5, "a pinned, revealed span is still counted as compressed");
+  assert.equal(widget.model.folds, 5, "the fold count includes a span now shown raw");
+  return { folds: model.folds, marks: model.stagedMarks, mass: model.mass };
 }
 
 /**
@@ -17588,7 +17571,7 @@ const gates = [
   [166, "What a fold frees is priced by the image law", gateFreedMassIsPricedByTheImageLaw],
   [167, "A re-cut span adopts its durable record", gateRecutSpanAdoptsItsDurableRecord],
   [168, "The status page advertises only actions the schema accepts", gateStatusPageAdvertisesSchemaActions],
-  [169, "The fold diagram preserves items and pending parents", gateFoldDiagramPreservesItemsAndPendingParents],
+  [169, "Fold composition counts visible mass once", gateFoldCompositionCountsVisibleMass],
   // 138 is retired with the steward band (Shane 2026-08-23). It pinned a PRE-COMMIT
   // invitation, timed one band before the epoch so the agent was asked while marking
   // could still matter. The ask moves to fold time, where the agent has just seen the
