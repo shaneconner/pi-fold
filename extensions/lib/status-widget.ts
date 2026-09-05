@@ -31,7 +31,7 @@ export interface FoldBarTheme {
   fg(color: "dim" | "muted" | "text" | "warning" | "error" | "accent", text: string): string;
   bold(text: string): string;
   getColorMode?(): "truecolor" | "256color";
-  getFgAnsi?(color: "text"): string;
+  getFgAnsi?(color: "text" | "muted" | "accent"): string;
   name?: string;
 }
 
@@ -62,23 +62,40 @@ const truecolor = (hex: string, text: string): string => {
   return `\x1b[38;2;${rgb.join(";")}m${text}\x1b[39m`;
 };
 
-/** Total fill is measured; the composition within it is estimated and grouped by kind.
- * No minimum-width items, boundary marks, or forced cells. Tiny shares can round away.
+/** Two half-cell samples per terminal column. The measured fill never grows to fit
+ * inventory. Each nonempty CATEGORY gets one half-cell when there is room, then quotas
+ * follow relative mass. This is a visibility floor, not a per-fold width or token-exact
+ * proportion. Both halves of a guide column are reserved so it cannot erase a category.
  */
-export function foldBarCells(model: FoldBarModel, width = FOLD_BAR_WIDTH): Array<FoldBarKind | "empty" | "unknown"> {
-  const filled = Math.max(0, Math.min(width, Math.round((model.share ?? 0) * width)));
+export function foldBarCells(model: FoldBarModel, width = FOLD_BAR_WIDTH): Array<FoldBarKind | "empty" | "unknown" | "tick"> {
+  const samples = 2 * width;
+  const filled = Math.max(0, Math.min(samples, Math.round((model.share ?? 0) * samples)));
+  const ticks = foldBarTicks(model, width);
   const total = FOLD_BAR_KINDS.reduce((sum, kind) => sum + model.mass[kind], 0);
-  const cells: Array<FoldBarKind | "empty" | "unknown"> = [];
-  let kindIndex = 0;
-  let cumulative = model.mass[FOLD_BAR_KINDS[0]];
-  for (let i = 0; i < width; i += 1) {
-    if (i >= filled) { cells.push("empty"); continue; }
-    if (!model.mapped || total <= 0) { cells.push("unknown"); continue; }
-    const midpoint = (i + 0.5) * total / filled;
-    while (kindIndex < FOLD_BAR_KINDS.length - 1 && cumulative < midpoint) {
-      cumulative += model.mass[FOLD_BAR_KINDS[++kindIndex]];
+  const cells: Array<FoldBarKind | "empty" | "unknown" | "tick"> = Array.from({ length: samples }, (_, i) =>
+    ticks.has(Math.floor(i / 2)) ? "tick" : i < filled ? "unknown" : "empty");
+  const slots = cells.flatMap((kind, i) => kind === "unknown" ? [i] : []);
+  if (!model.mapped || total <= 0 || !slots.length) return cells;
+  const allocation = FOLD_BAR_KINDS.filter((kind) => model.mass[kind] > 0)
+    .map((kind) => ({ kind, quota: model.mass[kind] * slots.length / total, count: 0 }));
+  if (slots.length < allocation.length) {
+    // At very low occupancy there may be fewer slots than kinds. Keep the largest
+    // shares rather than inventing occupancy; ties keep the declared category order.
+    for (const item of [...allocation].sort((a, b) => b.quota - a.quota).slice(0, slots.length)) item.count = 1;
+  } else {
+    for (const item of allocation) item.count = Math.max(1, Math.floor(item.quota));
+    let assigned = allocation.reduce((sum, item) => sum + item.count, 0);
+    while (assigned !== slots.length) {
+      const direction = assigned < slots.length ? 1 : -1;
+      const candidates = allocation.filter((item) => direction > 0 || item.count > 1);
+      candidates.sort((a, b) => direction * ((b.quota - b.count) - (a.quota - a.count)));
+      candidates[0].count += direction;
+      assigned += direction;
     }
-    cells.push(FOLD_BAR_KINDS[kindIndex]);
+  }
+  let next = 0;
+  for (const item of allocation) {
+    for (let n = 0; n < item.count; n += 1) cells[slots[next++]] = item.kind;
   }
   return cells;
 }
@@ -104,13 +121,36 @@ export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBar
     if (kind === "pinned") return theme.fg("accent", text);
     return theme.fg(kind === "raw" ? "muted" : "text", text);
   };
-  const ticks = foldBarTicks(model);
-  const bar = foldBarCells(model).map((kind, i) => {
-    if (ticks.has(i)) return neutral(theme.bold("┆"));
+  const cells = foldBarCells(model);
+  const solid = (kind: typeof cells[number]): string => {
+    if (kind === "tick") return neutral(theme.bold("┆"));
     if (kind === "empty") return theme.fg("dim", "░");
     if (kind === "unknown") return muted("█");
     return ink(kind, "█");
-  }).join("");
+  };
+  const background = (kind: FoldBarKind): string | null => {
+    if (theme.getColorMode?.() === "truecolor") return truecolor(palette[kind], "").replace("[38;", "[48;");
+    // Pi exposes the same theme ink in 256-colour mode. Convert its foreground escape
+    // to background, without assuming an RGB theme or leaking styles into the label.
+    const fg = theme.getFgAnsi?.(kind === "pinned" ? "accent" : kind === "raw" ? "muted" : "text") ?? "";
+    const extended = /^\x1b\[38;(?:2;\d+;\d+;\d+|5;\d+)m$/.test(fg);
+    if (extended) return fg.replace("[38;", "[48;");
+    const basic = /^\x1b\[(3[0-7]|9[0-7])m$/.exec(fg);
+    return basic ? `\x1b[${Number(basic[1]) + 10}m` : null;
+  };
+  let bar = "";
+  for (let i = 0; i < cells.length; i += 2) {
+    const left = cells[i], right = cells[i + 1];
+    if (left === right) { bar += solid(left); continue; }
+    // One full-height left-half glyph, right colour supplied by the cell background:
+    // two colours in one column, never a notch, gap, score, or extra terminal column.
+    if (right === "empty") {
+      bar += left === "unknown" ? muted("▌") : ink(left as FoldBarKind, "▌");
+    } else {
+      const bg = background(right as FoldBarKind);
+      bar += bg ? `${bg}${ink(left as FoldBarKind, "▌")}\x1b[49m` : solid(left);
+    }
+  }
   const pct = Math.round(model.share * 100);
   const parts: string[] = [];
   if (model.staleAfterCommit) parts.push(muted(`${pct}% before the commit`));

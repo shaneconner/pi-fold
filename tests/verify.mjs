@@ -17078,7 +17078,7 @@ async function gateCommitSurfacesTellTheTruth() {
   await startRuntime(runtime);
   const row = () => widget.render(200).join("\n");
   assert.equal(widget?.options?.placement, "belowEditor", "the bar is not the footer's top row");
-  assert(/not measured yet/.test(row()) && !/[▊░]/.test(row()),
+  assert(/not measured yet/.test(row()) && !/[█▌░┆]/.test(row()),
     `an unmeasured window drew a bar, which is a guess drawn: ${row()}`);
   assert.equal(runtime.statuses.at(-1).text, undefined,
     "the status string is still set beside a bar that carries every fact it carried");
@@ -17158,8 +17158,10 @@ async function gateCommitSurfacesTellTheTruth() {
     stagedMarks: 1, folds: 3, foldSpans: 1, foldTruncations: 1, foldConsolidations: 1,
     unplacedItems: 0, pinnedRefs: 1, weighed: false, staleAfterCommit: false, stopped: null,
   };
-  assert.deepEqual(context.foldBarCells(model), [...order.flatMap((kind) => Array(4).fill(kind)), ...Array(16).fill("empty")],
-    "the six equal shares are not in the requested order");
+  const painted = (cells) => cells.filter((kind) => order.includes(kind));
+  assert.deepEqual(painted(context.foldBarCells(model)), order.flatMap((kind, i) => Array(i < 4 ? 8 : 7).fill(kind)),
+    "the six equal shares are not apportioned in order after reserving the guide slots");
+  assert.equal(context.foldBarCells(model).length, 80, "forty columns did not provide eighty half-cell samples");
   const rendered = context.renderFoldBar(model, 220, plain);
   assert(!rendered.includes("\n") && !/usage|items|sections|tokens|nested|hide/.test(rendered));
   assert(!/[▁▂▃▄▅▆▇▖▉▊]/.test(rendered) && !rendered.includes("[") && !rendered.includes("]"),
@@ -17167,14 +17169,31 @@ async function gateCommitSurfacesTellTheTruth() {
   assert.equal(rendered.split("┆").length - 1, 2, "both targets must retain the same dashed style");
   assert(rendered.endsWith("60% · commit at 80% · 3 Folds (1 Cons., 1 Span, 1 Tool, 1 Pin, 1 Mark)"), rendered);
   const mostlyRaw = { ...model, share: .5, mass: { ...context.emptyFoldBarMass(), marked: 5, raw: 95 } };
-  assert.deepEqual(context.foldBarCells(mostlyRaw), ["marked", ...Array(19).fill("raw"), ...Array(20).fill("empty")],
-    "category widths are counts instead of proportional visible mass");
-  const tiny = { ...model, share: .5, mass: { ...context.emptyFoldBarMass(), consolidated: 1, raw: 9999 } };
-  assert.deepEqual(context.foldBarCells(tiny), [...Array(20).fill("raw"), ...Array(20).fill("empty")],
-    "a tiny fold was forced to a misleading minimum width");
+  assert.deepEqual(painted(context.foldBarCells(mostlyRaw)), [...Array(2).fill("marked"), ...Array(36).fill("raw")],
+    "category widths stopped following mass above the visibility floor");
+  const tiny = { ...model, share: .5, mass: { ...context.emptyFoldBarMass(), consolidated: 1, span: 1, raw: 9998 } };
+  assert.deepEqual(painted(context.foldBarCells(tiny)), ["consolidated", "span", ...Array(36).fill("raw")],
+    "nonempty compressed categories vanished instead of retaining one half-cell each");
+  // All nonempty subsets, across scarcity and ordinary occupancy. Categories may not
+  // steal space outside the measured fill, invent zero-mass colours, or hide behind a guide.
+  for (let mask = 1; mask < 64; mask += 1) {
+    const mass = Object.fromEntries(order.map((kind, i) => [kind, mask & (1 << i) ? (i + 1) ** 3 : 0]));
+    const nonempty = order.filter((kind) => mass[kind] > 0);
+    for (const share of [0, .0125, .05, .10, .20, .40, 1]) {
+      const cells = context.foldBarCells({ ...model, mass, share });
+      const filled = Math.round(share * 80);
+      const capacity = cells.slice(0, filled).filter((kind) => kind !== "tick").length;
+      const visible = painted(cells);
+      assert.equal(visible.length, capacity, "category floors changed the measured fill");
+      assert(cells.slice(filled).every((kind) => kind === "empty" || kind === "tick"), "colour escaped the measured fill");
+      assert(visible.every((kind) => mass[kind] > 0), "an empty category acquired colour");
+      if (capacity >= nonempty.length) assert(nonempty.every((kind) => visible.includes(kind)), "a nonempty category disappeared with room available");
+      assert(visible.every((kind, i) => i === 0 || order.indexOf(kind) >= order.indexOf(visible[i - 1])), "category order changed");
+    }
+  }
   const held = context.renderFoldBar({ ...model, mapped: false }, 120, plain);
   assert(held.includes("mapping") && held.includes("█"), "reload lost either the measured fill or the unmapped notice");
-  assert(context.foldBarCells({ ...model, mapped: false }).slice(0, 24).every((kind) => kind === "unknown"));
+  assert(context.foldBarCells({ ...model, mapped: false }).slice(0, 48).every((kind) => kind === "unknown" || kind === "tick"));
   assert(context.renderFoldBar({ ...model, unplacedItems: 1 }, 220, plain).includes("1 not mapped"));
   for (const width of [1, 6, 20, 40, 80, 120, 220]) {
     const line = context.renderFoldBar(model, width, plain);
@@ -17201,6 +17220,28 @@ async function gateCommitSurfacesTellTheTruth() {
     for (const hex of palette) {
       assert(text.includes(escape(hex) + "█"), `the ${name} category lost its full-height ink`);
     }
+    // Tiny categories must actually reach the rendered BAR, not merely its label.
+    // A half-cell on the right uses background ink; foreground-only assertions miss it.
+    // The aim lies inside the measured fill. Without reserved guide slots it would
+    // overwrite the final two singleton colours, so test the rendered bytes as well.
+    const mixed = context.renderFoldBar({ ...model, share: .10, aimShare: .10,
+      mass: { consolidated: 1000, span: 1, tool: 1, pinned: 1, marked: 1, raw: 1 } }, 400, theme);
+    const bar = mixed.slice(0, mixed.indexOf(" "));
+    assert.equal(visibleWidth(bar), 40, "half-cell precision made the bar wider");
+    assert(bar.includes("▌") && bar.includes("\x1b[48;2;"), "two colours were not rendered inside a column");
+    for (const hex of palette) {
+      const foreground = escape(hex);
+      const background = foreground.replace("[38;", "[48;");
+      assert(bar.includes(background) || bar.includes(foreground + "▌") || bar.includes(foreground + "█"),
+        `${name} ${hex} disappeared from a tiny nonempty category`);
+    }
+    let backgroundActive = false;
+    for (const match of bar.matchAll(/\x1b\[([0-9;]*)m/g)) {
+      const codes = match[1].split(";");
+      if (codes[0] === "48") backgroundActive = true;
+      else if (codes[0] !== "38" && (codes.includes("49") || codes.includes("0"))) backgroundActive = false;
+    }
+    assert.equal(backgroundActive, false, "category background bled into the following label");
     const bg = luminance(name === "dark" ? "#202122" : "#FFFFFF");
     for (const hex of palette) {
       const fg = luminance(hex);
@@ -17208,6 +17249,17 @@ async function gateCommitSurfacesTellTheTruth() {
         `${name} ${hex} vanishes against its reference background`);
     }
   }
+  // The same two-colour cell works with Pi's indexed and basic theme escapes.
+  const pinPair = { ...tiny, mass: { ...context.emptyFoldBarMass(), consolidated: 1, pinned: 1, raw: 9998 } };
+  for (const [accent, expectedBg] of [["\x1b[38;5;14m", "\x1b[48;5;14m"], ["\x1b[94m", "\x1b[104m"]]) {
+    const getFgAnsi = (kind) => kind === "accent" ? accent : "\x1b[37m";
+    const theme = { ...plain, getColorMode: () => "256color", getFgAnsi,
+      fg: (kind, text) => getFgAnsi(kind) + text + "\x1b[39m" };
+    const text = context.renderFoldBar(pinPair, 220, theme);
+    assert(text.slice(0, text.indexOf(" ")).includes(expectedBg), "the right-hand pin colour was lost on a non-RGB theme");
+  }
+  const half = context.renderFoldBar({ ...model, share: .0125, mass: { ...context.emptyFoldBarMass(), raw: 1 } }, 220, plain);
+  assert(half.startsWith("▌"), "a half-filled terminal column rounded back to a full column");
   assert.equal(context.lightBackground({ ...plain, name: "gruvbox-light" }), true);
   return { appliedMarks: commit.applied_marks, said: Number(said[1]), before, after, fresh };
 }
