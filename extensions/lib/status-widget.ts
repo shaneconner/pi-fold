@@ -100,18 +100,20 @@ export interface FoldBarTheme {
   name?: string;
 }
 
-// Crameri batlow10 classes per background. Spans (chapters of the conversation) and
-// truncations (tool results) are two rungs apart on the same ladder so they read as two
-// shades of one idea; standing folds take the light end, staged marks the middle, raw the
-// dark end. The lightest classes vanish on white, so a light terminal steps everything
-// two classes darker, the triple the README's light figure uses.
+// Crameri batlow10 classes per background, raw at the dark end, staged marks in the
+// middle, standing folds at the light end. THE PAIRS SIT A RUNG APART WITH A RUNG
+// BETWEEN (Shane 2026-09-05: adjacent rungs were "a tad too close"): staged truncation
+// olive against staged span peach, fold span pink against fold consolidation lilac, and
+// the consolidation sliver is also drawn a step taller. The same inks colour the kind
+// words on the label, so the text is the legend. The lightest classes vanish on white,
+// so a light terminal steps the ladder darker.
 const BATLOW_ON_DARK = {
-  raw: "#3C6D56", "staged-span": "#D29343", "staged-truncation": "#9D892B",
-  "fold-span": "#FDB7BC", "fold-truncation": "#F8A17B", "fold-consolidation": "#FACCFA",
+  raw: "#3C6D56", "staged-truncation": "#9D892B", "staged-span": "#F8A17B",
+  "fold-truncation": "#D29343", "fold-span": "#FDB7BC", "fold-consolidation": "#FACCFA",
 } as const;
 const BATLOW_ON_LIGHT = {
-  raw: "#1C5A62", "staged-span": "#9D892B", "staged-truncation": "#687B3E",
-  "fold-span": "#D29343", "fold-truncation": "#9D892B", "fold-consolidation": "#F8A17B",
+  raw: "#1C5A62", "staged-truncation": "#687B3E", "staged-span": "#D29343",
+  "fold-truncation": "#9D892B", "fold-span": "#F8A17B", "fold-consolidation": "#FDB7BC",
 } as const;
 
 /**
@@ -231,11 +233,6 @@ export function foldBarPlainText(model: FoldBarModel): string {
   });
 }
 
-const kindCounts = (parts: Array<[number, string]>): string => {
-  const named = parts.filter(([count]) => count > 0).map(([count, noun]) => `${count} ${noun}${count === 1 ? "" : "s"}`);
-  return named.length > 1 ? ` (${named.join(", ")})` : "";
-};
-
 export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBarTheme): string {
   const brand = theme.fg("dim", model.brand);
   if (model.stopped) {
@@ -258,10 +255,19 @@ export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBar
     if (kind.startsWith("staged")) return theme.fg("text", text);
     return theme.fg("dim", text);
   };
+  // A CONSOLIDATION SLIVER STANDS A STEP TALLER than a span's or a truncation's: at
+  // sliver size a colour step alone is faint, and shape survives where colour does not.
   const glyph = (cell: BarCell): string => {
     if (cell.kind === "empty") return "░";
+    if (cell.kind === "fold-consolidation") return "▃";
     if (cell.kind.startsWith("fold")) return "▂";
     return cell.scored ? "▉" : "█";
+  };
+  // THE KIND WORDS TAKE THEIR CELL INKS, named only when more than one kind is present.
+  const kindClause = (parts: Array<[number, string, SegmentKind]>): string => {
+    const named = parts.filter(([count]) => count > 0)
+      .map(([count, noun, kind]) => ink(kind, `${count} ${noun}${count === 1 ? "" : "s"}`));
+    return named.length > 1 ? ` (${named.join(theme.fg("dim", ", "))})` : "";
   };
   const cells = foldBarCells(model);
   const ticks = foldBarTicks(model);
@@ -294,19 +300,20 @@ export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBar
   // the kinds are named only when both are present. The tokens are what the staged cells
   // draw, priced by the image law, with the unit written out because k/M read as megabytes.
   if (model.stagedMarks > 0) {
-    const kinds = kindCounts([[model.stagedSpans, "span"], [model.stagedTruncations, "truncation"]]);
-    parts.push(ink("staged-span", model.stagedTokens > 0
-      ? `${model.stagedMarks} staged${kinds}, ${formatTokens(model.stagedTokens)} tokens`
-      : `${model.stagedMarks} staged${kinds}`));
+    const kinds = kindClause([[model.stagedSpans, "span", "staged-span"], [model.stagedTruncations, "truncation", "staged-truncation"]]);
+    const tokens = model.stagedTokens > 0 ? ink("staged-span", `, ${formatTokens(model.stagedTokens)} tokens`) : "";
+    parts.push(`${ink("staged-span", `${model.stagedMarks} staged`)}${kinds}${tokens}`);
   }
   if (model.pinnedRefs > 0) parts.push(ink("pinned", `${model.pinnedRefs} pinned`));
   if (model.folds > 0) {
-    const kinds = kindCounts([
-      [model.foldSpans, "span"], [model.foldTruncations, "truncation"], [model.foldConsolidations, "consolidation"],
+    const kinds = kindClause([
+      [model.foldSpans, "span", "fold-span"], [model.foldTruncations, "truncation", "fold-truncation"],
+      [model.foldConsolidations, "consolidation", "fold-consolidation"],
     ]);
-    const nested = model.totalFolds > model.folds ? `, ${model.totalFolds} nested` : "";
-    parts.push(ink("fold-span",
-      `${model.folds} fold${model.folds === 1 ? "" : "s"}${kinds}${nested} hide ${formatTokens(model.hiddenTokens)} tokens`));
+    // The nested count is what consolidation made, so it wears the consolidation ink.
+    const nested = model.totalFolds > model.folds ? ink("fold-consolidation", `, ${model.totalFolds} nested`) : "";
+    parts.push(`${ink("fold-span", `${model.folds} fold${model.folds === 1 ? "" : "s"}`)}${kinds}${nested}` +
+      ink("fold-span", ` hide ${formatTokens(model.hiddenTokens)} tokens`));
   }
   // NO BRAND IN FRONT OF THE BAR (Shane 2026-09-02): the bar identifies itself, and the
   // two prose states above keep the brand because nothing else on them says whose they are.

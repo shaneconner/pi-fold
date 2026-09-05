@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1302" height="52" viewBox="0 0 1302 52" role="img" aria-label="The fold bar: forty cells of the serving budget, oldest on the left, with ticks at the aim and the commit point. Staged spans and truncations, raw material and fold placeholders fill it by position, a score is drawn where each staged mark ends, and the label states the percentage, the commit point, what is staged by kind and the tokens the folds hide.">
-<rect width="1302" height="52" fill="#ffffff"/>
-<rect x="12" y="14" width="9" height="16" fill="#9D892B"/>
-<rect x="21" y="14" width="9" height="16" fill="#9D892B"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1401" height="52" viewBox="0 0 1401 52" role="img" aria-label="The fold bar: forty cells of the serving budget, oldest on the left, with ticks at the aim and the commit point. Staged spans and truncations, raw material and fold placeholders fill it by position, a score is drawn where each staged mark ends, and the label states the percentage, the commit point, what is staged by kind and the tokens the folds hide.">
+<rect width="1401" height="52" fill="#ffffff"/>
+<rect x="12" y="14" width="9" height="16" fill="#D29343"/>
+<rect x="21" y="14" width="9" height="16" fill="#D29343"/>
 <rect x="30" y="14" width="7.5" height="16" fill="#687B3E"/>
 <rect x="39" y="14" width="7.5" height="16" fill="#687B3E"/>
 <rect x="48" y="14" width="7.5" height="16" fill="#687B3E"/>
@@ -12,8 +12,8 @@
 <rect x="84" y="14" width="9" height="16" fill="#1C5A62"/>
 <rect x="93" y="14" width="9" height="16" fill="#1C5A62"/>
 <rect x="102" y="14" width="9" height="16" fill="#1C5A62"/>
-<rect x="111" y="14" width="9" height="16" fill="#9D892B"/>
-<rect x="120" y="14" width="7.5" height="16" fill="#9D892B"/>
+<rect x="111" y="14" width="9" height="16" fill="#D29343"/>
+<rect x="120" y="14" width="7.5" height="16" fill="#D29343"/>
 <rect x="129" y="14" width="9" height="16" fill="#1C5A62"/>
 <rect x="138" y="14" width="9" height="16" fill="#1C5A62"/>
 <rect x="147" y="14" width="9" height="16" fill="#1C5A62"/>
@@ -42,7 +42,7 @@
 <rect x="345" y="14" width="9" height="16" fill="#eaeef2"/>
 <rect x="354" y="14" width="9" height="16" fill="#eaeef2"/>
 <rect x="363" y="14" width="9" height="16" fill="#eaeef2"/>
-<text x="382" y="26" font-size="12" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,Liberation Mono,monospace" xml:space="preserve"><tspan fill="#1f2328">42%</tspan><tspan fill="#656d76"> · </tspan><tspan fill="#656d76">commit at 80%</tspan><tspan fill="#656d76"> · </tspan><tspan fill="#9D892B">12 staged (9 spans, 3 truncations), 118k tokens</tspan><tspan fill="#656d76"> · </tspan><tspan fill="#D29343">3 folds (2 spans, 1 truncation) hide 412k tokens</tspan></text>
+<text x="382" y="26" font-size="12" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,Liberation Mono,monospace" xml:space="preserve"><tspan fill="#1f2328">42%</tspan><tspan fill="#656d76"> · </tspan><tspan fill="#656d76">commit at 80%</tspan><tspan fill="#656d76"> · </tspan><tspan fill="#D29343">12 staged (</tspan><tspan fill="#D29343">9 spans</tspan><tspan fill="#656d76">, </tspan><tspan fill="#687B3E">3 truncations</tspan><tspan fill="#D29343">), 118k tokens</tspan><tspan fill="#656d76"> · </tspan><tspan fill="#F8A17B">3 folds (</tspan><tspan fill="#F8A17B">2 spans</tspan><tspan fill="#656d76">, </tspan><tspan fill="#FDB7BC">1 consolidation</tspan><tspan fill="#F8A17B">)</tspan><tspan fill="#FDB7BC">, 5 nested</tspan><tspan fill="#F8A17B"> hide 412k tokens</tspan></text>
 <text x="79" y="46" font-size="10" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" fill="#656d76" text-anchor="middle">aim 20%</text>
 <text x="295" y="46" font-size="10" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" fill="#9a6700" text-anchor="middle">commit 80%</text>
 <text x="12" y="46" font-size="10" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" fill="#656d76" text-anchor="start">oldest</text>

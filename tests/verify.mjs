@@ -17180,8 +17180,11 @@ async function gateCommitSurfacesTellTheTruth() {
   const scored = cells.map((cell, index) => (cell.scored ? index : -1)).filter((index) => index >= 0);
   assert.deepEqual(scored, [4, 12, 14], `scores are not at the mark ends: ${scored}`);
   const mapped = context.renderFoldBar(model, 200, themed("#e6edf3"));
-  assert(/3 staged \(1 span, 2 truncations\), 200 tokens/.test(mapped), `staged kinds are not named: ${mapped}`);
-  assert(/2 folds \(1 span, 1 truncation\), 27 nested hide/.test(mapped), `fold kinds and nesting are not named: ${mapped}`);
+  // Read without ink: the kind words carry their cell colours, so the wording is judged
+  // on the plain rendering and the inks are judged below.
+  const mappedPlain = mapped.replace(/\x1b\[[0-9;]*m/g, "");
+  assert(/3 staged \(1 span, 2 truncations\), 200 tokens/.test(mappedPlain), `staged kinds are not named: ${mappedPlain}`);
+  assert(/2 folds \(1 span, 1 truncation\), 27 nested hide/.test(mappedPlain), `fold kinds and nesting are not named: ${mappedPlain}`);
   assert(!/nested/.test(context.renderFoldBar({ ...model, totalFolds: 2 }, 200, themed("#e6edf3"))),
     "a flat forest states a nested count");
   assert(!/\(/.test(context.renderFoldBar({ ...model, stagedSpans: 3, stagedTruncations: 0, foldTruncations: 0, foldSpans: 2, totalFolds: 2 }, 200, themed("#e6edf3")).replace(/hide.*$/, "")),
@@ -17205,8 +17208,20 @@ async function gateCommitSurfacesTellTheTruth() {
   const onLight = context.renderFoldBar(model, 200, themed("#1f2328"));
   assert(onDark.includes(truecolor("#3C6D56")) && !onDark.includes(truecolor("#1C5A62")),
     "a dark theme did not get the dark-background batlow classes");
-  assert(onLight.includes(truecolor("#1C5A62")) && !onLight.includes(truecolor("#FDB7BC")),
-    "a light theme kept the light-background pink that vanishes on white");
+  assert(onLight.includes(truecolor("#1C5A62")) && !onLight.includes(truecolor("#3C6D56")),
+    "a light theme kept the dark-background ladder");
+  // THE TEXT IS THE LEGEND (Shane 2026-09-05): each kind word on the label wears the ink
+  // of its cells, the pairs sit a rung apart with a rung between, and a consolidation
+  // sliver stands a step taller than a span's.
+  const legend = context.renderFoldBar({ ...model, segments: [
+    { kind: "fold-span", tokens: 2 }, { kind: "raw", tokens: 18 }, { kind: "fold-consolidation", tokens: 6 }, { kind: "raw", tokens: 94 },
+    { kind: "staged-truncation", tokens: 20, markEnd: true }, { kind: "staged-span", tokens: 30, markEnd: true }, { kind: "raw", tokens: 30 },
+  ], stagedMarks: 2, stagedSpans: 1, stagedTruncations: 1, folds: 2, foldSpans: 1, foldTruncations: 0, foldConsolidations: 1 }, 400, themed("#e6edf3"));
+  for (const [word, hex] of [["1 span", "#F8A17B"], ["1 truncation", "#9D892B"], ["1 consolidation", "#FACCFA"]]) {
+    assert(legend.includes(`${truecolor(hex)}m${word}`), `"${word}" does not wear its cell ink ${hex}: ${legend}`);
+  }
+  assert(legend.includes(`${truecolor("#FACCFA")}m▃`) && legend.includes(`${truecolor("#FDB7BC")}m▂`),
+    `the consolidation sliver is not a step taller than the span's: ${legend}`);
   assert.equal(context.lightBackground({ fg: (_c, t) => t, bold: (t) => t, name: "gruvbox-light" }), true,
     "a theme without a text escape did not fall back to its name");
   return { appliedMarks: commit.applied_marks, said: Number(said[1]), before, after, fresh };
