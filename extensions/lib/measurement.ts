@@ -405,7 +405,9 @@ export function explicitProtectedMass(
   let refs = 0;
   for (const item of snapshot.mapped) {
     if (!item.ref || !explicit.has(objectRefKey(item.ref))) continue;
-    total += bytes(item.message);
+    // Priced, not counted: a pinned screenshot is one image against the pin cap and on
+    // the bar, not its base64 length (pricedBytes, gate 166's law).
+    total += pricedBytes([item.message]);
     refs += 1;
   }
   return { bytes: total, refs };

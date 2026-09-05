@@ -51,8 +51,13 @@ export interface FoldBarModel {
   /** Share of the budget the standing folds' placeholders occupy (estimated). */
   foldedShare: number;
   folds: number;
+  /** Every fold in the forest, nested ones included; equals `folds` until a consolidation lands. */
+  totalFolds: number;
   /** Tokens the standing folds hide: source minus placeholder, summed over the forest. */
   hiddenTokens: number;
+  /** Entries held raw on purpose, and the share of the budget they occupy. */
+  pinnedRefs: number;
+  pinnedShare: number;
   /** Whether a band-top commit has already been weighed against the current count. */
   weighed: boolean;
   /** A commit landed after the count `share` reads; the number is from before it. */
@@ -63,7 +68,7 @@ export interface FoldBarModel {
 
 /** The subset of pi's Theme the row uses. */
 export interface FoldBarTheme {
-  fg(color: "dim" | "muted" | "text" | "warning" | "error", text: string): string;
+  fg(color: "dim" | "muted" | "text" | "warning" | "error" | "accent", text: string): string;
   bold(text: string): string;
   getColorMode?(): "truecolor" | "256color";
   getFgAnsi?(color: "text"): string;
@@ -108,14 +113,17 @@ export function formatTokens(count: number): string {
   return `${(count / 1_000_000).toFixed(1)}M`;
 }
 
-type Cell = "folded" | "staged" | "raw" | "empty";
+type Cell = "folded" | "staged" | "raw" | "pinned" | "empty";
 // SCORED CELLS (Shane 2026-09-03): the README figure draws every cell as its own rectangle
 // with a hairline gap, and the full-width block fused adjacent cells into one solid run,
 // so the terminal read as a different figure. The left seven-eighths block leaves an
 // eighth of each cell empty on the right, which is the same score in a glyph. Staged and
 // raw share the glyph and differ by colour; the shade glyph is gone because at a small
 // font its texture read as a solid block anyway.
-const GLYPH: Record<Cell, string> = { folded: "▂", staged: "▉", raw: "▉", empty: "░" };
+// PINNED CELLS ARE THE ONE CLASS OFF THE BATLOW LADDER: a pin is a hold, not a state of
+// compression, so it takes the theme's accent and a full block, and sits at the newest
+// end of the fill because the bar orders by class, not by position.
+const GLYPH: Record<Cell, string> = { folded: "▂", staged: "▉", raw: "▉", pinned: "█", empty: "░" };
 
 /** The bar's cells, oldest on the left, before any tick is laid over them. */
 export function foldBarCells(model: FoldBarModel, width: number = FOLD_BAR_WIDTH): Cell[] {
@@ -123,11 +131,16 @@ export function foldBarCells(model: FoldBarModel, width: number = FOLD_BAR_WIDTH
   const filled = Math.max(0, Math.min(width, Math.round(share * width)));
   const folded = Math.min(filled, Math.round(model.foldedShare * width));
   const staged = Math.min(filled - folded, Math.round(model.stagedShare * width));
+  // A PIN ALWAYS SHOWS. Two pinned entries are a fraction of one cell and rounded to
+  // nothing, which hid the one class a person placed by hand; pinned mass rounds UP, the
+  // one deliberate overstatement on the bar, and never past the fill.
+  const pinned = Math.min(filled - folded - staged, model.pinnedShare > 0 ? Math.ceil(model.pinnedShare * width) : 0);
   const cells: Cell[] = [];
   for (let i = 0; i < width; i += 1) {
     if (i < folded) cells.push("folded");
     else if (i < folded + staged) cells.push("staged");
-    else if (i < filled) cells.push("raw");
+    else if (i < filled - pinned) cells.push("raw");
+    else if (i < filled) cells.push("pinned");
     else cells.push("empty");
   }
   return cells;
@@ -167,6 +180,7 @@ export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBar
     raw: (t) => rich ? truecolor(BATLOW.raw, t) : theme.fg("muted", t),
     staged: (t) => rich ? truecolor(BATLOW.staged, t) : theme.fg("text", t),
     folded: (t) => rich ? truecolor(BATLOW.folded, t) : theme.fg("dim", t),
+    pinned: (t) => theme.fg("accent", t),
     empty: (t) => theme.fg("dim", t),
   };
   const cells = foldBarCells(model);
@@ -204,8 +218,13 @@ export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBar
       ? `${model.stagedMarks} staged, ${formatTokens(model.stagedTokens)} tokens`
       : `${model.stagedMarks} staged`));
   }
+  // WHAT IS HELD AND HOW DEEP THE FOREST IS (Shane 2026-09-04), each only when nonzero:
+  // a pin frees nothing and makes the rest fold sooner, so it is worth a clause; a nested
+  // count beside the root count says consolidation has happened without a second noun.
+  if (model.pinnedRefs > 0) parts.push(ink.pinned(`${model.pinnedRefs} pinned`));
   if (model.folds > 0) {
-    parts.push(ink.folded(`${model.folds} fold${model.folds === 1 ? "" : "s"} hide ${formatTokens(model.hiddenTokens)} tokens`));
+    const nested = model.totalFolds > model.folds ? ` (${model.totalFolds} nested)` : "";
+    parts.push(ink.folded(`${model.folds} fold${model.folds === 1 ? "" : "s"}${nested} hide ${formatTokens(model.hiddenTokens)} tokens`));
   }
   // NO BRAND IN FRONT OF THE BAR (Shane 2026-09-02): the bar identifies itself, and the
   // two prose states above keep the brand because nothing else on them says whose they are.

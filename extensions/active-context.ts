@@ -782,6 +782,7 @@ export function registerActiveContext(pi: any, options: {
       }
     }
     const budget = input.budgetTokens > 0 ? input.budgetTokens : 1;
+    const pinned = state && snapshot ? explicitProtectedMass(snapshot, state) : { bytes: 0, refs: 0 };
     return {
       brand: brandNoun,
       share: input.share,
@@ -792,7 +793,10 @@ export function registerActiveContext(pi: any, options: {
       stagedTokens,
       foldedShare: estimatedTokens(placeholderChars) / budget,
       folds: input.roots,
+      totalFolds: state ? state.folds.length : 0,
       hiddenTokens: estimatedTokens(hiddenChars),
+      pinnedRefs: pinned.refs,
+      pinnedShare: estimatedTokens(pinned.bytes) / budget,
       weighed: input.weighed,
       staleAfterCommit: input.share !== null && foldBar.staleSince !== null &&
         foldBar.staleSince === measurements.lastProviderMeasurement,

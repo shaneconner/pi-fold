@@ -17110,7 +17110,7 @@ async function gateCommitSurfacesTellTheTruth() {
     `the bar showed the pre-commit count as a live reading: ${after}`);
   assert(!/commit at|COMMIT DUE|commit held/.test(after),
     `a reading from before the commit still placed the next one: ${after}`);
-  assert(/\d+ folds? hide \S+ tokens/.test(after),
+  assert(/\d+ folds?( \(\d+ nested\))? hide \S+ tokens/.test(after),
     `the folds clause does not state its unit: ${after}`);
 
   await measure(runtime, 100_000, 1_000_000);
@@ -17119,6 +17119,24 @@ async function gateCommitSurfacesTellTheTruth() {
   const fresh = row();
   assert(!/before the commit/.test(fresh), `a new count did not clear the stale marker: ${fresh}`);
   assert(/\b10% · commit at 80%/.test(fresh), `the fresh count did not render as a live reading: ${fresh}`);
+  assert(!/pinned/.test(fresh), `a pinned clause appeared with nothing pinned: ${fresh}`);
+
+  // WHAT IS HELD IS NAMED AND DRAWN (Shane 2026-09-04): pin the newest turn's entries
+  // through the real tool and the row gains a pinned clause and pinned cells; the cells
+  // take the accent ink, the one class off the batlow ladder.
+  const newest = runtime.built.turnEntries.at(-1);
+  await toolCall(runtime, { action: "pin", ids: [newest[0], newest.at(-1)] });
+  await project(runtime);
+  await settle();
+  const pinnedRow = row();
+  assert(/\b\d+ pinned\b/.test(pinnedRow), `pinned entries are not named on the row: ${pinnedRow}`);
+  assert(/█/.test(pinnedRow), `pinned mass is not drawn: ${pinnedRow}`);
+  // The widget reads the host's theme at render time, so swapping the fixture's theme
+  // for one that marks the accent ink shows which parts of the row carry it.
+  runtime.ctx.ui.theme = { fg: (colour, text) => (colour === "accent" ? `<A>${text}</A>` : text), bold: (t) => t, getColorMode: () => "256color" };
+  const accentRow = row();
+  assert(/<A>█+<\/A>/.test(accentRow) && /<A>\d+ pinned<\/A>/.test(accentRow),
+    `pinned cells and clause do not take the accent ink: ${accentRow}`);
   assert(renders > 0, "the bar never asked the host to repaint");
 
   // THE PALETTE FOLLOWS THE BACKGROUND, read off the theme's own text colour. A theme
@@ -17132,9 +17150,13 @@ async function gateCommitSurfacesTellTheTruth() {
   });
   const model = {
     brand: "pi-fold", share: 0.43, commitShare: 0.80, aimShare: 0.20, stagedShare: 0.10, stagedMarks: 3,
-    stagedTokens: 1_000, foldedShare: 0.02, folds: 2, hiddenTokens: 5_000, weighed: false,
-    staleAfterCommit: false, stopped: null,
+    stagedTokens: 1_000, foldedShare: 0.02, folds: 2, totalFolds: 27, hiddenTokens: 5_000, weighed: false,
+    staleAfterCommit: false, stopped: null, pinnedRefs: 0, pinnedShare: 0,
   };
+  assert(/2 folds \(27 nested\) hide/.test(context.renderFoldBar(model, 200, themed("#e6edf3"))),
+    "a consolidated forest does not state its nested count beside the roots");
+  assert(!/nested/.test(context.renderFoldBar({ ...model, totalFolds: 2 }, 200, themed("#e6edf3"))),
+    "a flat forest states a nested count");
   const onDark = context.renderFoldBar(model, 200, themed("#e6edf3"));
   const onLight = context.renderFoldBar(model, 200, themed("#1f2328"));
   assert(onDark.includes(truecolor("#3C6D56")) && !onDark.includes(truecolor("#1C5A62")),
