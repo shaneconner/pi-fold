@@ -63,7 +63,7 @@ import {
   stringIds,
   toolPayload,
 } from "./lib/measurement.ts";
-import { renderFoldBar, type FoldBarModel } from "./lib/status-widget.ts";
+import { renderFoldBar, type FoldBarModel, type SegmentKind } from "./lib/status-widget.ts";
 import type {
   NativeCompactionCompletionReceipt,
   NativeCompactionDecisionReceipt,
@@ -732,6 +732,8 @@ export function registerActiveContext(pi: any, options: {
     staleSince: null as unknown,
     /** Each standing fold's source priced by the image law, keyed by the fold object. */
     pricedSource: new WeakMap<ActiveFold, number>(),
+    /** Per-message priced tokens, keyed by the snapshot object. */
+    pricedMessages: new WeakMap<object, number[]>(),
   };
   const installFoldBar = (ctx: any): void => {
     if (foldBar.installed || typeof ctx.ui?.setWidget !== "function") return;
@@ -760,48 +762,98 @@ export function registerActiveContext(pi: any, options: {
     // on the branch length, so reading it here costs nothing while nothing has changed.
     let snapshot = lifecycle.latestSnapshot;
     try { snapshot = authoritativeSnapshotFor(ctx); } catch { }
-    let stagedTokens = 0;
-    let placeholderChars = 0;
-    let hiddenChars = 0;
-    if (state && snapshot) {
-      for (const mark of pendingMarks(state)) stagedTokens += estimatedTokens(markFreedBytes(snapshot, state, mark));
-      for (const root of orderedRoots(state, snapshot)) placeholderChars += root.fold.placeholderChars;
-      // WHAT FOLDING BOUGHT, IN WINDOW TERMS. `sourceChars` is the transcript count, base64
-      // and all, and read as tokens it said "8.6M" over a 1M window. Each standing fold's
-      // source is priced by the image law once per fold OBJECT (folds are immutable and
-      // replaced, never mutated, so a WeakMap memo is exact) and summed over the whole
-      // forest, which is additive because a parent's source is its children's placeholders.
-      for (const fold of state.folds) {
-        let priced = foldBar.pricedSource.get(fold);
-        if (priced === undefined) {
-          const source = renderFoldParts(fold.parts, state, snapshot);
-          priced = source ? pricedBytes(source) : fold.sourceChars;
-          foldBar.pricedSource.set(fold, priced);
-        }
-        hiddenChars += Math.max(0, priced - fold.placeholderChars);
-      }
-    }
-    const budget = input.budgetTokens > 0 ? input.budgetTokens : 1;
-    const pinned = state && snapshot ? explicitProtectedMass(snapshot, state) : { bytes: 0, refs: 0 };
-    return {
+    const model: FoldBarModel = {
       brand: brandNoun,
       share: input.share,
       commitShare: thresholds.maxTarget,
       aimShare: thresholds.minTarget,
-      stagedShare: stagedTokens / budget,
-      stagedMarks: input.staged,
-      stagedTokens,
-      foldedShare: estimatedTokens(placeholderChars) / budget,
-      folds: input.roots,
+      segments: [],
+      stagedMarks: input.staged, stagedSpans: 0, stagedTruncations: 0, stagedTokens: 0,
+      folds: input.roots, foldSpans: 0, foldTruncations: 0, foldConsolidations: 0,
       totalFolds: state ? state.folds.length : 0,
-      hiddenTokens: estimatedTokens(hiddenChars),
-      pinnedRefs: pinned.refs,
-      pinnedShare: estimatedTokens(pinned.bytes) / budget,
+      hiddenTokens: 0,
+      pinnedRefs: state ? state.protected.length : 0,
       weighed: input.weighed,
       staleAfterCommit: input.share !== null && foldBar.staleSince !== null &&
         foldBar.staleSince === measurements.lastProviderMeasurement,
       stopped: ladder.automaticFailure?.message ?? null,
     };
+    if (!state || !snapshot) return model;
+    // THE WINDOW IN ORDER (Shane 2026-09-05: the scores are to show the marks). Walk the
+    // snapshot oldest first: a standing root costs its placeholder, a raw message costs its
+    // priced tokens, and each stretch is classed by what covers it: a staged mark (span or
+    // truncation), a pin, or nothing. Per-message prices are memoized on the snapshot
+    // OBJECT, which is replaced whenever the branch moves, so one walk per branch state.
+    let prices = foldBar.pricedMessages.get(snapshot);
+    if (!prices) {
+      prices = snapshot.messages.map((message) => estimatedTokens(pricedBytes([message])));
+      foldBar.pricedMessages.set(snapshot, prices);
+    }
+    const rootAt = new Map<number, { fold: ActiveFold; end: number }>();
+    for (const root of orderedRoots(state, snapshot)) {
+      rootAt.set(root.start, { fold: root.fold, end: root.end });
+      if (root.fold.kind === "chapter") model.foldSpans += 1;
+      else if (root.fold.kind === "tool-result") model.foldTruncations += 1;
+      else model.foldConsolidations += 1;
+    }
+    const markAt = new Map<number, { kind: string; end: number }>();
+    for (const mark of pendingMarks(state)) {
+      const tokens = estimatedTokens(markFreedBytes(snapshot, state, mark));
+      model.stagedTokens += tokens;
+      if (mark.kind === "tool-result") model.stagedTruncations += 1;
+      else model.stagedSpans += 1;
+      if (mark.mark !== "fold") continue;
+      const span = markSpanRefs(state, mark);
+      if (span.unresolved) continue;
+      const indices = span.refs.map((ref) => exactMapped(snapshot, ref)?.index ?? -1);
+      if (indices.some((index) => index < 0)) continue;
+      const start = Math.min(...indices);
+      const end = Math.max(...indices) + 1;
+      const existing = markAt.get(start);
+      markAt.set(start, { kind: mark.kind === "tool-result" ? "staged-truncation" : "staged-span",
+        end: existing ? Math.max(existing.end, end) : end });
+    }
+    const pinnedKeys = new Set(state.protected.map((ref) => objectRefKey(ref)));
+    const push = (kind: SegmentKind, tokens: number, markEnd = false): void => {
+      const last = model.segments.at(-1);
+      if (last && last.kind === kind && !last.markEnd) { last.tokens += tokens; last.markEnd = markEnd; return; }
+      model.segments.push({ kind, tokens, ...(markEnd ? { markEnd } : {}) });
+    };
+    let mark: { kind: string; end: number } | null = null;
+    for (let index = 0; index < snapshot.messages.length; index += 1) {
+      const root = rootAt.get(index);
+      if (root) {
+        const kind: SegmentKind = root.fold.kind === "chapter" ? "fold-span"
+          : root.fold.kind === "tool-result" ? "fold-truncation" : "fold-consolidation";
+        push(kind, estimatedTokens(root.fold.placeholderChars));
+        index = root.end - 1;
+        continue;
+      }
+      if (!mark || index >= mark.end) mark = markAt.get(index) ?? null;
+      const item = snapshot.mapped[index];
+      const pinned = item?.ref ? pinnedKeys.has(objectRefKey(item.ref)) : false;
+      const kind: SegmentKind = mark ? (mark.kind as SegmentKind) : pinned ? "pinned" : "raw";
+      const ends = mark !== null && index === mark.end - 1;
+      push(kind, prices[index] ?? 0, ends);
+      if (ends) mark = null;
+    }
+    // WHAT FOLDING BOUGHT, IN WINDOW TERMS. `sourceChars` is the transcript count, base64
+    // and all, and read as tokens it said "8.6M" over a 1M window. Each standing fold's
+    // source is priced by the image law once per fold OBJECT (folds are immutable and
+    // replaced, never mutated, so a WeakMap memo is exact) and summed over the whole
+    // forest, which is additive because a parent's source is its children's placeholders.
+    let hiddenChars = 0;
+    for (const fold of state.folds) {
+      let priced = foldBar.pricedSource.get(fold);
+      if (priced === undefined) {
+        const source = renderFoldParts(fold.parts, state, snapshot);
+        priced = source ? pricedBytes(source) : fold.sourceChars;
+        foldBar.pricedSource.set(fold, priced);
+      }
+      hiddenChars += Math.max(0, priced - fold.placeholderChars);
+    }
+    model.hiddenTokens = estimatedTokens(hiddenChars);
+    return model;
   };
 
   const updateStatus = (ctx: any): void => {

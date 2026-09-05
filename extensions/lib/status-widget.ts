@@ -36,6 +36,29 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 
 export const FOLD_BAR_WIDTH = 40;
 
+/**
+ * THE BAR IS A MAP (Shane 2026-09-05: "the scores were intended only to be in there to
+ * show the fold marks"). Segments arrive in WINDOW ORDER, oldest first, each priced in
+ * tokens by the image law, and the fill is scaled so the measured occupancy fills exactly
+ * the cells the provider's count says it should. A cell takes the kind covering most of
+ * it. A SCORE (the seven-eighths block, an eighth of the cell empty on the right) is drawn
+ * only where a staged mark ENDS inside the cell; a solid block means no boundary here. A
+ * cell can hold several boundaries and shows one score: a score means "at least one mark
+ * ends here", never a count.
+ */
+export type SegmentKind =
+  | "fold-span" | "fold-truncation" | "fold-consolidation"
+  | "staged-span" | "staged-truncation"
+  | "raw" | "pinned";
+
+export interface BarSegment {
+  kind: SegmentKind;
+  /** Priced tokens this stretch of the window occupies. */
+  tokens: number;
+  /** A staged mark ends with this segment. */
+  markEnd?: boolean;
+}
+
 /** Everything the row reads. Built by the runtime on every status update. */
 export interface FoldBarModel {
   brand: string;
@@ -44,20 +67,22 @@ export interface FoldBarModel {
   /** maxTarget and minTarget of the live thresholds, as shares. */
   commitShare: number;
   aimShare: number;
-  /** Share of the budget standing marks would free at the next commit (estimated). */
-  stagedShare: number;
+  /** The window in order, oldest first, as priced segments. */
+  segments: BarSegment[];
   stagedMarks: number;
+  stagedSpans: number;
+  stagedTruncations: number;
   stagedTokens: number;
-  /** Share of the budget the standing folds' placeholders occupy (estimated). */
-  foldedShare: number;
+  /** Visible roots, split by kind, and every fold in the forest. */
   folds: number;
-  /** Every fold in the forest, nested ones included; equals `folds` until a consolidation lands. */
+  foldSpans: number;
+  foldTruncations: number;
+  foldConsolidations: number;
   totalFolds: number;
   /** Tokens the standing folds hide: source minus placeholder, summed over the forest. */
   hiddenTokens: number;
-  /** Entries held raw on purpose, and the share of the budget they occupy. */
+  /** Entries held raw on purpose. */
   pinnedRefs: number;
-  pinnedShare: number;
   /** Whether a band-top commit has already been weighed against the current count. */
   weighed: boolean;
   /** A commit landed after the count `share` reads; the number is from before it. */
@@ -75,11 +100,19 @@ export interface FoldBarTheme {
   name?: string;
 }
 
-// Crameri batlow10, three classes per background. Classes 3, 6 and 8 (0-indexed) read on
-// a dark terminal; the lightest of them is 1.7:1 against white, so a light terminal steps
-// two classes darker (2, 5 and 6), the same triple the README's light figure uses.
-const BATLOW_ON_DARK = { raw: "#3C6D56", staged: "#D29343", folded: "#FDB7BC" } as const;
-const BATLOW_ON_LIGHT = { raw: "#1C5A62", staged: "#9D892B", folded: "#D29343" } as const;
+// Crameri batlow10 classes per background. Spans (chapters of the conversation) and
+// truncations (tool results) are two rungs apart on the same ladder so they read as two
+// shades of one idea; standing folds take the light end, staged marks the middle, raw the
+// dark end. The lightest classes vanish on white, so a light terminal steps everything
+// two classes darker, the triple the README's light figure uses.
+const BATLOW_ON_DARK = {
+  raw: "#3C6D56", "staged-span": "#D29343", "staged-truncation": "#9D892B",
+  "fold-span": "#FDB7BC", "fold-truncation": "#F8A17B", "fold-consolidation": "#FACCFA",
+} as const;
+const BATLOW_ON_LIGHT = {
+  raw: "#1C5A62", "staged-span": "#9D892B", "staged-truncation": "#687B3E",
+  "fold-span": "#D29343", "fold-truncation": "#9D892B", "fold-consolidation": "#F8A17B",
+} as const;
 
 /**
  * WHICH WAY THE BACKGROUND GOES, read off the theme's own text colour rather than its
@@ -113,35 +146,56 @@ export function formatTokens(count: number): string {
   return `${(count / 1_000_000).toFixed(1)}M`;
 }
 
-type Cell = "folded" | "staged" | "raw" | "pinned" | "empty";
-// SCORED CELLS (Shane 2026-09-03): the README figure draws every cell as its own rectangle
-// with a hairline gap, and the full-width block fused adjacent cells into one solid run,
-// so the terminal read as a different figure. The left seven-eighths block leaves an
-// eighth of each cell empty on the right, which is the same score in a glyph. Staged and
-// raw share the glyph and differ by colour; the shade glyph is gone because at a small
-// font its texture read as a solid block anyway.
-// PINNED CELLS ARE THE ONE CLASS OFF THE BATLOW LADDER: a pin is a hold, not a state of
-// compression, so it takes the theme's accent and a full block, and sits at the newest
-// end of the fill because the bar orders by class, not by position.
-const GLYPH: Record<Cell, string> = { folded: "▂", staged: "▉", raw: "▉", pinned: "█", empty: "░" };
+export interface BarCell { kind: SegmentKind | "empty"; scored: boolean }
 
-/** The bar's cells, oldest on the left, before any tick is laid over them. */
-export function foldBarCells(model: FoldBarModel, width: number = FOLD_BAR_WIDTH): Cell[] {
+/**
+ * The cells, oldest on the left. The measured share fixes how many cells are filled; the
+ * segments' priced tokens fix where each kind falls INSIDE that fill, so an estimate
+ * places things and the provider's count sizes them. A pin is drawn at least one cell
+ * wide, the one deliberate overstatement on the bar, because two pinned entries are a
+ * fraction of a cell and would otherwise vanish.
+ */
+export function foldBarCells(model: FoldBarModel, width: number = FOLD_BAR_WIDTH): BarCell[] {
   const share = model.share ?? 0;
   const filled = Math.max(0, Math.min(width, Math.round(share * width)));
-  const folded = Math.min(filled, Math.round(model.foldedShare * width));
-  const staged = Math.min(filled - folded, Math.round(model.stagedShare * width));
-  // A PIN ALWAYS SHOWS. Two pinned entries are a fraction of one cell and rounded to
-  // nothing, which hid the one class a person placed by hand; pinned mass rounds UP, the
-  // one deliberate overstatement on the bar, and never past the fill.
-  const pinned = Math.min(filled - folded - staged, model.pinnedShare > 0 ? Math.ceil(model.pinnedShare * width) : 0);
-  const cells: Cell[] = [];
-  for (let i = 0; i < width; i += 1) {
-    if (i < folded) cells.push("folded");
-    else if (i < folded + staged) cells.push("staged");
-    else if (i < filled - pinned) cells.push("raw");
-    else if (i < filled) cells.push("pinned");
-    else cells.push("empty");
+  const cells: BarCell[] = Array.from({ length: width }, () => ({ kind: "empty", scored: false }));
+  const total = model.segments.reduce((sum, segment) => sum + Math.max(0, segment.tokens), 0);
+  if (filled === 0 || total <= 0) return cells;
+  const scale = filled / total;
+  const coverage: Array<Map<SegmentKind, number>> = Array.from({ length: filled }, () => new Map());
+  let position = 0;
+  for (const segment of model.segments) {
+    const start = position;
+    const end = position + Math.max(0, segment.tokens) * scale;
+    position = end;
+    for (let cell = Math.floor(start); cell < Math.min(filled, Math.ceil(end)); cell += 1) {
+      const overlap = Math.min(end, cell + 1) - Math.max(start, cell);
+      if (overlap <= 0) continue;
+      const map = coverage[cell];
+      map.set(segment.kind, (map.get(segment.kind) ?? 0) + overlap);
+    }
+    if (segment.markEnd) {
+      const cell = Math.min(filled - 1, Math.max(0, Math.ceil(end) - 1));
+      cells[cell].scored = true;
+    }
+  }
+  for (let cell = 0; cell < filled; cell += 1) {
+    let best: SegmentKind = "raw";
+    let bestCover = -1;
+    for (const [kind, cover] of coverage[cell]) if (cover > bestCover) { best = kind; bestCover = cover; }
+    cells[cell].kind = best;
+  }
+  const pinnedTokens = model.segments.filter((segment) => segment.kind === "pinned")
+    .reduce((sum, segment) => sum + segment.tokens, 0);
+  if (pinnedTokens > 0 && !cells.some((cell) => cell.kind === "pinned")) {
+    // Place the guaranteed pinned cell where the pinned mass actually sits.
+    let at = 0;
+    let seen = 0;
+    for (const segment of model.segments) {
+      if (segment.kind === "pinned") { at = Math.min(filled - 1, Math.floor(seen * scale)); break; }
+      seen += Math.max(0, segment.tokens);
+    }
+    cells[at].kind = "pinned";
   }
   return cells;
 }
@@ -162,6 +216,11 @@ export function foldBarPlainText(model: FoldBarModel): string {
   });
 }
 
+const kindCounts = (parts: Array<[number, string]>): string => {
+  const named = parts.filter(([count]) => count > 0).map(([count, noun]) => `${count} ${noun}${count === 1 ? "" : "s"}`);
+  return named.length > 1 ? ` (${named.join(", ")})` : "";
+};
+
 export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBarTheme): string {
   const brand = theme.fg("dim", model.brand);
   if (model.stopped) {
@@ -175,13 +234,19 @@ export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBar
       width, theme.fg("dim", "..."));
   }
   const rich = theme.getColorMode?.() === "truecolor";
-  const BATLOW = lightBackground(theme) ? BATLOW_ON_LIGHT : BATLOW_ON_DARK;
-  const ink: Record<Cell, (text: string) => string> = {
-    raw: (t) => rich ? truecolor(BATLOW.raw, t) : theme.fg("muted", t),
-    staged: (t) => rich ? truecolor(BATLOW.staged, t) : theme.fg("text", t),
-    folded: (t) => rich ? truecolor(BATLOW.folded, t) : theme.fg("dim", t),
-    pinned: (t) => theme.fg("accent", t),
-    empty: (t) => theme.fg("dim", t),
+  const palette = lightBackground(theme) ? BATLOW_ON_LIGHT : BATLOW_ON_DARK;
+  const ink = (kind: SegmentKind | "empty", text: string): string => {
+    if (kind === "empty") return theme.fg("dim", text);
+    if (kind === "pinned") return theme.fg("accent", text);
+    if (rich) return truecolor(palette[kind], text);
+    if (kind === "raw") return theme.fg("muted", text);
+    if (kind.startsWith("staged")) return theme.fg("text", text);
+    return theme.fg("dim", text);
+  };
+  const glyph = (cell: BarCell): string => {
+    if (cell.kind === "empty") return "░";
+    if (cell.kind.startsWith("fold")) return "▂";
+    return cell.scored ? "▉" : "█";
   };
   const cells = foldBarCells(model);
   const ticks = foldBarTicks(model);
@@ -190,7 +255,7 @@ export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBar
     const tick = ticks.get(i);
     if (tick === "commit") bar += theme.fg("warning", "│");
     else if (tick === "aim") bar += theme.fg("dim", "│");
-    else bar += ink[cells[i]](GLYPH[cells[i]]);
+    else bar += ink(cells[i].kind, glyph(cells[i]));
   }
   const pct = Math.round(model.share * 100);
   const parts: string[] = [];
@@ -207,24 +272,24 @@ export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBar
     else if (model.weighed) parts.push(theme.fg("muted", "commit held"));
     else parts.push(theme.fg("warning", "COMMIT DUE"));
   }
-  // THE COUNT AND THE TOKENS, BOTH, FOR WHAT IS STAGED. The staged cells draw the spans'
-  // share of the budget and the count says how many spans, and a reader took the cells
-  // for a count ("33 staged" over seven cells, Shane 2026-09-04); the token figure is
-  // what joins them, and it is honest now that pricing follows the image law
-  // (measurement.ts pricedBytes; "5.8M to free" beside a 1M window was 83 screenshots'
-  // base64 counted as text). The unit is written out because pi's k/M read as megabytes.
+  // THE COUNT, ITS KINDS AND ITS TOKENS. Spans are chapters of the conversation and
+  // truncations are tool results (Shane's word for the tool compression, 2026-09-05);
+  // the kinds are named only when both are present. The tokens are what the staged cells
+  // draw, priced by the image law, with the unit written out because k/M read as megabytes.
   if (model.stagedMarks > 0) {
-    parts.push(ink.staged(model.stagedTokens > 0
-      ? `${model.stagedMarks} staged, ${formatTokens(model.stagedTokens)} tokens`
-      : `${model.stagedMarks} staged`));
+    const kinds = kindCounts([[model.stagedSpans, "span"], [model.stagedTruncations, "truncation"]]);
+    parts.push(ink("staged-span", model.stagedTokens > 0
+      ? `${model.stagedMarks} staged${kinds}, ${formatTokens(model.stagedTokens)} tokens`
+      : `${model.stagedMarks} staged${kinds}`));
   }
-  // WHAT IS HELD AND HOW DEEP THE FOREST IS (Shane 2026-09-04), each only when nonzero:
-  // a pin frees nothing and makes the rest fold sooner, so it is worth a clause; a nested
-  // count beside the root count says consolidation has happened without a second noun.
-  if (model.pinnedRefs > 0) parts.push(ink.pinned(`${model.pinnedRefs} pinned`));
+  if (model.pinnedRefs > 0) parts.push(ink("pinned", `${model.pinnedRefs} pinned`));
   if (model.folds > 0) {
-    const nested = model.totalFolds > model.folds ? ` (${model.totalFolds} nested)` : "";
-    parts.push(ink.folded(`${model.folds} fold${model.folds === 1 ? "" : "s"}${nested} hide ${formatTokens(model.hiddenTokens)} tokens`));
+    const kinds = kindCounts([
+      [model.foldSpans, "span"], [model.foldTruncations, "truncation"], [model.foldConsolidations, "consolidation"],
+    ]);
+    const nested = model.totalFolds > model.folds ? `, ${model.totalFolds} nested` : "";
+    parts.push(ink("fold-span",
+      `${model.folds} fold${model.folds === 1 ? "" : "s"}${kinds}${nested} hide ${formatTokens(model.hiddenTokens)} tokens`));
   }
   // NO BRAND IN FRONT OF THE BAR (Shane 2026-09-02): the bar identifies itself, and the
   // two prose states above keep the brand because nothing else on them says whose they are.

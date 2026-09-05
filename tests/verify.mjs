@@ -17110,7 +17110,7 @@ async function gateCommitSurfacesTellTheTruth() {
     `the bar showed the pre-commit count as a live reading: ${after}`);
   assert(!/commit at|COMMIT DUE|commit held/.test(after),
     `a reading from before the commit still placed the next one: ${after}`);
-  assert(/\d+ folds?( \(\d+ nested\))? hide \S+ tokens/.test(after),
+  assert(/\d+ folds?(?: \([^)]*\))?(?:, \d+ nested)? hide \S+ tokens/.test(after),
     `the folds clause does not state its unit: ${after}`);
 
   await measure(runtime, 100_000, 1_000_000);
@@ -17135,7 +17135,7 @@ async function gateCommitSurfacesTellTheTruth() {
   // for one that marks the accent ink shows which parts of the row carry it.
   runtime.ctx.ui.theme = { fg: (colour, text) => (colour === "accent" ? `<A>${text}</A>` : text), bold: (t) => t, getColorMode: () => "256color" };
   const accentRow = row();
-  assert(/<A>█+<\/A>/.test(accentRow) && /<A>\d+ pinned<\/A>/.test(accentRow),
+  assert(/<A>[█▉]+<\/A>/.test(accentRow) && /<A>\d+ pinned<\/A>/.test(accentRow),
     `pinned cells and clause do not take the accent ink: ${accentRow}`);
   assert(renders > 0, "the bar never asked the host to repaint");
 
@@ -17148,15 +17148,42 @@ async function gateCommitSurfacesTellTheTruth() {
     fg: (_colour, text) => text, bold: (text) => text, getColorMode: () => "truecolor",
     getFgAnsi: () => `\x1b[${truecolor(textHex)}m`,
   });
+  // THE BAR IS A MAP: segments in window order, a score only where a staged mark ends.
+  // Forty cells over a window measured at half the budget, so twenty cells fill; each
+  // segment below is exactly ten cells.
   const model = {
-    brand: "pi-fold", share: 0.43, commitShare: 0.80, aimShare: 0.20, stagedShare: 0.10, stagedMarks: 3,
-    stagedTokens: 1_000, foldedShare: 0.02, folds: 2, totalFolds: 27, hiddenTokens: 5_000, weighed: false,
-    staleAfterCommit: false, stopped: null, pinnedRefs: 0, pinnedShare: 0,
+    brand: "pi-fold", share: 0.50, commitShare: 0.80, aimShare: 0.20,
+    segments: [
+      { kind: "fold-span", tokens: 0 },
+      { kind: "staged-span", tokens: 100, markEnd: true },
+      { kind: "raw", tokens: 100 },
+      { kind: "staged-truncation", tokens: 50, markEnd: true },
+      { kind: "staged-truncation", tokens: 50, markEnd: true },
+      { kind: "pinned", tokens: 100 },
+    ],
+    stagedMarks: 3, stagedSpans: 1, stagedTruncations: 2, stagedTokens: 200,
+    folds: 2, foldSpans: 1, foldTruncations: 1, foldConsolidations: 0, totalFolds: 27,
+    hiddenTokens: 5_000, pinnedRefs: 2, weighed: false, staleAfterCommit: false, stopped: null,
   };
-  assert(/2 folds \(27 nested\) hide/.test(context.renderFoldBar(model, 200, themed("#e6edf3"))),
-    "a consolidated forest does not state its nested count beside the roots");
+  const cells = context.foldBarCells(model);
+  const kinds = cells.map((cell) => cell.kind);
+  assert.deepEqual(kinds.slice(0, 5), Array(5).fill("staged-span"), `the first stretch is not the staged span: ${kinds.slice(0, 5)}`);
+  assert.deepEqual(kinds.slice(5, 10), Array(5).fill("raw"), `the raw stretch is out of place: ${kinds.slice(5, 10)}`);
+  assert.deepEqual(kinds.slice(10, 15), Array(5).fill("staged-truncation"), `the truncations are out of place: ${kinds.slice(10, 15)}`);
+  assert.deepEqual(kinds.slice(15, 20), Array(5).fill("pinned"), `the pinned stretch is out of place: ${kinds.slice(15, 20)}`);
+  assert.deepEqual(kinds.slice(20), Array(20).fill("empty"), "the empty stretch is wrong");
+  const scored = cells.map((cell, index) => (cell.scored ? index : -1)).filter((index) => index >= 0);
+  assert.deepEqual(scored, [4, 12, 14], `scores are not at the mark ends: ${scored}`);
+  const mapped = context.renderFoldBar(model, 200, themed("#e6edf3"));
+  assert(/3 staged \(1 span, 2 truncations\), 200 tokens/.test(mapped), `staged kinds are not named: ${mapped}`);
+  assert(/2 folds \(1 span, 1 truncation\), 27 nested hide/.test(mapped), `fold kinds and nesting are not named: ${mapped}`);
   assert(!/nested/.test(context.renderFoldBar({ ...model, totalFolds: 2 }, 200, themed("#e6edf3"))),
     "a flat forest states a nested count");
+  assert(!/\(/.test(context.renderFoldBar({ ...model, stagedSpans: 3, stagedTruncations: 0, foldTruncations: 0, foldSpans: 2, totalFolds: 2 }, 200, themed("#e6edf3")).replace(/hide.*$/, "")),
+    "kinds are named when only one kind is present");
+  // A mark smaller than a cell still scores the cell it ends in.
+  const tiny = { ...model, segments: [{ kind: "raw", tokens: 195 }, { kind: "staged-span", tokens: 5, markEnd: true }, { kind: "raw", tokens: 200 }] };
+  assert(context.foldBarCells(tiny)[9].scored, "a sub-cell mark left no score");
   const onDark = context.renderFoldBar(model, 200, themed("#e6edf3"));
   const onLight = context.renderFoldBar(model, 200, themed("#1f2328"));
   assert(onDark.includes(truecolor("#3C6D56")) && !onDark.includes(truecolor("#1C5A62")),
