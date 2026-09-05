@@ -832,7 +832,10 @@ export function registerActiveContext(pi: any, options: {
       if (root) {
         const kind: SegmentKind = root.fold.kind === "chapter" ? "fold-span"
           : root.fold.kind === "tool-result" ? "fold-truncation" : "fold-consolidation";
-        push(kind, estimatedTokens(root.fold.placeholderChars));
+        // A FOLD'S EDGE IS SCORED LIKE A MARK'S (Shane 2026-09-05: "the scores help define
+        // the boundaries"): the placeholder segment carries the end flag, so a root's last
+        // cell draws the gap and two roots in neighbouring cells read as two.
+        push(kind, estimatedTokens(root.fold.placeholderChars), true);
         index = root.end - 1;
         continue;
       }

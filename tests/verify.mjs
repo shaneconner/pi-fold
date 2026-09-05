@@ -17077,7 +17077,7 @@ async function gateCommitSurfacesTellTheTruth() {
   await startRuntime(runtime);
   const row = () => widget.render(200).join("\n");
   assert.equal(widget?.options?.placement, "belowEditor", "the bar is not the footer's top row");
-  assert(/not measured yet/.test(row()) && !/[▉░]/.test(row()),
+  assert(/not measured yet/.test(row()) && !/[▊░]/.test(row()),
     `an unmeasured window drew a bar, which is a guess drawn: ${row()}`);
   assert.equal(runtime.statuses.at(-1).text, undefined,
     "the status string is still set beside a bar that carries every fact it carried");
@@ -17140,7 +17140,7 @@ async function gateCommitSurfacesTellTheTruth() {
   // for one that marks the accent ink shows which parts of the row carry it.
   runtime.ctx.ui.theme = { fg: (colour, text) => (colour === "accent" ? `<A>${text}</A>` : text), bold: (t) => t, getColorMode: () => "256color" };
   const accentRow = row();
-  assert(/<A>[█▉]+<\/A>/.test(accentRow) && /<A>\d+ pinned<\/A>/.test(accentRow),
+  assert(/<A>[█▊]+<\/A>/.test(accentRow) && /<A>\d+ pinned<\/A>/.test(accentRow),
     `pinned cells and clause do not take the accent ink: ${accentRow}`);
   assert(renders > 0, "the bar never asked the host to repaint");
 
@@ -17179,6 +17179,21 @@ async function gateCommitSurfacesTellTheTruth() {
   assert.deepEqual(kinds.slice(20), Array(20).fill("empty"), "the empty stretch is wrong");
   const scored = cells.map((cell, index) => (cell.scored ? index : -1)).filter((index) => index >= 0);
   assert.deepEqual(scored, [4, 12, 14], `scores are not at the mark ends: ${scored}`);
+  // A FOLD'S EDGE SCORES TOO (Shane 2026-09-05): a placeholder segment flagged at its
+  // end scores its cell, and the scored glyphs are the quarter-gap block and the quadrant.
+  // At a full window forty cells hold 200 tokens, five to a cell, so the fixtures below
+  // place segments on exact cell edges.
+  const edged = context.foldBarCells({ ...model, share: 1, segments: [
+    { kind: "fold-span", tokens: 5, markEnd: true }, { kind: "fold-span", tokens: 5, markEnd: true }, { kind: "raw", tokens: 190 },
+  ] });
+  assert(edged[0].scored && edged[1].scored && !edged[2].scored, `fold edges are not scored: ${edged.slice(0, 3).map((c) => c.scored)}`);
+  const edgedRow = context.foldBarPlainText({ ...model, share: 1, segments: [
+    { kind: "fold-span", tokens: 5, markEnd: true }, { kind: "fold-consolidation", tokens: 10 }, { kind: "raw", tokens: 10 },
+    { kind: "staged-span", tokens: 5, markEnd: true }, { kind: "raw", tokens: 170 },
+  ] });
+  assert(/^▖▃▃██▊/.test(edgedRow), `the scored glyphs are not the quadrant and the quarter-gap block: ${edgedRow}`);
+  assert(!/▉/.test(edgedRow), `the eighth-gap glyph is still drawn: ${edgedRow}`);
+  assert(/┆/.test(edgedRow) && /┃/.test(edgedRow) && !/│/.test(edgedRow), `the ticks are not the dotted aim and the heavy commit: ${edgedRow}`);
   const mapped = context.renderFoldBar(model, 200, themed("#e6edf3"));
   // Read without ink: the kind words carry their cell colours, so the wording is judged
   // on the plain rendering and the inks are judged below.

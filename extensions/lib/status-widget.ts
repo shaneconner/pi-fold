@@ -55,7 +55,7 @@ export interface BarSegment {
   kind: SegmentKind;
   /** Priced tokens this stretch of the window occupies. */
   tokens: number;
-  /** A staged mark ends with this segment. */
+  /** A staged mark or a standing fold ends with this segment; the cell it falls in is scored. */
   markEnd?: boolean;
 }
 
@@ -255,13 +255,15 @@ export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBar
     if (kind.startsWith("staged")) return theme.fg("text", text);
     return theme.fg("dim", text);
   };
-  // A CONSOLIDATION SLIVER STANDS A STEP TALLER than a span's or a truncation's: at
-  // sliver size a colour step alone is faint, and shape survives where colour does not.
+  // A SCORE IS A QUARTER GAP (Shane 2026-09-05: the eighth gap of U+2589 did not read at
+  // his font): a scored full cell is U+258A, three quarters wide. A scored sliver is the
+  // lower-left quadrant U+2596, half wide and half high, so a fold's edge shows the same
+  // gap; a consolidation sliver is a step taller (U+2583 against U+2582) where it is not
+  // scored, and its ink and the label carry the kind where it is.
   const glyph = (cell: BarCell): string => {
     if (cell.kind === "empty") return "░";
-    if (cell.kind === "fold-consolidation") return "▃";
-    if (cell.kind.startsWith("fold")) return "▂";
-    return cell.scored ? "▉" : "█";
+    if (cell.kind.startsWith("fold")) return cell.scored ? "▖" : cell.kind === "fold-consolidation" ? "▃" : "▂";
+    return cell.scored ? "▊" : "█";
   };
   // THE KIND WORDS TAKE THEIR CELL INKS, named only when more than one kind is present.
   const kindClause = (parts: Array<[number, string, SegmentKind]>): string => {
@@ -274,8 +276,11 @@ export function renderFoldBar(model: FoldBarModel, width: number, theme: FoldBar
   let bar = "";
   for (let i = 0; i < cells.length; i += 1) {
     const tick = ticks.get(i);
-    if (tick === "commit") bar += theme.fg("warning", "│");
-    else if (tick === "aim") bar += theme.fg("dim", "│");
+    // THE TICKS ARE OFF THE LADDER AND OFF THE FILL'S WEIGHT (Shane 2026-09-05): the commit
+    // point is a heavy bar and the aim a dotted one, both in the theme's own text ink,
+    // which no fill class uses, so they read as the frame the fill sits in.
+    if (tick === "commit") bar += theme.fg("text", theme.bold("┃"));
+    else if (tick === "aim") bar += theme.fg("text", "┆");
     else bar += ink(cells[i].kind, glyph(cells[i]));
   }
   const pct = Math.round(model.share * 100);

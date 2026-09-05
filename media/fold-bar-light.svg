@@ -1,19 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1401" height="52" viewBox="0 0 1401 52" role="img" aria-label="The fold bar: forty cells of the serving budget, oldest on the left, with ticks at the aim and the commit point. Staged spans and truncations, raw material and fold placeholders fill it by position, a score is drawn where each staged mark ends, and the label states the percentage, the commit point, what is staged by kind and the tokens the folds hide.">
 <rect width="1401" height="52" fill="#ffffff"/>
-<rect x="12" y="14" width="9" height="16" fill="#D29343"/>
+<rect x="12" y="14" width="6" height="16" fill="#D29343"/>
 <rect x="21" y="14" width="9" height="16" fill="#D29343"/>
-<rect x="30" y="14" width="7.5" height="16" fill="#687B3E"/>
-<rect x="39" y="14" width="7.5" height="16" fill="#687B3E"/>
-<rect x="48" y="14" width="7.5" height="16" fill="#687B3E"/>
+<rect x="30" y="14" width="6" height="16" fill="#687B3E"/>
+<rect x="39" y="14" width="6" height="16" fill="#687B3E"/>
+<rect x="48" y="14" width="6" height="16" fill="#687B3E"/>
 <rect x="57" y="14" width="9" height="16" fill="#1C5A62"/>
 <rect x="66" y="14" width="9" height="16" fill="#1C5A62"/>
 <rect x="75" y="14" width="9" height="16" fill="#1C5A62"/>
-<rect x="78" y="11" width="2" height="22" fill="#8c959f"/>
+<line x1="78.5" y1="11" x2="78.5" y2="33" stroke="#1f2328" stroke-width="2" stroke-dasharray="2,2"/>
 <rect x="84" y="14" width="9" height="16" fill="#1C5A62"/>
 <rect x="93" y="14" width="9" height="16" fill="#1C5A62"/>
 <rect x="102" y="14" width="9" height="16" fill="#1C5A62"/>
 <rect x="111" y="14" width="9" height="16" fill="#D29343"/>
-<rect x="120" y="14" width="7.5" height="16" fill="#D29343"/>
+<rect x="120" y="14" width="6" height="16" fill="#D29343"/>
 <rect x="129" y="14" width="9" height="16" fill="#1C5A62"/>
 <rect x="138" y="14" width="9" height="16" fill="#1C5A62"/>
 <rect x="147" y="14" width="9" height="16" fill="#1C5A62"/>
@@ -33,7 +33,7 @@
 <rect x="273" y="14" width="9" height="16" fill="#eaeef2"/>
 <rect x="282" y="14" width="9" height="16" fill="#eaeef2"/>
 <rect x="291" y="14" width="9" height="16" fill="#eaeef2"/>
-<rect x="294" y="11" width="2" height="22" fill="#9a6700"/>
+<rect x="293" y="11" width="3" height="22" fill="#1f2328"/>
 <rect x="300" y="14" width="9" height="16" fill="#eaeef2"/>
 <rect x="309" y="14" width="9" height="16" fill="#eaeef2"/>
 <rect x="318" y="14" width="9" height="16" fill="#eaeef2"/>
